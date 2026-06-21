@@ -3,7 +3,7 @@
 #KeyHistory 0
 #InstallKeybdHook
 #InstallMouseHook
-#include Lib\AutoHotInterception.ahk
+#include Lib\ViiperInput.ahk
 #include MobData.ahk
 #include BotLogic.ahk
 #include MemoryOperations.ahk
@@ -64,16 +64,10 @@ global selectedMonsterIndex := 1 ; Default to first monster
 global targetColor = MobColors[selectedMonsterIndex]
 global SelectedMonster1, SelectedMonster2, SelectedMonster3, SelectedMonster4, SelectedMonster5, SelectedMonster6
 
-; ====== DEVICE DEFAULTS ======
-global mouseVID := 0
-global mousePID := 0
-global keyboardVID := 0
-global keyboardPID := 0
-
-; ====== INTERNAL STATES ======
-global AHI := "" ; AutoHotInterception instance
-global mouseId := 0
-global keyboardId := 0
+; ====== VIIPER INPUT ======
+global AHI := "" ; ViiperInput instance (AHI-compatible API)
+global mouseId := 1
+global keyboardId := 1
 
 SetDefaultKeyboardLayout("00000409") ; English - US
 
@@ -81,43 +75,7 @@ if (!FileExist("config.ini")) {
     FileAppend, , config.ini ; Create empty file
 }
 
-; --------------------------
-; DEVICE DETECTION LOGIC
-; --------------------------
-
-; Check if we have valid device IDs
-IniRead, mouseVID, config.ini, Devices, mouseVID
-IniRead, mousePID, config.ini, Devices, mousePID
-IniRead, keyboardVID, config.ini, Devices, keyboardVID
-IniRead, keyboardPID, config.ini, Devices, keyboardPID
-
-if (mouseVID = "ERROR" || mousePID = "ERROR" || keyboardVID = "ERROR" || keyboardPID = "ERROR") {
-    ; Run device detection if any device is missing
-    RunWait, DeviceDetector.ahk
-
-    ; Reload device IDs after detection
-    IniRead, mouseVID, config.ini, Devices, mouseVID
-    IniRead, mousePID, config.ini, Devices, mousePID
-    IniRead, keyboardVID, config.ini, Devices, keyboardVID
-    IniRead, keyboardPID, config.ini, Devices, keyboardPID
-}
-
-; 2. HEX CONVERSION 
-mouseVID := mouseVID + 0
-mousePID := mousePID + 0
-keyboardVID := keyboardVID + 0
-keyboardPID := keyboardPID + 0
-
-; 3. DEVICE INITIALIZATION
-global AHI := new AutoHotInterception()
-global mouseId := AHI.GetMouseID(mouseVID, mousePID)
-global keyboardId := AHI.GetKeyboardID(keyboardVID, keyboardPID)
-
-; 4. VERIFICATION
-if (!mouseId || !keyboardId) {
-    MsgBox Device initialization failed!`n`nMouse: %mouseVID% %mousePID%`nKeyboard: %keyboardVID% %keyboardPID%
-    ExitApp
-}
+global AHI := new ViiperInput()
 
 ; -------------------------------
 ; Load Config Values First
@@ -132,7 +90,7 @@ if (FileExist("config.ini")) {
 Gui, Font, s10, Segoe UI
 
 ; Title
-Gui, Add, Text, x10 y15 w700 h30 Center, Hex Bot
+Gui, Add, Text, x10 y15 w700 h30 Center, ViiperHex Bot
 Gui, Add, Text, x10 y50 w700 h2 0x10 ; Divider
 
 ; Window Selection
@@ -145,9 +103,9 @@ Gui, Add, Text, x20 y130 w280 h25 vWindowInfo, % (gameWindowTitle ? gameWindowTi
 Gui, Add, Text, x600 y70 w150 h30 vBotStatus, Status: Off
 Gui, Add, Progress, x600 y+3 w150 h12 cRed vStatusLight, 100
 
-; Device Info
-Gui, Add, Text, x600 y170 w150 h40 vMouseStatus, % "MouseIDs: " Format("0x{:04X}", mouseVID) ", " Format("0x{:04X}", mousePID) 
-Gui, Add, Text, x600 y+15 w150 h40 vKeyboardStatus, % "KeyboardIDs: " Format("0x{:04X}", keyboardVID) ", " Format("0x{:04X}", keyboardPID)
+; Input backend
+Gui, Add, Text, x600 y170 w150 h40 vInputStatus, Input: VIIPER
+Gui, Add, Text, x600 y+15 w150 h40 vInputHint, Virtual HID devices
 
 ; Warper Coordinates Group - GUI Definition (unchanged)
 Gui, Add, GroupBox, x600 y300 w150 h100, Warper Coordinates
@@ -361,13 +319,6 @@ Loop % MobNames.MaxIndex() {
 
         ; Clear existing file and build with formatting
         FileDelete, config.ini
-
-        ; ====== [Devices] ======
-        FileAppend, `n[Devices]`n, config.ini
-        IniWrite, % Format("0x{:04X}", mouseVID), config.ini, Devices, mouseVID
-        IniWrite, % Format("0x{:04X}", mousePID), config.ini, Devices, mousePID
-        IniWrite, % Format("0x{:04X}", keyboardVID), config.ini, Devices, keyboardVID
-        IniWrite, % Format("0x{:04X}", keyboardPID), config.ini, Devices, keyboardPID
 
         ; ====== [LastSession] ======
         FileAppend, `n`n[LastSession]`n, config.ini
