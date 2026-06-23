@@ -28,7 +28,7 @@ class DeathValidator:
     def __init__(self, config: dict, region_scorer: SimpleRegionScorer):
         self.region_scorer = region_scorer
         self.threshold = float(config["deadValidationThreshold"])
-        self.attack_slot_threshold = float(config["deadAttackSlotThreshold"])
+        self.watch_point_threshold = float(config["deadWatchPointThreshold"])
         self.min_mob_presence = float(config["minDeadMobPresence"])
         self.min_descriptor_color_match = float(config["minDescriptorColorMatch"])
         self.max_full_opacity = float(config["maxFullOpacity"])
@@ -75,7 +75,7 @@ class DeathValidator:
         dead_score: RegionScore | None,
         living_at_dead_score: RegionScore,
         *,
-        attack_slot: bool = False,
+        watch_point: bool = False,
     ) -> DeathValidation:
         signals = self._collect_signals(
             frame_bgr,
@@ -86,8 +86,8 @@ class DeathValidator:
             dead_score,
             living_at_dead_score,
         )
-        threshold = self.attack_slot_threshold if attack_slot else self.threshold
-        is_dead = self._is_dead(signals, threshold, attack_slot=attack_slot)
+        threshold = self.watch_point_threshold if watch_point else self.threshold
+        is_dead = self._is_dead(signals, threshold, watch_point=watch_point)
         return DeathValidation(
             is_dead=is_dead,
             confidence=signals["confidence"],
@@ -133,8 +133,8 @@ class DeathValidator:
             "mean_opacity": mean_opacity,
         }
 
-    def _is_dead(self, signals: dict[str, float], threshold: float, *, attack_slot: bool = False) -> bool:
-        min_presence = self.min_mob_presence * (0.70 if attack_slot else 1.0)
+    def _is_dead(self, signals: dict[str, float], threshold: float, *, watch_point: bool = False) -> bool:
+        min_presence = self.min_mob_presence * (0.70 if watch_point else 1.0)
         if signals["mob_presence"] < min_presence:
             return False
 
@@ -144,10 +144,10 @@ class DeathValidator:
         confidence = signals["confidence"]
         fade = signals["opacity_fade_score"]
 
-        if fade > 0.0 and confidence >= self.attack_slot_threshold:
+        if fade > 0.0 and confidence >= self.watch_point_threshold:
             return True
 
-        if attack_slot:
+        if watch_point:
             if gap >= 0.36 and pose >= 0.26:
                 return True
             pose_living_ratio = pose / max(living, 1e-6)

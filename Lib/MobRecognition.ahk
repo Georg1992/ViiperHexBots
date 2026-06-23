@@ -7,6 +7,8 @@ global mobRecognitionPython := ""
 global mobRecognitionCli := "mob-recognition\cli.py"
 global mobRecognitionShutdownDone := false
 global mobRecognitionActiveDetectPid := 0
+global mobRecognitionServerExec := ""
+global mobRecognitionServerReady := false
 
 MobTemplateFolderName(monsterIndex := "") {
     global MobFolderNames, selectedMonsterIndex
@@ -194,22 +196,157 @@ MobRecognitionParseCandidates(jsonText, ByRef outCandidates) {
     return outCandidates.MaxIndex() ? outCandidates.MaxIndex() : 0
 }
 
-MobRecognitionHuntDetect(mobName, roiX, roiY, roiW, roiH, probeXs := "", probeYs := "", showProgress := false) {
+MobRecognitionDiscoveryDetect(mobName, roiX, roiY, roiW, roiH, showProgress := false) {
     if (roiW <= 0 || roiH <= 0) {
         MobRecognitionLog("MobRecognition: invalid hunt ROI " . roiX . "," . roiY . " " . roiW . "x" . roiH)
         return ""
     }
-
     if (!MobRecognitionEnsureServer()) {
         MobRecognitionLog("MobRecognition: detector unavailable")
         return ""
     }
+    return MobRecognitionServerRequest("scan", mobName, roiX, roiY, roiW, roiH, "", "", showProgress)
+}
 
-    if (!IsObject(probeXs))
-        probeXs := []
-    if (!IsObject(probeYs))
-        probeYs := []
-    return MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, false, showProgress, probeXs, probeYs)
+MobRecognitionWatchDetect(mobName, roiX, roiY, roiW, roiH, watchXs, watchYs) {
+    if (roiW <= 0 || roiH <= 0)
+        return ""
+    if (!IsObject(watchXs) || !watchXs.MaxIndex())
+        return ""
+    if (!MobRecognitionEnsureServer())
+        return ""
+    return MobRecognitionServerRequest("watch", mobName, roiX, roiY, roiW, roiH, watchXs, watchYs, false)
+}
+
+MobRecognitionBuildWatchPointsJson(roiX, roiY, watchXs, watchYs) {
+    watchJson := "["
+    Loop % watchXs.MaxIndex() {
+        if (A_Index > 1)
+            watchJson .= ","
+        localX := watchXs[A_Index] - roiX
+        localY := watchYs[A_Index] - roiY
+        watchJson .= "[" . localX . "," . localY . "]"
+    }
+    watchJson .= "]"
+    return watchJson
+}
+
+MobRecognitionBuildServerRequest(cmd, mobName, roiX, roiY, roiW, roiH, watchXs, watchYs) {
+    sessionId := ""
+    if IsFunc("BotSessionGetId") {
+        fn := "BotSessionGetId"
+        sessionId := %fn%()
+    }
+    scaleJson := ""
+    if IsFunc("BotSessionScaleRangeJson") {
+        fn := "BotSessionScaleRangeJson"
+        scaleJson := %fn%(mobName)
+    }
+    watchJson := "[]"
+    if (IsObject(watchXs) && watchXs.MaxIndex() > 0)
+        watchJson := MobRecognitionBuildWatchPointsJson(roiX, roiY, watchXs, watchYs)
+    request := "{""cmd"":""" . cmd . """,""mob"":""" . mobName . """,""roi"":[" . roiX . "," . roiY . "," . roiW . "," . roiH . "],""watchPoints"":" . watchJson . ",""sessionId"":""" . sessionId . """" . scaleJson . "}"
+    return request
+}
+
+MobRecognitionReadServerLine(timeoutMs) {
+    global mobRecognitionServerExec
+
+    if (!IsObject(mobRecognitionServerExec))
+        return ""
+
+    deadline := A_TickCount + timeoutMs
+    while (A_TickCount < deadline) {
+        if (!mobRecognitionServerExec.Status = 0)
+            return ""
+        if (!mobRecognitionServerExec.Stdout.AtEndOfStream) {
+            line := mobRecognitionServerExec.Stdout.ReadLine()
+            if (line != "")
+                return line
+        }
+        Sleep, 10
+    }
+    return ""
+}
+
+MobRecognitionServerRequest(cmd, mobName, roiX, roiY, roiW, roiH, watchXs, watchYs, showProgress := false) {
+    global mobRecognitionServerExec, botStopRequested
+
+    if (!IsObject(watchXs))
+        watchXs := []
+    if (!IsObject(watchYs))
+        watchYs := []
+
+    if (!MobRecognitionStartServer())
+        return ""
+
+    request := MobRecognitionBuildServerRequest(cmd, mobName, roiX, roiY, roiW, roiH, watchXs, watchYs)
+    startTick := A_TickCount
+    mobRecognitionServerExec.StdIn.Write(request . "`n")
+
+    timeoutMs := (cmd = "watch") ? 3000 : 60000
+    jsonText := MobRecognitionReadServerLine(timeoutMs)
+    if (jsonText = "") {
+        MobRecognitionLog("MobRecognition: server request timed out cmd=" . cmd)
+        MobRecognitionStopServer()
+        return ""
+    }
+    if (showProgress && IsFunc("AppendLog"))
+        AppendLog("Mob detect " . Round((A_TickCount - startTick) / 1000, 2) . "s")
+    if IsFunc("BotSessionDetectResponse") {
+        fn := "BotSessionDetectResponse"
+        %fn%(jsonText, A_TickCount - startTick)
+    }
+    return jsonText
+}
+
+MobRecognitionStartServer() {
+    global mobRecognitionCli, mobRecognitionServerExec, mobRecognitionServerReady
+
+    if (mobRecognitionServerReady && IsObject(mobRecognitionServerExec)) {
+        if (mobRecognitionServerExec.Status = 0)
+            return true
+        mobRecognitionServerReady := false
+        mobRecognitionServerExec := ""
+    }
+
+    pythonCmd := EnsureMobRecognitionPython()
+    if (pythonCmd = "")
+        return false
+
+    cliPath := A_ScriptDir . "\" . mobRecognitionCli
+    if (!FileExist(cliPath)) {
+        MobRecognitionLog("MobRecognition: cli.py not found")
+        return false
+    }
+
+    shell := ComObjCreate("WScript.Shell")
+    shell.CurrentDirectory := A_ScriptDir
+    mobRecognitionServerExec := shell.Exec(pythonCmd . " -u """ . cliPath . """ serve")
+    readyLine := MobRecognitionReadServerLine(15000)
+    if (readyLine = "" || !InStr(readyLine, """ready"":true")) {
+        MobRecognitionLog("MobRecognition: detector server failed to start")
+        MobRecognitionStopServer()
+        return false
+    }
+    mobRecognitionServerReady := true
+    MobRecognitionLog("MobRecognition: detector server ready")
+    return true
+}
+
+MobRecognitionStopServer() {
+    global mobRecognitionServerExec, mobRecognitionServerReady
+
+    if (!IsObject(mobRecognitionServerExec)) {
+        mobRecognitionServerReady := false
+        return
+    }
+    if (mobRecognitionServerExec.Status = 0)
+        mobRecognitionServerExec.StdIn.Write("{""cmd"":""shutdown""}`n")
+    MobRecognitionReadServerLine(3000)
+    mobRecognitionServerExec.Terminate()
+    mobRecognitionServerExec := ""
+    mobRecognitionServerReady := false
 }
 
 MobRecognitionProcessRunning(pid) {
@@ -241,18 +378,7 @@ MobRecognitionKillPid(pid) {
 }
 
 MobRecognitionEnsureServer() {
-    pythonCmd := EnsureMobRecognitionPython()
-    if (pythonCmd = "") {
-        MobRecognitionLog("MobRecognition: Python not found")
-        return false
-    }
-
-    cliPath := A_ScriptDir . "\" . mobRecognitionCli
-    if (!FileExist(cliPath)) {
-        MobRecognitionLog("MobRecognition: cli.py not found")
-        return false
-    }
-    return true
+    return MobRecognitionStartServer()
 }
 
 MobRecognitionCancelActiveDetect() {
@@ -271,6 +397,7 @@ MobRecognitionExitCleanup() {
     mobRecognitionShutdownDone := true
 
     MobRecognitionCancelActiveDetect()
+    MobRecognitionStopServer()
 
     if IsFunc("MobRecognitionLog")
         MobRecognitionLog("MobRecognition: simple detector cleanup complete")
@@ -296,10 +423,12 @@ MobRecognitionDetect(mobName, roiX, roiY, roiW, roiH, debug := "", showProgress 
     }
 
     useDebug := (debug != "") ? debug : mobRecognitionDebug
-    return MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, useDebug, showProgress)
+    if (useDebug)
+        return MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, true, showProgress)
+    return MobRecognitionDiscoveryDetect(mobName, roiX, roiY, roiW, roiH, showProgress)
 }
 
-MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, debug := false, showProgress := false, attackedXs := "", attackedYs := "") {
+MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, debug := false, showProgress := false) {
     global mobRecognitionCli, mobRecognitionActiveDetectPid
     global botStopRequested
 
@@ -323,18 +452,7 @@ MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, debug := false, showPro
         fn := "BotSessionScaleArgs"
         scaleArg := %fn%(mobName)
     }
-    attackArg := ""
-    slotCount := attackedXs.MaxIndex()
-    if (slotCount > 0) {
-        attackSlots := ""
-        Loop %slotCount% {
-            localX := attackedXs[A_Index] - roiX
-            localY := attackedYs[A_Index] - roiY
-            attackSlots .= localX . "," . localY . ";"
-        }
-        attackArg := " --attack-slots """ . attackSlots . """"
-    }
-    cmd := A_ComSpec . " /c " . pythonCmd . " """ . cliPath . """ detect-simple --mob " . mobName . " --roi " . roiArg . " --output """ . outFile . """" . sessionArg . scaleArg . attackArg . debugFlag
+    cmd := A_ComSpec . " /c " . pythonCmd . " """ . cliPath . """ detect-simple --mob " . mobName . " --roi " . roiArg . " --output """ . outFile . """" . sessionArg . scaleArg . debugFlag
 
     startTick := A_TickCount
     jsonText := ""

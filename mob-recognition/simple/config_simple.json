@@ -41,7 +41,7 @@
     "localPattern": 0.15
   },
   "deadValidationThreshold": 0.42,
-  "deadAttackSlotThreshold": 0.30,
+  "deadWatchPointThreshold": 0.30,
   "minDeadMobPresence": 0.24,
   "maxFullOpacity": 0.90,
   "minOpacitySpriteFraction": 0.04,

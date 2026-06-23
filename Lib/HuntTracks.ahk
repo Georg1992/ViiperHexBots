@@ -7,6 +7,7 @@ global HUNT_TRACK_MISS_LIMIT := 4
 global HUNT_TRACK_REQUIRE_CLEAR_SCAN := true
 global HUNT_TRACK_UNREACHABLE_ATTACKS := 3
 global HUNT_TRACK_DEBUG := false
+global HUNT_WATCH_MAX_AGE_MS := 400
 
 global huntTracks := []
 global huntTrackNextId := 1
@@ -100,6 +101,7 @@ HuntTracks_CreateTrack(x, y, confidence) {
     track.attackCount := 0
     track.confidence := confidence
     track.lastAttackTick := 0
+    track.lastWatchTick := 0
     track.unreachable := false
     track.createdScan := huntTrackScanId
     track.updatedTick := A_TickCount
@@ -117,10 +119,7 @@ HuntTracks_ApplyMatch(track, candidate) {
     track.confidence := candidate.confidence
     track.updatedTick := A_TickCount
     if (candidate.dead) {
-        if (track.state != "dead") {
-            track.state := "dead"
-            HuntTracks_Log("TRACK", "dead id=" . track.id)
-        }
+        HuntTracks_MarkDead(track.id)
     } else if (candidate.living && track.state = "alive") {
         track.state := "alive"
     }
@@ -128,12 +127,12 @@ HuntTracks_ApplyMatch(track, candidate) {
         HuntTracks_Log("TRACK", "match id=" . track.id . " x=" . Round(track.x) . " y=" . Round(track.y) . " state=" . track.state . " miss=0")
 }
 
-HuntTracks_CollectAttackProbes(ByRef outXs, ByRef outYs) {
+HuntTracks_CollectWatchPoints(ByRef outXs, ByRef outYs) {
     global huntTracks
     outXs := []
     outYs := []
     for index, track in huntTracks {
-        if (track.state != "alive" || track.attackCount < 1)
+        if (track.state != "alive" || track.unreachable)
             continue
         outXs.Push(Round(track.x))
         outYs.Push(Round(track.y))
@@ -154,26 +153,6 @@ HuntTracks_CandidateNearDeadTrack(x, y, radius) {
     return false
 }
 
-HuntTracks_FindNearestAttackedTrack(x, y, matchRadiusSq, matchedTrackIds) {
-    global huntTracks
-    bestTrackIndex := 0
-    bestDistSq := matchRadiusSq + 1
-    for trackIndex, track in huntTracks {
-        if (track.state = "gone" || track.attackCount < 1)
-            continue
-        if (matchedTrackIds.HasKey(track.id))
-            continue
-        dx := x - track.x
-        dy := y - track.y
-        distSq := (dx * dx) + (dy * dy)
-        if (distSq <= matchRadiusSq && distSq < bestDistSq) {
-            bestDistSq := distSq
-            bestTrackIndex := trackIndex
-        }
-    }
-    return bestTrackIndex
-}
-
 HuntTracks_AllTracksDead() {
     global huntTracks
     if (!huntTracks.MaxIndex())
@@ -187,8 +166,6 @@ HuntTracks_ApplyDeadCandidate(candidate, ByRef matchedTrackIds) {
     bestTrackIndex := HuntTracks_FindNearestTrack(candidate.x, candidate.y, matchRadiusSq, matchedTrackIds, true)
     if (!bestTrackIndex)
         bestTrackIndex := HuntTracks_FindNearestTrack(candidate.x, candidate.y, matchRadiusSq, matchedTrackIds, false)
-    if (!bestTrackIndex)
-        bestTrackIndex := HuntTracks_FindNearestAttackedTrack(candidate.x, candidate.y, matchRadiusSq, matchedTrackIds)
     if (bestTrackIndex > 0) {
         track := huntTracks[bestTrackIndex]
         matchedTrackIds[track.id] := true
@@ -292,6 +269,65 @@ HuntTracks_SortCandidatesByConfidence(ByRef candidates) {
 HuntTracks_IsFresh(track) {
     global huntTrackScanId
     return (IsObject(track) && track.lastSeenScan = huntTrackScanId)
+}
+
+HuntTracks_IsEngageable(track) {
+    global HUNT_WATCH_MAX_AGE_MS
+    if (!IsObject(track) || track.state != "alive" || track.unreachable)
+        return false
+    if (HuntTracks_IsFresh(track))
+        return true
+    return (track.lastWatchTick > 0 && (A_TickCount - track.lastWatchTick) <= HUNT_WATCH_MAX_AGE_MS)
+}
+
+HuntTracks_ClearTargetIfDead() {
+    global CurrentTargetTrackId
+    if (CurrentTargetTrackId = "")
+        return
+    track := HuntTracks_GetTrackById(CurrentTargetTrackId)
+    if (IsObject(track) && track.state = "dead") {
+        HuntTracks_Log("HUNT", "clear currentTarget id=" . CurrentTargetTrackId . " reason=dead")
+        CurrentTargetTrackId := ""
+    }
+}
+
+HuntTracks_ApplyWatch(candidates) {
+    global huntTracks, HUNT_TRACK_MATCH_RADIUS
+    if (!IsObject(candidates) || !candidates.MaxIndex())
+        return
+
+    matchedTrackIds := {}
+    matchRadiusSq := HUNT_TRACK_MATCH_RADIUS * HUNT_TRACK_MATCH_RADIUS
+    deadCandidates := []
+    livingCandidates := []
+
+    for index, candidate in candidates {
+        if (candidate.dead)
+            deadCandidates.Push(candidate)
+        else if (candidate.living)
+            livingCandidates.Push(candidate)
+    }
+
+    for candIndex, candidate in deadCandidates
+        HuntTracks_ApplyDeadCandidate(candidate, matchedTrackIds)
+
+    for candIndex, candidate in livingCandidates {
+        if (HuntTracks_CandidateNearDeadTrack(candidate.x, candidate.y, HUNT_TRACK_MATCH_RADIUS))
+            continue
+        bestTrackIndex := HuntTracks_FindNearestTrack(candidate.x, candidate.y, matchRadiusSq, matchedTrackIds, true)
+        if (bestTrackIndex > 0) {
+            track := huntTracks[bestTrackIndex]
+            matchedTrackIds[track.id] := true
+            track.x := candidate.x
+            track.y := candidate.y
+            track.missCount := 0
+            track.confidence := candidate.confidence
+            track.lastWatchTick := A_TickCount
+            track.updatedTick := A_TickCount
+        }
+    }
+
+    HuntTracks_ClearTargetIfDead()
 }
 
 HuntTracks_GetActionableAliveCount() {

@@ -22,6 +22,11 @@ global currentLocation := 0
 global huntLastWarpTime := 0
 global huntLastSkillTime := 0
 global huntFastIdle := false
+global HUNT_WATCH_INTERVAL_MS := 150
+global HUNT_DISCOVERY_INTERVAL_MS := 1000
+global huntServerBusy := false
+global huntScanTimersActive := false
+global huntDiscoveryReady := false
 
 HuntAttackTrack(skillSC, track) {
     global SkillDelay, botRunning, botStopRequested
@@ -43,6 +48,114 @@ HuntAttackTrack(skillSC, track) {
     HuntTracks_MarkAttack(track.id)
     BotSessionRecordAttack(Round(track.x), Round(track.y), track.confidence)
     return true
+}
+
+HuntFilterCandidates(candidates, xs, ys, ws, hs, ByRef filteredCandidates) {
+    filteredCandidates := []
+    GetMobSearchPlayerIgnore(xs, ys, ws, hs, ignoreX, ignoreY, ignoreW, ignoreH)
+    for index, candidate in candidates {
+        if (candidate.dead) {
+            filteredCandidates.Push(candidate)
+            continue
+        }
+        if (MobPointInsideIgnore(candidate.x, candidate.y, ignoreX, ignoreY, ignoreW, ignoreH))
+            continue
+        filteredCandidates.Push(candidate)
+    }
+}
+
+HuntStartScanTimers() {
+    global huntScanTimersActive, HUNT_WATCH_INTERVAL_MS, HUNT_DISCOVERY_INTERVAL_MS, huntDiscoveryReady
+    if (huntScanTimersActive)
+        return
+    huntDiscoveryReady := false
+    SetTimer, HuntWatchTick, %HUNT_WATCH_INTERVAL_MS%
+    SetTimer, HuntDiscoveryTick, %HUNT_DISCOVERY_INTERVAL_MS%
+    SetTimer, HuntDiscoveryTick, -1
+    huntScanTimersActive := true
+}
+
+HuntStopScanTimers() {
+    global huntScanTimersActive, huntDiscoveryReady
+    SetTimer, HuntWatchTick, Off
+    SetTimer, HuntDiscoveryTick, Off
+    huntScanTimersActive := false
+    huntDiscoveryReady := false
+}
+
+HuntWatchTick() {
+    global botRunning, botPaused, botStopRequested, huntServerBusy
+
+    if (!botRunning || botPaused || botStopRequested || huntServerBusy)
+        return
+
+    GetHuntSearchRegion(xs, ys, ws, hs)
+    if (!ws || !hs)
+        return
+
+    watchXs := []
+    watchYs := []
+    HuntTracks_CollectWatchPoints(watchXs, watchYs)
+    if (!watchXs.MaxIndex())
+        return
+
+    mobName := MobTemplateFolderName()
+    huntServerBusy := true
+    jsonText := MobRecognitionWatchDetect(mobName, xs, ys, ws, hs, watchXs, watchYs)
+    huntServerBusy := false
+
+    if (!botRunning || botStopRequested)
+        return
+    if (jsonText = "" || !MobJsonIsOk(jsonText))
+        return
+
+    candidates := []
+    MobRecognitionParseCandidates(jsonText, candidates)
+    HuntTracks_ApplyWatch(candidates)
+}
+
+HuntDiscoveryTick() {
+    global botRunning, botPaused, botStopRequested, huntServerBusy, huntDiscoveryReady, huntFastIdle
+
+    if (!botRunning || botPaused || botStopRequested || huntServerBusy)
+        return
+
+    GetHuntSearchRegion(xs, ys, ws, hs)
+    if (!ws || !hs)
+        return
+
+    HuntTracks_SetRoiCenter(xs + (ws // 2), ys + (hs // 2))
+
+    mobName := MobTemplateFolderName()
+    if IsFunc("BotSessionHuntScan") {
+        fn := "BotSessionHuntScan"
+        %fn%(mobName, xs, ys, ws, hs)
+    }
+
+    huntServerBusy := true
+    jsonText := MobRecognitionDiscoveryDetect(mobName, xs, ys, ws, hs, false)
+    huntServerBusy := false
+
+    if (!botRunning || botStopRequested)
+        return
+    if (jsonText = "") {
+        huntDiscoveryReady := true
+        return
+    }
+    if (!MobJsonIsOk(jsonText)) {
+        if IsFunc("AppendLog")
+            AppendLog("Hunt: discovery failed — retrying")
+        huntDiscoveryReady := true
+        return
+    }
+
+    candidates := []
+    MobRecognitionParseCandidates(jsonText, candidates)
+    filteredCandidates := []
+    HuntFilterCandidates(candidates, xs, ys, ws, hs, filteredCandidates)
+    HuntTracks_Update(filteredCandidates)
+    huntFastIdle := false
+    huntDiscoveryReady := true
 }
 
 StartBot(){
@@ -106,7 +219,7 @@ StartBot(){
 Hunt(skillSC, teleportSC) {
     global botRunning, botPaused, botStopRequested
     global huntLastWarpTime, huntLastSkillTime, huntFastIdle
-    global huntTrackClearScans
+    global huntTrackClearScans, huntDiscoveryReady
     global CurrentTargetTrackId, HUNT_TRACK_UNREACHABLE_ATTACKS, SkillDelay
 
     postAttackSleepMs := 50
@@ -126,6 +239,8 @@ Hunt(skillSC, teleportSC) {
         huntLastSkillTime := A_TickCount
     }
 
+    HuntStartScanTimers()
+
     while(botRunning && !botPaused && !botStopRequested) {
         if (MemoryFeaturesActive())
             UpdateGameStats()
@@ -138,6 +253,7 @@ Hunt(skillSC, teleportSC) {
         }
 
         if (MemoryFeaturesActive() && warperCoordsSet && SavePointButtonKey != "" && (A_TickCount - huntLastWarpTime) >= (TimeOnLocation * 1000)) {
+            HuntStopScanTimers()
             WarpToSavePoint()
             huntLastWarpTime := A_TickCount
             BotSleep(1000)
@@ -161,51 +277,13 @@ Hunt(skillSC, teleportSC) {
             continue
         }
 
-        HuntTracks_SetRoiCenter(xs + (ws // 2), ys + (hs // 2))
-
         if (MemoryFeaturesActive() && DetectCaptcha && captchaEnabled && DetectCAPTCHA(xs, ys, ws, hs)) {
+            HuntStopScanTimers()
             RequestBotStop("captcha detected")
             break
         }
 
-        mobName := MobTemplateFolderName()
-        if IsFunc("BotSessionHuntScan") {
-            fn := "BotSessionHuntScan"
-            %fn%(mobName, xs, ys, ws, hs)
-        }
-
-        probeXs := []
-        probeYs := []
-        HuntTracks_CollectAttackProbes(probeXs, probeYs)
-
-        jsonText := MobRecognitionHuntDetect(mobName, xs, ys, ws, hs, probeXs, probeYs, false)
-        if (!botRunning || botStopRequested)
-            break
-        if (jsonText = "") {
-            BotSleep(100)
-            continue
-        }
-
-        candidates := []
-        if (jsonText = "" || !MobJsonIsOk(jsonText)) {
-            if IsFunc("AppendLog")
-                AppendLog("Hunt: detect failed — retrying")
-            BotSleep(200)
-            continue
-        }
-        MobRecognitionParseCandidates(jsonText, candidates)
-        GetMobSearchPlayerIgnore(xs, ys, ws, hs, ignoreX, ignoreY, ignoreW, ignoreH)
-        filteredCandidates := []
-        for index, candidate in candidates {
-            if (candidate.dead) {
-                filteredCandidates.Push(candidate)
-                continue
-            }
-            if (MobPointInsideIgnore(candidate.x, candidate.y, ignoreX, ignoreY, ignoreW, ignoreH))
-                continue
-            filteredCandidates.Push(candidate)
-        }
-        HuntTracks_Update(filteredCandidates)
+        HuntTracks_ClearTargetIfDead()
 
         engaged := false
         if (CurrentTargetTrackId != "") {
@@ -216,7 +294,7 @@ Hunt(skillSC, teleportSC) {
             } else if (currentTrack.state = "dead") {
                 HuntTracks_Log("HUNT", "clear currentTarget id=" . CurrentTargetTrackId . " reason=dead")
                 CurrentTargetTrackId := ""
-            } else if (!HuntTracks_IsFresh(currentTrack)) {
+            } else if (!HuntTracks_IsEngageable(currentTrack)) {
                 HuntTracks_Log("HUNT", "clear currentTarget id=" . CurrentTargetTrackId . " reason=stale")
                 CurrentTargetTrackId := ""
             } else if (currentTrack.attackCount >= HUNT_TRACK_UNREACHABLE_ATTACKS) {
@@ -232,6 +310,7 @@ Hunt(skillSC, teleportSC) {
 
         if (engaged) {
             huntFastIdle := false
+            BotSleep(20)
             continue
         }
 
@@ -255,7 +334,8 @@ Hunt(skillSC, teleportSC) {
         scanSleepMs := huntFastIdle ? fastIdleScanSleepMs : emptyScanSleepMs
         clearScansRequired := (huntFastIdle || HuntTracks_AllTracksDead()) ? 1 : 2
 
-        if (CurrentTargetTrackId = "" && HuntTracks_AllCleared(clearScansRequired)) {
+        if (huntDiscoveryReady && CurrentTargetTrackId = "" && HuntTracks_AllCleared(clearScansRequired)) {
+            huntDiscoveryReady := false
             if (!botRunning || botStopRequested)
                 break
             if IsFunc("AppendLog")
@@ -267,17 +347,23 @@ Hunt(skillSC, teleportSC) {
             continue
         }
 
-        if (HuntTracks_GetActionableAliveCount() > 0) {
+        if (huntDiscoveryReady && HuntTracks_GetActionableAliveCount() > 0) {
             if IsFunc("AppendLog")
                 AppendLog("Hunt [scan]: actionable tracks=" . HuntTracks_GetActionableAliveCount() . " waiting")
+            huntDiscoveryReady := false
             BotSleep(scanSleepMs)
             continue
         }
 
-        if IsFunc("AppendLog")
-            AppendLog("Hunt [scan]: clear scan pending " . huntTrackClearScans . "/" . clearScansRequired)
+        if (huntDiscoveryReady) {
+            if IsFunc("AppendLog")
+                AppendLog("Hunt [scan]: clear scan pending " . huntTrackClearScans . "/" . clearScansRequired)
+            huntDiscoveryReady := false
+        }
         BotSleep(scanSleepMs)
     }
+
+    HuntStopScanTimers()
 }
 
 Teleport(teleportSC){

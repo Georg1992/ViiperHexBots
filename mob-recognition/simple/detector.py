@@ -48,7 +48,7 @@ REQUIRED_CONFIG_KEYS = {
     "weights",
     "centerWeights",
     "deadValidationThreshold",
-    "deadAttackSlotThreshold",
+    "deadWatchPointThreshold",
     "minDeadMobPresence",
     "maxFullOpacity",
     "minOpacitySpriteFraction",
@@ -115,7 +115,7 @@ class SimpleCandidate:
 class SimpleDetectionResult:
     mob_name: str
     descriptor: SimpleMobDescriptor
-    heatmaps: Heatmaps
+    heatmaps: Heatmaps | None
     candidates: list[SimpleCandidate]
     accepted: list[SimpleCandidate]
     elapsed_s: float
@@ -177,31 +177,60 @@ class SimpleMobDetector:
         self,
         frame_bgr: np.ndarray,
         mob_name: str,
-        attack_slots: list[tuple[int, int]] | None = None,
+        watch_points: list[tuple[int, int]] | None = None,
+        *,
+        watch_only: bool = False,
     ) -> SimpleDetectionResult:
         start = time.perf_counter()
         descriptor = self.ensure_descriptor(mob_name)
         hsv_start = time.perf_counter()
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+
+        if not watch_only and watch_points:
+            raise ValueError("watch_points are only valid with watch_only")
+
+        if watch_only:
+            if not watch_points:
+                elapsed = time.perf_counter() - start
+                return SimpleDetectionResult(
+                    mob_name=mob_name.lower(),
+                    descriptor=descriptor,
+                    heatmaps=None,
+                    candidates=[],
+                    accepted=[],
+                    elapsed_s=elapsed,
+                    timing={"hsv": hsv_start - start, "total": elapsed},
+                )
+            score_start = time.perf_counter()
+            candidates: list[SimpleCandidate] = []
+            for watch_x, watch_y in watch_points:
+                candidates.extend(
+                    self._evaluate_center(frame_bgr, hsv, descriptor, watch_x, watch_y, 1.0, watch_point=True)
+                )
+            accepted = self._finalize_accepted(candidates)
+            elapsed = time.perf_counter() - start
+            return SimpleDetectionResult(
+                mob_name=mob_name.lower(),
+                descriptor=descriptor,
+                heatmaps=None,
+                candidates=candidates[: int(self.config["maxCandidates"])],
+                accepted=accepted,
+                elapsed_s=elapsed,
+                timing={
+                    "hsv": hsv_start - start,
+                    "scoring": score_start - hsv_start,
+                    "total": elapsed,
+                },
+            )
+
         heatmap_start = time.perf_counter()
         heatmaps = self.heatmap_detector.build_heatmaps(frame_bgr, hsv, descriptor)
         centers_start = time.perf_counter()
         centers = self.heatmap_detector.top_centers(heatmaps.final_center)
         score_start = time.perf_counter()
         candidates: list[SimpleCandidate] = []
-        slot_guard_px = int(self.config["nmsDistancePx"])
-        slot_guard_sq = slot_guard_px * slot_guard_px
         for cx, cy, heat_score in centers:
-            if attack_slots and any(
-                (cx - slot_x) ** 2 + (cy - slot_y) ** 2 <= slot_guard_sq for slot_x, slot_y in attack_slots
-            ):
-                continue
             candidates.extend(self._evaluate_center(frame_bgr, hsv, descriptor, cx, cy, heat_score))
-        if attack_slots:
-            for slot_x, slot_y in attack_slots:
-                candidates.extend(
-                    self._evaluate_center(frame_bgr, hsv, descriptor, slot_x, slot_y, 1.0, attack_slot=True)
-                )
         nms_start = time.perf_counter()
         accepted = self._finalize_accepted(candidates)
         accepted_ids = {id(candidate) for candidate in accepted}
@@ -239,20 +268,20 @@ class SimpleMobDetector:
         cy: int,
         heat_score: float,
         *,
-        attack_slot: bool = False,
+        watch_point: bool = False,
     ) -> list[SimpleCandidate]:
-        if not attack_slot and self._is_self_center(cx, cy, frame_bgr.shape):
+        if not watch_point and self._is_self_center(cx, cy, frame_bgr.shape):
             return []
-        if attack_slot and (cx < 0 or cy < 0 or cx >= frame_bgr.shape[1] or cy >= frame_bgr.shape[0]):
+        if watch_point and (cx < 0 or cy < 0 or cx >= frame_bgr.shape[1] or cy >= frame_bgr.shape[0]):
             return []
-        if attack_slot and descriptor.dead is None:
+        if watch_point and descriptor.dead is None:
             return []
 
         best_living: tuple[float, tuple[int, int, int, int], tuple[int, int, int, int], RegionScore, DeathValidation] | None = None
         best_dead: tuple[float, tuple[int, int, int, int], RegionScore | None, DeathValidation] | None = None
-        presence_gate = self.death_validator.min_mob_presence * (0.55 if attack_slot else 0.5)
+        presence_gate = self.death_validator.min_mob_presence * (0.55 if watch_point else 0.5)
 
-        for scale in self._candidate_scales(frame_bgr.shape[1], attack_slot=attack_slot):
+        for scale in self._candidate_scales(frame_bgr.shape[1], watch_point=watch_point):
             living_bbox = self._bbox_for_size(
                 cx,
                 cy,
@@ -305,7 +334,7 @@ class SimpleMobDetector:
                 living_score,
                 dead_score,
                 living_at_dead_score,
-                attack_slot=attack_slot,
+                watch_point=watch_point,
             )
 
             if validation.is_dead and (
@@ -317,7 +346,7 @@ class SimpleMobDetector:
             ):
                 best_living = (float(scale), living_bbox, dead_bbox, living_score, validation)
 
-        if attack_slot:
+        if watch_point:
             if best_dead is None:
                 return []
             scale, bbox, score, validation = best_dead
@@ -394,8 +423,8 @@ class SimpleMobDetector:
         half_height = height * self.self_exclusion_height_ratio * 0.5
         return abs(cx - width / 2) <= half_width and abs(cy - height / 2) <= half_height
 
-    def _candidate_scales(self, frame_width: int, *, attack_slot: bool = False) -> list[float]:
-        if attack_slot:
+    def _candidate_scales(self, frame_width: int, *, watch_point: bool = False) -> list[float]:
+        if watch_point:
             return [0.45, 0.55, 0.65]
         return [
             float(scale)

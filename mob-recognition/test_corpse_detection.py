@@ -39,8 +39,13 @@ class CorpseDetectionTests(unittest.TestCase):
                 image_path = self.fixture_dir / entry["file"]
                 frame = cv2.imread(str(image_path))
                 self.assertIsNotNone(frame, entry["file"])
-                attack_slots = [tuple(slot) for slot in entry["attackSlots"]]
-                result = self.detector.detect(playfield_roi(frame), "horn", attack_slots=attack_slots)
+                watch_points = [tuple(point) for point in entry["watchPoints"]]
+                result = self.detector.detect(
+                    playfield_roi(frame),
+                    "horn",
+                    watch_points=watch_points,
+                    watch_only=True,
+                )
                 dead = sum(1 for candidate in result.accepted if candidate.is_dead)
                 living = sum(1 for candidate in result.accepted if not candidate.is_dead)
                 self.assertEqual(dead, entry["expectDead"], result.accepted)

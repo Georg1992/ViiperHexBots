@@ -232,6 +232,17 @@ BotSessionScaleArgs(mobName) {
     return " --scale-range " . botSessionScaleMin . "," . botSessionScaleMax . " --enforce-size-gate"
 }
 
+BotSessionScaleRangeJson(mobName) {
+    global botSessionActive, botSessionScaleMob, botSessionScaleLocked
+    global botSessionScaleMin, botSessionScaleMax
+
+    if (!botSessionActive || !botSessionScaleLocked)
+        return ""
+    if (mobName != botSessionScaleMob)
+        return ""
+    return ",""scaleRange"":[" . botSessionScaleMin . "," . botSessionScaleMax . "],""enforceSizeGate"":true"
+}
+
 BotSessionWriteSummary(status := "running") {
     global botSessionActive, botSessionSummaryPath, botSessionId, botSessionTargetMob
     global botSessionStartedTick, botSessionTotalScans, botSessionEmptyScans, botSessionTargetScans

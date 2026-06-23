@@ -31,7 +31,7 @@ def parse_roi(value: str) -> tuple[int, int, int, int]:
     return tuple(parts)
 
 
-def parse_attack_slots(value: str) -> list[tuple[int, int]]:
+def parse_watch_points(value: str) -> list[tuple[int, int]]:
     slots: list[tuple[int, int]] = []
     for part in value.split(";"):
         part = part.strip()
@@ -39,7 +39,7 @@ def parse_attack_slots(value: str) -> list[tuple[int, int]]:
             continue
         coords = [int(p.strip()) for p in part.split(",")]
         if len(coords) != 2:
-            raise argparse.ArgumentTypeError("attack slot must be x,y")
+            raise argparse.ArgumentTypeError("watch point must be x,y")
         slots.append((coords[0], coords[1]))
     return slots
 
@@ -117,6 +117,127 @@ def cmd_build_simple_descriptor(args: argparse.Namespace) -> int:
     return 0
 
 
+def build_detect_response(
+    result,
+    screen_offset: tuple[int, int],
+    *,
+    pipeline: str,
+    session_id: str = "",
+    scale_range: tuple[float, float] | None = None,
+    enforce_size_gate: bool = False,
+    accept_threshold: float = 0.0,
+) -> dict:
+    accepted_json = [candidate_to_json(candidate, screen_offset) for candidate in result.accepted]
+    return {
+        "ok": True,
+        "pipeline": pipeline,
+        "sessionId": session_id,
+        "scaleCalibration": {
+            "status": "locked" if scale_range else "discovering",
+            "range": list(scale_range) if scale_range else None,
+            "sizeGate": bool(enforce_size_gate),
+        },
+        "confidenceThreshold": accept_threshold,
+        "candidateCount": len(result.candidates),
+        "acceptedCount": len(result.accepted),
+        "elapsedS": round(result.elapsed_s, 4),
+        "candidates": accepted_json,
+    }
+
+
+def parse_request_scale_range(value) -> tuple[float, float] | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        low, high = float(value[0]), float(value[1])
+        return (min(low, high), max(low, high))
+    return None
+
+
+def parse_request_watch_points(value) -> list[tuple[int, int]]:
+    if not value:
+        return []
+    points: list[tuple[int, int]] = []
+    for entry in value:
+        if isinstance(entry, (list, tuple)) and len(entry) == 2:
+            points.append((int(entry[0]), int(entry[1])))
+    return points
+
+
+def run_detect_request(detector: SimpleMobDetector, config: dict, request: dict) -> dict:
+    command = str(request.get("cmd", "")).lower()
+    mob_name = str(request.get("mob", "")).lower()
+    roi = request.get("roi")
+    if not mob_name:
+        raise ValueError("mob is required")
+    if not isinstance(roi, (list, tuple)) or len(roi) != 4:
+        raise ValueError("roi must be [x,y,width,height]")
+    x, y, w, h = (int(roi[0]), int(roi[1]), int(roi[2]), int(roi[3]))
+    scale_range = parse_request_scale_range(request.get("scaleRange"))
+    enforce_size_gate = bool(request.get("enforceSizeGate", False))
+    calibrated = apply_scale_calibration(config, scale_range, enforce_size_gate)
+    detector.config.update(calibrated)
+
+    frame = capture_region(x, y, w, h)
+    session_id = str(request.get("sessionId", ""))
+
+    if command == "watch":
+        watch_points = parse_request_watch_points(request.get("watchPoints"))
+        result = detector.detect(frame, mob_name, watch_points=watch_points, watch_only=True)
+        return build_detect_response(
+            result,
+            (x, y),
+            pipeline="watch",
+            session_id=session_id,
+            scale_range=scale_range,
+            enforce_size_gate=enforce_size_gate,
+            accept_threshold=float(calibrated["acceptThreshold"]),
+        )
+
+    if command == "scan":
+        result = detector.detect(frame, mob_name)
+        return build_detect_response(
+            result,
+            (x, y),
+            pipeline="scan",
+            session_id=session_id,
+            scale_range=scale_range,
+            enforce_size_gate=enforce_size_gate,
+            accept_threshold=float(calibrated["acceptThreshold"]),
+        )
+
+    raise ValueError(f"unsupported cmd: {command}")
+
+
+def cmd_serve() -> int:
+    config = load_simple_config()
+    detector = SimpleMobDetector(PROJECT_ROOT, config)
+    sys.stdout.write(json.dumps({"ok": True, "ready": True, "pipeline": "serve"}) + "\n")
+    sys.stdout.flush()
+    for raw_line in sys.stdin:
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError as exc:
+            response = {"ok": False, "error": f"invalid json: {exc}", "candidates": []}
+            sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
+            sys.stdout.flush()
+            continue
+        if str(request.get("cmd", "")).lower() == "shutdown":
+            sys.stdout.write(json.dumps({"ok": True, "shutdown": True}) + "\n")
+            sys.stdout.flush()
+            break
+        try:
+            response = run_detect_request(detector, config, request)
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc), "candidates": []}
+        sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
+    return 0
+
+
 def cmd_detect_simple(args: argparse.Namespace) -> int:
     output_path = Path(args.output) if args.output else None
     try:
@@ -124,29 +245,31 @@ def cmd_detect_simple(args: argparse.Namespace) -> int:
         config = load_simple_config(Path(args.config_simple) if args.config_simple else None)
         config = apply_scale_calibration(config, args.scale_range, args.enforce_size_gate)
         detector = SimpleMobDetector(PROJECT_ROOT, config)
-        attack_slots = parse_attack_slots(args.attack_slots) if args.attack_slots else []
-        result = detector.detect(frame, args.mob.lower(), attack_slots=attack_slots or None)
+        watch_points = parse_watch_points(args.watch_points) if args.watch_points else []
+        if watch_points:
+            result = detector.detect(
+                frame,
+                args.mob.lower(),
+                watch_points=watch_points,
+                watch_only=True,
+            )
+        else:
+            result = detector.detect(frame, args.mob.lower())
         accepted_json = [candidate_to_json(candidate, screen_offset) for candidate in result.accepted]
         if args.debug:
             label = Path(args.image).name if args.image else "live_capture"
             debug_root = PROJECT_ROOT / config["debugOutputDir"]
             save_simple_debug_bundle(debug_root, label, frame, result)
         emit_json(
-            {
-                "ok": True,
-                "pipeline": "simple",
-                "sessionId": args.session_id or "",
-                "scaleCalibration": {
-                    "status": "locked" if args.scale_range else "discovering",
-                    "range": list(args.scale_range) if args.scale_range else None,
-                    "sizeGate": bool(args.enforce_size_gate),
-                },
-                "confidenceThreshold": float(config["acceptThreshold"]),
-                "candidateCount": len(result.candidates),
-                "acceptedCount": len(result.accepted),
-                "elapsedS": round(result.elapsed_s, 4),
-                "candidates": accepted_json,
-            },
+            build_detect_response(
+                result,
+                screen_offset,
+                pipeline="simple",
+                session_id=args.session_id or "",
+                scale_range=args.scale_range,
+                enforce_size_gate=bool(args.enforce_size_gate),
+                accept_threshold=float(config["acceptThreshold"]),
+            ),
             output_path,
         )
         return 0
@@ -207,7 +330,7 @@ def build_parser() -> argparse.ArgumentParser:
     detect.add_argument("--session-id", default="", help="bot session id for logs/calibration")
     detect.add_argument("--scale-range", type=parse_scale_range, help="locked session scale range as min,max")
     detect.add_argument("--enforce-size-gate", action="store_true", help="enforce strict object size gate")
-    detect.add_argument("--attack-slots", help="ROI-local attack slots as x,y;x,y for hunt kill validation")
+    detect.add_argument("--watch-points", help="ROI-local watch points for watch-only CLI evaluation (no heatmap)")
 
     fixtures = sub.add_parser("fixtures-simple", help="run screenshot fixture suite with simple detector")
     fixtures.add_argument("--mob", required=True)
@@ -218,6 +341,8 @@ def build_parser() -> argparse.ArgumentParser:
     inspect = sub.add_parser("inspect", help="inspect SPR/ACT files")
     inspect.add_argument("--spr", required=True)
     inspect.add_argument("--act", required=True)
+
+    serve = sub.add_parser("serve", help="persistent JSON-lines detector server for scan/watch commands")
     return parser
 
 
@@ -232,6 +357,8 @@ def main() -> int:
         return cmd_fixtures_simple(args)
     if args.command == "inspect":
         return cmd_inspect(args)
+    if args.command == "serve":
+        return cmd_serve()
     parser.print_help()
     return 1
 
