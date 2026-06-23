@@ -295,14 +295,17 @@ func (b *inputBridge) sendMouseButton(button int, down bool) error {
 		if !down {
 			return nil
 		}
-		state := b.mouseState
-		state.Wheel = -1
-		err := b.mouseStream.WriteBinary(&state)
-		state.Wheel = 0
-		return err
+		return b.sendMouseWheelLocked(-1)
 	}
 
-	flag, ok := ahiButtonToMouseFlag(button)
+	if button == 6 {
+		if !down {
+			return nil
+		}
+		return b.sendMouseWheelLocked(1)
+	}
+
+	flag, ok := bridgeMouseButtonFlag(button)
 	if !ok {
 		return fmt.Errorf("unsupported mouse button %d", button)
 	}
@@ -316,7 +319,47 @@ func (b *inputBridge) sendMouseButton(button int, down bool) error {
 	return b.mouseStream.WriteBinary(&b.mouseState)
 }
 
-func ahiButtonToMouseFlag(button int) (uint8, bool) {
+func (b *inputBridge) sendMouseMove(dx, dy int16) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sendMouseMoveLocked(dx, dy)
+}
+
+func (b *inputBridge) sendMouseMoveLocked(dx, dy int16) error {
+	if b.mouseStream == nil {
+		return fmt.Errorf("input bridge not initialized")
+	}
+
+	state := b.mouseState
+	state.DX = dx
+	state.DY = dy
+	err := b.mouseStream.WriteBinary(&state)
+	state.DX = 0
+	state.DY = 0
+	return err
+}
+
+func (b *inputBridge) sendMouseWheel(delta int16) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sendMouseWheelLocked(delta)
+}
+
+func (b *inputBridge) sendMouseWheelLocked(delta int16) error {
+	if b.mouseStream == nil {
+		return fmt.Errorf("input bridge not initialized")
+	}
+
+	state := b.mouseState
+	state.Wheel = delta
+	err := b.mouseStream.WriteBinary(&state)
+	state.Wheel = 0
+	return err
+}
+
+// bridgeMouseButtonFlag maps bridge button indices to VIIPER mouse flags:
+// 0=left, 1=right, 2=middle, 3=back, 4=forward, 5=wheel down, 6=wheel up.
+func bridgeMouseButtonFlag(button int) (uint8, bool) {
 	switch button {
 	case 0:
 		return mouse.BtnLeft, true

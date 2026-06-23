@@ -1,0 +1,14 @@
+{
+  "horns": [
+    {
+      "centerX": 550,
+      "centerY": 196,
+      "radius": 70
+    },
+    {
+      "centerX": 694,
+      "centerY": 216,
+      "radius": 70
+    }
+  ]
+}

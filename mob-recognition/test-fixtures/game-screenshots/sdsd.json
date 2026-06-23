@@ -1,0 +1,10 @@
+{
+  "note": "One visible horn near the upper-left dirt path.",
+  "horns": [
+    {
+      "centerX": 775,
+      "centerY": 304,
+      "radius": 80
+    }
+  ]
+}

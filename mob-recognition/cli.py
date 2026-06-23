@@ -1,0 +1,194 @@
+"""Mob recognition CLI for the simple descriptor heatmap detector."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import cv2
+
+MOB_REC_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = MOB_REC_DIR.parent
+SIMPLE_DIR = MOB_REC_DIR / "simple"
+for path in (str(MOB_REC_DIR), str(SIMPLE_DIR)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+from act_reader import ActReader
+from capture import capture_region
+from debug_renderer import save_simple_debug_bundle
+from descriptor_builder import SimpleDescriptorBuilder
+from detector import SimpleMobDetector, load_simple_config
+from spr_reader import SprReader
+
+
+def parse_roi(value: str) -> tuple[int, int, int, int]:
+    parts = [int(p.strip()) for p in value.split(",")]
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError("roi must be x,y,width,height")
+    return tuple(parts)
+
+
+def emit_json(payload: dict, output_path: Path | None = None) -> None:
+    text = json.dumps(payload, separators=(",", ":"))
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+        tmp_path.write_text(text, encoding="utf-8")
+        tmp_path.replace(output_path)
+    print(text)
+
+
+def candidate_to_json(candidate, screen_offset: tuple[int, int]) -> dict:
+    ox, oy = screen_offset
+    payload = candidate.to_dict()
+    x, y, w, h = candidate.bbox
+    payload.update(
+        {
+            "x": x + ox,
+            "y": y + oy,
+            "width": w,
+            "height": h,
+            "centerX": candidate.center_x + ox,
+            "centerY": candidate.center_y + oy,
+            "confidence": round(candidate.final_score, 4),
+            "living": candidate.accepted,
+            "dead": False,
+        }
+    )
+    return payload
+
+
+def _load_frame(args: argparse.Namespace) -> tuple[object, tuple[int, int], int]:
+    if args.image:
+        image_path = Path(args.image)
+        if not image_path.is_absolute():
+            image_path = PROJECT_ROOT / image_path
+        frame = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if frame is None:
+            raise FileNotFoundError(f"failed to read image: {image_path}")
+        return frame, (0, 0), 0
+    if not args.roi:
+        raise ValueError("--roi is required without --image")
+    x, y, w, h = args.roi
+    return capture_region(x, y, w, h), (x, y), 0
+
+
+def cmd_build_simple_descriptor(args: argparse.Namespace) -> int:
+    descriptor = SimpleDescriptorBuilder(PROJECT_ROOT).build(args.mob.lower(), force=args.force)
+    print(json.dumps({"ok": True, "descriptor": descriptor.to_dict()}, indent=2))
+    return 0
+
+
+def cmd_detect_simple(args: argparse.Namespace) -> int:
+    output_path = Path(args.output) if args.output else None
+    try:
+        frame, screen_offset, _ = _load_frame(args)
+        config = load_simple_config(Path(args.config_simple) if args.config_simple else None)
+        detector = SimpleMobDetector(PROJECT_ROOT, config)
+        result = detector.detect(frame, args.mob.lower())
+        accepted_json = [candidate_to_json(candidate, screen_offset) for candidate in result.accepted]
+        if args.debug:
+            label = Path(args.image).name if args.image else "live_capture"
+            debug_root = PROJECT_ROOT / config.get("debugOutputDir", "mob-recognition/debug/simple")
+            save_simple_debug_bundle(debug_root, label, frame, result)
+        emit_json(
+            {
+                "ok": True,
+                "pipeline": "simple",
+                "confidenceThreshold": float(config.get("acceptThreshold", 0.46)),
+                "candidateCount": len(result.candidates),
+                "acceptedCount": len(result.accepted),
+                "elapsedS": round(result.elapsed_s, 4),
+                "best": accepted_json[0] if accepted_json else None,
+                "candidates": accepted_json,
+            },
+            output_path,
+        )
+        return 0
+    except Exception as exc:
+        emit_json({"ok": False, "error": str(exc), "candidates": []}, output_path)
+        return 1
+
+
+def cmd_fixtures_simple(args: argparse.Namespace) -> int:
+    from dataset_runner import main as fixtures_main
+
+    argv = ["--mob", args.mob.lower()]
+    if args.fixtures:
+        argv.extend(["--fixtures", args.fixtures])
+    if args.debug:
+        argv.append("--debug")
+    if args.rebuild_descriptor:
+        argv.append("--rebuild-descriptor")
+    return fixtures_main(argv)
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    spr_path = Path(args.spr)
+    act_path = Path(args.act)
+    if not spr_path.is_absolute():
+        spr_path = PROJECT_ROOT / spr_path
+    if not act_path.is_absolute():
+        act_path = PROJECT_ROOT / act_path
+    spr = SprReader(spr_path).load()
+    act = ActReader(act_path).load()
+    payload = {
+        "spr": str(spr_path),
+        "act": str(act_path),
+        "sprVersion": spr.version,
+        "frameCount": spr.frame_count,
+        "actionCount": len(act.actions),
+        "actions": [{"index": action.index, "frames": len(action.frames)} for action in act.actions],
+    }
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Simple mob recognition")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    build = sub.add_parser("build-simple-descriptor", help="build simple descriptor from SPR/ACT")
+    build.add_argument("--mob", required=True)
+    build.add_argument("--force", action="store_true")
+
+    detect = sub.add_parser("detect-simple", help="detect mobs using descriptor heatmaps")
+    detect.add_argument("--mob", required=True)
+    detect.add_argument("--roi", type=parse_roi, help="screen x,y,width,height")
+    detect.add_argument("--image", help="existing image path")
+    detect.add_argument("--output", help="JSON output file for AHK")
+    detect.add_argument("--debug", action="store_true")
+    detect.add_argument("--config-simple", help="simple config path")
+
+    fixtures = sub.add_parser("fixtures-simple", help="run screenshot fixture suite with simple detector")
+    fixtures.add_argument("--mob", required=True)
+    fixtures.add_argument("--fixtures", help="test-fixtures root")
+    fixtures.add_argument("--debug", action="store_true")
+    fixtures.add_argument("--rebuild-descriptor", action="store_true")
+
+    inspect = sub.add_parser("inspect", help="inspect SPR/ACT files")
+    inspect.add_argument("--spr", required=True)
+    inspect.add_argument("--act", required=True)
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.command == "build-simple-descriptor":
+        return cmd_build_simple_descriptor(args)
+    if args.command == "detect-simple":
+        return cmd_detect_simple(args)
+    if args.command == "fixtures-simple":
+        return cmd_fixtures_simple(args)
+    if args.command == "inspect":
+        return cmd_inspect(args)
+    parser.print_help()
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

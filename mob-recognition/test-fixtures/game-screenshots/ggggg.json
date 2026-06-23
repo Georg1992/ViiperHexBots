@@ -1,0 +1,15 @@
+{
+  "note": "Two visible horns on the grass path.",
+  "horns": [
+    {
+      "centerX": 1090,
+      "centerY": 219,
+      "radius": 80
+    },
+    {
+      "centerX": 1095,
+      "centerY": 570,
+      "radius": 80
+    }
+  ]
+}

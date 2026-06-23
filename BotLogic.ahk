@@ -21,30 +21,52 @@ global totalWeight := 0
 global currentLocation := 0
 
 StartBot(){
-    totalWeight := ReadMemoryUInt(gameProcess, totalWeightAddress)
+    if (MemoryFeaturesActive()) {
+        totalWeight := ReadMemoryUInt(gameProcess, totalWeightAddress)
+        UpdateGameStats()
 
-    UpdateGameStats()
-
-    if (currentLocation == 0 || currentWeight == 0 || maxSp == 0) {
-        MsgBox % "Failed to initialize game variables!`n"
-        return false
+        if (currentLocation == 0 || currentWeight == 0 || maxSp == 0) {
+            MsgBox % "Failed to initialize game variables!`nCheck the client profile and memory addresses."
+            return false
+        }
     }
 
-    ZoomOut() 
+    ZoomOut()
     skillSC := GetKeySC(SkillButtonKey) + 0
     teleportSC := GetKeySC(TeleportButtonKey) + 0
+    if IsFunc("AppendLog") {
+        AppendLog("Bot hunt loop started")
+        if (teleportSC = 0)
+            AppendLog("WARNING: Teleport hotkey is not set")
+        if (skillSC = 0)
+            AppendLog("WARNING: Attack hotkey is not set")
+    }
     while(botRunning) {
-        if (!botRunning || botPaused) ; Double-check flag
+        if (!botRunning)
+            break
+        while (botPaused && botRunning)
+            Sleep 100
+        if (!botRunning)
             break
         if(SkillTimerButtonKey != ""){
             SendKeyCombo(SkillTimerButtonKey)
         }
-        if(warperCoordsSet && (currentLocation == warperLocation)){ 
-            MoveToTheMap(warperX, warperY)
-        } 
 
-        if(currentLocation != warperLocation){
-            Hunt(skillSC, teleportSC) 
+        if (MemoryFeaturesActive()) {
+            if(warperCoordsSet && (currentLocation == warperLocation)){ 
+                if IsFunc("AppendLog")
+                    AppendLog("At warper — moving to hunt map")
+                MoveToTheMap(warperX, warperY)
+            } 
+
+            if(currentLocation != warperLocation){
+                Hunt(skillSC, teleportSC) 
+            } else if (warperCoordsSet && IsFunc("AppendLog")) {
+                AppendLog("Still at warper — update location or clear warper coords to hunt")
+                Sleep 1000
+            }
+        } else {
+            Hunt(skillSC, teleportSC)
         }
         iterations++
     }
@@ -53,122 +75,191 @@ StartBot(){
 Hunt(skillSC, teleportSC) {
     static lastWarpTime := 0
     static lastSkillTime := 0
-    ws := SearchRange * cellSize
-    hs := SearchRange * cellSize
-    xs := A_ScreenWidth // 2 - ws // 2
-    ys := A_ScreenHeight // 2 - hs // 2 
-    ; Settings
-    attackCount := 2 ; Number of skill uses per monster
+    static attackedXs := []
+    static attackedYs := []
+    static attackCounts := []
+    static unreachableXs := []
+    static unreachableYs := []
+    static emptyScans := 0
+    static fastIdle := false
+
+    attackedRadiusPx := 72
+    attacksBeforeUnreachable := 3
+    postAttackSleepMs := 50
+    emptyScanSleepMs := 25
+    fastIdleScanSleepMs := 15
+    killWaitScanSleepMs := 8
+
+    SyncSearchRangeFromUI()
+
+    if (teleportSC = 0) {
+        if IsFunc("AppendLog")
+            AppendLog("Hunt: Teleport key not set — bot cannot move")
+        return
+    }
+
     if (lastWarpTime == 0) {
         lastWarpTime := A_TickCount
-        lastSkillTime := A_TickCount ; <-- NEW: Initialize skill timer
+        lastSkillTime := A_TickCount
     }
 
     while(botRunning && !botPaused) {
-        UpdateGameStats()
-        if(DetectCAPTCHA()){
+        if (MemoryFeaturesActive())
+            UpdateGameStats()
+
+        if (MemoryFeaturesActive() && DetectCaptcha && captchaEnabled && DetectCAPTCHA()){
             botRunning := false
             break
         }
 
         if (SkillTimerButtonKey != "" && (A_TickCount - lastSkillTime) >= (SkillTimerInterval * 1000)) {
-            SendKeyCombo(SkillTimerButtonKey) ; <-- Trigger the skill
-            lastSkillTime := A_TickCount ; <-- Reset timer
-            Sleep 300 ; Brief delay after skill use
+            SendKeyCombo(SkillTimerButtonKey)
+            lastSkillTime := A_TickCount
+            Sleep 300
         }
 
-        if (warperCoordsSet && SavePointButtonKey != "" && (A_TickCount - lastWarpTime) >= (TimeOnLocation * 1000)) {
+        if (MemoryFeaturesActive() && warperCoordsSet && SavePointButtonKey != "" && (A_TickCount - lastWarpTime) >= (TimeOnLocation * 1000)) {
             WarpToSavePoint()
-            lastWarpTime := A_TickCount ; Reset timer
-            Sleep 1000 ; Brief pause after warp
-            break ; Restart hunting loop
+            lastWarpTime := A_TickCount
+            Sleep 1000
+            break
         }
 
-        if (WeightModifier >= 50 && currentWeight >= (totalWeight * WeightModifier / 100)) {
+        if (MemoryFeaturesActive() && WeightModifier >= 50 && currentWeight >= (totalWeight * WeightModifier / 100)) {
             ItemsToStorage()
             currentWeight := ReadMemoryUInt(gameProcess,currentWeightAddress)
         }
 
-        if(wingcount <= 0 && TakeFlyWings){
+        if (MemoryFeaturesActive() && wingcount <= 0 && TakeFlyWings){
             GetFlyWings()
         }
 
-        PixelSearch, firstX, firstY, xs, ys, xs + ws, ys + hs, targetColor, 1, Fast RGB
-        if (ErrorLevel) {
-            ; No monsters found - teleport immediately
-            Teleport(teleportSC)
+        GetHuntSearchRegion(xs, ys, ws, hs)
+        if (ws <= 0 || hs <= 0) {
+            if IsFunc("AppendLog")
+                AppendLog("Hunt: invalid search region — select game window and refresh")
+            Sleep 500
             continue
         }
 
-        ; Monster found - attack it
-        MouseMove, firstX, firstY
-        Loop %attackCount% {
-            SkillClick(skillSC)
-            Sleep, SkillDelay
+        mobName := MobTemplateFolderName()
+        if IsFunc("SessionLogHuntScan") {
+            fn := "SessionLogHuntScan"
+            %fn%(mobName, xs, ys, ws, hs)
         }
 
-        ; Now search for other monsters while ignoring this one
-        ignoreX := firstX - 30
-        ignoreY := firstY - 30
-        ignoreW := 60
-        ignoreH := 120
-
-        PixelSearch, otherX, otherY, xs, ys, xs + ws, ys + hs, targetColor, 1, Fast RGB
-        while (!ErrorLevel) {
-            ; Check if this monster is outside our ignore area
-            if (otherX < ignoreX 
-                || otherX > ignoreX + ignoreW
-            || otherY < ignoreY 
-            || otherY > ignoreY + ignoreH) 
-            {
-                ; Attack the new monster twice
-                MouseMove, otherX, otherY
-                Loop %attackCount% {
-                    SkillClick(skillSC)
-                    Sleep, SkillDelay
-                }
-
-                ; Update ignore area to include this monster
-                ignoreX := Min(ignoreX, otherX - 30)
-                ignoreY := Min(ignoreY, otherY - 30)
-                ignoreW := Max(ignoreX + ignoreW, otherX + 30) - ignoreX
-                ignoreH := Max(ignoreY + ignoreH, otherY + 60) - ignoreY
-            }
-
-            ; Search next monster (skip already checked area)
-            PixelSearch, otherX, otherY, otherX + 10, otherY, xs + ws, ys + hs, targetColor, 1, Fast RGB
+        jsonText := MobRecognitionHuntScan(mobName, xs, ys, ws, hs, attackedXs, attackedYs, unreachableXs, unreachableYs, emptyScans, attackCounts, fastIdle, false)
+        if (jsonText = "") {
+            Sleep 100
+            continue
         }
 
-        ; No more monsters found - teleport
-        Teleport(teleportSC)
+        livingInRange := 0
+        canTeleport := false
+        attackX := 0
+        attackY := 0
+        attackConf := 0
+        huntStatus := ""
+        engagementsResolved := true
+        teleportScansRequired := 6
+        if (!MobRecognitionParseHuntPlan(jsonText, livingInRange, canTeleport, attackX, attackY, attackConf, huntStatus, engagementsResolved, teleportScansRequired)) {
+            if IsFunc("AppendLog")
+                AppendLog("Hunt: stale detect server — restarting")
+            MobRecognitionShutdownServer()
+            Sleep 200
+            continue
+        }
+
+        GetMobSearchPlayerIgnore(xs, ys, ws, hs, ignoreX, ignoreY, ignoreW, ignoreH)
+        MobRecognitionApplyHuntMarkUnreachable(jsonText, unreachableXs, unreachableYs, attackedRadiusPx)
+        MobRecognitionUpdateUnreachableFromScan(jsonText, attackedXs, attackedYs, attackCounts, unreachableXs, unreachableYs, ignoreX, ignoreY, ignoreW, ignoreH, attackedRadiusPx, attacksBeforeUnreachable)
+
+        if (attackX != 0 && attackY != 0) {
+            emptyScans := 0
+            fastIdle := false
+            if IsFunc("AppendLog")
+                AppendLog("Hunt [" . huntStatus . "]: attack @" . attackX . "," . attackY . " conf=" . attackConf . " living=" . livingInRange)
+            MoveMouseTo(attackX, attackY)
+            HuntSkillClick(skillSC)
+            MobRecognitionRecordAttackSlot(attackX, attackY, attackedXs, attackedYs, attackCounts, attackedRadiusPx)
+            Sleep %postAttackSleepMs%
+            continue
+        }
+
+        scanSleepMs := emptyScanSleepMs
+        if (fastIdle && attackedXs.MaxIndex() = 0)
+            scanSleepMs := fastIdleScanSleepMs
+        else if (attackedXs.MaxIndex() = 0)
+            scanSleepMs := fastIdleScanSleepMs
+
+        if (livingInRange > 0) {
+            if IsFunc("AppendLog")
+                AppendLog("Hunt [" . huntStatus . "]: " . livingInRange . " living mob(s) — keep hunting")
+            emptyScans := 0
+            fastIdle := false
+            Sleep %scanSleepMs%
+            continue
+        }
+
+        if (!engagementsResolved) {
+            emptyScans++
+            if IsFunc("AppendLog")
+                AppendLog("Hunt [" . huntStatus . "]: waiting for kill confirmation (" . emptyScans . ")")
+            Sleep %killWaitScanSleepMs%
+            continue
+        }
+
+        emptyScans++
+        if IsFunc("AppendLog")
+            AppendLog("Hunt [" . huntStatus . "]: clear scan " . emptyScans . "/" . teleportScansRequired)
+
+        if (canTeleport) {
+            if IsFunc("AppendLog")
+                AppendLog("Hunt: area clear — teleporting")
+            Teleport(teleportSC)
+            attackedXs := []
+            attackedYs := []
+            attackCounts := []
+            unreachableXs := []
+            unreachableYs := []
+            emptyScans := 0
+            fastIdle := true
+            Sleep 40
+            continue
+        }
+
+        Sleep %scanSleepMs%
     }
 }
 
 Teleport(teleportSC){
-    AHI.SendKeyEvent(keyboardId, teleportSC, 1)
+    Input.SendKey(teleportSC, 1)
     sleep 50
-    AHI.SendKeyEvent(keyboardId, teleportSC, 0)
-    sleep 800
-    if(TakeFlyWings){
+    Input.SendKey(teleportSC, 0)
+    sleep 400
+    if(TakeFlyWings && MemoryFeaturesActive()){
         wingcount--
     }
 }
 
 MoveToTheMap(posX, posY) {
-    mousemove, posX, posY
+    MoveMouseTo(posX, posY)
     Sleep 500
-    AHI.SendMouseButtonEvent(mouseId, 0, 1)
+    Input.SendMouseButton(0, 1)
     sleep 50
-    AHI.SendMouseButtonEvent(mouseId, 0, 0)
+    Input.SendMouseButton(0, 0)
     Sleep 500
-    Send {Enter}
+    enterSC := GetKeySC("Enter") + 0
+    Input.SendKey(enterSC, 1)
+    sleep 50
+    Input.SendKey(enterSC, 0)
     Sleep 2000
     UpdateGameStats()
 }
 
 WarpToSavePoint() {
     SendKeyCombo(SavePointButtonKey)
-    Sleep 2000 ; Wait for warp to complete
+    Sleep 2000
     UpdateGameStats()
 }
 
@@ -187,20 +278,21 @@ GetFlyWings() {
     sleep 500
     MoveCursorToImage(flywing_img)
     sleep 100
-    AHI.SendMouseButtonEvent(mouseId, 0, 1)
+    Input.SendMouseButton(0, 1)
     sleep 100
     MoveCursorToImage(etc_img,100,20)
-    AHI.SendMouseButtonEvent(mouseId, 0, 0)
+    Input.SendMouseButton(0, 0)
     sleep 200
     send %wingsTaken%
     sleep 200
-    SendInput {Enter}
+    enterSC := GetKeySC("Enter") + 0
+    Input.SendKey(enterSC, 1)
+    sleep 50
+    Input.SendKey(enterSC, 0)
     ManageInventoryWindow()
     MoveCursorToImage(close_img)
     sleep 200
-    AHI.SendMouseButtonEvent(mouseId, 0, 1)
-    sleep 50
-    AHI.SendMouseButtonEvent(mouseId, 0, 0)
+    InputClick()
     wingcount := wingsTaken
     sleep 200
 }
@@ -211,23 +303,22 @@ ManageInventoryWindow(){
         ImageSearch, FoundX, FoundY, 0, 0, A_ScreenWidth, A_ScreenHeight, etc_img
 
     }
-    AHI.SendKeyEvent(keyboardId, 56, 1)
+    Input.SendKey(56, 1)
     sleep 50
-    AHI.SendKeyEvent(keyboardId, 18, 1)
+    Input.SendKey(18, 1)
     sleep 50
-    AHI.SendKeyEvent(keyboardId, 18, 0)
+    Input.SendKey(18, 0)
     sleep 50
-    AHI.SendKeyEvent(keyboardId, 56, 0)
+    Input.SendKey(56, 0)
     sleep 500
 }
 
 DetectCAPTCHA() {
-    global xs, ys, ws, hs
-    PixelSearch, x, y, xs, ys, xs + ws, ys + hs, 0xC50A0A, 1, Fast RGB 
+    global xs, ys, ws, hs, captchaColor
+    PixelSearch, x, y, xs, ys, xs + ws, ys + hs, %captchaColor%, 1, Fast RGB 
     if (ErrorLevel = 0) {
-        ; CAPTCHA detected
         Loop,8{
-            SoundBeep, 750, 1000 ; Frequency: 750 Hz, Duration: 1s
+            SoundBeep, 750, 1000
             sleep 500
         }
         Pause, On
@@ -237,7 +328,6 @@ DetectCAPTCHA() {
 }
 
 CheckInventoryCell(image, ignoreWing := true) {
-    ; Get current mouse position
     MouseGetPos, currentX, currentY
 
     cellSize := 40
@@ -246,27 +336,23 @@ CheckInventoryCell(image, ignoreWing := true) {
     searchRight := currentX + cellSize//2
     searchBottom := currentY + cellSize//2
 
-    ; Search for image in this area
     ImageSearch, FoundX, FoundY, searchLeft, searchTop, searchRight, searchBottom, %image%
 
     if (ErrorLevel = 0) {
         if(image == flywing_img && ignoreWing == false){
-            ; Image found - move to next cell (right)
             nextCellX := currentX + cellSize
             nextCellY := currentY
 
-            ; Ensure we stay within inventory bounds
             maxRight := A_ScreenWidth - cellSize//2
             if (nextCellX > maxRight) {
-                nextCellX := cellSize//2 ; Wrap to first column
-                nextCellY += cellSize ; Move down one row
+                nextCellX := cellSize//2
+                nextCellY += cellSize
             }
-            MouseMove, nextCellX, nextCellY, 0
+            MoveMouseTo(nextCellX, nextCellY)
         }
         return true
     }
 
-    ; Image not found in this cell
     return false
 }
 
@@ -276,7 +362,7 @@ ItemsToStorage(){
     sleep 500
     MoveCursorToImage(use_img)
     Sleep 100
-    AHIclick()
+    InputClick()
     SendKeyCombo(OpenStorageButtonKey)
     MoveCursorToImage(cell1_img,0,40)
     while(!CheckInventoryCell(empty_cell_img)){
@@ -287,7 +373,7 @@ ItemsToStorage(){
     sleep 100
     MoveCursorToImage(eqp_img)
     sleep 100
-    AHIclick()
+    InputClick()
     sleep 50
     MoveCursorToImage(cell1_img,0,40)
     while(!CheckInventoryCell(empty_cell_img)){
@@ -297,25 +383,24 @@ ItemsToStorage(){
 
     MoveCursorToImage(etc_img)
     sleep 100
-    AHIclick()
+    InputClick()
     sleep 100
     MoveCursorToImage(cell1_img,0,40)
     while(!CheckInventoryCell(empty_cell_img)){
         sleep 50
         if(CheckImageOnScreen(ok_img)){
-            AHI.SendKeyEvent(keyboardId, 284, 1)
+            Input.SendKey(284, 1)
             sleep 50
-            AHI.SendKeyEvent(keyboardId, 284, 0)
+            Input.SendKey(284, 0)
             MouseGetPos, currentX, currentY
-            MouseMove, currentX+40, currentY, 0
+            MoveMouseTo(currentX + 40, currentY)
         }
         AltClicks(1)
     }
     sleep 100
     MoveCursorToImage(close_img,10,10)
     sleep 100
-    AHIclick()
+    InputClick()
     ManageInventoryWindow()
     sleep 500
 }
-

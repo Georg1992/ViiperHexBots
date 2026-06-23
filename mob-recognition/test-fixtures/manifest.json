@@ -1,0 +1,81 @@
+{
+  "mob": "horn",
+  "description": "Eight game screenshots used for Horn detection regression tests.",
+  "imageDir": "game-screenshots",
+  "matchRadiusPx": 70,
+  "strictAcceptCount": true,
+  "images": [
+    {
+      "file": "222.png",
+      "label": "positive",
+      "expectHorns": 1,
+      "note": "One clear horn upper-right; faded top horn is below detection threshold"
+    },
+    {
+      "file": "2223.png",
+      "label": "negative",
+      "expectHorns": 0,
+      "note": "Empty map, player only"
+    },
+    {
+      "file": "333.png",
+      "label": "positive",
+      "expectHorns": 4,
+      "note": "Four horns visible: top-left, left-mid, mid-right, and lower-mid"
+    },
+    {
+      "file": "666.png",
+      "label": "positive",
+      "expectHorns": 1,
+      "note": "Single horn upper-right of player"
+    },
+    {
+      "file": "777.png",
+      "label": "positive",
+      "expectHorns": 2,
+      "note": "Two horns upper-left quadrant"
+    },
+    {
+      "file": "ggg.png",
+      "label": "negative",
+      "expectHorns": 0,
+      "note": "Desert Wolf only, no horns"
+    },
+    {
+      "file": "ggggg.png",
+      "label": "positive",
+      "expectHorns": 2,
+      "note": "Two visible horns on the grass path"
+    },
+    {
+      "file": "ppp.png",
+      "label": "negative",
+      "expectHorns": 0,
+      "note": "Grass map with no horns"
+    },
+    {
+      "file": "qq.png",
+      "label": "negative",
+      "expectHorns": 0,
+      "note": "Empty map (duplicate of 2223.png)"
+    },
+    {
+      "file": "qqq.png",
+      "label": "negative",
+      "expectHorns": 0,
+      "note": "Wolf and Poring, no horns"
+    },
+    {
+      "file": "dwarf_blacksmith.png",
+      "label": "negative",
+      "expectHorns": 0,
+      "note": "Dwarf Blacksmith NPC — brown apron matches horn palette"
+    },
+    {
+      "file": "sdsd.png",
+      "label": "positive",
+      "expectHorns": 1,
+      "note": "One visible horn near the upper-left dirt path"
+    }
+  ]
+}

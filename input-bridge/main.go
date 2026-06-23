@@ -25,6 +25,15 @@ type mouseRequest struct {
 	State  int `json:"state"`
 }
 
+type wheelRequest struct {
+	Delta int `json:"delta"`
+}
+
+type moveRequest struct {
+	DX int `json:"dx"`
+	DY int `json:"dy"`
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
@@ -59,6 +68,13 @@ func main() {
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+
+	server := &http.Server{
+		Addr:              bridgeHTTPAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
 	mux.HandleFunc("/shutdown", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -69,6 +85,13 @@ func main() {
 		bridge.shutdown(ctx)
 		stopViiperServer()
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+
+		go func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer shutdownCancel()
+			_ = server.Shutdown(shutdownCtx)
+			os.Exit(0)
+		}()
 	})
 	mux.HandleFunc("/key", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -102,12 +125,46 @@ func main() {
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-
-	server := &http.Server{
-		Addr:              bridgeHTTPAddr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	mux.HandleFunc("/move", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req moveRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.DX == 0 && req.DY == 0 {
+			http.Error(w, "dx and dy cannot both be zero", http.StatusBadRequest)
+			return
+		}
+		if err := bridge.sendMouseMove(int16(req.DX), int16(req.DY)); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("/wheel", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req wheelRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Delta == 0 {
+			http.Error(w, "delta must be non-zero", http.StatusBadRequest)
+			return
+		}
+		if err := bridge.sendMouseWheel(int16(req.Delta)); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
 
 	go func() {
 		log.Printf("input bridge listening on http://%s", bridgeHTTPAddr)

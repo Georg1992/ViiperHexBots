@@ -1,22 +1,24 @@
-; Memory addresses
-global maxSpAddress := 0x010DCE1C
-global currentSpAddress := 0x010DCE18
-global currentWeightAddress := 0x010D94B0
-global totalWeightAddress := 0x010D94AC
-global currentLocationAddress := 0x010D856C
-
+global maxSpAddress := 0
+global currentSpAddress := 0
+global currentWeightAddress := 0
+global totalWeightAddress := 0
+global currentLocationAddress := 0
 
 UpdateGameStats() {
+    if (!MemoryFeaturesActive())
+        return
+
     Critical
-    ; Read memory values
     maxSp := ReadMemoryUInt(gameProcess, maxSpAddress)
     currentSp := ReadMemoryUInt(gameProcess, currentSpAddress)
     currentWeight := ReadMemoryUInt(gameProcess, currentWeightAddress)
     currentLocation := ReadMemoryUInt(gameProcess, currentLocationAddress)
 }
 
-
 ReadMemoryUInt(processName, address) {
+    if (!MemoryFeaturesActive() || !address)
+        return 0
+
     Process, Exist, %processName%
     pid := ErrorLevel
     if (!pid)
@@ -32,4 +34,3 @@ ReadMemoryUInt(processName, address) {
 
     return (success) ? NumGet(&buffer, 0, "UInt") : 0
 }
-

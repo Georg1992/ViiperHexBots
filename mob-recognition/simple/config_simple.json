@@ -1,0 +1,22 @@
+{
+  "acceptThreshold": 0.46,
+  "topCandidateCenters": 50,
+  "minCenterDistancePx": 35,
+  "minCenterHeat": 0.02,
+  "nmsDistancePx": 35,
+  "matchRadiusPx": 80,
+  "maxCandidates": 100,
+  "scales": [0.9, 1.0, 1.1],
+  "playfieldTopRatio": 0.08,
+  "playfieldBottomRatio": 0.92,
+  "playfieldLeftRatio": 0.03,
+  "playfieldRightRatio": 0.97,
+  "debugOutputDir": "mob-recognition/debug/simple",
+  "weights": {
+    "bodyPalette": 0.30,
+    "accent": 0.35,
+    "rareColor": 0.10,
+    "localPattern": 0.15,
+    "size": 0.10
+  }
+}

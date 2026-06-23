@@ -4,9 +4,12 @@
 #InstallKeybdHook
 #InstallMouseHook
 #include Lib\ViiperInput.ahk
+#include Lib\SessionLog.ahk
 #include MobData.ahk
-#include BotLogic.ahk
+#include Lib\ClientProfile.ahk
+#include Lib\MobRecognition.ahk
 #include MemoryOperations.ahk
+#include BotLogic.ahk
 #include utilityFunctions.ahk
 #MaxThreadsPerHotkey 2
 
@@ -39,10 +42,12 @@ global warperY := ""
 global warperLocation := 0
 
 ; Sliders
-global SearchRange := 16 ; Default search range (9-16)
+global SearchRange := 16 ; Default search range (9-16 cells)
+global cellSize := 50 ; Pixels per RO viewport cell
 global TimeOnLocation := 20 ; Default time in seconds
 global Iterations := 0 ; Default iterations before Kafra
 global WeightModifier := 49
+global ZoomWheelDirection := "Scroll up"
 
 ; Checkboxes
 global TakeFlyWings := 0 ; Default checked (true)
@@ -61,13 +66,16 @@ global SkillTimerInterval := 20 ; Default 20 seconds
 
 ; Monster Selection
 global selectedMonsterIndex := 1 ; Default to first monster
-global targetColor = MobColors[selectedMonsterIndex]
 global SelectedMonster1, SelectedMonster2, SelectedMonster3, SelectedMonster4, SelectedMonster5, SelectedMonster6
 
 ; ====== VIIPER INPUT ======
-global AHI := "" ; ViiperInput instance (AHI-compatible API)
-global mouseId := 1
-global keyboardId := 1
+global Input := ""
+global inputReady := false
+global inputShutdownDone := false
+global viperShutdownRequested := false
+global exitCleanupDone := false
+OnExit("MainOnExit")
+global LogBoxHwnd := 0
 
 SetDefaultKeyboardLayout("00000409") ; English - US
 
@@ -75,14 +83,21 @@ if (!FileExist("config.ini")) {
     FileAppend, , config.ini ; Create empty file
 }
 
-global AHI := new ViiperInput()
-
 ; -------------------------------
 ; Load Config Values First
 ; -------------------------------
 if (FileExist("config.ini")) {
     Gosub, LoadConfig
 }
+
+LoadClientProfile(clientProfileName)
+if (!clientSupportsMemory)
+    memoryReadingEnabled := false
+ApplyZoomDirectionFromGlobal()
+
+clientOptions := ""
+for index, profileName in ListClientProfiles()
+    clientOptions .= (clientOptions = "" ? "" : "|") . profileName
 
 ; --------------------------
 ; GUI Setup (With Loaded Values)
@@ -94,18 +109,32 @@ Gui, Add, Text, x10 y15 w700 h30 Center, ViiperHex Bot
 Gui, Add, Text, x10 y50 w700 h2 0x10 ; Divider
 
 ; Window Selection
-Gui, Add, Text, x20 y70 w280 h30, Select Game Window:
-Gui, Add, DropDownList, x20 y100 w200 h25 r10 vSelectedWindow gOnWindowSelect, || 
-Gui, Add, Button, x230 y100 w70 h25 gRefreshWindows, Refresh
-Gui, Add, Text, x20 y130 w280 h25 vWindowInfo, % (gameWindowTitle ? gameWindowTitle : "No window selected")
+Gui, Add, Text, x20 y70 w560 h25, Select Game Window:
+Gui, Add, DropDownList, x20 y100 w490 h25 r10 vSelectedWindow gOnWindowSelect, ||
+    Gui, Add, Button, x515 y100 w75 h25 gRefreshWindows, Refresh
+    Gui, Add, Button, x515 y130 w75 h25 gTestMonsterSearch vTestSearchBtn, Test Search
+    Gui, Add, Button, x515 y160 w75 h25 gTestMobRecognition vTestMobRecBtn, Test OpenCV
+    Gui, Add, Text, x20 y130 w490 h25 vWindowInfo, % (gameWindowTitle ? gameWindowTitle : "No window selected")
+
+; Client profile
+Gui, Add, Text, x20 y160 w120 h25, Client Profile:
+Gui, Add, DropDownList, x140 y157 w180 h25 r10 vSelectedClientProfile gOnClientProfileChange, %clientOptions%
+Gui, Add, CheckBox, x330 y157 vUseMemoryReading gUpdateMemoryMode Checked%memoryReadingEnabled%, Use memory reading
+
+Gui, Add, Text, x20 y185 w120 h25, Zoom out via:
+Gui, Add, DropDownList, x140 y182 w150 h25 r10 vZoomWheelDirection gUpdateZoomSettings, Scroll up|Scroll down
 
 ; Bot Status
 Gui, Add, Text, x600 y70 w150 h30 vBotStatus, Status: Off
 Gui, Add, Progress, x600 y+3 w150 h12 cRed vStatusLight, 100
 
 ; Input backend
-Gui, Add, Text, x600 y170 w150 h40 vInputStatus, Input: VIIPER
-Gui, Add, Text, x600 y+15 w150 h40 vInputHint, Virtual HID devices
+Gui, Add, Text, x600 y170 w150 h40 vInputStatus, Input: Starting...
+Gui, Add, Text, x600 y+15 w150 h40 vInputHint, Launch the game after VIIPER is ready
+
+; Log panel
+Gui, Add, GroupBox, x600 y520 w170 h350, Log
+Gui, Add, Edit, x610 y545 w150 h315 ReadOnly -WantReturn +VScroll vLogBox gLogBoxFocus
 
 ; Warper Coordinates Group - GUI Definition (unchanged)
 Gui, Add, GroupBox, x600 y300 w150 h100, Warper Coordinates
@@ -130,7 +159,7 @@ if (!warperCoordsSet) {
 }
 
 ; Monster Type
-monsterStartY := 170
+monsterStartY := 220
 Gui, Add, Text, x20 y%monsterStartY% w120 h30, Monster Type:
 yPos := monsterStartY + 30
 
@@ -140,6 +169,9 @@ Loop % MobNames.MaxIndex() {
         Gui, Add, Radio, x20 y%yPos% %isChecked% vSelectedMonster%A_Index% gUpdateGlobalsFromUI, % MobNames[A_Index]
         yPos += 35
     }
+
+    mobDetectY := monsterStartY + 30
+    Gui, Add, Text, x330 y%mobDetectY% w200 h25, Mob detection: OpenCV templates
 
     ; Keybindings
     Gui, Add, Text, x160 y200 w130 h25, Attack Skill Button:
@@ -176,7 +208,7 @@ Loop % MobNames.MaxIndex() {
     Gui, Add, Slider, x150 yp w200 h25 vSearchRange gUpdateSliderValues Range9-16 TickInterval1 ToolTip, %SearchRange%
     Gui, Add, Text, x+5 yp w30 h25 vSearchRangeText Center, %SearchRange%
 
-    Gui, Add, Text, x20 y+20 w120 h40, Items To Kafra when weight is:
+    Gui, Add, Text, x20 y+20 w120 h40 vWeightSliderLabel, Items To Kafra when weight is:
     Gui, Add, Slider, x150 yp w200 h25 vWeightModifier gUpdateSliderValues Range49-90 TickInterval1 ToolTip, %WeightModifier%
     Gui, Add, Text, x+5 yp w30 h25 vWeightModifierText Center, % (WeightModifier = 49 ? "Off" : WeightModifier)
     Gui, Add, Text, x+1 yp w30 h25, `%
@@ -187,7 +219,12 @@ Loop % MobNames.MaxIndex() {
     GuiControl,, FlyWingsAmount, % (FlyWingsAmount ? FlyWingsAmount : 100) ; Default to 15 if empty
     GuiControl, % (TakeFlyWings ? "Enable" : "Disable"), FlyWingsAmount
 
-    Gui, Add, CheckBox, x20 y+30 vDetectCaptcha gUpdateGlobalsFromUI Checked%DetectCaptcha%, Detect Captcha (HoneyRO)
+    Gui, Add, CheckBox, x20 y+30 vDetectCaptcha gUpdateGlobalsFromUI Checked%DetectCaptcha%, Detect Captcha
+
+    GuiControl, ChooseString, SelectedClientProfile, %clientProfileName%
+    ApplyZoomDirectionFromGlobal()
+    GuiControl, ChooseString, ZoomWheelDirection, %ZoomWheelDirection%
+    Gosub, ApplyMemoryDependentUI
 
     ; Control Buttons
     buttonStartY := inputStartY + 300
@@ -199,8 +236,59 @@ Loop % MobNames.MaxIndex() {
     Gui, Add, Button, x480 y%buttonStartY% w120 h40 gContinueBot vContinueButton Hidden, Continue
 
     Gui, Show, w800 h900, Hex Bot
+    Menu, Tray, NoStandard
+    Menu, Tray, Add, Open, TrayOpen
+    Menu, Tray, Add, Reload Script, TrayReload
+    Menu, Tray, Add
+    Menu, Tray, Add, Exit, TrayExit
+    Menu, Tray, Default, Open
+    Menu, Tray, Tip, ViiperHexBots
+    GuiControlGet, LogBoxHwnd, Hwnd, LogBox
     GuiControl,, StatusLight, 100
-    Gosub, RefreshWindows
+    UpdateSearchRangeLabel()
+
+    GuiControl, Disable, SelectedWindow
+    GuiControl, Disable, RefreshWindows
+    GuiControl, Disable, TestSearchBtn
+    GuiControl, Disable, TestMobRecBtn
+    GuiControl, Disable, BotButton
+
+    if (A_Args.Length() > 0 && A_Args[1] = "--validate") {
+        ExitApp
+        return
+    }
+
+    SessionLogStart()
+    AppendLog("ViiperHexBots started")
+    AppendLog("Starting VIIPER before game launch...")
+    SetTimer, InitViiperInput, -1
+    return
+
+    InitViiperInput:
+        global Input, inputReady
+        Input := new ViiperInput()
+        inputReady := true
+        SetInputStatus("Input: Ready", "Virtual keyboard and mouse active — launch the game now")
+        GuiControl, Enable, SelectedWindow
+        GuiControl, Enable, RefreshWindows
+        GuiControl, Enable, TestSearchBtn
+        GuiControl, Enable, TestMobRecBtn
+        GuiControl, Enable, BotButton
+        AppendLog("All set — select or launch the game window")
+        MobRecognitionEnsureServer()
+        SessionLogWriteRuntimeContext()
+        Gosub, RefreshWindows
+    return
+
+    TestMonsterSearch:
+        TestMonsterSearch()
+    return
+
+    TestMobRecognition:
+        TestMobRecognition()
+    return
+
+    LogBoxFocus:
     return
 
     MainBotButton:
@@ -221,9 +309,16 @@ Loop % MobNames.MaxIndex() {
         Critical
         Gui, Submit, NoHide
 
+        if (!inputReady) {
+            MsgBox, 16, Error, VIIPER is not ready yet.`nPlease wait for initialization to finish.
+            return
+        }
+
+        Gosub, OnWindowSelect
+
         ; STRICT verification
         if (!gameWindowID || gameWindowID = 0) {
-            MsgBox, 16, Error, Please select a valid game window first!
+            MsgBox, 16, Error, Please select a valid game window first!`nChoose the game in the dropdown (with its .exe name) and click Refresh if needed.
             return
         }
 
@@ -243,8 +338,18 @@ Loop % MobNames.MaxIndex() {
         GuiControl, +cGreen, StatusLight
         GuiControl,, StatusLight, 100
         Gosub, LockGUI
+        if (MemoryFeaturesActive())
+            AppendLog("Bot started (memory reading on)")
+        else
+            AppendLog("Bot started (memory reading off)")
 
         RestoreWindow()
+        SyncSearchRangeFromUI()
+        GetHuntSearchRegion(searchXs, searchYs, searchWs, searchHs)
+        if IsFunc("AppendLog")
+            AppendLog("Search box: " . searchWs . "x" . searchHs . " px (" . SearchRange . " cells) at " . searchXs . "," . searchYs)
+        ShowSearchRegionOverlay(searchXs, searchYs, searchWs, searchHs, 2500)
+        SessionLogRegisterBotRun()
         ; Auto-pause when tabbing out
         SetTimer, CheckWindowFocus, 300 ; Checks every 500ms
 
@@ -264,17 +369,21 @@ Loop % MobNames.MaxIndex() {
     StopBotProcedure:
         botRunning := false
         botPaused := false
+        SetTimer, CheckWindowFocus, Off
+        AppendLog("Bot stopped (VIIPER still running)")
         GuiControl,, BotButton, Start Bot
         GuiControl, Hide, ContinueButton 
         GuiControl,, BotStatus, Status: Off
         GuiControl, +cRed, StatusLight
         GuiControl,, StatusLight, 100
         Gosub, UnlockGUI
-        ; ... any other cleanup ...
     return
 
     PauseBotProcedure:
         botPaused := true
+        WinGet, focusLostActiveId, ID, A
+        SessionLogFocusChange("paused (focus lost)", focusLostActiveId)
+        AppendLog("Bot paused (focus lost)")
 
         ; Update buttons
         GuiControl,, BotButton, Stop Bot ; Still shows Stop when paused
@@ -287,10 +396,12 @@ Loop % MobNames.MaxIndex() {
 
     UnpauseBotProcedure:
         botPaused := false
+        SessionLogFocusChange("resumed")
+        AppendLog("Bot resumed")
         GuiControl, Hide, ContinueButton
         GuiControl,, BotStatus, Status: ONLINE
         GuiControl, +cGreen, StatusLight
-        RestoreWindow() ; Your existing function
+        RestoreWindow()
         ToolTip, BOT RESUMED, % A_ScreenWidth//2-100, 10
         SetTimer, RemoveToolTip, -2000
     return
@@ -333,15 +444,23 @@ Loop % MobNames.MaxIndex() {
             IniWrite, %gameProcess%, config.ini, Window, Process
         }
 
+        ; ====== [Client] ======
+        FileAppend, `n`n[Client]`n, config.ini
+        IniWrite, %SelectedClientProfile%, config.ini, Client, Profile
+        IniWrite, %UseMemoryReading%, config.ini, Client, UseMemoryReading
+
         ; ====== [MonsterSettings] ======
         FileAppend, `n`n[MonsterSettings]`n, config.ini
         Loop % MobNames.MaxIndex() {
             if (SelectedMonster%A_Index%) {
                 IniWrite, %A_Index%, config.ini, MonsterSettings, SelectedMonster
-                IniWrite, %targetColor%, config.ini, MonsterSettings, targetColor
                 break
             }
         }
+
+        ; ====== [MobRecognition] ======
+        FileAppend, `n`n[MobRecognition]`n, config.ini
+        IniWrite, %mobRecognitionDebug%, config.ini, MobRecognition, Debug
 
         ; ====== [Settings] ======
         FileAppend, `n`n[Settings]`n, config.ini
@@ -351,6 +470,7 @@ Loop % MobNames.MaxIndex() {
         IniWrite, %WeightModifier%, config.ini, Settings, WeightModifier
         IniWrite, %TakeFlyWings%, config.ini, Settings, TakeFlyWings
         IniWrite, %DetectCaptcha%, config.ini, Settings, DetectCaptcha
+        IniWrite, %ZoomWheelDirection%, config.ini, Settings, ZoomWheelDirection
 
         ; ====== [Warper] ======
         FileAppend, `n`n[Warper]`n, config.ini
@@ -385,6 +505,10 @@ Loop % MobNames.MaxIndex() {
     return
 
     LoadConfig:
+        ; Client
+        IniRead, clientProfileName, config.ini, Client, Profile, HoneyRO
+        IniRead, memoryReadingEnabled, config.ini, Client, UseMemoryReading, 1
+
         ; Window
         IniRead, gameWindowID, config.ini, Window, ID, %gameWindowID%
         IniRead, gameWindowTitle, config.ini, Window, Title, %gameWindowTitle%
@@ -398,6 +522,7 @@ Loop % MobNames.MaxIndex() {
         ; Checkboxes
         IniRead, TakeFlyWings, config.ini, Settings, TakeFlyWings, %TakeFlyWings%
         IniRead, DetectCaptcha, config.ini, Settings, DetectCaptcha, %DetectCaptcha%
+        IniRead, ZoomWheelDirection, config.ini, Settings, ZoomWheelDirection, %ZoomWheelDirection%
 
         ; Warper
         IniRead, warperX, config.ini, Warper, X
@@ -426,20 +551,54 @@ Loop % MobNames.MaxIndex() {
 
         ; Monster
         IniRead, selectedMonsterIndex, config.ini, MonsterSettings, SelectedMonster, 1
-        targetColor := MobColors[selectedMonsterIndex]
+
+        ; Mob recognition
+        IniRead, mobRecognitionDebug, config.ini, MobRecognition, Debug, 0
     return
 
     ; --------------------------
     ; UPDATE SLIDER VALUES FUNCTION
     ; --------------------------
-    UpdateSliderValues:
-        GuiControlGet, focusedControl, FocusV
+    ApplyMemoryDependentUI:
+        ApplyMemoryDependentUI()
+    return
 
-        if (focusedControl = "SearchRange") {
-            GuiControlGet, SearchRange,, SearchRange
-            GuiControl,, SearchRangeText, %SearchRange%
+    OnClientProfileChange:
+        GuiControlGet, SelectedClientProfile,, SelectedClientProfile
+        GuiControlGet, UseMemoryReading,, UseMemoryReading
+        LoadClientProfile(SelectedClientProfile)
+        if (!clientSupportsMemory) {
+            memoryReadingEnabled := false
+            UseMemoryReading := 0
+        } else {
+            memoryReadingEnabled := UseMemoryReading
         }
-        else if (focusedControl = "WeightModifier") {
+        if (zoomWheelDelta > 0)
+            ZoomWheelDirection := "Scroll up"
+        else
+            ZoomWheelDirection := "Scroll down"
+        Gosub, ApplyMemoryDependentUI
+        AppendLog("Client profile: " . clientProfileName)
+        GuiControl, ChooseString, ZoomWheelDirection, %ZoomWheelDirection%
+    return
+
+    UpdateZoomSettings:
+        GuiControlGet, ZoomWheelDirection,, ZoomWheelDirection
+        ApplyZoomDirectionFromGlobal()
+    return
+
+    UpdateMemoryMode:
+        Gui, Submit, NoHide
+        memoryReadingEnabled := UseMemoryReading
+        Gosub, ApplyMemoryDependentUI
+    return
+
+    UpdateSliderValues:
+        GuiControlGet, SearchRange,, SearchRange
+        UpdateSearchRangeLabel()
+
+        GuiControlGet, focusedControl, FocusV
+        if (focusedControl = "WeightModifier") {
             GuiControlGet, WeightModifier,, WeightModifier
             GuiControl,, WeightModifierText, % (WeightModifier = 49 ? "Off" : WeightModifier)
         }
@@ -450,36 +609,15 @@ Loop % MobNames.MaxIndex() {
         Gosub, UpdateGlobalsFromUI
     return
 
-    RestoreWindow(){
-        ; RESTORE MINIMIZED WINDOW
-        WinGet, minMaxStatus, MinMax, ahk_id %gameWindowID%
-        if (minMaxStatus = -1) {
-            WinRestore, ahk_id %gameWindowID%
-            Sleep, 1000 ; Give time to restore
-        }
-
-        ; ACTIVATE WINDOW 
-        WinActivate, ahk_id %gameWindowID%
-        WinWaitActive, ahk_id %gameWindowID%, , 2
-
-        ; FINAL VERIFICATION
-        WinGet, activeID, ID, A
-        if (activeID != gameWindowID) {
-            ; LAST RESORT - remove disabled style
-            WinSet, Style, -0x8000000, ahk_id %gameWindowID%
-            WinActivate, ahk_id %gameWindowID%
-            WinWaitActive, ahk_id %gameWindowID%, , 3
-            if ErrorLevel {
-                MsgBox, 16, Error, Failed to activate game window!`nTry running as Administrator.
-                return
-            }
-        }
-    }
-
     LockGUI:
         ; Disable Window Selection controls
         GuiControl, Disable, SelectedWindow
         GuiControl, Disable, RefreshWindows
+        GuiControl, Disable, TestSearchBtn
+        GuiControl, Disable, TestMobRecBtn
+
+        GuiControl, Disable, SelectedClientProfile
+        GuiControl, Disable, UseMemoryReading
 
         ; Disable Warper Coordinates controls
         GuiControl, Disable, SetWarperCoordsBtn
@@ -510,6 +648,7 @@ Loop % MobNames.MaxIndex() {
         GuiControl, Disable, SearchRangeText
         GuiControl, Disable, WeightModifier
         GuiControl, Disable, WeightModifierText
+        GuiControl, Disable, WeightSliderLabel
 
         ; Disable Checkboxes
         GuiControl, Disable, TakeFlyWings
@@ -519,14 +658,17 @@ Loop % MobNames.MaxIndex() {
         Gui, Font, cGray
         GuiControl, Font, WindowInfo
         GuiControl, Font, WarperCoordsText
-        GuiControl, Font, MouseStatus
-        GuiControl, Font, KeyboardStatus
     return
 
     UnlockGUI:
         ; Enable Window Selection controls
         GuiControl, Enable, SelectedWindow
         GuiControl, Enable, RefreshWindows
+        GuiControl, Enable, TestSearchBtn
+        GuiControl, Enable, TestMobRecBtn
+
+        GuiControl, Enable, SelectedClientProfile
+        GuiControl, Enable, UseMemoryReading
 
         ; Enable Warper Coordinates controls (with conditional enable for Reset button)
         GuiControl, Enable, SetWarperCoordsBtn
@@ -557,21 +699,24 @@ Loop % MobNames.MaxIndex() {
         GuiControl, Enable, SearchRangeText
         GuiControl, Enable, WeightModifier
         GuiControl, Enable, WeightModifierText
+        GuiControl, Enable, WeightSliderLabel
 
         ; Enable Checkboxes
         GuiControl, Enable, TakeFlyWings
         GuiControl, Enable, DetectCaptcha
 
+        Gosub, ApplyMemoryDependentUI
+
         ; Restore visual style
         Gui, Font, cBlack
         GuiControl, Font, WindowInfo
         GuiControl, Font, WarperCoordsText
-        GuiControl, Font, MouseStatus
-        GuiControl, Font, KeyboardStatus
     return
 
     RefreshWindows:
-        GuiControl,, SelectedWindow, |
+        global windowIDs, titleToIndex, gameWindowID, gameWindowTitle, gameProcess
+
+        previousWindowID := gameWindowID
         windowList := ""
         windowIDs := {}
         titleToIndex := {}
@@ -584,94 +729,122 @@ Loop % MobNames.MaxIndex() {
         Loop, %windows%
         {
             id := windows%A_Index%
+            if (id = A_ScriptHwnd)
+                continue
+
             WinGetTitle, title, ahk_id %id%
             WinGet, process, ProcessName, ahk_id %id%
 
             if (title = "" || process = "")
                 continue
 
-            WinGet, guiID, ID, Monster Hunter Bot ahk_class AutoHotkeyGUI
-            if (id = guiID)
+            if (process ~= "i)^explorer\.exe$")
                 continue
 
             itemCount += 1
             WinGet, minMaxStatus, MinMax, ahk_id %id%
-            stateSymbol := (minMaxStatus = -1) ? "[MIN] " : ""
-                displayText := stateSymbol title " (" process ")"
+            displayText := FormatWindowListEntry(title, process, minMaxStatus)
 
-                windowList .= "|" displayText
-                windowIDs[itemCount] := id
-                titleToIndex[displayText] := itemCount
-            }
+            windowList .= "|" . displayText
+            windowIDs[itemCount] := id
+            titleToIndex[displayText] := itemCount
+        }
 
-            GuiControl,, SelectedWindow, %windowList%
+        GuiControl,, SelectedWindow, % (windowList ? windowList : "|")
 
-            ; Attempt to auto-select previously used window
-            IniRead, lastTitle, config.ini, LastSession, GameTitle, ERROR
-            IniRead, lastProcess, config.ini, LastSession, GameProcess, ERROR
-
-            if (lastTitle != "ERROR" && lastProcess != "ERROR") {
-                for index, id in windowIDs {
+        if (previousWindowID) {
+            for index, id in windowIDs {
+                if (id = previousWindowID) {
                     WinGetTitle, tTitle, ahk_id %id%
                     WinGet, tProcess, ProcessName, ahk_id %id%
-                    if (tTitle = lastTitle && tProcess = lastProcess) {
-                        WinGet, minMaxStatus, MinMax, ahk_id %id%
-                        stateSymbol := (minMaxStatus = -1) ? "[MIN] " : ""
-                            selectedDisplay := stateSymbol tTitle " (" tProcess ")"
-                            GuiControl, ChooseString, SelectedWindow, %selectedDisplay%
-                            Gosub, OnWindowSelect
-                        return
-                    }
+                    WinGet, minMaxStatus, MinMax, ahk_id %id%
+                    selectedDisplay := FormatWindowListEntry(tTitle, tProcess, minMaxStatus)
+                    GuiControl, ChooseString, SelectedWindow, %selectedDisplay%
+                    Gosub, OnWindowSelect
+                    return
                 }
             }
+        }
 
-            ; If nothing selected, pick the first one (if any)
-            if (windowList != "") {
-                GuiControl, Choose, SelectedWindow, 1
-                Gosub, OnWindowSelect
+        IniRead, lastTitle, config.ini, LastSession, GameTitle, ERROR
+        IniRead, lastProcess, config.ini, LastSession, GameProcess, ERROR
+
+        if (lastTitle != "ERROR" && lastProcess != "ERROR") {
+            for index, id in windowIDs {
+                WinGetTitle, tTitle, ahk_id %id%
+                WinGet, tProcess, ProcessName, ahk_id %id%
+                if (tTitle = lastTitle && tProcess = lastProcess) {
+                    WinGet, minMaxStatus, MinMax, ahk_id %id%
+                    selectedDisplay := FormatWindowListEntry(tTitle, tProcess, minMaxStatus)
+                    GuiControl, ChooseString, SelectedWindow, %selectedDisplay%
+                    Gosub, OnWindowSelect
+                    return
+                }
             }
+        }
+
+        if (itemCount = 0) {
+            GuiControl,, WindowInfo, No windows found — launch game and Refresh
+            AppendLog("No windows in list (try Run as administrator)")
+        } else {
+            GuiControl,, WindowInfo, Select a game window
+        }
+        gameWindowID := 0
+    return
+
+    OnWindowSelect:
+        global windowIDs, titleToIndex, gameWindowID, gameWindowTitle, gameProcess
+
+        GuiControlGet, selectedText,, SelectedWindow
+
+        if (!selectedText || !titleToIndex.HasKey(selectedText)) {
+            GuiControl,, WindowInfo, No window selected
+            gameWindowID := 0
+            if (selectedText)
+                AppendLog("Window lookup failed — click Refresh and select again")
             return
+        }
 
-            OnWindowSelect:
-                GuiControlGet, selectedText,, SelectedWindow
+        selectedIndex := titleToIndex[selectedText]
+        gameWindowID := windowIDs[selectedIndex]
 
-                if (!selectedText || !titleToIndex.HasKey(selectedText)) {
-                    GuiControl,, WindowInfo, No window selected
-                    gameWindowID := 0
+        if (!gameWindowID || !WinExist("ahk_id " gameWindowID)) {
+            GuiControl,, WindowInfo, Window not found! Refresh list.
+            gameWindowID := 0
+            return
+        }
+
+        WinGetTitle, gameWindowTitle, ahk_id %gameWindowID%
+        WinGet, gameProcess, ProcessName, ahk_id %gameWindowID%
+        GuiControl,, WindowInfo, % "SELECTED: " . selectedText
+        AppendLog("Game window selected: " . gameProcess)
+        SessionLogWriteRuntimeContext()
+
+        WinSet, Transparent, 150, ahk_id %gameWindowID%
+        Sleep, 300
+        WinSet, Transparent, Off, ahk_id %gameWindowID%
+    return
+
+    RemoveToolTip:
+        ToolTip
+        SetTimer, RemoveToolTip, Off
+    return
+
+    CheckWindowFocus:
+        if (botRunning && !botPaused && gameWindowID) {
+            if (!WinActive("ahk_id " . gameWindowID)) {
+                Gosub, PauseBotProcedure
+                GuiControl,, BotStatus, Status: PAUSED (TAB)
+            }
+        }
+    return
+
+    SetWarperCoords:
+                if (!MemoryFeaturesActive()) {
+                    MsgBox, 48, Warper, Warper coordinates require memory reading.
                     return
                 }
 
-                selectedIndex := titleToIndex[selectedText]
-                gameWindowID := windowIDs[selectedIndex]
-
-                if (!gameWindowID || !WinExist("ahk_id " gameWindowID)) {
-                    GuiControl,, WindowInfo, Window not found! Refresh list.
-                    gameWindowID := 0
-                    return
-                }
-
-                WinGetTitle, gameWindowTitle, ahk_id %gameWindowID%
-                WinGet, gameProcess, ProcessName, ahk_id %gameWindowID%
-                GuiControl,, WindowInfo, % "SELECTED: " gameProcess
-
-                WinSet, Transparent, 150, ahk_id %gameWindowID%
-                Sleep, 300
-                WinSet, Transparent, Off, ahk_id %gameWindowID%
-            return
-
-            RemoveToolTip:
-                ToolTip ; This clears any active tooltip
-                SetTimer, RemoveToolTip, Off ; Turn off the timer
-            return
-
-            CheckWindowFocus:
-                if (botRunning && !botPaused && !WinActive(gameWindowTitle)) {
-                    Gosub, PauseBotProcedure
-                    GuiControl,, BotStatus, Status: PAUSED (TAB)
-                }
-            return
-
-            SetWarperCoords:
                 ; Visual feedback
                 GuiControl, Disable, SetWarperCoordsBtn
                 GuiControl,, SetWarperCoordsBtn, Setting...
@@ -742,12 +915,12 @@ Loop % MobNames.MaxIndex() {
 
             UpdateGlobalsFromUI:
                 Gui, Submit, NoHide
+                memoryReadingEnabled := UseMemoryReading
 
                 ; Update monster selection
                 Loop % MobNames.MaxIndex() {
                     if (SelectedMonster%A_Index%) {
                         selectedMonsterIndex := A_Index
-                        targetColor := MobColors[selectedMonsterIndex]
                         break
                     }
                 }
@@ -776,8 +949,63 @@ Loop % MobNames.MaxIndex() {
             return
 
             ExitBot:
-            ExitApp
+                Gosub, ExitApplication
             return
 
             GuiClose:
-            ExitApp
+                Gosub, ExitApplication
+            return
+
+            TrayOpen:
+                Gui, Show
+                Gui, Restore
+            return
+
+            TrayReload:
+                Reload
+            return
+
+            TrayExit:
+                Gosub, ExitApplication
+            return
+
+            ExitApplication:
+                global exitCleanupDone
+                if (exitCleanupDone) {
+                    ExitApp
+                    return
+                }
+                exitCleanupDone := true
+                SetTimer, CheckWindowFocus, Off
+                SetTimer, InitViiperInput, Off
+                if (botRunning)
+                    Gosub, StopBotProcedure
+                viperShutdownRequested := true
+                AppendLog("Closing bot and stopping VIIPER...")
+                MobRecognitionExitCleanup()
+                ShutdownInput()
+                SessionLogEnd("user exit")
+                ExitApp
+            return
+
+MainOnExit(ExitReason, ExitCode) {
+    if (ExitReason = "Reload")
+        return
+    global exitCleanupDone
+    if (exitCleanupDone)
+        return
+    exitCleanupDone := true
+
+    SetTimer, CheckWindowFocus, Off
+    SetTimer, InitViiperInput, Off
+    global botRunning
+    if (botRunning)
+        Gosub, StopBotProcedure
+    global viperShutdownRequested
+    viperShutdownRequested := true
+    MobRecognitionExitCleanup()
+    ShutdownInput()
+    global sessionLogPath
+    if (sessionLogPath != "")
+        SessionLogEnd("exit: " . ExitReason)
+}

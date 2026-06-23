@@ -2,5 +2,10 @@ viiper-input.exe
 viiper-input.exe.new
 viiper-input.exe.bak
 bot_log.txt
+logs/sessions/
+mob-recognition/debug/
+NUL.tmp
+ahk-err.txt
+query
 VIIPER/dist/
 input-bridge/embed/viiper.exe

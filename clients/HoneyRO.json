@@ -1,0 +1,21 @@
+{
+  "name": "HoneyRO",
+  "processName": "HoneyRO.exe",
+  "windowTitleHint": "HoneyRO ~",
+  "memory": {
+    "maxSpAddress": "0x010DCE1C",
+    "currentSpAddress": "0x010DCE18",
+    "currentWeightAddress": "0x010D94B0",
+    "totalWeightAddress": "0x010D94AC",
+    "currentLocationAddress": "0x010D856C"
+  },
+  "captcha": {
+    "label": "HoneyRO",
+    "color": "0xC50A0A"
+  },
+  "zoom": {
+    "wheelDelta": -1,
+    "steps": 10,
+    "delayMs": 60
+  }
+}
