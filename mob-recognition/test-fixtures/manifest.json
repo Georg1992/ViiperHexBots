@@ -2,7 +2,6 @@
   "mob": "horn",
   "description": "Eight game screenshots used for Horn detection regression tests.",
   "imageDir": "game-screenshots",
-  "matchRadiusPx": 70,
   "strictAcceptCount": true,
   "images": [
     {

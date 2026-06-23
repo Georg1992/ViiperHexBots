@@ -45,15 +45,22 @@ def palette_heatmap(hsv: np.ndarray, clusters: list[ColorCluster]) -> np.ndarray
 
 class HeatmapDetector:
     def __init__(self, config: dict):
-        self.max_centers = int(config.get("topCandidateCenters", 50))
-        self.min_center_distance = int(config.get("minCenterDistancePx", 35))
-        self.ui_top_ratio = float(config.get("playfieldTopRatio", 0.08))
-        self.ui_bottom_ratio = float(config.get("playfieldBottomRatio", 0.92))
-        self.ui_left_ratio = float(config.get("playfieldLeftRatio", 0.03))
-        self.ui_right_ratio = float(config.get("playfieldRightRatio", 0.97))
-        self.min_center_heat = float(config.get("minCenterHeat", 0.02))
-        self.center_scales = [float(scale) for scale in config.get("centerScales", config.get("scales", [1.0]))]
-        self.small_scale_min_frame_width = int(config.get("smallScaleMinFrameWidth", 900))
+        self.max_centers = int(config["topCandidateCenters"])
+        self.min_center_distance = int(config["minCenterDistancePx"])
+        self.ui_top_ratio = float(config["playfieldTopRatio"])
+        self.ui_bottom_ratio = float(config["playfieldBottomRatio"])
+        self.ui_left_ratio = float(config["playfieldLeftRatio"])
+        self.ui_right_ratio = float(config["playfieldRightRatio"])
+        self.min_center_heat = float(config["minCenterHeat"])
+        self.center_scales = [float(scale) for scale in config["centerScales"]]
+        self.small_scale_min_frame_width = int(config["smallScaleMinFrameWidth"])
+        weights = config["centerWeights"]
+        self.center_weights = {
+            "body": float(weights["bodyPalette"]),
+            "accent": float(weights["accent"]),
+            "rare": float(weights["rareColor"]),
+            "pattern": float(weights["localPattern"]),
+        }
 
     def build_heatmaps(self, frame_bgr: np.ndarray, hsv: np.ndarray, descriptor: SimpleMobDescriptor) -> Heatmaps:
         body = palette_heatmap(hsv, descriptor.body_colors)
@@ -71,10 +78,10 @@ class HeatmapDetector:
             center_rare = cv2.blur(rare, window)
             center_pattern = cv2.blur(local_pattern, window)
             scale_center = (
-                center_body * 0.30
-                + center_accent * 0.35
-                + center_rare * 0.10
-                + center_pattern * 0.15
+                center_body * self.center_weights["body"]
+                + center_accent * self.center_weights["accent"]
+                + center_rare * self.center_weights["rare"]
+                + center_pattern * self.center_weights["pattern"]
             ).astype(np.float32)
             final = np.maximum(final, scale_center)
         ui_mask = self._ui_mask(frame_bgr.shape[:2])

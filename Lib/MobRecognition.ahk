@@ -9,13 +9,11 @@ global mobRecognitionShutdownDone := false
 global mobRecognitionActiveDetectPid := 0
 
 MobTemplateFolderName(monsterIndex := "") {
-    global MobNames, selectedMonsterIndex
+    global MobFolderNames, selectedMonsterIndex
 
     if (monsterIndex = "")
         monsterIndex := selectedMonsterIndex
-    name := MobNames[monsterIndex]
-    StringLower, name, name
-    return name
+    return MobFolderNames[monsterIndex]
 }
 
 EnsureMobRecognitionPython() {
@@ -277,10 +275,6 @@ MobRecognitionEnsureServer() {
     return true
 }
 
-MobRecognitionShutdownServer() {
-    return
-}
-
 MobRecognitionCancelActiveDetect() {
     global mobRecognitionActiveDetectPid
     if (mobRecognitionActiveDetectPid) {
@@ -297,7 +291,6 @@ MobRecognitionExitCleanup() {
     mobRecognitionShutdownDone := true
 
     MobRecognitionCancelActiveDetect()
-    MobRecognitionShutdownServer()
 
     if IsFunc("MobRecognitionLog")
         MobRecognitionLog("MobRecognition: simple detector cleanup complete")
@@ -492,8 +485,8 @@ MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, debug := false, showPro
 
     FileRead, jsonText, *P65001 %outFile%
     FileDelete, %outFile%
-    if IsFunc("SessionLogDetectResponse") {
-        fn := "SessionLogDetectResponse"
+    if IsFunc("BotSessionDetectResponse") {
+        fn := "BotSessionDetectResponse"
         %fn%(jsonText, A_TickCount - startTick)
     }
     return jsonText
@@ -842,7 +835,7 @@ MobRecognitionLogCandidates(jsonText) {
             flags .= " dead"
         if (unreachable)
             flags .= " unreachable"
-        MobRecognitionLog("MobRecognition: horn @ " . candX . "," . candY . " conf=" . candConf . flags)
+        MobRecognitionLog("MobRecognition: candidate @ " . candX . "," . candY . " conf=" . candConf . flags)
         pos += StrLen(block)
     }
 }

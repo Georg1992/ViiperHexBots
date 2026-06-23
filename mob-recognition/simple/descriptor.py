@@ -56,17 +56,17 @@ class SimpleMobDescriptor:
     def from_dict(cls, data: dict[str, Any]) -> "SimpleMobDescriptor":
         return cls(
             mob_name=str(data["mobName"]),
-            version=int(data.get("version", 1)),
+            version=int(data["version"]),
             size=SizeDescriptor(**data["size"]),
-            body_colors=[ColorCluster(**item) for item in data.get("bodyColors", [])],
-            accent_colors=[ColorCluster(**item) for item in data.get("accentColors", [])],
-            rare_colors=[ColorCluster(**item) for item in data.get("rareColors", [])],
-            sprite_palette_bgr=[tuple(int(v) for v in item) for item in data.get("spritePaletteBgr", [])],
-            hsv_histogram=[float(v) for v in data.get("hsvHistogram", [])],
-            rgb_histogram=[float(v) for v in data.get("rgbHistogram", [])],
-            patch_signatures=[PatchSignature(**item) for item in data.get("patchSignatures", [])],
-            template_count=int(data.get("templateCount", 0)),
-            action_indices=[int(v) for v in data.get("actionIndices", [])],
+            body_colors=[ColorCluster(**item) for item in data["bodyColors"]],
+            accent_colors=[ColorCluster(**item) for item in data["accentColors"]],
+            rare_colors=[ColorCluster(**item) for item in data["rareColors"]],
+            sprite_palette_bgr=[tuple(int(v) for v in item) for item in data["spritePaletteBgr"]],
+            hsv_histogram=[float(v) for v in data["hsvHistogram"]],
+            rgb_histogram=[float(v) for v in data["rgbHistogram"]],
+            patch_signatures=[PatchSignature(**item) for item in data["patchSignatures"]],
+            template_count=int(data["templateCount"]),
+            action_indices=[int(v) for v in data["actionIndices"]],
         )
 
     @classmethod

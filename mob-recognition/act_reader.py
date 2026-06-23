@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 from binary_reader import BinaryReader
 
@@ -47,30 +47,10 @@ class ActAction:
 
 
 @dataclass
-class ActEvent:
-    name: str
-
-
-@dataclass
 class ActFile:
     path: Path
     version: int
     actions: List[ActAction]
-    events: List[ActEvent]
-    action_intervals: List[float]
-
-
-# Common RO monster action indices (no names stored in ACT files).
-ACTION_INDEX_ALIASES = {
-    "stand": 0,
-    "idle": 0,
-    "walk": 1,
-    "attack": 8,
-    "hit": 9,
-    "death": 16,
-    "dead": 16,
-    "die": 16,
-}
 
 
 class ActReader:
@@ -97,12 +77,11 @@ class ActReader:
         for action_index in range(action_count):
             actions.append(self._read_action(reader, version, action_index))
 
-        events: List[ActEvent] = []
         intervals: List[float] = []
         if version >= 0x201:
             event_count = reader.read_uint32()
             for _ in range(event_count):
-                events.append(ActEvent(name=reader.read_fixed_string(40)))
+                reader.read_fixed_string(40)
         if version >= 0x202:
             for _ in range(action_count):
                 intervals.append(reader.read_float())
@@ -122,8 +101,6 @@ class ActReader:
             path=self.act_path,
             version=version,
             actions=actions,
-            events=events,
-            action_intervals=intervals,
         )
 
     def _read_action(self, reader: BinaryReader, version: int, action_index: int) -> ActAction:
@@ -192,15 +169,3 @@ class ActReader:
             rotation=rotation,
             image_type=image_type,
         )
-
-    def list_action_names(self) -> List[str]:
-        act_file = self.load()
-        return [action.name for action in act_file.actions]
-
-    def resolve_action_index(self, action_name: str) -> Optional[int]:
-        key = action_name.lower()
-        if key in ACTION_INDEX_ALIASES:
-            return ACTION_INDEX_ALIASES[key]
-        if key.startswith("action_") and key[7:].isdigit():
-            return int(key[7:])
-        return None

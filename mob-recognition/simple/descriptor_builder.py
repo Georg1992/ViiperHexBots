@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -64,9 +62,6 @@ class SimpleDescriptorBuilder:
         if not frames:
             raise RuntimeError(f"no stand/walk frames could be rendered for {mob_name}")
 
-        for folder in ("templates", "masks", "accents"):
-            (output_dir / folder).mkdir(parents=True, exist_ok=True)
-
         widths: list[int] = []
         heights: list[int] = []
         areas: list[int] = []
@@ -75,8 +70,7 @@ class SimpleDescriptorBuilder:
         accent_hsv_parts: list[np.ndarray] = []
         patch_signatures: list[PatchSignature] = []
 
-        contact_tiles = []
-        for idx, (action_index, frame_index, bgra) in enumerate(frames):
+        for _action_index, _frame_index, bgra in frames:
             bgr = bgra[:, :, :3]
             mask = (bgra[:, :, 3] > 0).astype(np.uint8) * 255
             hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
@@ -92,15 +86,11 @@ class SimpleDescriptorBuilder:
                 patch_signatures.extend(self._patch_signatures(hsv, accent_mask, patch_size=5, limit=8))
                 patch_signatures.extend(self._patch_signatures(hsv, accent_mask, patch_size=7, limit=6))
 
-            stem = f"a{action_index:02d}_f{frame_index:03d}_{idx:03d}"
-            cv2.imwrite(str(output_dir / "templates" / f"{stem}.png"), bgr)
-            cv2.imwrite(str(output_dir / "masks" / f"{stem}.png"), mask)
-            cv2.imwrite(str(output_dir / "accents" / f"{stem}.png"), accent_mask)
-            contact_tiles.append(self._contact_tile(bgr, mask, accent_mask))
-
         opaque_bgr = np.concatenate(opaque_bgr_parts, axis=0)
         opaque_hsv = np.concatenate(opaque_hsv_parts, axis=0)
-        accent_hsv = np.concatenate(accent_hsv_parts, axis=0) if accent_hsv_parts else opaque_hsv
+        if not accent_hsv_parts:
+            raise ValueError(f"no accent pixels found while building descriptor for {mob_name}")
+        accent_hsv = np.concatenate(accent_hsv_parts, axis=0)
 
         body_colors = self._clusters("body", opaque_bgr, opaque_hsv, count=6, tolerance=(18, 55, 55))
         accent_colors = self._clusters("accent", None, accent_hsv, count=4, tolerance=(16, 60, 65))
@@ -134,8 +124,6 @@ class SimpleDescriptorBuilder:
             action_indices=action_indices,
         )
         descriptor.save(descriptor_path)
-        self._write_contact_sheet(output_dir / "debug_contact_sheet.png", contact_tiles)
-        self._write_audit(output_dir / "descriptor_audit.json", mob_name, spr_path, act_path, descriptor, len(frames))
         return descriptor
 
     @staticmethod
@@ -143,7 +131,7 @@ class SimpleDescriptorBuilder:
         alpha = bgra[:, :, 3]
         ys, xs = np.where(alpha > 0)
         if len(xs) == 0:
-            return bgra[:1, :1].copy()
+            raise ValueError("cannot build descriptor from an empty sprite frame")
         return bgra[int(ys.min()) : int(ys.max()) + 1, int(xs.min()) : int(xs.max()) + 1].copy()
 
     @staticmethod
@@ -157,11 +145,6 @@ class SimpleDescriptorBuilder:
         v_threshold = float(np.percentile(v[opaque], 72))
         c_threshold = max(5.0, float(np.percentile(contrast[opaque], 60)))
         accent = opaque & (v >= v_threshold) & (contrast >= c_threshold)
-        if int(accent.sum()) < 6:
-            ranked = np.argsort(v[opaque])[-max(6, int(opaque.sum() * 0.15)) :]
-            ys, xs = np.where(opaque)
-            accent = np.zeros_like(opaque)
-            accent[ys[ranked], xs[ranked]] = True
         return accent.astype(np.uint8) * 255
 
     @staticmethod
@@ -259,43 +242,3 @@ class SimpleDescriptorBuilder:
         cv2.normalize(hist, hist)
         return hist.reshape(-1).astype(float).tolist()
 
-    @staticmethod
-    def _contact_tile(bgr: np.ndarray, mask: np.ndarray, accent: np.ndarray) -> np.ndarray:
-        tile = bgr.copy()
-        tile[mask == 0] = (35, 35, 35)
-        tile[accent > 0] = (0, 255, 255)
-        return cv2.copyMakeBorder(tile, 2, 2, 2, 2, cv2.BORDER_CONSTANT, value=(0, 0, 0))
-
-    @staticmethod
-    def _write_contact_sheet(path: Path, tiles: list[np.ndarray]) -> None:
-        if not tiles:
-            return
-        max_h = max(tile.shape[0] for tile in tiles)
-        max_w = max(tile.shape[1] for tile in tiles)
-        cols = min(8, len(tiles))
-        rows = int(np.ceil(len(tiles) / cols))
-        sheet = np.zeros((rows * max_h, cols * max_w, 3), dtype=np.uint8)
-        for idx, tile in enumerate(tiles):
-            row, col = divmod(idx, cols)
-            y, x = row * max_h, col * max_w
-            sheet[y : y + tile.shape[0], x : x + tile.shape[1]] = tile
-        cv2.imwrite(str(path), sheet)
-
-    @staticmethod
-    def _write_audit(
-        path: Path,
-        mob_name: str,
-        spr_path: Path,
-        act_path: Path,
-        descriptor: SimpleMobDescriptor,
-        frame_count: int,
-    ) -> None:
-        payload = {
-            "mobName": mob_name,
-            "builtAt": datetime.now(timezone.utc).isoformat(),
-            "spr": str(spr_path),
-            "act": str(act_path),
-            "frameCount": frame_count,
-            "descriptor": descriptor.to_dict(),
-        }
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

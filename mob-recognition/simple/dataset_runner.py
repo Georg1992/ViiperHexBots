@@ -20,47 +20,30 @@ from debug_renderer import save_simple_debug_bundle, save_summary_contact_sheet
 from descriptor_builder import SimpleDescriptorBuilder
 from detector import SimpleMobDetector, load_simple_config
 
-PROVISIONAL_GROUND_TRUTH = {
-    "ggggg.png": [(1090, 219), (1095, 570)],
-    "ppp.png": [],
-    "sdsd.png": [(775, 304)],
-}
 
-
-def _load_ground_truth(image_dir: Path, file_name: str) -> list[dict]:
+def _load_ground_truth(image_dir: Path, entry: dict) -> list[dict]:
+    file_name = entry["file"]
     json_path = image_dir / f"{Path(file_name).stem}.json"
     if json_path.exists():
         data = json.loads(json_path.read_text(encoding="utf-8"))
-        return data.get("horns", [])
-    centers = PROVISIONAL_GROUND_TRUTH.get(file_name, [])
-    return [{"centerX": x, "centerY": y, "radius": 80, "provisional": True} for x, y in centers]
+        return data["horns"]
+    if int(entry["expectHorns"]) == 0:
+        return []
+    raise FileNotFoundError(f"missing ground truth JSON for positive fixture: {json_path}")
 
 
 def _manifest_entries(fixtures_dir: Path) -> list[dict]:
     manifest_path = fixtures_dir / "manifest.json"
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    entries = list(data.get("images", []))
-    known = {entry["file"] for entry in entries}
-    for file_name in PROVISIONAL_GROUND_TRUTH:
-        if file_name not in known:
-            entries.append(
-                {
-                    "file": file_name,
-                    "label": "positive",
-                    "expectHorns": len(PROVISIONAL_GROUND_TRUTH[file_name]),
-                    "provisional": True,
-                    "note": "Provisional grass-map ground truth from descriptor grid search.",
-                }
-            )
-    return entries
+    return list(data["images"])
 
 
-def _match_counts(accepted, ground_truth: list[dict], default_radius: int) -> tuple[int, int, int]:
+def _match_counts(accepted, ground_truth: list[dict]) -> tuple[int, int, int]:
     matched_candidates: set[int] = set()
     tp = 0
     for gt in ground_truth:
         gx, gy = int(gt["centerX"]), int(gt["centerY"])
-        radius = int(gt.get("radius", default_radius))
+        radius = int(gt["radius"])
         radius_sq = radius * radius
         best_idx = None
         best_score = -1.0
@@ -85,7 +68,8 @@ def run_fixtures(mob_name: str, fixtures_dir: Path, *, debug: bool, rebuild_desc
     config = load_simple_config()
     detector = SimpleMobDetector(PROJECT_ROOT, config)
     image_dir = fixtures_dir / "game-screenshots"
-    debug_root = PROJECT_ROOT / config.get("debugOutputDir", "mob-recognition/debug/simple")
+    manifest = json.loads((fixtures_dir / "manifest.json").read_text(encoding="utf-8"))
+    debug_root = PROJECT_ROOT / config["debugOutputDir"]
     summary = {
         "mobName": mob_name,
         "pipeline": "simple",
@@ -100,8 +84,8 @@ def run_fixtures(mob_name: str, fixtures_dir: Path, *, debug: bool, rebuild_desc
         if frame is None:
             continue
         result = detector.detect(frame, mob_name)
-        gt = _load_ground_truth(image_dir, file_name)
-        tp, fp, fn = _match_counts(result.accepted, gt, int(config.get("matchRadiusPx", 80)))
+        gt = _load_ground_truth(image_dir, entry)
+        tp, fp, fn = _match_counts(result.accepted, gt)
         summary["totals"]["tp"] += tp
         summary["totals"]["fp"] += fp
         summary["totals"]["fn"] += fn
@@ -115,7 +99,6 @@ def run_fixtures(mob_name: str, fixtures_dir: Path, *, debug: bool, rebuild_desc
             "fn": fn,
             "bestScores": best_scores,
             "elapsedS": round(result.elapsed_s, 4),
-            "provisional": bool(entry.get("provisional") or any(item.get("provisional") for item in gt)),
         }
         summary["images"].append(row)
         print(

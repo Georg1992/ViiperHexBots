@@ -31,17 +31,34 @@ On startup the script launches `viiper-input.exe`, waits for virtual keyboard/mo
 ```
 ViiperHexBots/
   main.ahk                 Bot GUI and entry point
-  BotLogic.ahk             Hunting, inventory, warp logic
-  utilityFunctions.ahk     Input helpers (VIIPER virtual HID)
-  MobData.ahk              Universal monster names and pixel colors
+  build.ps1                Build script for the input bridge
+  config.ini               Local runtime settings (generated)
+  Lib/                     AHK runtime modules
+  Lib/BotLogic.ahk         Hunting, inventory, warp logic
+  Lib/utilityFunctions.ahk Shared bot/input helpers
+  Lib/MobData.ahk          Descriptor-backed mob catalog
+  Lib/MemoryOperations.ahk Memory reading helpers
   clients/                 Per-server profiles (memory addresses, captcha)
   Lib/ClientProfile.ahk    Loads client JSON profiles
   Lib/ViiperInput.ahk      AHK client for the input bridge
+  logs/                    Runtime/session logs (generated)
+  scripts/                 Maintenance and descriptor-build scripts
+  mob-recognition/         Python descriptor/detection pipeline
+  assets/mobs/             Source SPR/ACT assets for descriptor builds
+  generated_descriptors/   Runtime mob descriptors
   input-bridge/            Go HTTP bridge to VIIPER
   viiper-input.exe         Built bridge (not in git)
   VIIPER/                  Git submodule
-  build.ps1                Build script
 ```
+
+## Logs
+
+Each app launch writes to `logs/sessions/<session-id>/`.
+Only the latest 3 session folders are kept.
+
+- `behavior.log` is the user-facing bot timeline and is the source for the current GUI log box.
+- `system.log` is internal diagnostics for detector timings, runtime context, process state, and debugging.
+- `<bot-session-id>/summary.json` stores bot-run stats such as scans, attacks, and scale calibration.
 
 ## Differences from HexBots
 

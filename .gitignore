@@ -1,10 +1,10 @@
 viiper-input.exe
 viiper-input.exe.new
 viiper-input.exe.bak
-bot_log.txt
 logs/sessions/
 mob-recognition/debug/
 __pycache__/
+.pytest_cache/
 *.pyc
 NUL.tmp
 ahk-err.txt

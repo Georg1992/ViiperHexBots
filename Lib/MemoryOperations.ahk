@@ -5,6 +5,10 @@ global totalWeightAddress := 0
 global currentLocationAddress := 0
 
 UpdateGameStats() {
+    global gameProcess
+    global maxSpAddress, currentSpAddress, currentWeightAddress, currentLocationAddress
+    global maxSp, currentSp, currentWeight, currentLocation
+
     if (!MemoryFeaturesActive())
         return
 

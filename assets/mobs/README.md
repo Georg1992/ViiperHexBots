@@ -15,7 +15,8 @@ assets/mobs/
 Build the runtime descriptor:
 
 ```powershell
-py -3 mob-recognition\cli.py build-simple-descriptor --mob horn
+.\scripts\build-mob-descriptor.ps1 -Mob horn -Force
 ```
 
-Output goes to `generated_descriptors/<mob>/simple/` (descriptor, templates, masks, accents, audit).
+Output goes to `generated_descriptors/<mob>/simple/descriptor.json`.
+The bot UI loads mobs from those descriptor folders on startup, so new mobs appear there after their descriptor exists.

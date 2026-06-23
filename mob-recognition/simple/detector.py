@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,9 +11,45 @@ import cv2
 import numpy as np
 
 from descriptor import SimpleMobDescriptor
-from descriptor_builder import DESCRIPTOR_VERSION, SimpleDescriptorBuilder
+from descriptor_builder import DESCRIPTOR_VERSION
 from heatmap_detector import HeatmapDetector, Heatmaps
 from region_scorer import RegionScore, SimpleRegionScorer
+
+
+REQUIRED_CONFIG_KEYS = {
+    "acceptThreshold",
+    "minColorPurity",
+    "minDescriptorColorMatch",
+    "maxSpritePaletteDistance",
+    "minSpritePaletteMatch",
+    "maxRareToBodyRatio",
+    "minInformativePixelFraction",
+    "maxDescriptorPixelFraction",
+    "minDiscoverySizeScore",
+    "minObjectSizeScore",
+    "enforceObjectSizeGate",
+    "topCandidateCenters",
+    "minCenterDistancePx",
+    "minCenterHeat",
+    "nmsDistancePx",
+    "matchRadiusPx",
+    "maxCandidates",
+    "smallScaleMinFrameWidth",
+    "selfExclusionWidthRatio",
+    "selfExclusionHeightRatio",
+    "centerScales",
+    "scales",
+    "playfieldTopRatio",
+    "playfieldBottomRatio",
+    "playfieldLeftRatio",
+    "playfieldRightRatio",
+    "debugOutputDir",
+    "weights",
+    "centerWeights",
+}
+
+REQUIRED_WEIGHT_KEYS = {"bodyPalette", "accent", "rareColor", "localPattern", "colorPurity", "size"}
+REQUIRED_CENTER_WEIGHT_KEYS = {"bodyPalette", "accent", "rareColor", "localPattern"}
 
 
 @dataclass
@@ -70,19 +105,31 @@ class SimpleDetectionResult:
 
 def load_simple_config(path: Optional[Path] = None) -> dict:
     config_path = path or (Path(__file__).resolve().parent / "config_simple.json")
-    return json.loads(config_path.read_text(encoding="utf-8"))
+    import json
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    missing = sorted(REQUIRED_CONFIG_KEYS - set(config))
+    if missing:
+        raise ValueError(f"missing detector config keys: {', '.join(missing)}")
+    weight_missing = sorted(REQUIRED_WEIGHT_KEYS - set(config["weights"]))
+    if weight_missing:
+        raise ValueError(f"missing detector weight keys: {', '.join(weight_missing)}")
+    center_weight_missing = sorted(REQUIRED_CENTER_WEIGHT_KEYS - set(config["centerWeights"]))
+    if center_weight_missing:
+        raise ValueError(f"missing center weight keys: {', '.join(center_weight_missing)}")
+    return config
 
 
 class SimpleMobDetector:
     def __init__(self, project_root: Path, config: Optional[dict] = None):
         self.project_root = project_root
-        self.config = config or load_simple_config()
+        self.config = load_simple_config() if config is None else config
         self.heatmap_detector = HeatmapDetector(self.config)
         self.region_scorer = SimpleRegionScorer(self.config)
         self._descriptor_cache: dict[str, SimpleMobDescriptor] = {}
-        self.self_exclusion_width_ratio = float(self.config.get("selfExclusionWidthRatio", 0.10))
-        self.self_exclusion_height_ratio = float(self.config.get("selfExclusionHeightRatio", 0.20))
-        self.small_scale_min_frame_width = int(self.config.get("smallScaleMinFrameWidth", 900))
+        self.self_exclusion_width_ratio = float(self.config["selfExclusionWidthRatio"])
+        self.self_exclusion_height_ratio = float(self.config["selfExclusionHeightRatio"])
+        self.small_scale_min_frame_width = int(self.config["smallScaleMinFrameWidth"])
 
     def descriptor_path(self, mob_name: str) -> Path:
         return self.project_root / "generated_descriptors" / mob_name.lower() / "simple" / "descriptor.json"
@@ -93,10 +140,13 @@ class SimpleMobDetector:
             return self._descriptor_cache[mob_name]
         path = self.descriptor_path(mob_name)
         if not path.exists():
-            SimpleDescriptorBuilder(self.project_root).build(mob_name)
+            raise FileNotFoundError(f"descriptor not found for mob '{mob_name}': {path}")
         descriptor = SimpleMobDescriptor.load(path)
         if descriptor.version < DESCRIPTOR_VERSION:
-            descriptor = SimpleDescriptorBuilder(self.project_root).build(mob_name, force=True)
+            raise RuntimeError(
+                f"descriptor for mob '{mob_name}' is version {descriptor.version}; "
+                f"rebuild descriptor version {DESCRIPTOR_VERSION} before detection"
+            )
         self._descriptor_cache[mob_name] = descriptor
         return descriptor
 
@@ -136,7 +186,7 @@ class SimpleMobDetector:
             mob_name=mob_name.lower(),
             descriptor=descriptor,
             heatmaps=heatmaps,
-            candidates=final_candidates[: int(self.config.get("maxCandidates", 100))],
+            candidates=final_candidates[: int(self.config["maxCandidates"])],
             accepted=accepted,
             elapsed_s=elapsed,
             timing=timing,
@@ -169,7 +219,7 @@ class SimpleMobDetector:
         accepted = [candidate for candidate in candidates if candidate.accepted]
         if accepted:
             return [max(accepted, key=lambda c: c.final_score)]
-        return [max(candidates, key=lambda c: c.final_score)]
+        return []
 
     def _is_self_center(self, cx: int, cy: int, frame_shape: tuple[int, ...]) -> bool:
         height, width = frame_shape[:2]
@@ -180,7 +230,7 @@ class SimpleMobDetector:
     def _candidate_scales(self, frame_width: int) -> list[float]:
         return [
             float(scale)
-            for scale in self.config.get("scales", [0.9, 1.0, 1.1])
+            for scale in self.config["scales"]
             if float(scale) >= 0.75 or frame_width >= self.small_scale_min_frame_width
         ]
 
@@ -214,7 +264,7 @@ class SimpleMobDetector:
 
     def _nms(self, candidates: list[SimpleCandidate]) -> list[SimpleCandidate]:
         kept: list[SimpleCandidate] = []
-        min_dist = int(self.config.get("nmsDistancePx", 35))
+        min_dist = int(self.config["nmsDistancePx"])
         min_dist_sq = min_dist * min_dist
         for candidate in sorted(candidates, key=lambda c: c.final_score, reverse=True):
             if all(

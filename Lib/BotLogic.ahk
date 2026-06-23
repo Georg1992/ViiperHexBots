@@ -134,11 +134,6 @@ Hunt(skillSC, teleportSC) {
         if (MemoryFeaturesActive())
             UpdateGameStats()
 
-        if (MemoryFeaturesActive() && DetectCaptcha && captchaEnabled && DetectCAPTCHA()){
-            botRunning := false
-            break
-        }
-
         if (SkillTimerButtonKey != "" && (A_TickCount - huntLastSkillTime) >= (SkillTimerInterval * 1000)) {
             if (!SendKeyCombo(SkillTimerButtonKey))
                 break
@@ -170,9 +165,14 @@ Hunt(skillSC, teleportSC) {
             continue
         }
 
+        if (MemoryFeaturesActive() && DetectCaptcha && captchaEnabled && DetectCAPTCHA(xs, ys, ws, hs)) {
+            RequestBotStop("captcha detected")
+            break
+        }
+
         mobName := MobTemplateFolderName()
-        if IsFunc("SessionLogHuntScan") {
-            fn := "SessionLogHuntScan"
+        if IsFunc("BotSessionHuntScan") {
+            fn := "BotSessionHuntScan"
             %fn%(mobName, xs, ys, ws, hs)
         }
 
@@ -194,8 +194,7 @@ Hunt(skillSC, teleportSC) {
         teleportScansRequired := 6
         if (!MobRecognitionParseHuntPlan(jsonText, livingInRange, canTeleport, attackX, attackY, attackConf, huntStatus, engagementsResolved, teleportScansRequired)) {
             if IsFunc("AppendLog")
-                AppendLog("Hunt: stale detect server — restarting")
-            MobRecognitionShutdownServer()
+                AppendLog("Hunt: invalid detect response — retrying")
             BotSleep(200)
             continue
         }
@@ -397,8 +396,8 @@ ManageInventoryWindow(){
     return BotSleep(500)
 }
 
-DetectCAPTCHA() {
-    global xs, ys, ws, hs, captchaColor
+DetectCAPTCHA(xs, ys, ws, hs) {
+    global captchaColor
     PixelSearch, x, y, xs, ys, xs + ws, ys + hs, %captchaColor%, 1, Fast RGB 
     if (ErrorLevel = 0) {
         Loop,8{

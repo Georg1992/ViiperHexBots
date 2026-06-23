@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
 from act_reader import ActFrameRef, ActSpriteLayer
@@ -30,9 +31,10 @@ def render_act_frame(spr_file: SprFile, frame: ActFrameRef) -> np.ndarray:
         sprite = _get_spr_frame(spr_file, layer.spr_frame_index)
         if sprite is None:
             continue
+        sprite = _apply_layer_transform(sprite, layer)
         paste_x = layer.x - min_x
         paste_y = layer.y - min_y
-        _blit_bgra(canvas, sprite, paste_x, paste_y, mirror=layer.mirror)
+        _blit_bgra(canvas, sprite, paste_x, paste_y)
 
     return canvas
 
@@ -44,16 +46,39 @@ def _get_spr_frame(spr_file: SprFile, index: int):
 
 def _layer_width(spr_file: SprFile, layer: ActSpriteLayer) -> int:
     sprite = _get_spr_frame(spr_file, layer.spr_frame_index)
-    return 0 if sprite is None else sprite.shape[1]
+    if sprite is None:
+        return 0
+    return max(1, int(round(sprite.shape[1] * abs(layer.scale_x))))
 
 
 def _layer_height(spr_file: SprFile, layer: ActSpriteLayer) -> int:
     sprite = _get_spr_frame(spr_file, layer.spr_frame_index)
-    return 0 if sprite is None else sprite.shape[0]
+    if sprite is None:
+        return 0
+    return max(1, int(round(sprite.shape[0] * abs(layer.scale_y))))
 
 
-def _blit_bgra(canvas: np.ndarray, sprite: np.ndarray, x: int, y: int, mirror: bool = False) -> None:
-    src = np.fliplr(sprite) if mirror else sprite
+def _apply_layer_transform(sprite: np.ndarray, layer: ActSpriteLayer) -> np.ndarray:
+    src = np.fliplr(sprite) if layer.mirror else sprite
+    width = max(1, int(round(src.shape[1] * abs(layer.scale_x))))
+    height = max(1, int(round(src.shape[0] * abs(layer.scale_y))))
+    if width != src.shape[1] or height != src.shape[0]:
+        src = cv2.resize(src, (width, height), interpolation=cv2.INTER_NEAREST)
+
+    tint_b, tint_g, tint_r, tint_a = layer.color_tint
+    if (tint_b, tint_g, tint_r, tint_a) != (255, 255, 255, 255):
+        tinted = src.astype(np.float32)
+        tinted[:, :, 0] *= tint_b / 255.0
+        tinted[:, :, 1] *= tint_g / 255.0
+        tinted[:, :, 2] *= tint_r / 255.0
+        tinted[:, :, 3] *= tint_a / 255.0
+        src = np.clip(tinted, 0, 255).astype(np.uint8)
+
+    return src
+
+
+def _blit_bgra(canvas: np.ndarray, sprite: np.ndarray, x: int, y: int) -> None:
+    src = sprite
     sh, sw = src.shape[:2]
     ch, cw = canvas.shape[:2]
 

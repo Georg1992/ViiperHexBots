@@ -12,7 +12,7 @@ The runtime detector does not use sprite blob proposals, bbox refinement scans, 
 
 ```powershell
 # Build descriptor from assets/mobs/horn/horn.spr + horn.act
-py -3 mob-recognition\cli.py build-simple-descriptor --mob horn --force
+.\scripts\build-mob-descriptor.ps1 -Mob horn -Force
 
 # Detect on a screenshot
 py -3 mob-recognition\cli.py detect-simple --mob horn --image mob-recognition\test-fixtures\game-screenshots\333.png --debug
@@ -42,19 +42,15 @@ Allowed shared support:
 | `act_reader.py` | Decode `.act` |
 | `frame_renderer.py` | Compose ACT frame layers |
 | `capture.py` | Optional screenshot capture for CLI ROI |
-| `template_io.py` | Shared image helpers if needed |
 
 ## Descriptor Output
 
 ```text
 generated_descriptors/<mob>/simple/
   descriptor.json
-  templates/
-  masks/
-  accents/
-  debug_contact_sheet.png
-  descriptor_audit.json
 ```
+
+The bot runtime never reads `.spr` or `.act` files. It lists available mobs from `generated_descriptors/*/simple/descriptor.json`; adding a descriptor adds that mob to the UI on the next bot launch.
 
 ## Debug Output
 

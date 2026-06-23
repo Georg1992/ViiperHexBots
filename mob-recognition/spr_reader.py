@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 
@@ -51,13 +51,6 @@ class SprFile:
     @property
     def frame_count(self) -> int:
         return len(self.indexed_frames) + len(self.rgba_frames)
-
-    @property
-    def frames(self) -> List[SprFrame]:
-        """All valid decoded frames in order (legacy helper)."""
-        decoded = [frame for frame in self.indexed_frames if frame is not None]
-        decoded.extend(self.rgba_frames)
-        return decoded
 
     def get_frame(self, index: int) -> Optional[SprFrame]:
         if 0 <= index < len(self.indexed_frames):
@@ -216,16 +209,3 @@ class SprReader:
         raw = reader.read_bytes(width * height * 4)
         rgba = abgr_to_bgra(raw, width, height)
         return SprFrame(index=index, width=width, height=height, rgba=rgba, is_rgba=True)
-
-    def read_header(self) -> dict:
-        reader = BinaryReader(self.spr_path.read_bytes())
-        signature = reader.read_bytes(2).decode("ascii", errors="replace")
-        version = reader.read_uint16()
-        pal_count = reader.read_uint16()
-        rgba_count = reader.read_uint16() if version >= 0x200 else 0
-        return {
-            "signature": signature,
-            "version": f"0x{version:04X}",
-            "indexedFrameCount": pal_count,
-            "rgbaFrameCount": rgba_count,
-        }

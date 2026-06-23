@@ -33,5 +33,11 @@
     "localPattern": 0.15,
     "colorPurity": 0.10,
     "size": 0.10
+  },
+  "centerWeights": {
+    "bodyPalette": 0.30,
+    "accent": 0.35,
+    "rareColor": 0.10,
+    "localPattern": 0.15
   }
 }

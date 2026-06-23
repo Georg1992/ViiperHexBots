@@ -5,12 +5,13 @@
 #InstallMouseHook
 #include Lib\ViiperInput.ahk
 #include Lib\SessionLog.ahk
-#include MobData.ahk
+#include Lib\BotSession.ahk
+#include Lib\MobData.ahk
 #include Lib\ClientProfile.ahk
 #include Lib\MobRecognition.ahk
-#include MemoryOperations.ahk
-#include BotLogic.ahk
-#include utilityFunctions.ahk
+#include Lib\MemoryOperations.ahk
+#include Lib\BotLogic.ahk
+#include Lib\utilityFunctions.ahk
 #MaxThreadsPerHotkey 2
 
 SetBatchLines, -1
@@ -67,7 +68,6 @@ global SkillTimerInterval := 20 ; Default 20 seconds
 
 ; Monster Selection
 global selectedMonsterIndex := 1 ; Default to first monster
-global SelectedMonster1, SelectedMonster2, SelectedMonster3, SelectedMonster4, SelectedMonster5, SelectedMonster6
 
 ; ====== VIIPER INPUT ======
 global Input := ""
@@ -159,8 +159,15 @@ if (!warperCoordsSet) {
 
 ; Monster Type
 monsterStartY := 220
-Gui, Add, Text, x20 y%monsterStartY% w120 h30, Monster Type:
+Gui, Add, Text, x20 y%monsterStartY% w180 h30, Descriptor Mob:
 yPos := monsterStartY + 30
+
+if (MobNames.MaxIndex() < 1) {
+    MsgBox, 16, ViiperHexBots, No mob descriptors found.`n`nCreate one with:`n.\scripts\build-mob-descriptor.ps1 -Mob horn
+    ExitApp
+}
+if (selectedMonsterIndex < 1 || selectedMonsterIndex > MobNames.MaxIndex())
+    selectedMonsterIndex := 1
 
 Loop % MobNames.MaxIndex() {
     ; Use the pre-loaded selectedMonsterIndex from config
@@ -400,16 +407,6 @@ Loop % MobNames.MaxIndex() {
         SetTimer, RemoveToolTip, -2000
     return
 
-    ContinueFromPause:
-        botPaused := false
-        GuiControl,, BotButton, Stop Bot
-        GuiControl,, BotStatus, Status: ONLINE
-        GuiControl, +cGreen, StatusLight
-        ToolTip, BOT CONTINUED, % A_ScreenWidth//2-100, 10
-        SetTimer, RemoveToolTip, -2000
-        RestoreWindow() ; Your existing function
-    return
-
     ; Wrapper to start bot in separate thread
     StartBotWrapper:
         StartBot()
@@ -545,6 +542,8 @@ Loop % MobNames.MaxIndex() {
 
         ; Monster
         IniRead, selectedMonsterIndex, config.ini, MonsterSettings, SelectedMonster, 1
+        if (selectedMonsterIndex < 1 || selectedMonsterIndex > MobNames.MaxIndex())
+            selectedMonsterIndex := 1
 
         ; Mob recognition
         IniRead, mobRecognitionDebug, config.ini, MobRecognition, Debug, 0
@@ -1005,3 +1004,60 @@ MainOnExit(ExitReason, ExitCode) {
     if (sessionLogPath != "")
         SessionLogEnd("exit: " . ExitReason)
 }
+
+ApplyMemoryDependentUI() {
+    global memoryReadingEnabled, clientSupportsMemory, captchaEnabled, captchaLabel
+    global warperCoordsSet, TakeFlyWings, DetectCaptcha
+
+    if (!clientSupportsMemory) {
+        memoryReadingEnabled := false
+        GuiControl,, UseMemoryReading, 0
+        GuiControl, Disable, UseMemoryReading
+    } else {
+        GuiControl, Enable, UseMemoryReading
+        checked := memoryReadingEnabled ? 1 : 0
+        GuiControl,, UseMemoryReading, %checked%
+    }
+
+    memActive := MemoryFeaturesActive()
+    ctlState := memActive ? "Enable" : "Disable"
+
+    GuiControl, %ctlState%, SetWarperCoordsBtn
+    GuiControl, % (memActive && warperCoordsSet) ? "Enable" : "Disable", ResetWarperBtn
+    GuiControl, %ctlState%, SavePointButtonKey
+    GuiControl, %ctlState%, OpenStorageButtonKey
+    GuiControl, %ctlState%, WeightModifier
+    GuiControl, %ctlState%, WeightModifierText
+    GuiControl, %ctlState%, WeightSliderLabel
+    GuiControl, %ctlState%, TakeFlyWings
+    GuiControl, % (memActive && TakeFlyWings) ? "Enable" : "Disable", FlyWingsAmount
+
+    if (captchaEnabled && memActive) {
+        GuiControl, Show, DetectCaptcha
+        GuiControl, Enable, DetectCaptcha
+        GuiControl,, DetectCaptcha, Detect Captcha (%captchaLabel%)
+    } else {
+        GuiControl,, DetectCaptcha, 0
+        DetectCaptcha := 0
+        GuiControl, Hide, DetectCaptcha
+    }
+
+    if (memActive && warperCoordsSet) {
+        GuiControl, Show, TimeOnLocationTextLabel
+        GuiControl, Show, TimeOnLocation
+        GuiControl, Show, TimeOnLocationValueText
+        GuiControl, Enable, TimeOnLocation
+    } else {
+        GuiControl, Hide, TimeOnLocationTextLabel
+        GuiControl, Hide, TimeOnLocation
+        GuiControl, Hide, TimeOnLocationValueText
+        GuiControl, Disable, TimeOnLocation
+    }
+}
+
+F12::
+    if (botRunning)
+        Gosub, StopBotProcedure
+    else
+        Gosub, StartBotProcedure
+return

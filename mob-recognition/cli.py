@@ -115,7 +115,7 @@ def cmd_detect_simple(args: argparse.Namespace) -> int:
         accepted_json = [candidate_to_json(candidate, screen_offset) for candidate in result.accepted]
         if args.debug:
             label = Path(args.image).name if args.image else "live_capture"
-            debug_root = PROJECT_ROOT / config.get("debugOutputDir", "mob-recognition/debug/simple")
+            debug_root = PROJECT_ROOT / config["debugOutputDir"]
             save_simple_debug_bundle(debug_root, label, frame, result)
         emit_json(
             {
@@ -127,7 +127,7 @@ def cmd_detect_simple(args: argparse.Namespace) -> int:
                     "range": list(args.scale_range) if args.scale_range else None,
                     "sizeGate": bool(args.enforce_size_gate),
                 },
-                "confidenceThreshold": float(config.get("acceptThreshold", 0.46)),
+                "confidenceThreshold": float(config["acceptThreshold"]),
                 "candidateCount": len(result.candidates),
                 "acceptedCount": len(result.accepted),
                 "elapsedS": round(result.elapsed_s, 4),

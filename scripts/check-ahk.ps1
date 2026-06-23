@@ -13,7 +13,6 @@ if (-not $ahk) {
 }
 
 function Stop-VhbOrphanProcesses {
-    $rootNorm = $root.Replace('\', '\\')
     Get-CimInstance Win32_Process | Where-Object {
         $cmd = $_.CommandLine
         if (-not $cmd) { return $false }
@@ -26,8 +25,6 @@ function Stop-VhbOrphanProcesses {
 }
 
 $scripts = @(
-    "test-horn-mob-recognition.ahk",
-    "test-mob-recognition.ahk",
     "main.ahk"
 )
 
@@ -40,12 +37,12 @@ foreach ($script in $scripts) {
     }
 
     $errFile = Join-Path $env:TEMP ("ahk_validate_" + [guid]::NewGuid().ToString() + ".txt")
-    $args = @("/ErrorStdOut", $script)
+    $scriptArgs = @("/ErrorStdOut", $script)
     if ($script -eq "main.ahk") {
-        $args += "--validate"
+        $scriptArgs += "--validate"
     }
 
-    $proc = Start-Process -FilePath $ahk -ArgumentList $args `
+    $proc = Start-Process -FilePath $ahk -ArgumentList $scriptArgs `
         -WorkingDirectory $root -PassThru -RedirectStandardError $errFile -WindowStyle Hidden
     $proc.WaitForExit(5000) | Out-Null
     if (-not $proc.HasExited) {

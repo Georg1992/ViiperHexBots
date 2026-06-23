@@ -26,25 +26,25 @@ class RegionScore:
 
 class SimpleRegionScorer:
     def __init__(self, config: dict):
-        self.threshold = float(config.get("acceptThreshold", 0.46))
-        self.min_color_purity = float(config.get("minColorPurity", 0.62))
-        self.min_descriptor_color_match = float(config.get("minDescriptorColorMatch", 0.20))
-        self.max_sprite_palette_distance = float(config.get("maxSpritePaletteDistance", 32.0))
-        self.min_sprite_palette_match = float(config.get("minSpritePaletteMatch", 0.25))
-        self.max_rare_to_body_ratio = float(config.get("maxRareToBodyRatio", 1.15))
-        self.min_informative_fraction = float(config.get("minInformativePixelFraction", 0.06))
-        self.max_descriptor_pixel_fraction = float(config.get("maxDescriptorPixelFraction", 0.38))
-        self.min_discovery_size_score = float(config.get("minDiscoverySizeScore", 0.60))
-        self.min_object_size_score = float(config.get("minObjectSizeScore", 0.72))
-        self.enforce_object_size_gate = bool(config.get("enforceObjectSizeGate", False))
-        weights = config.get("weights", {})
+        self.threshold = float(config["acceptThreshold"])
+        self.min_color_purity = float(config["minColorPurity"])
+        self.min_descriptor_color_match = float(config["minDescriptorColorMatch"])
+        self.max_sprite_palette_distance = float(config["maxSpritePaletteDistance"])
+        self.min_sprite_palette_match = float(config["minSpritePaletteMatch"])
+        self.max_rare_to_body_ratio = float(config["maxRareToBodyRatio"])
+        self.min_informative_fraction = float(config["minInformativePixelFraction"])
+        self.max_descriptor_pixel_fraction = float(config["maxDescriptorPixelFraction"])
+        self.min_discovery_size_score = float(config["minDiscoverySizeScore"])
+        self.min_object_size_score = float(config["minObjectSizeScore"])
+        self.enforce_object_size_gate = bool(config["enforceObjectSizeGate"])
+        weights = config["weights"]
         self.weights = {
-            "body": float(weights.get("bodyPalette", 0.30)),
-            "accent": float(weights.get("accent", 0.35)),
-            "rare": float(weights.get("rareColor", 0.10)),
-            "pattern": float(weights.get("localPattern", 0.15)),
-            "purity": float(weights.get("colorPurity", 0.10)),
-            "size": float(weights.get("size", 0.10)),
+            "body": float(weights["bodyPalette"]),
+            "accent": float(weights["accent"]),
+            "rare": float(weights["rareColor"]),
+            "pattern": float(weights["localPattern"]),
+            "purity": float(weights["colorPurity"]),
+            "size": float(weights["size"]),
         }
 
     def score(
@@ -105,6 +105,8 @@ class SimpleRegionScorer:
                 rejection_reason = "rare_color_imbalance"
             elif descriptor_fraction > self.max_descriptor_pixel_fraction:
                 rejection_reason = "too_much_descriptor_color"
+            elif informative_fraction < self.min_informative_fraction:
+                rejection_reason = "insufficient_sprite_pixels"
             elif size < self.min_discovery_size_score:
                 rejection_reason = "wrong_size"
             elif self.enforce_object_size_gate and size < self.min_object_size_score:

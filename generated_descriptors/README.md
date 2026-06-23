@@ -3,7 +3,7 @@
 Built by:
 
 ```powershell
-py -3 mob-recognition\cli.py build-simple-descriptor --mob <name>
+.\scripts\build-mob-descriptor.ps1 -Mob <name> -Force
 ```
 
 Each mob folder contains:
@@ -12,11 +12,7 @@ Each mob folder contains:
 generated_descriptors/<mob>/
   simple/
     descriptor.json
-    templates/
-    masks/
-    accents/
-    debug_contact_sheet.png
-    descriptor_audit.json
 ```
 
-Source files: `assets/mobs/<mob>/<mob>.spr` and `.act`
+Source files: `assets/mobs/<mob>/<mob>.spr` and `.act`.
+The bot UI uses these descriptor folders as the mob catalog.

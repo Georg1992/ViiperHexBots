@@ -1,19 +1,13 @@
-LogToFile(message) {
-    FormatTime, timestamp,, yyyy-MM-dd HH:mm:ss
-    FileAppend, [%timestamp%] %message%`n, bot_log.txt
-}
-
 AppendLog(message) {
     static logLines := []
 
-    if IsFunc("SessionLogWrite") {
-        fn := "SessionLogWrite"
-        %fn%("INFO", "app", message)
+    if IsFunc("BehaviorLogWrite") {
+        fn := "BehaviorLogWrite"
+        %fn%(message)
     }
 
     FormatTime, timestamp,, HH:mm:ss
     line := "[" . timestamp . "] " . message
-    LogToFile(message)
 
     logLines.Push(line)
     if (logLines.MaxIndex() > 200)
@@ -43,6 +37,23 @@ FormatWindowListEntry(title, process, minMaxStatus := 0) {
 BotShouldStop() {
     global botStopRequested
     return botStopRequested
+}
+
+RequestBotStop(reason := "stopped") {
+    global botRunning, botPaused, botStopRequested
+
+    botStopRequested := true
+    botPaused := false
+    ReleaseBotInputs()
+    if IsFunc("AppendLog")
+        AppendLog("Bot stop requested: " . reason)
+
+    if (IsLabel("StopBotProcedure")) {
+        SetTimer, StopBotProcedure, -1
+    } else {
+        botRunning := false
+    }
+    return false
 }
 
 BotSleep(ms) {
@@ -232,16 +243,6 @@ AltClicks(times){
     return !BotShouldStop()
 }
 
-SkillClick(KeySC){
-    sleep 50
-    Input.SendKey(KeySC, 1)
-    sleep 50
-    Input.SendKey(KeySC, 0)
-    Input.SendMouseButton(0, 1)
-    sleep 50
-    Input.SendMouseButton(0, 0)
-}
-
 HuntSkillClick(KeySC) {
     if (BotShouldStop())
         return false
@@ -301,12 +302,16 @@ MoveCursorToImage(image, xOffset := 0, yOffset := 0){
 ZoomOut(){
     global zoomWheelDelta, zoomSteps, zoomDelayMs, gameWindowID, gameWindowTitle
 
+    if (BotShouldStop())
+        return false
+
     if (gameWindowID) {
         WinGet, activeID, ID, A
         if (activeID != gameWindowID) {
             WinActivate, ahk_id %gameWindowID%
             WinWaitActive, ahk_id %gameWindowID%, , 2
-            Sleep 200
+            if (!BotSleep(200))
+                return false
         }
     }
 
@@ -314,12 +319,16 @@ ZoomOut(){
         AppendLog("Zooming out (" . (zoomWheelDelta > 0 ? "scroll up" : "scroll down") . ")")
 
     Loop %zoomSteps% {
+        if (BotShouldStop())
+            return false
         if (zoomWheelDelta > 0)
             Click, WheelUp
         else
             Click, WheelDown
-        Sleep %zoomDelayMs%
+        if (!BotSleep(zoomDelayMs))
+            return false
     }
+    return true
 }
 
 ParseKeyCombo(keyCombo, ByRef scKey, ByRef scModifier) {
@@ -359,7 +368,8 @@ SendKeyCombo(rawKeyCombo, pressDuration := 50, holdDuration := 300) {
     ; Parse the key combination
     scKey := 0, scModifier := 0
     if !%keyParser%(rawKeyCombo, scKey, scModifier) {
-        MsgBox, Failed to parse key combination: %rawKeyCombo%
+        if IsFunc("AppendLog")
+            AppendLog("Failed to parse key combination: " . rawKeyCombo)
         return false
     }
 

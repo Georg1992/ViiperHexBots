@@ -1,4 +1,4 @@
-#Include %A_ScriptDir%\TabletLib\JSON.ahk
+#Include %A_ScriptDir%\Lib\JSON.ahk
 
 global clientProfileName := "HoneyRO"
 global clientSupportsMemory := false
@@ -96,56 +96,4 @@ ApplyZoomDirectionFromGlobal() {
 MemoryFeaturesActive() {
     global memoryReadingEnabled, clientSupportsMemory
     return memoryReadingEnabled && clientSupportsMemory
-}
-
-ApplyMemoryDependentUI() {
-    global memoryReadingEnabled, clientSupportsMemory, captchaEnabled, captchaLabel
-    global warperCoordsSet, TakeFlyWings
-
-    if (!clientSupportsMemory) {
-        memoryReadingEnabled := false
-        GuiControl,, UseMemoryReading, 0
-        GuiControl, Disable, UseMemoryReading
-    } else {
-        GuiControl, Enable, UseMemoryReading
-        if (memoryReadingEnabled)
-            GuiControl,, UseMemoryReading, 1
-        else
-            GuiControl,, UseMemoryReading, 0
-    }
-
-    memActive := MemoryFeaturesActive()
-    ctlState := memActive ? "Enable" : "Disable"
-
-    GuiControl, %ctlState%, SetWarperCoordsBtn
-    GuiControl, % (memActive && warperCoordsSet) ? "Enable" : "Disable", ResetWarperBtn
-    GuiControl, %ctlState%, SavePointButtonKey
-    GuiControl, %ctlState%, OpenStorageButtonKey
-    GuiControl, %ctlState%, WeightModifier
-    GuiControl, %ctlState%, WeightModifierText
-    GuiControl, %ctlState%, WeightSliderLabel
-    GuiControl, %ctlState%, TakeFlyWings
-    GuiControl, % (memActive && TakeFlyWings) ? "Enable" : "Disable", FlyWingsAmount
-
-    if (captchaEnabled && memActive) {
-        GuiControl, Show, DetectCaptcha
-        GuiControl, Enable, DetectCaptcha
-        GuiControl,, DetectCaptcha, Detect Captcha (%captchaLabel%)
-    } else {
-        GuiControl,, DetectCaptcha, 0
-        DetectCaptcha := 0
-        GuiControl, Hide, DetectCaptcha
-    }
-
-    if (memActive && warperCoordsSet) {
-        GuiControl, Show, TimeOnLocationTextLabel
-        GuiControl, Show, TimeOnLocation
-        GuiControl, Show, TimeOnLocationValueText
-        GuiControl, Enable, TimeOnLocation
-    } else {
-        GuiControl, Hide, TimeOnLocationTextLabel
-        GuiControl, Hide, TimeOnLocation
-        GuiControl, Hide, TimeOnLocationValueText
-        GuiControl, Disable, TimeOnLocation
-    }
 }
