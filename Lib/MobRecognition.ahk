@@ -5,6 +5,8 @@
 global mobRecognitionDebug := false
 global mobRecognitionPython := ""
 global mobRecognitionCli := "mob-recognition\cli.py"
+global MobRecognitionEngagementRadius := 72
+global MobRecognitionAttackSuppressRadius := 28
 global mobRecognitionShutdownDone := false
 global mobRecognitionActiveDetectPid := 0
 
@@ -22,14 +24,14 @@ EnsureMobRecognitionPython() {
     if (mobRecognitionPython != "")
         return mobRecognitionPython
 
-    for index, cmd in ["py -3", "python", "python3"] {
-        RunWait, %ComSpec% /c %cmd% --version, , Hide UseErrorLevel
-        if (!ErrorLevel) {
-            mobRecognitionPython := cmd
-            return cmd
-        }
+    RunWait, %ComSpec% /c py -3 --version, , Hide UseErrorLevel
+    if (ErrorLevel) {
+        MobRecognitionLog("MobRecognition: Python 3 not found (py -3)")
+        return ""
     }
-    return ""
+
+    mobRecognitionPython := "py -3"
+    return mobRecognitionPython
 }
 
 MobJsonIsOk(jsonText) {
@@ -98,15 +100,21 @@ MobRecognitionIsHuntTargetBlock(block) {
 }
 
 MobRecognitionIsLivingBlock(block) {
-    if (InStr(block, """living"":true"))
-        return true
-    if (InStr(block, """dead"":true"))
-        return false
-    return InStr(block, """accepted"":true")
+    return InStr(block, """living"":true")
 }
 
 MobRecognitionIsDeadBlock(block) {
     return InStr(block, """dead"":true")
+}
+
+MobRecognitionExtractCandidatesSection(jsonText) {
+    if (jsonText = "" || !InStr(jsonText, """candidates"":"))
+        return ""
+    if (RegExMatch(jsonText, "i)""candidates"":\[\]", match))
+        return ""
+    if (RegExMatch(jsonText, "i)""candidates"":\[([^\]]*)\]", match))
+        return match1
+    return ""
 }
 
 MobRecognitionCountLivingInRange(jsonText, ignoreX, ignoreY, ignoreW, ignoreH) {
@@ -114,8 +122,12 @@ MobRecognitionCountLivingInRange(jsonText, ignoreX, ignoreY, ignoreW, ignoreH) {
     if (jsonText = "" || !MobJsonIsOk(jsonText))
         return 0
 
+    section := MobRecognitionExtractCandidatesSection(jsonText)
+    if (section = "")
+        return 0
+
     pos := 1
-    while (pos := RegExMatch(jsonText, "i)\{[^{}]+\}", block, pos)) {
+    while (pos := RegExMatch(section, "i)\{[^{}]+\}", block, pos)) {
         if (!MobRecognitionIsLivingBlock(block)) {
             pos += StrLen(block)
             continue
@@ -151,8 +163,12 @@ MobRecognitionEngagementsResolved(jsonText, attackedXs, attackedYs, radius) {
     livingYs := []
     deadXs := []
     deadYs := []
+    section := MobRecognitionExtractCandidatesSection(jsonText)
+    if (section = "")
+        return true
+
     pos := 1
-    while (pos := RegExMatch(jsonText, "i)\{[^{}]+\}", block, pos)) {
+    while (pos := RegExMatch(section, "i)\{[^{}]+\}", block, pos)) {
         candX := 0
         candY := 0
         candConf := 0
@@ -183,6 +199,60 @@ MobRecognitionEngagementsResolved(jsonText, attackedXs, attackedYs, radius) {
     return true
 }
 
+MobRecognitionSlotHasDead(jsonText, slotX, slotY, radius) {
+    if (jsonText = "" || !MobJsonIsOk(jsonText))
+        return false
+
+    section := MobRecognitionExtractCandidatesSection(jsonText)
+    if (section = "")
+        return false
+
+    pos := 1
+    while (pos := RegExMatch(section, "i)\{[^{}]+\}", block, pos)) {
+        if (!MobRecognitionIsDeadBlock(block)) {
+            pos += StrLen(block)
+            continue
+        }
+
+        candX := 0
+        candY := 0
+        candConf := 0
+        if (!MobRecognitionParseCandidateBlock(block, candX, candY, candConf)) {
+            pos += StrLen(block)
+            continue
+        }
+        dx := slotX - candX
+        dy := slotY - candY
+        if ((dx * dx) + (dy * dy) <= radius * radius)
+            return true
+        pos += StrLen(block)
+    }
+
+    return false
+}
+
+MobRecognitionPurgeResolvedAttackSlots(jsonText, ByRef attackedXs, ByRef attackedYs, ByRef attackCounts, radius) {
+    purged := 0
+    slotCount := attackedXs.MaxIndex()
+    if (!slotCount)
+        return 0
+
+    index := slotCount
+    while (index >= 1) {
+        slotX := attackedXs[index]
+        slotY := attackedYs[index]
+        if (MobRecognitionSlotHasDead(jsonText, slotX, slotY, radius)) {
+            attackedXs.RemoveAt(index)
+            attackedYs.RemoveAt(index)
+            attackCounts.RemoveAt(index)
+            purged++
+        }
+        index--
+    }
+
+    return purged
+}
+
 MobRecognitionSelectLivingTarget(jsonText, ByRef outX, ByRef outY, ByRef outConf, ignoreX, ignoreY, ignoreW, ignoreH, unreachableXs, unreachableYs, radius) {
     outX := 0
     outY := 0
@@ -197,8 +267,12 @@ MobRecognitionSelectLivingTarget(jsonText, ByRef outX, ByRef outY, ByRef outConf
     if (!IsObject(unreachableYs))
         unreachableYs := []
 
+    section := MobRecognitionExtractCandidatesSection(jsonText)
+    if (section = "")
+        return false
+
     pos := 1
-    while (pos := RegExMatch(jsonText, "i)\{[^{}]+\}", block, pos)) {
+    while (pos := RegExMatch(section, "i)\{[^{}]+\}", block, pos)) {
         if (!MobRecognitionIsLivingBlock(block)) {
             pos += StrLen(block)
             continue
@@ -330,10 +404,17 @@ MobRecognitionHuntScan(mobName, roiX, roiY, roiW, roiH, attackedXs, attackedYs, 
         return ""
     }
 
-    jsonText := MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, false, showProgress)
+    jsonText := MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, false, showProgress, attackedXs, attackedYs)
     if (jsonText = "")
         return ""
+    MobRecognitionPurgeResolvedAttackSlots(jsonText, attackedXs, attackedYs, attackCounts, MobRecognitionEngagementRadius)
     return MobRecognitionBuildSimpleHuntResponse(jsonText, attackedXs, attackedYs, unreachableXs, unreachableYs, emptyScans, fastIdle)
+}
+
+MobRecognitionExtractCandidatesJson(jsonText) {
+    if (RegExMatch(jsonText, "i)""candidates"":(\[[^\]]*\])", match))
+        return match1
+    return "[]"
 }
 
 MobRecognitionBuildSimpleHuntResponse(jsonText, attackedXs, attackedYs, unreachableXs, unreachableYs, emptyScans, fastIdle := false) {
@@ -343,10 +424,11 @@ MobRecognitionBuildSimpleHuntResponse(jsonText, attackedXs, attackedYs, unreacha
     targetXs := []
     targetYs := []
     targetConfs := []
-    emptyXs := []
-    emptyYs := []
-    livingInRange := MobRecognitionCollectHuntTargets(jsonText, targetXs, targetYs, targetConfs, 0, 0, 0, 0, attackedXs, attackedYs, 72, unreachableXs, unreachableYs, 72)
-    engagementsResolved := MobRecognitionEngagementsResolved(jsonText, attackedXs, attackedYs, 72)
+    suppressRadius := MobRecognitionAttackSuppressRadius
+    engagementRadius := MobRecognitionEngagementRadius
+    totalLivingInRange := MobRecognitionCountLivingInRange(jsonText, 0, 0, 0, 0)
+    livingInRange := MobRecognitionCollectHuntTargets(jsonText, targetXs, targetYs, targetConfs, 0, 0, 0, 0, attackedXs, attackedYs, suppressRadius, unreachableXs, unreachableYs, engagementRadius)
+    engagementsResolved := MobRecognitionEngagementsResolved(jsonText, attackedXs, attackedYs, engagementRadius)
 
     if (livingInRange > 0) {
         attackX := targetXs[1]
@@ -355,13 +437,16 @@ MobRecognitionBuildSimpleHuntResponse(jsonText, attackedXs, attackedYs, unreacha
     }
 
     teleportScansRequired := fastIdle ? 1 : 2
-    canTeleport := (livingInRange = 0 && engagementsResolved && (emptyScans + 1) >= teleportScansRequired) ? "true" : "false"
-    status := (livingInRange > 0) ? "target" : (engagementsResolved ? "clear" : "wait_kill")
+    pendingAttackSlots := attackedXs.MaxIndex() ? attackedXs.MaxIndex() : 0
+    scanReady := pendingAttackSlots = 0 ? ((emptyScans + 1) >= teleportScansRequired) : true
+    canTeleport := (totalLivingInRange = 0 && engagementsResolved && scanReady) ? "true" : "false"
+    status := (totalLivingInRange > 0) ? "target" : (engagementsResolved ? "clear" : "wait_kill")
     attackJson := "null"
     if (attackX > 0 && attackY > 0)
         attackJson := "{""centerX"":" . attackX . ",""centerY"":" . attackY . ",""confidence"":" . attackConf . ",""accepted"":true,""living"":true,""dead"":false}"
 
-    return "{""ok"":true,""pipeline"":""simple"",""hunt"":true,""status"":""" . status . """,""livingInRange"":" . livingInRange . ",""canTeleport"":" . canTeleport . ",""engagementsResolved"":" . (engagementsResolved ? "true" : "false") . ",""teleportScansRequired"":" . teleportScansRequired . ",""attack"":" . attackJson . ",""markUnreachable"":[]}"
+    candidatesJson := MobRecognitionExtractCandidatesJson(jsonText)
+    return "{""ok"":true,""pipeline"":""simple"",""hunt"":true,""status"":""" . status . """,""livingInRange"":" . livingInRange . ",""totalLivingInRange"":" . totalLivingInRange . ",""canTeleport"":" . canTeleport . ",""engagementsResolved"":" . (engagementsResolved ? "true" : "false") . ",""teleportScansRequired"":" . teleportScansRequired . ",""candidates"":" . candidatesJson . ",""attack"":" . attackJson . ",""markUnreachable"":[]}"
 }
 
 MobRecognitionParseHuntPlan(jsonText, ByRef livingInRange, ByRef canTeleport, ByRef attackX, ByRef attackY, ByRef attackConf, ByRef huntStatus, ByRef engagementsResolved, ByRef teleportScansRequired) {
@@ -373,12 +458,15 @@ MobRecognitionParseHuntPlan(jsonText, ByRef livingInRange, ByRef canTeleport, By
     huntStatus := ""
     engagementsResolved := true
     teleportScansRequired := 6
+    totalLivingInRange := 0
 
     if (jsonText = "" || !MobJsonIsOk(jsonText) || !InStr(jsonText, """hunt"":"))
         return false
 
     if (RegExMatch(jsonText, "i)""livingInRange"":(\d+)", match))
         livingInRange := match1 + 0
+    if (RegExMatch(jsonText, "i)""totalLivingInRange"":(\d+)", match))
+        totalLivingInRange := match1 + 0
     if (RegExMatch(jsonText, "i)""canTeleport"":(true|false)", match))
         canTeleport := (match1 = "true")
     if (RegExMatch(jsonText, "i)""engagementsResolved"":(true|false)", match))
@@ -417,7 +505,7 @@ MobRecognitionApplyHuntMarkUnreachable(jsonText, ByRef unreachableXs, ByRef unre
     return marked
 }
 
-MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, debug := false, showProgress := false) {
+MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, debug := false, showProgress := false, attackedXs := "", attackedYs := "") {
     global mobRecognitionCli, mobRecognitionActiveDetectPid
     global botStopRequested
 
@@ -441,7 +529,18 @@ MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, debug := false, showPro
         fn := "BotSessionScaleArgs"
         scaleArg := %fn%(mobName)
     }
-    cmd := A_ComSpec . " /c " . pythonCmd . " """ . cliPath . """ detect-simple --mob " . mobName . " --roi " . roiArg . " --output """ . outFile . """" . sessionArg . scaleArg . debugFlag
+    attackArg := ""
+    slotCount := attackedXs.MaxIndex()
+    if (slotCount > 0) {
+        attackSlots := ""
+        Loop %slotCount% {
+            localX := attackedXs[A_Index] - roiX
+            localY := attackedYs[A_Index] - roiY
+            attackSlots .= localX . "," . localY . ";"
+        }
+        attackArg := " --attack-slots """ . attackSlots . """"
+    }
+    cmd := A_ComSpec . " /c " . pythonCmd . " """ . cliPath . """ detect-simple --mob " . mobName . " --roi " . roiArg . " --output """ . outFile . """" . sessionArg . scaleArg . attackArg . debugFlag
 
     startTick := A_TickCount
     jsonText := ""
@@ -716,24 +815,12 @@ MobRecognitionCollectHuntTargets(jsonText, ByRef outXs, ByRef outYs, ByRef outCo
     if (jsonText = "" || !MobJsonIsOk(jsonText))
         return 0
 
-    if (!InStr(jsonText, """best"":null") && RegExMatch(jsonText, "i)""best"":\{([^}]+)\}", bestMatch)) {
-        bestBlock := "{" . bestMatch1 . "}"
-        if (MobRecognitionIsHuntTargetBlock(bestBlock)) {
-            candX := 0
-            candY := 0
-            candConf := 0
-            if (MobRecognitionParseCandidateBlock(bestBlock, candX, candY, candConf)) {
-                if (MobRecognitionIsHuntEligiblePoint(candX, candY, ignoreX, ignoreY, ignoreW, ignoreH, attackedXs, attackedYs, attackedRadius, unreachableXs, unreachableYs, unreachableRadius)) {
-                    outXs.Push(candX)
-                    outYs.Push(candY)
-                    outConfs.Push(candConf)
-                }
-            }
-        }
-    }
+    section := MobRecognitionExtractCandidatesSection(jsonText)
+    if (section = "")
+        return 0
 
     pos := 1
-    while (pos := RegExMatch(jsonText, "i)\{[^{}]+\}", block, pos)) {
+    while (pos := RegExMatch(section, "i)\{[^{}]+\}", block, pos)) {
         if (!MobRecognitionIsHuntTargetBlock(block)) {
             pos += StrLen(block)
             continue
@@ -814,8 +901,12 @@ MobRecognitionLogCandidates(jsonText) {
         return
     }
 
+    section := MobRecognitionExtractCandidatesSection(jsonText)
+    if (section = "")
+        return
+
     pos := 1
-    while (pos := RegExMatch(jsonText, "i)\{[^{}]+\}", block, pos)) {
+    while (pos := RegExMatch(section, "i)\{[^{}]+\}", block, pos)) {
         if (!MobRecognitionIsAcceptedBlock(block)) {
             pos += StrLen(block)
             continue

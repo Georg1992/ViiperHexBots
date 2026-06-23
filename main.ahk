@@ -49,7 +49,6 @@ global cellSize := 50 ; Pixels per RO viewport cell
 global TimeOnLocation := 20 ; Default time in seconds
 global Iterations := 0 ; Default iterations before Kafra
 global WeightModifier := 49
-global ZoomWheelDirection := "Scroll up"
 
 ; Checkboxes
 global TakeFlyWings := 0 ; Default checked (true)
@@ -94,7 +93,6 @@ if (FileExist("config.ini")) {
 LoadClientProfile(clientProfileName)
 if (!clientSupportsMemory)
     memoryReadingEnabled := false
-ApplyZoomDirectionFromGlobal()
 
 clientOptions := ""
 for index, profileName in ListClientProfiles()
@@ -106,61 +104,35 @@ for index, profileName in ListClientProfiles()
 Gui, Font, s10, Segoe UI
 
 ; Title
-Gui, Add, Text, x10 y15 w700 h30 Center, ViiperHex Bot
-Gui, Add, Text, x10 y50 w700 h2 0x10 ; Divider
+Gui, Add, Text, x10 y15 w900 h30 Center, ViiperHex Bot
+Gui, Add, Text, x10 y50 w900 h2 0x10 ; Divider
 
 ; Window Selection
-Gui, Add, Text, x20 y70 w560 h25, Select Game Window:
-Gui, Add, DropDownList, x20 y100 w490 h25 r10 vSelectedWindow gOnWindowSelect, ||
-    Gui, Add, Button, x515 y100 w75 h25 gRefreshWindows, Refresh
-    Gui, Add, Text, x20 y130 w490 h25 vWindowInfo, % (gameWindowTitle ? gameWindowTitle : "No window selected")
-
-; Client profile
-Gui, Add, Text, x20 y160 w120 h25, Client Profile:
-Gui, Add, DropDownList, x140 y157 w180 h25 r10 vSelectedClientProfile gOnClientProfileChange, %clientOptions%
-Gui, Add, CheckBox, x330 y157 vUseMemoryReading gUpdateMemoryMode Checked%memoryReadingEnabled%, Use memory reading
-
-Gui, Add, Text, x20 y185 w120 h25, Zoom out via:
-Gui, Add, DropDownList, x140 y182 w150 h25 r10 vZoomWheelDirection gUpdateZoomSettings, Scroll up|Scroll down
+Gui, Add, GroupBox, x15 y65 w570 h95, Game Window
+Gui, Add, Text, x30 y90 w150 h20, Select game window:
+Gui, Add, DropDownList, x30 y115 w450 h25 r10 vSelectedWindow gOnWindowSelect, ||
+Gui, Add, Button, x490 y115 w75 h25 gRefreshWindows, Refresh
+Gui, Add, Text, x30 y140 w535 h20 vWindowInfo, % (gameWindowTitle ? gameWindowTitle : "No window selected")
 
 ; Bot Status
-Gui, Add, Text, x600 y70 w150 h30 vBotStatus, Status: Off
-Gui, Add, Progress, x600 y+3 w150 h12 cRed vStatusLight, 100
+Gui, Add, GroupBox, x610 y65 w280 h95, Status
+Gui, Add, Text, x630 y90 w120 h25 vBotStatus, Status: Off
+Gui, Add, Progress, x630 y120 w230 h14 cRed vStatusLight, 100
 
 ; Input backend
-Gui, Add, Text, x600 y170 w150 h40 vInputStatus, Input: Starting...
-Gui, Add, Text, x600 y+15 w150 h40 vInputHint, Launch the game after VIIPER is ready
+Gui, Add, GroupBox, x610 y170 w280 h105, Input
+Gui, Add, Text, x630 y195 w230 h25 vInputStatus, Input: Starting...
+Gui, Add, Text, x630 y225 w230 h35 vInputHint, Launch the game after VIIPER is ready
 
-; Log panel
-Gui, Add, GroupBox, x600 y520 w170 h350, Log
-Gui, Add, Edit, x610 y545 w150 h315 ReadOnly -WantReturn +VScroll vLogBox gLogBoxFocus
+; Client and mob setup
+Gui, Add, GroupBox, x15 y175 w270 h195, Setup
+Gui, Add, Text, x30 y205 w100 h20, Client Profile:
+Gui, Add, DropDownList, x135 y202 w130 h25 r10 vSelectedClientProfile gOnClientProfileChange, %clientOptions%
+Gui, Add, CheckBox, x30 y235 w220 h25 vUseMemoryReading gUpdateMemoryMode Checked%memoryReadingEnabled%, Use memory reading
 
-; Warper Coordinates Group - GUI Definition (unchanged)
-Gui, Add, GroupBox, x600 y300 w150 h100, Warper Coordinates
-Gui, Add, Button, x610 y320 w130 h30 gSetWarperCoords vSetWarperCoordsBtn, Set Warper Position
-Gui, Add, Text, x610 y360 w130 h20 vWarperCoordsText, % warperCoordsSet ? "X: " warperX " Y: " warperY : "Not set"
-Gui, Add, Button, x610 y390 w130 h25 gResetWarperCoords vResetWarperBtn, Reset Coordinates
-GuiControl, % warperCoordsSet ? "Enable" : "Disable", ResetWarperBtn
-
-; Time on Location Controls
-Gui, Add, Text, x620 y450 w120 h50 vTimeOnLocationTextLabel, Time on Location (s):
-Gui, Add, Slider, x600 y485 w150 h25 vTimeOnLocation gUpdateSliderValues Range20-240, %TimeOnLocation%
-Gui, Add, Text, x760 y485 w30 h25 vTimeOnLocationValueText Center, %TimeOnLocation%
-GuiControl, % warperCoordsSet ? "Show" : "Hide", TimeOnLocationTextLabel
-GuiControl, % warperCoordsSet ? "Show" : "Hide", TimeOnLocation
-GuiControl, % warperCoordsSet ? "Show" : "Hide", TimeOnLocationValueText
-
-; Set initial visibility based on warperCoordsSet
-if (!warperCoordsSet) {
-    GuiControl, Hide, TimeOnLocationTextLabel
-    GuiControl, Hide, TimeOnLocation
-    GuiControl, Hide, TimeOnLocationValueText
-}
-
-; Monster Type
-monsterStartY := 220
-Gui, Add, Text, x20 y%monsterStartY% w180 h30, Descriptor Mob:
-yPos := monsterStartY + 30
+; Descriptor mob selection
+Gui, Add, Text, x30 y280 w220 h20, Descriptor Mob:
+mobY := 305
 
 if (MobNames.MaxIndex() < 1) {
     MsgBox, 16, ViiperHexBots, No mob descriptors found.`n`nCreate one with:`n.\scripts\build-mob-descriptor.ps1 -Mob horn
@@ -172,76 +144,88 @@ if (selectedMonsterIndex < 1 || selectedMonsterIndex > MobNames.MaxIndex())
 Loop % MobNames.MaxIndex() {
     ; Use the pre-loaded selectedMonsterIndex from config
     isChecked := (A_Index == selectedMonsterIndex) ? "Checked" : ""
-        Gui, Add, Radio, x20 y%yPos% %isChecked% vSelectedMonster%A_Index% gUpdateGlobalsFromUI, % MobNames[A_Index]
-        yPos += 35
-    }
+    Gui, Add, Radio, x35 y%mobY% %isChecked% vSelectedMonster%A_Index% gUpdateGlobalsFromUI, % MobNames[A_Index]
+    mobY += 25
+}
 
-    mobDetectY := monsterStartY + 30
-    Gui, Add, Text, x330 y%mobDetectY% w200 h25, Mob detection: simple descriptor
+Gui, Add, Text, x30 y390 w230 h20, Mob detection: simple descriptor
 
-    ; Keybindings
-    Gui, Add, Text, x160 y200 w130 h25, Attack Skill Button:
-    Gui, Add, Hotkey, x300 yp w55 vSkillButtonKey gUpdateGlobalsFromUI, %SkillButtonKey%
+; Keybindings
+Gui, Add, GroupBox, x305 y175 w280 h245, Keybindings
+Gui, Add, Text, x325 y205 w125 h22, Attack Skill:
+Gui, Add, Hotkey, x455 y202 w65 h25 vSkillButtonKey gUpdateGlobalsFromUI, %SkillButtonKey%
+Gui, Add, Text, x325 y235 w125 h22, Attack delay:
+Gui, Add, Edit, x455 y232 w45 h25 vSkillDelay Number gUpdateGlobalsFromUI, %SkillDelay%
+Gui, Add, Text, x505 y235 w35 h22, ms
 
-    Gui, Add, Text, x360 yp+0 w100 h25, delay
-    Gui, Add, Edit, x410 yp+0 w40 h25 vSkillDelay Number gUpdateGlobalsFromUI, %SkillDelay%
-    Gui, Add, Text, x455 yp+0 w30 h25, (ms)
+Gui, Add, Text, x325 y270 w125 h22, Teleport:
+Gui, Add, Hotkey, x455 y267 w65 h25 vTeleportButtonKey gUpdateGlobalsFromUI, %TeleportButtonKey%
+Gui, Add, Text, x325 y300 w125 h22, Save Point:
+Gui, Add, Hotkey, x455 y297 w65 h25 vSavePointButtonKey gUpdateGlobalsFromUI, %SavePointButtonKey%
+Gui, Add, Text, x325 y330 w125 h22, Open Storage:
+Gui, Add, Hotkey, x455 y327 w65 h25 vOpenStorageButtonKey gUpdateGlobalsFromUI, %OpenStorageButtonKey%
+Gui, Add, Text, x325 y360 w125 h22, Skill Timer:
+Gui, Add, Hotkey, x455 y357 w65 h25 vSkillTimerButtonKey gUpdateGlobalsFromUI, %SkillTimerButtonKey%
+Gui, Add, Text, x325 y390 w125 h22, SP Item:
+Gui, Add, Hotkey, x455 y387 w65 h25 vSPButtonKey gUpdateGlobalsFromUI, %SPButtonKey%
+Gui, Add, Text, x525 y360 w35 h22, every
+Gui, Add, Edit, x560 y357 w35 h25 vSkillTimerInterval Number gUpdateGlobalsFromUI, %SkillTimerInterval%
+Gui, Add, Text, x600 y360 w20 h22, s
 
-    Gui, Add, Text, x160 y+10 w130 h25, Teleport Button:
-    Gui, Add, Hotkey, x300 yp w55 vTeleportButtonKey gUpdateGlobalsFromUI, %TeleportButtonKey%
+; Hunt settings
+Gui, Add, GroupBox, x15 y430 w570 h130, Hunt Settings
+Gui, Add, Text, x35 y460 w135 h30, Search Range (9-16 Cells):
+Gui, Add, Slider, x175 y457 w260 h25 vSearchRange gUpdateSliderValues Range9-16 TickInterval1 ToolTip, %SearchRange%
+Gui, Add, Text, x445 y457 w35 h25 vSearchRangeText Center, %SearchRange%
 
-    Gui, Add, Text, x160 y+10 w130 h25, To Save Point Button:
-    Gui, Add, Hotkey, x300 yp w55 vSavePointButtonKey gUpdateGlobalsFromUI, %SavePointButtonKey%
+Gui, Add, Text, x35 y500 w135 h30 vWeightSliderLabel, Items To Kafra when weight is:
+Gui, Add, Slider, x175 y497 w260 h25 vWeightModifier gUpdateSliderValues Range49-90 TickInterval1 ToolTip, %WeightModifier%
+Gui, Add, Text, x445 y497 w45 h25 vWeightModifierText Center, % (WeightModifier = 49 ? "Off" : WeightModifier)
+Gui, Add, Text, x490 y497 w25 h25, `%
 
-    Gui, Add, Text, x160 y+10 w130 h25, Open Storage Button:
-    Gui, Add, Hotkey, x300 yp w55 vOpenStorageButtonKey gUpdateGlobalsFromUI, %OpenStorageButtonKey%
+Gui, Add, CheckBox, x35 y535 vTakeFlyWings gUpdateTakeFlyWings Checked%TakeFlyWings%, Take Fly Wings
+Gui, Add, Edit, x145 y532 w50 vFlyWingsAmount Number Limit3 -WantReturn, %FlyWingsAmount%
+Gui, Add, UpDown, Range1-500, %FlyWingsAmount% ; This adds spin controls
+GuiControl,, FlyWingsAmount, % (FlyWingsAmount ? FlyWingsAmount : 100)
+GuiControl, % (TakeFlyWings ? "Enable" : "Disable"), FlyWingsAmount
+Gui, Add, CheckBox, x260 y535 vDetectCaptcha gUpdateGlobalsFromUI Checked%DetectCaptcha%, Detect Captcha
 
-    Gui, Add, Text, x160 y+10 w130 h25, Skill Timer Button:
-    Gui, Add, Hotkey, x300 yp w55 vSkillTimerButtonKey gUpdateGlobalsFromUI, %SkillTimerButtonKey%
+; Warper Coordinates
+Gui, Add, GroupBox, x610 y290 w280 h125, Warper Coordinates
+Gui, Add, Button, x630 y315 w130 h28 gSetWarperCoords vSetWarperCoordsBtn, Set Position
+Gui, Add, Button, x770 y315 w95 h28 gResetWarperCoords vResetWarperBtn, Reset
+Gui, Add, Text, x630 y352 w230 h20 vWarperCoordsText, % warperCoordsSet ? "X: " warperX " Y: " warperY : "Not set"
+GuiControl, % warperCoordsSet ? "Enable" : "Disable", ResetWarperBtn
 
-    Gui, Add, Text, x360 yp+0 w100 h25, every
-    Gui, Add, Edit, x410 yp+0 w40 h25 vSkillTimerInterval Number gUpdateGlobalsFromUI, %SkillTimerInterval%
-    Gui, Add, Text, x455 yp+0 w30 h25, (s)
+; Time on Location Controls
+Gui, Add, Text, x630 y378 w130 h22 vTimeOnLocationTextLabel, Time on location:
+Gui, Add, Slider, x630 y397 w185 h25 vTimeOnLocation gUpdateSliderValues Range20-240, %TimeOnLocation%
+Gui, Add, Text, x820 y397 w45 h25 vTimeOnLocationValueText Center, %TimeOnLocation%
+GuiControl, % warperCoordsSet ? "Show" : "Hide", TimeOnLocationTextLabel
+GuiControl, % warperCoordsSet ? "Show" : "Hide", TimeOnLocation
+GuiControl, % warperCoordsSet ? "Show" : "Hide", TimeOnLocationValueText
 
-    Gui, Add, Text, x160 y+10 w130 h25, SP Item Button:
-    Gui, Add, Hotkey, x300 yp w55 vSPButtonKey gUpdateGlobalsFromUI, %SPButtonKey%
+; Set initial visibility based on warperCoordsSet
+if (!warperCoordsSet) {
+    GuiControl, Hide, TimeOnLocationTextLabel
+    GuiControl, Hide, TimeOnLocation
+    GuiControl, Hide, TimeOnLocationValueText
+}
 
-    ; Sliders
-    inputStartY := yPos + 30
+; Log panel
+Gui, Add, GroupBox, x610 y430 w280 h225, Log
+Gui, Add, Edit, x625 y455 w250 h185 ReadOnly -WantReturn +VScroll vLogBox gLogBoxFocus
 
-    ; Sliders with g-Labels
-    Gui, Add, Text, x20 y%inputStartY% w120 h40, Search Range (9-16 Cells):
-    Gui, Add, Slider, x150 yp w200 h25 vSearchRange gUpdateSliderValues Range9-16 TickInterval1 ToolTip, %SearchRange%
-    Gui, Add, Text, x+5 yp w30 h25 vSearchRangeText Center, %SearchRange%
+GuiControl, ChooseString, SelectedClientProfile, %clientProfileName%
+Gosub, ApplyMemoryDependentUI
 
-    Gui, Add, Text, x20 y+20 w120 h40 vWeightSliderLabel, Items To Kafra when weight is:
-    Gui, Add, Slider, x150 yp w200 h25 vWeightModifier gUpdateSliderValues Range49-90 TickInterval1 ToolTip, %WeightModifier%
-    Gui, Add, Text, x+5 yp w30 h25 vWeightModifierText Center, % (WeightModifier = 49 ? "Off" : WeightModifier)
-    Gui, Add, Text, x+1 yp w30 h25, `%
-    ; Checkboxes
-    Gui, Add, CheckBox, x20 y600 vTakeFlyWings gUpdateTakeFlyWings Checked%TakeFlyWings%, Take Fly Wings
-    Gui, Add, Edit, x+10 yp-3 w50 vFlyWingsAmount Number Limit3 -WantReturn, %FlyWingsAmount%
-    Gui, Add, UpDown, Range1-500, %FlyWingsAmount% ; This adds spin controls
-    GuiControl,, FlyWingsAmount, % (FlyWingsAmount ? FlyWingsAmount : 100) ; Default to 15 if empty
-    GuiControl, % (TakeFlyWings ? "Enable" : "Disable"), FlyWingsAmount
+; Control Buttons
+Gui, Add, Text, x230 y605 w300 h25 Center, Press F12 to quickly toggle bot
+Gui, Add, Button, x255 y640 w120 h40 gExitBot, Exit
+Gui, Add, Button, x400 y640 w120 h40 gMainBotButton vBotButton, Start Bot
+Gui, Add, Button, x545 y640 w120 h40 gContinueBot vContinueButton Hidden, Continue
 
-    Gui, Add, CheckBox, x20 y+30 vDetectCaptcha gUpdateGlobalsFromUI Checked%DetectCaptcha%, Detect Captcha
-
-    GuiControl, ChooseString, SelectedClientProfile, %clientProfileName%
-    ApplyZoomDirectionFromGlobal()
-    GuiControl, ChooseString, ZoomWheelDirection, %ZoomWheelDirection%
-    Gosub, ApplyMemoryDependentUI
-
-    ; Control Buttons
-    buttonStartY := inputStartY + 300
-    reminderY := buttonStartY - 40
-    Gui, Add, Text, x220 y%reminderY% w280 h30 Center, Press F12 to quickly toggle bot
-
-    Gui, Add, Button, x220 y%buttonStartY% w120 h40 gExitBot, Exit
-    Gui, Add, Button, x360 y%buttonStartY% w120 h40 gMainBotButton vBotButton, Start Bot
-    Gui, Add, Button, x480 y%buttonStartY% w120 h40 gContinueBot vContinueButton Hidden, Continue
-
-    Gui, Show, w800 h900, Hex Bot
+Gui, Show, w920 h710, Hex Bot
     Menu, Tray, NoStandard
     Menu, Tray, Add, Open, TrayOpen
     Menu, Tray, Add, Reload Script, TrayReload
@@ -340,7 +324,11 @@ Loop % MobNames.MaxIndex() {
 
         RestoreWindow()
         SyncSearchRangeFromUI()
-        GetHuntSearchRegion(searchXs, searchYs, searchWs, searchHs)
+        if (!GetHuntSearchRegion(searchXs, searchYs, searchWs, searchHs)) {
+            AppendLog("ERROR: Game window not selected — select window and try again")
+            Gosub, StopBotProcedure
+            return
+        }
         if IsFunc("AppendLog")
             AppendLog("Search box: " . searchWs . "x" . searchHs . " px (" . SearchRange . " cells) at " . searchXs . "," . searchYs)
         ShowSearchRegionOverlay(searchXs, searchYs, searchWs, searchHs, 2500)
@@ -461,7 +449,6 @@ Loop % MobNames.MaxIndex() {
         IniWrite, %WeightModifier%, config.ini, Settings, WeightModifier
         IniWrite, %TakeFlyWings%, config.ini, Settings, TakeFlyWings
         IniWrite, %DetectCaptcha%, config.ini, Settings, DetectCaptcha
-        IniWrite, %ZoomWheelDirection%, config.ini, Settings, ZoomWheelDirection
 
         ; ====== [Warper] ======
         FileAppend, `n`n[Warper]`n, config.ini
@@ -513,7 +500,6 @@ Loop % MobNames.MaxIndex() {
         ; Checkboxes
         IniRead, TakeFlyWings, config.ini, Settings, TakeFlyWings, %TakeFlyWings%
         IniRead, DetectCaptcha, config.ini, Settings, DetectCaptcha, %DetectCaptcha%
-        IniRead, ZoomWheelDirection, config.ini, Settings, ZoomWheelDirection, %ZoomWheelDirection%
 
         ; Warper
         IniRead, warperX, config.ini, Warper, X
@@ -566,18 +552,8 @@ Loop % MobNames.MaxIndex() {
         } else {
             memoryReadingEnabled := UseMemoryReading
         }
-        if (zoomWheelDelta > 0)
-            ZoomWheelDirection := "Scroll up"
-        else
-            ZoomWheelDirection := "Scroll down"
         Gosub, ApplyMemoryDependentUI
         AppendLog("Client profile: " . clientProfileName)
-        GuiControl, ChooseString, ZoomWheelDirection, %ZoomWheelDirection%
-    return
-
-    UpdateZoomSettings:
-        GuiControlGet, ZoomWheelDirection,, ZoomWheelDirection
-        ApplyZoomDirectionFromGlobal()
     return
 
     UpdateMemoryMode:
@@ -1024,8 +1000,6 @@ ApplyMemoryDependentUI() {
 
     GuiControl, %ctlState%, SetWarperCoordsBtn
     GuiControl, % (memActive && warperCoordsSet) ? "Enable" : "Disable", ResetWarperBtn
-    GuiControl, %ctlState%, SavePointButtonKey
-    GuiControl, %ctlState%, OpenStorageButtonKey
     GuiControl, %ctlState%, WeightModifier
     GuiControl, %ctlState%, WeightModifierText
     GuiControl, %ctlState%, WeightSliderLabel

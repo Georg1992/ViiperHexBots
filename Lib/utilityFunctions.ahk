@@ -48,11 +48,7 @@ RequestBotStop(reason := "stopped") {
     if IsFunc("AppendLog")
         AppendLog("Bot stop requested: " . reason)
 
-    if (IsLabel("StopBotProcedure")) {
-        SetTimer, StopBotProcedure, -1
-    } else {
-        botRunning := false
-    }
+    SetTimer, StopBotProcedure, -1
     return false
 }
 
@@ -110,33 +106,35 @@ UpdateSearchRangeLabel() {
 GetHuntSearchRegion(ByRef xs, ByRef ys, ByRef ws, ByRef hs) {
     global SearchRange, cellSize, gameWindowID
 
+    xs := 0
+    ys := 0
+    ws := 0
+    hs := 0
+
+    if (!gameWindowID || !WinExist("ahk_id " gameWindowID))
+        return false
+
     searchSize := GetSearchBoxSizePx()
+    WinGetPos, wx, wy, , , ahk_id %gameWindowID%
+    ControlGetPos, cx, cy, cw, ch, , ahk_id %gameWindowID%
+    clientLeft := wx + cx
+    clientTop := wy + cy
 
-    if (gameWindowID && WinExist("ahk_id " gameWindowID)) {
-        WinGetPos, wx, wy, , , ahk_id %gameWindowID%
-        ControlGetPos, cx, cy, cw, ch, , ahk_id %gameWindowID%
-        clientLeft := wx + cx
-        clientTop := wy + cy
+    ws := searchSize
+    hs := searchSize
+    xs := clientLeft + (cw // 2) - (ws // 2)
+    ys := clientTop + (ch // 2) - (hs // 2)
 
-        ws := searchSize
-        hs := searchSize
-        xs := clientLeft + (cw // 2) - (ws // 2)
-        ys := clientTop + (ch // 2) - (hs // 2)
+    if (xs < clientLeft)
+        xs := clientLeft
+    if (ys < clientTop)
+        ys := clientTop
+    if (xs + ws > clientLeft + cw)
+        xs := clientLeft + cw - ws
+    if (ys + hs > clientTop + ch)
+        ys := clientTop + ch - hs
 
-        if (xs < clientLeft)
-            xs := clientLeft
-        if (ys < clientTop)
-            ys := clientTop
-        if (xs + ws > clientLeft + cw)
-            xs := clientLeft + cw - ws
-        if (ys + hs > clientTop + ch)
-            ys := clientTop + ch - hs
-    } else {
-        ws := searchSize
-        hs := searchSize
-        xs := A_ScreenWidth // 2 - ws // 2
-        ys := A_ScreenHeight // 2 - hs // 2
-    }
+    return (ws > 0 && hs > 0)
 }
 
 RestoreWindow() {
@@ -316,7 +314,7 @@ ZoomOut(){
     }
 
     if (IsFunc("AppendLog"))
-        AppendLog("Zooming out (" . (zoomWheelDelta > 0 ? "scroll up" : "scroll down") . ")")
+        AppendLog("Zooming out")
 
     Loop %zoomSteps% {
         if (BotShouldStop())

@@ -16,10 +16,12 @@ from act_reader import ActReader
 from frame_renderer import render_act_frame
 from spr_reader import SprReader
 
-from descriptor import ColorCluster, PatchSignature, SimpleMobDescriptor, SizeDescriptor
+from descriptor import ColorCluster, DeadStateProfile, PatchSignature, SimpleMobDescriptor, SizeDescriptor
 
-DESCRIPTOR_VERSION = 2
-EXPORT_ACTIONS = (0, 1)
+DESCRIPTOR_VERSION = 3
+LIVING_ACTIONS = (0, 1)
+DEATH_ACTIONS = tuple(range(32, 40))
+DEATH_CORPSE_FRAME_START = 5
 
 
 class SimpleDescriptorBuilder:
@@ -46,22 +48,78 @@ class SimpleDescriptorBuilder:
 
         spr_file = SprReader(spr_path).load()
         act_file = ActReader(act_path).load()
-        frames = []
-        action_indices = []
-        for action_index in EXPORT_ACTIONS:
+        living_frames = self._collect_frames(
+            spr_file,
+            act_file,
+            LIVING_ACTIONS,
+            frame_start=0,
+        )
+        if not living_frames:
+            raise RuntimeError(f"no stand/walk frames could be rendered for {mob_name}")
+
+        dead_frames = self._collect_frames(
+            spr_file,
+            act_file,
+            DEATH_ACTIONS,
+            frame_start=DEATH_CORPSE_FRAME_START,
+        )
+        if not dead_frames:
+            raise RuntimeError(f"no death corpse frames could be rendered for {mob_name}")
+
+        living_profile = self._build_frame_profile(living_frames)
+        dead_profile = self._build_frame_profile(dead_frames)
+
+        descriptor = SimpleMobDescriptor(
+            mob_name=mob_name,
+            version=DESCRIPTOR_VERSION,
+            size=living_profile["size"],
+            body_colors=living_profile["body_colors"],
+            accent_colors=living_profile["accent_colors"],
+            rare_colors=living_profile["rare_colors"],
+            sprite_palette_bgr=living_profile["sprite_palette_bgr"],
+            hsv_histogram=living_profile["hsv_histogram"],
+            rgb_histogram=living_profile["rgb_histogram"],
+            patch_signatures=living_profile["patch_signatures"][:120],
+            template_count=len(living_frames),
+            action_indices=living_profile["action_indices"],
+            dead=DeadStateProfile(
+                size=dead_profile["size"],
+                body_colors=dead_profile["body_colors"],
+                accent_colors=dead_profile["accent_colors"],
+                hsv_histogram=dead_profile["hsv_histogram"],
+                rgb_histogram=dead_profile["rgb_histogram"],
+                patch_signatures=dead_profile["patch_signatures"][:120],
+                action_indices=dead_profile["action_indices"],
+                corpse_frame_start=DEATH_CORPSE_FRAME_START,
+            ),
+        )
+        descriptor.save(descriptor_path)
+        return descriptor
+
+    def _collect_frames(
+        self,
+        spr_file,
+        act_file,
+        action_indices: tuple[int, ...],
+        *,
+        frame_start: int,
+    ) -> list[tuple[int, int, np.ndarray]]:
+        frames: list[tuple[int, int, np.ndarray]] = []
+        for action_index in action_indices:
             if action_index >= len(act_file.actions):
                 continue
             action = act_file.actions[action_index]
-            action_indices.append(action_index)
-            for frame_ref in action.frames:
+            for frame_index, frame_ref in enumerate(action.frames):
+                if frame_index < frame_start:
+                    continue
                 bgra = render_act_frame(spr_file, frame_ref)
                 cropped = self._tight_crop(bgra)
                 if cropped.shape[0] <= 1 or cropped.shape[1] <= 1:
                     continue
-                frames.append((action_index, frame_ref.frame_index, cropped))
-        if not frames:
-            raise RuntimeError(f"no stand/walk frames could be rendered for {mob_name}")
+                frames.append((action_index, frame_index, cropped))
+        return frames
 
+    def _build_frame_profile(self, frames: list[tuple[int, int, np.ndarray]]) -> dict:
         widths: list[int] = []
         heights: list[int] = []
         areas: list[int] = []
@@ -69,8 +127,13 @@ class SimpleDescriptorBuilder:
         opaque_hsv_parts: list[np.ndarray] = []
         accent_hsv_parts: list[np.ndarray] = []
         patch_signatures: list[PatchSignature] = []
+        action_indices: list[int] = []
 
-        for _action_index, _frame_index, bgra in frames:
+        seen_actions: set[int] = set()
+        for action_index, _frame_index, bgra in frames:
+            if action_index not in seen_actions:
+                seen_actions.add(action_index)
+                action_indices.append(action_index)
             bgr = bgra[:, :, :3]
             mask = (bgra[:, :, 3] > 0).astype(np.uint8) * 255
             hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
@@ -89,7 +152,7 @@ class SimpleDescriptorBuilder:
         opaque_bgr = np.concatenate(opaque_bgr_parts, axis=0)
         opaque_hsv = np.concatenate(opaque_hsv_parts, axis=0)
         if not accent_hsv_parts:
-            raise ValueError(f"no accent pixels found while building descriptor for {mob_name}")
+            raise ValueError("no accent pixels found while building frame profile")
         accent_hsv = np.concatenate(accent_hsv_parts, axis=0)
 
         body_colors = self._clusters("body", opaque_bgr, opaque_hsv, count=6, tolerance=(18, 55, 55))
@@ -109,22 +172,17 @@ class SimpleDescriptorBuilder:
             aspect_ratio=float(np.mean(widths) / max(np.mean(heights), 1.0)),
             opaque_area=float(np.mean(areas)),
         )
-        descriptor = SimpleMobDescriptor(
-            mob_name=mob_name,
-            version=DESCRIPTOR_VERSION,
-            size=size,
-            body_colors=body_colors,
-            accent_colors=accent_colors,
-            rare_colors=rare_colors,
-            sprite_palette_bgr=sprite_palette_bgr,
-            hsv_histogram=hsv_hist,
-            rgb_histogram=rgb_hist,
-            patch_signatures=patch_signatures[:120],
-            template_count=len(frames),
-            action_indices=action_indices,
-        )
-        descriptor.save(descriptor_path)
-        return descriptor
+        return {
+            "size": size,
+            "body_colors": body_colors,
+            "accent_colors": accent_colors,
+            "rare_colors": rare_colors,
+            "sprite_palette_bgr": sprite_palette_bgr,
+            "hsv_histogram": hsv_hist,
+            "rgb_histogram": rgb_hist,
+            "patch_signatures": patch_signatures,
+            "action_indices": action_indices,
+        }
 
     @staticmethod
     def _tight_crop(bgra: np.ndarray) -> np.ndarray:

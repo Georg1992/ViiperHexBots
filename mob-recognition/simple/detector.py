@@ -10,6 +10,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from death_validator import DeathValidation, DeathValidator
 from descriptor import SimpleMobDescriptor
 from descriptor_builder import DESCRIPTOR_VERSION
 from heatmap_detector import HeatmapDetector, Heatmaps
@@ -46,7 +47,16 @@ REQUIRED_CONFIG_KEYS = {
     "debugOutputDir",
     "weights",
     "centerWeights",
+    "deadValidationThreshold",
+    "deadAttackSlotThreshold",
+    "minDeadMobPresence",
+    "maxFullOpacity",
+    "minOpacitySpriteFraction",
+    "minOpacitySamplePixels",
+    "deadValidationWeights",
 }
+
+REQUIRED_DEAD_VALIDATION_WEIGHT_KEYS = {"pose", "sizeGap", "histogram", "opacity"}
 
 REQUIRED_WEIGHT_KEYS = {"bodyPalette", "accent", "rareColor", "localPattern", "colorPurity", "size"}
 REQUIRED_CENTER_WEIGHT_KEYS = {"bodyPalette", "accent", "rareColor", "localPattern"}
@@ -67,6 +77,10 @@ class SimpleCandidate:
     size_score: float
     candidate_scale: float
     accepted: bool
+    is_dead: bool
+    dead_score: float
+    mean_opacity: float
+    opacity_confirmed: bool
     rejection_reason: str
     heatmap_score: float
 
@@ -88,6 +102,11 @@ class SimpleCandidate:
             "candidateScale": round(self.candidate_scale, 4),
             "heatmapScore": round(self.heatmap_score, 4),
             "accepted": self.accepted,
+            "dead": self.is_dead,
+            "living": self.accepted and not self.is_dead,
+            "deadScore": round(self.dead_score, 4),
+            "meanOpacity": round(self.mean_opacity, 4),
+            "opacityConfirmed": self.opacity_confirmed,
             "rejectionReason": self.rejection_reason,
         }
 
@@ -117,6 +136,9 @@ def load_simple_config(path: Optional[Path] = None) -> dict:
     center_weight_missing = sorted(REQUIRED_CENTER_WEIGHT_KEYS - set(config["centerWeights"]))
     if center_weight_missing:
         raise ValueError(f"missing center weight keys: {', '.join(center_weight_missing)}")
+    dead_weight_missing = sorted(REQUIRED_DEAD_VALIDATION_WEIGHT_KEYS - set(config["deadValidationWeights"]))
+    if dead_weight_missing:
+        raise ValueError(f"missing dead validation weight keys: {', '.join(dead_weight_missing)}")
     return config
 
 
@@ -126,6 +148,7 @@ class SimpleMobDetector:
         self.config = load_simple_config() if config is None else config
         self.heatmap_detector = HeatmapDetector(self.config)
         self.region_scorer = SimpleRegionScorer(self.config)
+        self.death_validator = DeathValidator(self.config, self.region_scorer)
         self._descriptor_cache: dict[str, SimpleMobDescriptor] = {}
         self.self_exclusion_width_ratio = float(self.config["selfExclusionWidthRatio"])
         self.self_exclusion_height_ratio = float(self.config["selfExclusionHeightRatio"])
@@ -150,7 +173,12 @@ class SimpleMobDetector:
         self._descriptor_cache[mob_name] = descriptor
         return descriptor
 
-    def detect(self, frame_bgr: np.ndarray, mob_name: str) -> SimpleDetectionResult:
+    def detect(
+        self,
+        frame_bgr: np.ndarray,
+        mob_name: str,
+        attack_slots: list[tuple[int, int]] | None = None,
+    ) -> SimpleDetectionResult:
         start = time.perf_counter()
         descriptor = self.ensure_descriptor(mob_name)
         hsv_start = time.perf_counter()
@@ -162,10 +190,19 @@ class SimpleMobDetector:
         score_start = time.perf_counter()
         candidates: list[SimpleCandidate] = []
         for cx, cy, heat_score in centers:
-            candidates.extend(self._score_center(frame_bgr, hsv, descriptor, cx, cy, heat_score))
+            candidates.extend(self._evaluate_center(frame_bgr, hsv, descriptor, cx, cy, heat_score))
+        if attack_slots:
+            for slot_x, slot_y in attack_slots:
+                candidates.extend(
+                    self._evaluate_center(frame_bgr, hsv, descriptor, slot_x, slot_y, 1.0, attack_slot=True)
+                )
         nms_start = time.perf_counter()
         candidates.sort(key=lambda c: c.final_score, reverse=True)
         accepted = self._nms([candidate for candidate in candidates if candidate.accepted])
+        if attack_slots:
+            for candidate in candidates:
+                if candidate.accepted and candidate.is_dead and candidate not in accepted:
+                    accepted.append(candidate)
         accepted_ids = {id(candidate) for candidate in accepted}
         final_candidates = []
         for candidate in candidates:
@@ -192,7 +229,7 @@ class SimpleMobDetector:
             timing=timing,
         )
 
-    def _score_center(
+    def _evaluate_center(
         self,
         frame_bgr: np.ndarray,
         hsv: np.ndarray,
@@ -200,26 +237,132 @@ class SimpleMobDetector:
         cx: int,
         cy: int,
         heat_score: float,
+        *,
+        attack_slot: bool = False,
     ) -> list[SimpleCandidate]:
-        candidates: list[SimpleCandidate] = []
-        scales = self._candidate_scales(frame_bgr.shape[1])
-        for scale in scales:
-            w = max(8, int(round(descriptor.avg_width * float(scale))))
-            h = max(8, int(round(descriptor.avg_height * float(scale))))
-            x = int(round(cx - w / 2))
-            y = int(round(cy - h / 2))
-            if x < 0 or y < 0 or x + w > frame_bgr.shape[1] or y + h > frame_bgr.shape[0]:
-                continue
-            if self._is_self_center(cx, cy, frame_bgr.shape):
-                continue
-            score = self.region_scorer.score(frame_bgr, hsv, descriptor, (x, y, w, h), expected_scale=float(scale))
-            candidates.append(self._candidate(descriptor.mob_name, cx, cy, (x, y, w, h), score, heat_score, float(scale)))
-        if not candidates:
+        if not attack_slot and self._is_self_center(cx, cy, frame_bgr.shape):
             return []
-        accepted = [candidate for candidate in candidates if candidate.accepted]
-        if accepted:
-            return [max(accepted, key=lambda c: c.final_score)]
+        if attack_slot and (cx < 0 or cy < 0 or cx >= frame_bgr.shape[1] or cy >= frame_bgr.shape[0]):
+            return []
+        if attack_slot and descriptor.dead is None:
+            return []
+
+        best_living: tuple[float, tuple[int, int, int, int], RegionScore, DeathValidation] | None = None
+        best_dead: tuple[float, tuple[int, int, int, int], RegionScore | None, DeathValidation] | None = None
+        presence_gate = self.death_validator.min_mob_presence * (0.55 if attack_slot else 0.5)
+
+        for scale in self._candidate_scales(frame_bgr.shape[1]):
+            living_bbox = self._bbox_for_size(
+                cx,
+                cy,
+                int(round(descriptor.avg_width * scale)),
+                int(round(descriptor.avg_height * scale)),
+                frame_bgr.shape,
+            )
+            if living_bbox is None:
+                continue
+
+            living_score = self.region_scorer.score(
+                frame_bgr, hsv, descriptor, living_bbox, expected_scale=float(scale)
+            )
+            if descriptor.dead is None:
+                if living_score.accepted and (
+                    best_living is None or living_score.final_score > best_living[2].final_score
+                ):
+                    empty_validation = DeathValidation(False, 0.0, living_score.final_score, 0.0, 0.0, 0.0, 0.0, 1.0)
+                    best_living = (float(scale), living_bbox, living_score, empty_validation)
+                continue
+
+            dead_bbox = self._bbox_for_size(
+                cx,
+                cy,
+                int(round(descriptor.dead.size.avg_width * scale)),
+                int(round(descriptor.dead.size.avg_height * scale)),
+                frame_bgr.shape,
+            )
+            if dead_bbox is None:
+                continue
+
+            dead_score = self.death_validator.score_dead_region(frame_bgr, hsv, descriptor, dead_bbox, float(scale))
+            living_at_dead_score = self.region_scorer.score(
+                frame_bgr, hsv, descriptor, dead_bbox, expected_scale=float(scale)
+            )
+            mob_signal = max(
+                living_score.final_score,
+                living_at_dead_score.final_score,
+                dead_score.final_score if dead_score is not None else 0.0,
+            )
+            if mob_signal < presence_gate:
+                continue
+
+            validation = self.death_validator.validate(
+                frame_bgr,
+                hsv,
+                descriptor,
+                living_bbox,
+                dead_bbox,
+                living_score,
+                dead_score,
+                living_at_dead_score,
+                attack_slot=attack_slot,
+            )
+
+            if validation.is_dead and (best_dead is None or validation.confidence > best_dead[3].confidence):
+                best_dead = (float(scale), dead_bbox, dead_score, validation)
+            elif living_score.accepted and not validation.is_dead and (
+                best_living is None or living_score.final_score > best_living[2].final_score
+            ):
+                best_living = (float(scale), living_bbox, living_score, validation)
+
+        if best_dead is not None:
+            scale, bbox, score, validation = best_dead
+            region_score = score if score is not None else RegionScore(0, 0, 0, 0, 0, 0, 0, False, "missing_dead_score")
+            return [
+                self._candidate(
+                    descriptor.mob_name,
+                    cx,
+                    cy,
+                    bbox,
+                    region_score,
+                    heat_score,
+                    scale,
+                    is_dead=True,
+                    death_validation=validation,
+                )
+            ]
+        if best_living is not None:
+            scale, bbox, score, validation = best_living
+            return [
+                self._candidate(
+                    descriptor.mob_name,
+                    cx,
+                    cy,
+                    bbox,
+                    score,
+                    heat_score,
+                    scale,
+                    is_dead=False,
+                    death_validation=validation,
+                )
+            ]
         return []
+
+    @staticmethod
+    def _bbox_for_size(
+        cx: int,
+        cy: int,
+        width: int,
+        height: int,
+        frame_shape: tuple[int, ...],
+    ) -> tuple[int, int, int, int] | None:
+        w = max(8, width)
+        h = max(8, height)
+        x = int(round(cx - w / 2))
+        y = int(round(cy - h / 2))
+        frame_h, frame_w = frame_shape[:2]
+        if x < 0 or y < 0 or x + w > frame_w or y + h > frame_h:
+            return None
+        return x, y, w, h
 
     def _is_self_center(self, cx: int, cy: int, frame_shape: tuple[int, ...]) -> bool:
         height, width = frame_shape[:2]
@@ -243,22 +386,30 @@ class SimpleMobDetector:
         score: RegionScore,
         heat_score: float,
         candidate_scale: float,
+        *,
+        is_dead: bool,
+        death_validation: DeathValidation,
     ) -> SimpleCandidate:
+        region_score = score if score is not None else RegionScore(0, 0, 0, 0, 0, 0, 0, False, "missing_score")
         return SimpleCandidate(
             mob_name=mob_name,
             center_x=cx,
             center_y=cy,
             bbox=bbox,
-            final_score=score.final_score,
-            body_palette_score=score.body_palette_score,
-            accent_score=score.accent_score,
-            rare_color_score=score.rare_color_score,
-            local_pattern_score=score.local_pattern_score,
-            color_purity_score=score.color_purity_score,
-            size_score=score.size_score,
+            final_score=death_validation.confidence if is_dead else region_score.final_score,
+            body_palette_score=region_score.body_palette_score,
+            accent_score=region_score.accent_score,
+            rare_color_score=region_score.rare_color_score,
+            local_pattern_score=region_score.local_pattern_score,
+            color_purity_score=region_score.color_purity_score,
+            size_score=region_score.size_score,
             candidate_scale=candidate_scale,
-            accepted=score.accepted,
-            rejection_reason=score.rejection_reason,
+            accepted=True,
+            is_dead=is_dead,
+            dead_score=death_validation.confidence if is_dead else 0.0,
+            mean_opacity=death_validation.mean_opacity,
+            opacity_confirmed=death_validation.opacity_fade_score > 0.0,
+            rejection_reason="" if is_dead else region_score.rejection_reason,
             heatmap_score=heat_score,
         )
 

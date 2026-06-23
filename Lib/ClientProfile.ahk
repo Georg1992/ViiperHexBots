@@ -85,14 +85,6 @@ LoadClientProfile(profileName) {
     return true
 }
 
-ApplyZoomDirectionFromGlobal() {
-    global ZoomWheelDirection, zoomWheelDelta
-    if (ZoomWheelDirection = "Scroll down")
-        zoomWheelDelta := -1
-    else
-        zoomWheelDelta := 1
-}
-
 MemoryFeaturesActive() {
     global memoryReadingEnabled, clientSupportsMemory
     return memoryReadingEnabled && clientSupportsMemory

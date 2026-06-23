@@ -17,6 +17,7 @@ from cli import apply_scale_calibration, parse_scale_range  # noqa: E402
 from dataset_runner import run_fixtures  # noqa: E402
 from descriptor_builder import SimpleDescriptorBuilder  # noqa: E402
 from detector import SimpleMobDetector, load_simple_config  # noqa: E402
+from death_validator import DeathValidator  # noqa: E402
 
 
 class SimplePipelineTests(unittest.TestCase):
@@ -38,6 +39,25 @@ class SimplePipelineTests(unittest.TestCase):
         self.assertGreater(self.descriptor.avg_height, 10)
         self.assertGreater(len(self.descriptor.body_colors), 0)
         self.assertGreater(len(self.descriptor.accent_colors), 0)
+        self.assertIsNotNone(self.descriptor.dead)
+        self.assertGreater(self.descriptor.dead.size.avg_width, self.descriptor.size.avg_width)
+
+    def test_opacity_fade_detects_blended_sprite(self) -> None:
+        import numpy as np
+
+        validator = DeathValidator(self.config, self.detector.region_scorer)
+        background = np.array([128.0, 128.0, 128.0], dtype=np.float32)
+        foreground = np.array([40.0, 30.0, 90.0], dtype=np.float32)
+        palette = [(40, 30, 90)]
+
+        full_pixels = np.tile(foreground, (100, 1))
+        full_opacity = validator._estimate_mean_opacity(full_pixels, background, palette)
+        self.assertGreater(full_opacity, 0.95)
+
+        faded_pixels = np.tile(foreground * 0.55 + background * 0.45, (100, 1))
+        faded_opacity = validator._estimate_mean_opacity(faded_pixels, background, palette)
+        self.assertLess(faded_opacity, 0.90)
+        self.assertLess(faded_opacity, full_opacity)
 
     def test_heatmaps_are_generated(self) -> None:
         result = self.detector.detect(self._image("333.png"), "horn")

@@ -20,3 +20,4 @@ Build the runtime descriptor:
 
 Output goes to `generated_descriptors/<mob>/simple/descriptor.json`.
 The bot UI loads mobs from those descriptor folders on startup, so new mobs appear there after their descriptor exists.
+On bot launch, missing descriptors are generated automatically for complete asset folders that contain `<mob>.spr` and `<mob>.act`.

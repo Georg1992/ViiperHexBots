@@ -111,8 +111,6 @@ class SimpleRegionScorer:
                 rejection_reason = "wrong_size"
             elif self.enforce_object_size_gate and size < self.min_object_size_score:
                 rejection_reason = "wrong_size"
-            else:
-                rejection_reason = "insufficient_sprite_pixels"
         return RegionScore(
             final_score=float(np.clip(final, 0.0, 1.0)),
             body_palette_score=body,

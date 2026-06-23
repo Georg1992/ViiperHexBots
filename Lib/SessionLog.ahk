@@ -182,7 +182,12 @@ SessionLogRegisterBotRun() {
     sessionBotRunCount++
     mobName := MobTemplateFolderName()
 
-    GetHuntSearchRegion(xs, ys, ws, hs)
+    if (!GetHuntSearchRegion(xs, ys, ws, hs)) {
+        xs := 0
+        ys := 0
+        ws := 0
+        hs := 0
+    }
     GetMobSearchPlayerIgnore(xs, ys, ws, hs, ignoreX, ignoreY, ignoreW, ignoreH)
 
     skillSC := GetKeySC(SkillButtonKey) + 0

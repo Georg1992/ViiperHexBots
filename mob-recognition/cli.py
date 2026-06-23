@@ -31,6 +31,19 @@ def parse_roi(value: str) -> tuple[int, int, int, int]:
     return tuple(parts)
 
 
+def parse_attack_slots(value: str) -> list[tuple[int, int]]:
+    slots: list[tuple[int, int]] = []
+    for part in value.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        coords = [int(p.strip()) for p in part.split(",")]
+        if len(coords) != 2:
+            raise argparse.ArgumentTypeError("attack slot must be x,y")
+        slots.append((coords[0], coords[1]))
+    return slots
+
+
 def parse_scale_range(value: str) -> tuple[float, float]:
     parts = [float(p.strip()) for p in value.split(",")]
     if len(parts) != 2:
@@ -76,8 +89,8 @@ def candidate_to_json(candidate, screen_offset: tuple[int, int]) -> dict:
             "centerX": candidate.center_x + ox,
             "centerY": candidate.center_y + oy,
             "confidence": round(candidate.final_score, 4),
-            "living": candidate.accepted,
-            "dead": False,
+            "living": candidate.accepted and not candidate.is_dead,
+            "dead": candidate.is_dead,
         }
     )
     return payload
@@ -111,7 +124,8 @@ def cmd_detect_simple(args: argparse.Namespace) -> int:
         config = load_simple_config(Path(args.config_simple) if args.config_simple else None)
         config = apply_scale_calibration(config, args.scale_range, args.enforce_size_gate)
         detector = SimpleMobDetector(PROJECT_ROOT, config)
-        result = detector.detect(frame, args.mob.lower())
+        attack_slots = parse_attack_slots(args.attack_slots) if args.attack_slots else []
+        result = detector.detect(frame, args.mob.lower(), attack_slots=attack_slots or None)
         accepted_json = [candidate_to_json(candidate, screen_offset) for candidate in result.accepted]
         if args.debug:
             label = Path(args.image).name if args.image else "live_capture"
@@ -131,7 +145,6 @@ def cmd_detect_simple(args: argparse.Namespace) -> int:
                 "candidateCount": len(result.candidates),
                 "acceptedCount": len(result.accepted),
                 "elapsedS": round(result.elapsed_s, 4),
-                "best": accepted_json[0] if accepted_json else None,
                 "candidates": accepted_json,
             },
             output_path,
@@ -194,6 +207,7 @@ def build_parser() -> argparse.ArgumentParser:
     detect.add_argument("--session-id", default="", help="bot session id for logs/calibration")
     detect.add_argument("--scale-range", type=parse_scale_range, help="locked session scale range as min,max")
     detect.add_argument("--enforce-size-gate", action="store_true", help="enforce strict object size gate")
+    detect.add_argument("--attack-slots", help="ROI-local attack slots as x,y;x,y for hunt kill validation")
 
     fixtures = sub.add_parser("fixtures-simple", help="run screenshot fixture suite with simple detector")
     fixtures.add_argument("--mob", required=True)

@@ -279,25 +279,23 @@ BotSessionDetectResponse(jsonText, elapsedMs) {
         detectMs := m1
 
     candidateCount := 0
-    pos := 1
-    while (pos := RegExMatch(jsonText, "i)""accepted"":true", match, pos)) {
-        candidateCount++
-        pos += StrLen(match)
+    section := MobRecognitionExtractCandidatesSection(jsonText)
+    if (section != "") {
+        pos := 1
+        while (pos := RegExMatch(section, "i)\{[^{}]+\}", block, pos)) {
+            if (InStr(block, """accepted"":true"))
+                candidateCount++
+            pos += StrLen(block)
+        }
     }
 
     bestX := ""
     bestY := ""
     bestConf := ""
-    if (RegExMatch(jsonText, "i)""best"":\{[^}]*""centerX"":(\d+)[^}]*""centerY"":(\d+)[^}]*""confidence"":([0-9.]+)", b)) {
+    if (RegExMatch(jsonText, "i)""candidates"":\[\{[^}]*""centerX"":(\d+)[^}]*""centerY"":(\d+)[^}]*""confidence"":([0-9.]+)", b)) {
         bestX := b1
         bestY := b2
         bestConf := b3
-    } else if (RegExMatch(jsonText, "i)""centerX"":(\d+)", bx)) {
-        bestX := bx1
-        if (RegExMatch(jsonText, "i)""centerY"":(\d+)", by))
-            bestY := by1
-        if (RegExMatch(jsonText, "i)""confidence"":([0-9.]+)", bc))
-            bestConf := bc1
     }
 
     summary := "ok=" . ok . " elapsed=" . elapsedMs . "ms"

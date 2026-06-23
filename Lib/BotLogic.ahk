@@ -158,7 +158,7 @@ Hunt(skillSC, teleportSC) {
         }
 
         GetHuntSearchRegion(xs, ys, ws, hs)
-        if (ws <= 0 || hs <= 0) {
+        if (!ws || !hs) {
             if IsFunc("AppendLog")
                 AppendLog("Hunt: invalid search region — select game window and refresh")
             BotSleep(500)
@@ -185,6 +185,7 @@ Hunt(skillSC, teleportSC) {
         }
 
         livingInRange := 0
+        totalLivingInRange := 0
         canTeleport := false
         attackX := 0
         attackY := 0
@@ -199,6 +200,9 @@ Hunt(skillSC, teleportSC) {
             continue
         }
 
+        if (RegExMatch(jsonText, "i)""totalLivingInRange"":(\d+)", match))
+            totalLivingInRange := match1 + 0
+
         GetMobSearchPlayerIgnore(xs, ys, ws, hs, ignoreX, ignoreY, ignoreW, ignoreH)
         MobRecognitionApplyHuntMarkUnreachable(jsonText, huntUnreachableXs, huntUnreachableYs, attackedRadiusPx)
         MobRecognitionUpdateUnreachableFromScan(jsonText, huntAttackedXs, huntAttackedYs, huntAttackCounts, huntUnreachableXs, huntUnreachableYs, ignoreX, ignoreY, ignoreW, ignoreH, attackedRadiusPx, attacksBeforeUnreachable)
@@ -209,7 +213,7 @@ Hunt(skillSC, teleportSC) {
             huntEmptyScans := 0
             huntFastIdle := false
             if IsFunc("AppendLog")
-                AppendLog("Hunt [" . huntStatus . "]: attack @" . attackX . "," . attackY . " conf=" . attackConf . " living=" . livingInRange)
+                AppendLog("Hunt [" . huntStatus . "]: attack @" . attackX . "," . attackY . " conf=" . attackConf . " targets=" . livingInRange . " living=" . totalLivingInRange)
             MoveMouseTo(attackX, attackY)
             HuntSkillClick(skillSC)
             MobRecognitionRecordAttackSlot(attackX, attackY, huntAttackedXs, huntAttackedYs, huntAttackCounts, attackedRadiusPx)
@@ -224,9 +228,9 @@ Hunt(skillSC, teleportSC) {
         else if (huntAttackedXs.MaxIndex() = 0)
             scanSleepMs := fastIdleScanSleepMs
 
-        if (livingInRange > 0) {
+        if (totalLivingInRange > 0) {
             if IsFunc("AppendLog")
-                AppendLog("Hunt [" . huntStatus . "]: " . livingInRange . " living mob(s) — keep hunting")
+                AppendLog("Hunt [" . huntStatus . "]: " . totalLivingInRange . " living mob(s) in range — keep hunting")
             huntEmptyScans := 0
             huntFastIdle := false
             BotSleep(scanSleepMs)
