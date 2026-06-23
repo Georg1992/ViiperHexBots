@@ -20,7 +20,7 @@ from spr_reader import SprReader
 
 from descriptor import ColorCluster, PatchSignature, SimpleMobDescriptor, SizeDescriptor
 
-DESCRIPTOR_VERSION = 1
+DESCRIPTOR_VERSION = 2
 EXPORT_ACTIONS = (0, 1)
 
 
@@ -105,6 +105,7 @@ class SimpleDescriptorBuilder:
         body_colors = self._clusters("body", opaque_bgr, opaque_hsv, count=6, tolerance=(18, 55, 55))
         accent_colors = self._clusters("accent", None, accent_hsv, count=4, tolerance=(16, 60, 65))
         rare_colors = self._rare_clusters(opaque_bgr, opaque_hsv)
+        sprite_palette_bgr = self._sprite_palette(opaque_bgr)
         hsv_hist = self._hsv_histogram(opaque_hsv)
         rgb_hist = self._rgb_histogram(opaque_bgr)
 
@@ -125,6 +126,7 @@ class SimpleDescriptorBuilder:
             body_colors=body_colors,
             accent_colors=accent_colors,
             rare_colors=rare_colors,
+            sprite_palette_bgr=sprite_palette_bgr,
             hsv_histogram=hsv_hist,
             rgb_histogram=rgb_hist,
             patch_signatures=patch_signatures[:120],
@@ -234,6 +236,14 @@ class SimpleDescriptorBuilder:
     def _rare_clusters(self, bgr_pixels: np.ndarray, hsv_pixels: np.ndarray) -> list[ColorCluster]:
         clusters = self._clusters("rare", bgr_pixels, hsv_pixels, count=10, tolerance=(14, 45, 45))
         return [cluster for cluster in clusters if cluster.fraction <= 0.12][:4]
+
+    @staticmethod
+    def _sprite_palette(bgr_pixels: np.ndarray) -> list[tuple[int, int, int]]:
+        if bgr_pixels.size == 0:
+            return []
+        unique = np.unique(np.rint(bgr_pixels).astype(np.uint8), axis=0)
+        unique = unique[np.lexsort((unique[:, 2], unique[:, 1], unique[:, 0]))]
+        return [tuple(int(v) for v in color) for color in unique]
 
     @staticmethod
     def _hsv_histogram(hsv_pixels: np.ndarray) -> list[float]:

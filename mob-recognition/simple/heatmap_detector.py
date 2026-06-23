@@ -52,26 +52,31 @@ class HeatmapDetector:
         self.ui_left_ratio = float(config.get("playfieldLeftRatio", 0.03))
         self.ui_right_ratio = float(config.get("playfieldRightRatio", 0.97))
         self.min_center_heat = float(config.get("minCenterHeat", 0.02))
+        self.center_scales = [float(scale) for scale in config.get("centerScales", config.get("scales", [1.0]))]
+        self.small_scale_min_frame_width = int(config.get("smallScaleMinFrameWidth", 900))
 
     def build_heatmaps(self, frame_bgr: np.ndarray, hsv: np.ndarray, descriptor: SimpleMobDescriptor) -> Heatmaps:
         body = palette_heatmap(hsv, descriptor.body_colors)
         accent = palette_heatmap(hsv, descriptor.accent_colors)
         rare = palette_heatmap(hsv, descriptor.rare_colors)
         local_pattern = self._local_pattern(frame_bgr, accent, body)
-        window = (
-            max(3, descriptor.avg_width | 1),
-            max(3, descriptor.avg_height | 1),
-        )
-        center_body = cv2.blur(body, window)
-        center_accent = cv2.blur(accent, window)
-        center_rare = cv2.blur(rare, window)
-        center_pattern = cv2.blur(local_pattern, window)
-        final = (
-            center_body * 0.30
-            + center_accent * 0.35
-            + center_rare * 0.10
-            + center_pattern * 0.15
-        ).astype(np.float32)
+        final = np.zeros(body.shape, dtype=np.float32)
+        for scale in self._center_scales(frame_bgr.shape[1]):
+            window = (
+                max(3, int(round(descriptor.avg_width * scale)) | 1),
+                max(3, int(round(descriptor.avg_height * scale)) | 1),
+            )
+            center_body = cv2.blur(body, window)
+            center_accent = cv2.blur(accent, window)
+            center_rare = cv2.blur(rare, window)
+            center_pattern = cv2.blur(local_pattern, window)
+            scale_center = (
+                center_body * 0.30
+                + center_accent * 0.35
+                + center_rare * 0.10
+                + center_pattern * 0.15
+            ).astype(np.float32)
+            final = np.maximum(final, scale_center)
         ui_mask = self._ui_mask(frame_bgr.shape[:2])
         final[ui_mask == 0] = 0.0
         return Heatmaps(
@@ -114,6 +119,13 @@ class HeatmapDetector:
         edge = cv2.normalize(edge, None, 0.0, 1.0, cv2.NORM_MINMAX)
         pattern = np.maximum(accent * 0.8, body * edge)
         return np.clip(pattern, 0.0, 1.0).astype(np.float32)
+
+    def _center_scales(self, frame_width: int) -> list[float]:
+        return [
+            scale
+            for scale in self.center_scales
+            if scale >= 0.75 or frame_width >= self.small_scale_min_frame_width
+        ]
 
     def _ui_mask(self, shape: tuple[int, int]) -> np.ndarray:
         h, w = shape

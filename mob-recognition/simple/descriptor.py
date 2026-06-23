@@ -45,6 +45,7 @@ class SimpleMobDescriptor:
     body_colors: list[ColorCluster]
     accent_colors: list[ColorCluster]
     rare_colors: list[ColorCluster]
+    sprite_palette_bgr: list[tuple[int, int, int]]
     hsv_histogram: list[float]
     rgb_histogram: list[float]
     patch_signatures: list[PatchSignature] = field(default_factory=list)
@@ -60,6 +61,7 @@ class SimpleMobDescriptor:
             body_colors=[ColorCluster(**item) for item in data.get("bodyColors", [])],
             accent_colors=[ColorCluster(**item) for item in data.get("accentColors", [])],
             rare_colors=[ColorCluster(**item) for item in data.get("rareColors", [])],
+            sprite_palette_bgr=[tuple(int(v) for v in item) for item in data.get("spritePaletteBgr", [])],
             hsv_histogram=[float(v) for v in data.get("hsvHistogram", [])],
             rgb_histogram=[float(v) for v in data.get("rgbHistogram", [])],
             patch_signatures=[PatchSignature(**item) for item in data.get("patchSignatures", [])],
@@ -80,6 +82,7 @@ class SimpleMobDescriptor:
             "bodyColors": data["body_colors"],
             "accentColors": data["accent_colors"],
             "rareColors": data["rare_colors"],
+            "spritePaletteBgr": data["sprite_palette_bgr"],
             "hsvHistogram": data["hsv_histogram"],
             "rgbHistogram": data["rgb_histogram"],
             "patchSignatures": data["patch_signatures"],

@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 
 from descriptor import SimpleMobDescriptor
-from descriptor_builder import SimpleDescriptorBuilder
+from descriptor_builder import DESCRIPTOR_VERSION, SimpleDescriptorBuilder
 from heatmap_detector import HeatmapDetector, Heatmaps
 from region_scorer import RegionScore, SimpleRegionScorer
 
@@ -28,7 +28,9 @@ class SimpleCandidate:
     accent_score: float
     rare_color_score: float
     local_pattern_score: float
+    color_purity_score: float
     size_score: float
+    candidate_scale: float
     accepted: bool
     rejection_reason: str
     heatmap_score: float
@@ -46,7 +48,9 @@ class SimpleCandidate:
             "accentScore": round(self.accent_score, 4),
             "rareColorScore": round(self.rare_color_score, 4),
             "localPatternScore": round(self.local_pattern_score, 4),
+            "colorPurityScore": round(self.color_purity_score, 4),
             "sizeScore": round(self.size_score, 4),
+            "candidateScale": round(self.candidate_scale, 4),
             "heatmapScore": round(self.heatmap_score, 4),
             "accepted": self.accepted,
             "rejectionReason": self.rejection_reason,
@@ -76,6 +80,9 @@ class SimpleMobDetector:
         self.heatmap_detector = HeatmapDetector(self.config)
         self.region_scorer = SimpleRegionScorer(self.config)
         self._descriptor_cache: dict[str, SimpleMobDescriptor] = {}
+        self.self_exclusion_width_ratio = float(self.config.get("selfExclusionWidthRatio", 0.10))
+        self.self_exclusion_height_ratio = float(self.config.get("selfExclusionHeightRatio", 0.20))
+        self.small_scale_min_frame_width = int(self.config.get("smallScaleMinFrameWidth", 900))
 
     def descriptor_path(self, mob_name: str) -> Path:
         return self.project_root / "generated_descriptors" / mob_name.lower() / "simple" / "descriptor.json"
@@ -88,6 +95,8 @@ class SimpleMobDetector:
         if not path.exists():
             SimpleDescriptorBuilder(self.project_root).build(mob_name)
         descriptor = SimpleMobDescriptor.load(path)
+        if descriptor.version < DESCRIPTOR_VERSION:
+            descriptor = SimpleDescriptorBuilder(self.project_root).build(mob_name, force=True)
         self._descriptor_cache[mob_name] = descriptor
         return descriptor
 
@@ -143,7 +152,7 @@ class SimpleMobDetector:
         heat_score: float,
     ) -> list[SimpleCandidate]:
         candidates: list[SimpleCandidate] = []
-        scales = self.config.get("scales", [0.9, 1.0, 1.1])
+        scales = self._candidate_scales(frame_bgr.shape[1])
         for scale in scales:
             w = max(8, int(round(descriptor.avg_width * float(scale))))
             h = max(8, int(round(descriptor.avg_height * float(scale))))
@@ -151,11 +160,29 @@ class SimpleMobDetector:
             y = int(round(cy - h / 2))
             if x < 0 or y < 0 or x + w > frame_bgr.shape[1] or y + h > frame_bgr.shape[0]:
                 continue
-            score = self.region_scorer.score(frame_bgr, hsv, descriptor, (x, y, w, h))
-            candidates.append(self._candidate(descriptor.mob_name, cx, cy, (x, y, w, h), score, heat_score))
+            if self._is_self_center(cx, cy, frame_bgr.shape):
+                continue
+            score = self.region_scorer.score(frame_bgr, hsv, descriptor, (x, y, w, h), expected_scale=float(scale))
+            candidates.append(self._candidate(descriptor.mob_name, cx, cy, (x, y, w, h), score, heat_score, float(scale)))
         if not candidates:
             return []
+        accepted = [candidate for candidate in candidates if candidate.accepted]
+        if accepted:
+            return [max(accepted, key=lambda c: c.final_score)]
         return [max(candidates, key=lambda c: c.final_score)]
+
+    def _is_self_center(self, cx: int, cy: int, frame_shape: tuple[int, ...]) -> bool:
+        height, width = frame_shape[:2]
+        half_width = width * self.self_exclusion_width_ratio * 0.5
+        half_height = height * self.self_exclusion_height_ratio * 0.5
+        return abs(cx - width / 2) <= half_width and abs(cy - height / 2) <= half_height
+
+    def _candidate_scales(self, frame_width: int) -> list[float]:
+        return [
+            float(scale)
+            for scale in self.config.get("scales", [0.9, 1.0, 1.1])
+            if float(scale) >= 0.75 or frame_width >= self.small_scale_min_frame_width
+        ]
 
     @staticmethod
     def _candidate(
@@ -165,6 +192,7 @@ class SimpleMobDetector:
         bbox: tuple[int, int, int, int],
         score: RegionScore,
         heat_score: float,
+        candidate_scale: float,
     ) -> SimpleCandidate:
         return SimpleCandidate(
             mob_name=mob_name,
@@ -176,7 +204,9 @@ class SimpleMobDetector:
             accent_score=score.accent_score,
             rare_color_score=score.rare_color_score,
             local_pattern_score=score.local_pattern_score,
+            color_purity_score=score.color_purity_score,
             size_score=score.size_score,
+            candidate_scale=candidate_scale,
             accepted=score.accepted,
             rejection_reason=score.rejection_reason,
             heatmap_score=heat_score,

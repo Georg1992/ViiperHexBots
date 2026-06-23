@@ -31,6 +31,28 @@ def parse_roi(value: str) -> tuple[int, int, int, int]:
     return tuple(parts)
 
 
+def parse_scale_range(value: str) -> tuple[float, float]:
+    parts = [float(p.strip()) for p in value.split(",")]
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("scale range must be min,max")
+    low, high = min(parts), max(parts)
+    if low <= 0 or high <= 0:
+        raise argparse.ArgumentTypeError("scale values must be positive")
+    return low, high
+
+
+def apply_scale_calibration(config: dict, scale_range: tuple[float, float] | None, enforce_size_gate: bool) -> dict:
+    calibrated = dict(config)
+    if scale_range is not None:
+        low, high = scale_range
+        mid = (low + high) / 2.0
+        calibrated["scales"] = [low, mid, high]
+        calibrated["centerScales"] = [low, mid, high]
+    if enforce_size_gate:
+        calibrated["enforceObjectSizeGate"] = True
+    return calibrated
+
+
 def emit_json(payload: dict, output_path: Path | None = None) -> None:
     text = json.dumps(payload, separators=(",", ":"))
     if output_path is not None:
@@ -87,6 +109,7 @@ def cmd_detect_simple(args: argparse.Namespace) -> int:
     try:
         frame, screen_offset, _ = _load_frame(args)
         config = load_simple_config(Path(args.config_simple) if args.config_simple else None)
+        config = apply_scale_calibration(config, args.scale_range, args.enforce_size_gate)
         detector = SimpleMobDetector(PROJECT_ROOT, config)
         result = detector.detect(frame, args.mob.lower())
         accepted_json = [candidate_to_json(candidate, screen_offset) for candidate in result.accepted]
@@ -98,6 +121,12 @@ def cmd_detect_simple(args: argparse.Namespace) -> int:
             {
                 "ok": True,
                 "pipeline": "simple",
+                "sessionId": args.session_id or "",
+                "scaleCalibration": {
+                    "status": "locked" if args.scale_range else "discovering",
+                    "range": list(args.scale_range) if args.scale_range else None,
+                    "sizeGate": bool(args.enforce_size_gate),
+                },
                 "confidenceThreshold": float(config.get("acceptThreshold", 0.46)),
                 "candidateCount": len(result.candidates),
                 "acceptedCount": len(result.accepted),
@@ -162,6 +191,9 @@ def build_parser() -> argparse.ArgumentParser:
     detect.add_argument("--output", help="JSON output file for AHK")
     detect.add_argument("--debug", action="store_true")
     detect.add_argument("--config-simple", help="simple config path")
+    detect.add_argument("--session-id", default="", help="bot session id for logs/calibration")
+    detect.add_argument("--scale-range", type=parse_scale_range, help="locked session scale range as min,max")
+    detect.add_argument("--enforce-size-gate", action="store_true", help="enforce strict object size gate")
 
     fixtures = sub.add_parser("fixtures-simple", help="run screenshot fixture suite with simple detector")
     fixtures.add_argument("--mob", required=True)

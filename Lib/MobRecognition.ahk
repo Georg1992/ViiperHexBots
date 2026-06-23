@@ -6,6 +6,7 @@ global mobRecognitionDebug := false
 global mobRecognitionPython := ""
 global mobRecognitionCli := "mob-recognition\cli.py"
 global mobRecognitionShutdownDone := false
+global mobRecognitionActiveDetectPid := 0
 
 MobTemplateFolderName(monsterIndex := "") {
     global MobNames, selectedMonsterIndex
@@ -280,6 +281,14 @@ MobRecognitionShutdownServer() {
     return
 }
 
+MobRecognitionCancelActiveDetect() {
+    global mobRecognitionActiveDetectPid
+    if (mobRecognitionActiveDetectPid) {
+        MobRecognitionKillPid(mobRecognitionActiveDetectPid)
+        mobRecognitionActiveDetectPid := 0
+    }
+}
+
 MobRecognitionExitCleanup() {
     global mobRecognitionShutdownDone
 
@@ -287,6 +296,7 @@ MobRecognitionExitCleanup() {
         return
     mobRecognitionShutdownDone := true
 
+    MobRecognitionCancelActiveDetect()
     MobRecognitionShutdownServer()
 
     if IsFunc("MobRecognitionLog")
@@ -343,6 +353,7 @@ MobRecognitionBuildSimpleHuntResponse(jsonText, attackedXs, attackedYs, unreacha
     emptyXs := []
     emptyYs := []
     livingInRange := MobRecognitionCollectHuntTargets(jsonText, targetXs, targetYs, targetConfs, 0, 0, 0, 0, attackedXs, attackedYs, 72, unreachableXs, unreachableYs, 72)
+    engagementsResolved := MobRecognitionEngagementsResolved(jsonText, attackedXs, attackedYs, 72)
 
     if (livingInRange > 0) {
         attackX := targetXs[1]
@@ -351,13 +362,13 @@ MobRecognitionBuildSimpleHuntResponse(jsonText, attackedXs, attackedYs, unreacha
     }
 
     teleportScansRequired := fastIdle ? 1 : 2
-    canTeleport := (livingInRange = 0 && (emptyScans + 1) >= teleportScansRequired) ? "true" : "false"
-    status := (livingInRange > 0) ? "target" : "clear"
+    canTeleport := (livingInRange = 0 && engagementsResolved && (emptyScans + 1) >= teleportScansRequired) ? "true" : "false"
+    status := (livingInRange > 0) ? "target" : (engagementsResolved ? "clear" : "wait_kill")
     attackJson := "null"
     if (attackX > 0 && attackY > 0)
         attackJson := "{""centerX"":" . attackX . ",""centerY"":" . attackY . ",""confidence"":" . attackConf . ",""accepted"":true,""living"":true,""dead"":false}"
 
-    return "{""ok"":true,""pipeline"":""simple"",""hunt"":true,""status"":""" . status . """,""livingInRange"":" . livingInRange . ",""canTeleport"":" . canTeleport . ",""engagementsResolved"":true,""teleportScansRequired"":" . teleportScansRequired . ",""attack"":" . attackJson . ",""markUnreachable"":[]}"
+    return "{""ok"":true,""pipeline"":""simple"",""hunt"":true,""status"":""" . status . """,""livingInRange"":" . livingInRange . ",""canTeleport"":" . canTeleport . ",""engagementsResolved"":" . (engagementsResolved ? "true" : "false") . ",""teleportScansRequired"":" . teleportScansRequired . ",""attack"":" . attackJson . ",""markUnreachable"":[]}"
 }
 
 MobRecognitionParseHuntPlan(jsonText, ByRef livingInRange, ByRef canTeleport, ByRef attackX, ByRef attackY, ByRef attackConf, ByRef huntStatus, ByRef engagementsResolved, ByRef teleportScansRequired) {
@@ -414,7 +425,8 @@ MobRecognitionApplyHuntMarkUnreachable(jsonText, ByRef unreachableXs, ByRef unre
 }
 
 MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, debug := false, showProgress := false) {
-    global mobRecognitionCli
+    global mobRecognitionCli, mobRecognitionActiveDetectPid
+    global botStopRequested
 
     pythonCmd := EnsureMobRecognitionPython()
     if (pythonCmd = "")
@@ -424,13 +436,32 @@ MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, debug := false, showPro
     debugFlag := debug ? " --debug" : ""
     roiArg := roiX . "," . roiY . "," . roiW . "," . roiH
     outFile := A_Temp . "\mob_recognition_" . A_TickCount . ".json"
-    cmd := A_ComSpec . " /c " . pythonCmd . " """ . cliPath . """ detect-simple --mob " . mobName . " --roi " . roiArg . " --output """ . outFile . """" . debugFlag
+    sessionArg := ""
+    if IsFunc("BotSessionGetId") {
+        fn := "BotSessionGetId"
+        activeSessionId := %fn%()
+        if (activeSessionId != "")
+            sessionArg := " --session-id " . activeSessionId
+    }
+    scaleArg := ""
+    if IsFunc("BotSessionScaleArgs") {
+        fn := "BotSessionScaleArgs"
+        scaleArg := %fn%(mobName)
+    }
+    cmd := A_ComSpec . " /c " . pythonCmd . " """ . cliPath . """ detect-simple --mob " . mobName . " --roi " . roiArg . " --output """ . outFile . """" . sessionArg . scaleArg . debugFlag
 
     startTick := A_TickCount
     jsonText := ""
     Run, %cmd%, %A_ScriptDir%, Hide, pid
+    mobRecognitionActiveDetectPid := pid
 
     while (MobRecognitionProcessRunning(pid)) {
+        if (botStopRequested) {
+            MobRecognitionKillPid(pid)
+            mobRecognitionActiveDetectPid := 0
+            FileDelete, %outFile%
+            return ""
+        }
         elapsed := (A_TickCount - startTick) // 1000
         if (showProgress)
             MobRecognitionShowDetectProgress(elapsed)
@@ -444,6 +475,8 @@ MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, debug := false, showPro
         if (elapsed >= 60) {
             Process, Close, %pid%
             MobRecognitionLog("MobRecognition: detect-simple timed out after 60s")
+            mobRecognitionActiveDetectPid := 0
+            FileDelete, %outFile%
             return ""
         }
 
@@ -452,12 +485,17 @@ MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, debug := false, showPro
 
     if (MobRecognitionProcessRunning(pid))
         Process, Wait, %pid%, 3
+    mobRecognitionActiveDetectPid := 0
 
     if (!FileExist(outFile))
         return ""
 
     FileRead, jsonText, *P65001 %outFile%
     FileDelete, %outFile%
+    if IsFunc("SessionLogDetectResponse") {
+        fn := "SessionLogDetectResponse"
+        %fn%(jsonText, A_TickCount - startTick)
+    }
     return jsonText
 }
 
@@ -847,40 +885,3 @@ FindMobTarget(ByRef outX, ByRef outY, xs, ys, ws, hs, ignoreX := 0, ignoreY := 0
     return true
 }
 
-TestMobRecognition() {
-    global gameWindowID, MobNames, selectedMonsterIndex
-
-    if (!gameWindowID || !WinExist("ahk_id " gameWindowID)) {
-        MsgBox, 48, Mob Recognition, Select a game window first.
-        return
-    }
-
-    RestoreWindow()
-    Sleep, 300
-
-    GetHuntSearchRegion(xs, ys, ws, hs)
-    mobName := MobTemplateFolderName()
-    jsonText := MobRecognitionDetect(mobName, xs, ys, ws, hs, true)
-
-    if (jsonText = "") {
-        MsgBox, 48, Mob Recognition, Detection failed.`nInstall Python deps:`n`npip install -r mob-recognition\requirements.txt
-        return
-    }
-
-    MobRecognitionLogCandidates(jsonText)
-
-    GetMobSearchPlayerIgnore(xs, ys, ws, hs, ignoreX, ignoreY, ignoreW, ignoreH)
-    foundX := 0
-    foundY := 0
-    conf := 0
-    if (MobRecognitionBestCandidateFiltered(jsonText, foundX, foundY, conf, ignoreX, ignoreY, ignoreW, ignoreH)) {
-        msg := "Best match: " . MobNames[selectedMonsterIndex]
-        msg .= "`nCenter: " . foundX . ", " . foundY
-        msg .= "`nConfidence: " . conf
-        msg .= "`n`nDebug output: mob-recognition\debug"
-        MsgBox, 64, Mob Recognition, %msg%
-        return
-    }
-
-    MsgBox, 48, Mob Recognition, No match.`n`nBuild descriptor:`npy -3 mob-recognition\cli.py build-simple-descriptor --mob %mobName%
-}

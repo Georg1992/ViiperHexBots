@@ -1,12 +1,12 @@
 {
   "mobName": "horn",
-  "builtAt": "2026-06-23T12:03:42.747028+00:00",
+  "builtAt": "2026-06-23T13:47:01.464846+00:00",
   "spr": "C:\\Users\\georg\\Desktop\\ViiperHexBots\\ViiperHexBots\\assets\\mobs\\horn\\horn.spr",
   "act": "C:\\Users\\georg\\Desktop\\ViiperHexBots\\ViiperHexBots\\assets\\mobs\\horn\\horn.act",
   "frameCount": 16,
   "descriptor": {
     "mobName": "horn",
-    "version": 1,
+    "version": 2,
     "size": {
       "avg_width": 64.0,
       "avg_height": 50.375,
@@ -288,6 +288,58 @@
           45
         ]
       }
+    ],
+    "spritePaletteBgr": [
+      [
+        28,
+        46,
+        78
+      ],
+      [
+        49,
+        35,
+        59
+      ],
+      [
+        64,
+        54,
+        84
+      ],
+      [
+        79,
+        73,
+        109
+      ],
+      [
+        93,
+        95,
+        109
+      ],
+      [
+        95,
+        94,
+        131
+      ],
+      [
+        108,
+        116,
+        140
+      ],
+      [
+        143,
+        155,
+        195
+      ],
+      [
+        174,
+        196,
+        220
+      ],
+      [
+        255,
+        255,
+        255
+      ]
     ],
     "hsvHistogram": [
       0.004033965524286032,

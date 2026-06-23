@@ -19,8 +19,35 @@ global currentSp := 0
 global currentWeight := 0
 global totalWeight := 0
 global currentLocation := 0
+global huntLastWarpTime := 0
+global huntLastSkillTime := 0
+global huntAttackedXs := []
+global huntAttackedYs := []
+global huntAttackCounts := []
+global huntUnreachableXs := []
+global huntUnreachableYs := []
+global huntEmptyScans := 0
+global huntFastIdle := false
+
+HuntStateReset(resetWarpTimer := true) {
+    global huntLastWarpTime, huntLastSkillTime
+    global huntAttackedXs, huntAttackedYs, huntAttackCounts
+    global huntUnreachableXs, huntUnreachableYs, huntEmptyScans, huntFastIdle
+
+    if (resetWarpTimer)
+        huntLastWarpTime := 0
+    huntLastSkillTime := 0
+    huntAttackedXs := []
+    huntAttackedYs := []
+    huntAttackCounts := []
+    huntUnreachableXs := []
+    huntUnreachableYs := []
+    huntEmptyScans := 0
+    huntFastIdle := false
+}
 
 StartBot(){
+    global botRunning, botPaused, botStopRequested
     if (MemoryFeaturesActive()) {
         totalWeight := ReadMemoryUInt(gameProcess, totalWeightAddress)
         UpdateGameStats()
@@ -41,15 +68,16 @@ StartBot(){
         if (skillSC = 0)
             AppendLog("WARNING: Attack hotkey is not set")
     }
-    while(botRunning) {
-        if (!botRunning)
+    while(botRunning && !botStopRequested) {
+        if (!botRunning || botStopRequested)
             break
-        while (botPaused && botRunning)
-            Sleep 100
-        if (!botRunning)
+        while (botPaused && botRunning && !botStopRequested)
+            BotSleep(100)
+        if (!botRunning || botStopRequested)
             break
         if(SkillTimerButtonKey != ""){
-            SendKeyCombo(SkillTimerButtonKey)
+            if (!SendKeyCombo(SkillTimerButtonKey))
+                break
         }
 
         if (MemoryFeaturesActive()) {
@@ -59,29 +87,28 @@ StartBot(){
                 MoveToTheMap(warperX, warperY)
             } 
 
+            if (!botRunning || botStopRequested)
+                break
+
             if(currentLocation != warperLocation){
                 Hunt(skillSC, teleportSC) 
             } else if (warperCoordsSet && IsFunc("AppendLog")) {
                 AppendLog("Still at warper — update location or clear warper coords to hunt")
-                Sleep 1000
+                BotSleep(1000)
             }
         } else {
             Hunt(skillSC, teleportSC)
         }
         iterations++
     }
+    BotSessionStop("loop ended")
 }
 
 Hunt(skillSC, teleportSC) {
-    static lastWarpTime := 0
-    static lastSkillTime := 0
-    static attackedXs := []
-    static attackedYs := []
-    static attackCounts := []
-    static unreachableXs := []
-    static unreachableYs := []
-    static emptyScans := 0
-    static fastIdle := false
+    global botRunning, botPaused, botStopRequested
+    global huntLastWarpTime, huntLastSkillTime
+    global huntAttackedXs, huntAttackedYs, huntAttackCounts
+    global huntUnreachableXs, huntUnreachableYs, huntEmptyScans, huntFastIdle
 
     attackedRadiusPx := 72
     attacksBeforeUnreachable := 3
@@ -98,12 +125,12 @@ Hunt(skillSC, teleportSC) {
         return
     }
 
-    if (lastWarpTime == 0) {
-        lastWarpTime := A_TickCount
-        lastSkillTime := A_TickCount
+    if (huntLastWarpTime == 0) {
+        huntLastWarpTime := A_TickCount
+        huntLastSkillTime := A_TickCount
     }
 
-    while(botRunning && !botPaused) {
+    while(botRunning && !botPaused && !botStopRequested) {
         if (MemoryFeaturesActive())
             UpdateGameStats()
 
@@ -112,16 +139,17 @@ Hunt(skillSC, teleportSC) {
             break
         }
 
-        if (SkillTimerButtonKey != "" && (A_TickCount - lastSkillTime) >= (SkillTimerInterval * 1000)) {
-            SendKeyCombo(SkillTimerButtonKey)
-            lastSkillTime := A_TickCount
-            Sleep 300
+        if (SkillTimerButtonKey != "" && (A_TickCount - huntLastSkillTime) >= (SkillTimerInterval * 1000)) {
+            if (!SendKeyCombo(SkillTimerButtonKey))
+                break
+            huntLastSkillTime := A_TickCount
+            BotSleep(300)
         }
 
-        if (MemoryFeaturesActive() && warperCoordsSet && SavePointButtonKey != "" && (A_TickCount - lastWarpTime) >= (TimeOnLocation * 1000)) {
+        if (MemoryFeaturesActive() && warperCoordsSet && SavePointButtonKey != "" && (A_TickCount - huntLastWarpTime) >= (TimeOnLocation * 1000)) {
             WarpToSavePoint()
-            lastWarpTime := A_TickCount
-            Sleep 1000
+            huntLastWarpTime := A_TickCount
+            BotSleep(1000)
             break
         }
 
@@ -138,7 +166,7 @@ Hunt(skillSC, teleportSC) {
         if (ws <= 0 || hs <= 0) {
             if IsFunc("AppendLog")
                 AppendLog("Hunt: invalid search region — select game window and refresh")
-            Sleep 500
+            BotSleep(500)
             continue
         }
 
@@ -148,9 +176,11 @@ Hunt(skillSC, teleportSC) {
             %fn%(mobName, xs, ys, ws, hs)
         }
 
-        jsonText := MobRecognitionHuntScan(mobName, xs, ys, ws, hs, attackedXs, attackedYs, unreachableXs, unreachableYs, emptyScans, attackCounts, fastIdle, false)
+        jsonText := MobRecognitionHuntScan(mobName, xs, ys, ws, hs, huntAttackedXs, huntAttackedYs, huntUnreachableXs, huntUnreachableYs, huntEmptyScans, huntAttackCounts, huntFastIdle, false)
+        if (!botRunning || botStopRequested)
+            break
         if (jsonText = "") {
-            Sleep 100
+            BotSleep(100)
             continue
         }
 
@@ -166,151 +196,205 @@ Hunt(skillSC, teleportSC) {
             if IsFunc("AppendLog")
                 AppendLog("Hunt: stale detect server — restarting")
             MobRecognitionShutdownServer()
-            Sleep 200
+            BotSleep(200)
             continue
         }
 
         GetMobSearchPlayerIgnore(xs, ys, ws, hs, ignoreX, ignoreY, ignoreW, ignoreH)
-        MobRecognitionApplyHuntMarkUnreachable(jsonText, unreachableXs, unreachableYs, attackedRadiusPx)
-        MobRecognitionUpdateUnreachableFromScan(jsonText, attackedXs, attackedYs, attackCounts, unreachableXs, unreachableYs, ignoreX, ignoreY, ignoreW, ignoreH, attackedRadiusPx, attacksBeforeUnreachable)
+        MobRecognitionApplyHuntMarkUnreachable(jsonText, huntUnreachableXs, huntUnreachableYs, attackedRadiusPx)
+        MobRecognitionUpdateUnreachableFromScan(jsonText, huntAttackedXs, huntAttackedYs, huntAttackCounts, huntUnreachableXs, huntUnreachableYs, ignoreX, ignoreY, ignoreW, ignoreH, attackedRadiusPx, attacksBeforeUnreachable)
 
         if (attackX != 0 && attackY != 0) {
-            emptyScans := 0
-            fastIdle := false
+            if (!botRunning || botStopRequested)
+                break
+            huntEmptyScans := 0
+            huntFastIdle := false
             if IsFunc("AppendLog")
                 AppendLog("Hunt [" . huntStatus . "]: attack @" . attackX . "," . attackY . " conf=" . attackConf . " living=" . livingInRange)
             MoveMouseTo(attackX, attackY)
             HuntSkillClick(skillSC)
-            MobRecognitionRecordAttackSlot(attackX, attackY, attackedXs, attackedYs, attackCounts, attackedRadiusPx)
-            Sleep %postAttackSleepMs%
+            MobRecognitionRecordAttackSlot(attackX, attackY, huntAttackedXs, huntAttackedYs, huntAttackCounts, attackedRadiusPx)
+            BotSessionRecordAttack(attackX, attackY, attackConf)
+            BotSleep(postAttackSleepMs)
             continue
         }
 
         scanSleepMs := emptyScanSleepMs
-        if (fastIdle && attackedXs.MaxIndex() = 0)
+        if (huntFastIdle && huntAttackedXs.MaxIndex() = 0)
             scanSleepMs := fastIdleScanSleepMs
-        else if (attackedXs.MaxIndex() = 0)
+        else if (huntAttackedXs.MaxIndex() = 0)
             scanSleepMs := fastIdleScanSleepMs
 
         if (livingInRange > 0) {
             if IsFunc("AppendLog")
                 AppendLog("Hunt [" . huntStatus . "]: " . livingInRange . " living mob(s) — keep hunting")
-            emptyScans := 0
-            fastIdle := false
-            Sleep %scanSleepMs%
+            huntEmptyScans := 0
+            huntFastIdle := false
+            BotSleep(scanSleepMs)
             continue
         }
 
         if (!engagementsResolved) {
-            emptyScans++
+            huntEmptyScans++
             if IsFunc("AppendLog")
-                AppendLog("Hunt [" . huntStatus . "]: waiting for kill confirmation (" . emptyScans . ")")
-            Sleep %killWaitScanSleepMs%
+                AppendLog("Hunt [" . huntStatus . "]: waiting for kill confirmation (" . huntEmptyScans . ")")
+            BotSleep(killWaitScanSleepMs)
             continue
         }
 
-        emptyScans++
+        huntEmptyScans++
         if IsFunc("AppendLog")
-            AppendLog("Hunt [" . huntStatus . "]: clear scan " . emptyScans . "/" . teleportScansRequired)
+            AppendLog("Hunt [" . huntStatus . "]: clear scan " . huntEmptyScans . "/" . teleportScansRequired)
 
         if (canTeleport) {
+            if (!botRunning || botStopRequested)
+                break
             if IsFunc("AppendLog")
                 AppendLog("Hunt: area clear — teleporting")
             Teleport(teleportSC)
-            attackedXs := []
-            attackedYs := []
-            attackCounts := []
-            unreachableXs := []
-            unreachableYs := []
-            emptyScans := 0
-            fastIdle := true
-            Sleep 40
+            HuntStateReset(false)
+            huntFastIdle := true
+            BotSleep(40)
             continue
         }
 
-        Sleep %scanSleepMs%
+        BotSleep(scanSleepMs)
     }
 }
 
 Teleport(teleportSC){
+    global botRunning, botStopRequested
+    if (!botRunning || botStopRequested)
+        return
     Input.SendKey(teleportSC, 1)
-    sleep 50
+    if (!BotSleep(50)) {
+        Input.SendKey(teleportSC, 0)
+        return
+    }
+    if (!botRunning || botStopRequested) {
+        Input.SendKey(teleportSC, 0)
+        return
+    }
     Input.SendKey(teleportSC, 0)
-    sleep 400
+    BotSleep(400)
     if(TakeFlyWings && MemoryFeaturesActive()){
         wingcount--
     }
 }
 
 MoveToTheMap(posX, posY) {
+    if (BotShouldStop())
+        return false
     MoveMouseTo(posX, posY)
-    Sleep 500
+    if (!BotSleep(500))
+        return false
     Input.SendMouseButton(0, 1)
-    sleep 50
+    if (!BotSleep(50)) {
+        Input.SendMouseButton(0, 0)
+        return false
+    }
     Input.SendMouseButton(0, 0)
-    Sleep 500
+    if (!BotSleep(500))
+        return false
     enterSC := GetKeySC("Enter") + 0
     Input.SendKey(enterSC, 1)
-    sleep 50
+    if (!BotSleep(50)) {
+        Input.SendKey(enterSC, 0)
+        return false
+    }
     Input.SendKey(enterSC, 0)
-    Sleep 2000
+    if (!BotSleep(2000))
+        return false
     UpdateGameStats()
+    return true
 }
 
 WarpToSavePoint() {
-    SendKeyCombo(SavePointButtonKey)
-    Sleep 2000
+    if (!SendKeyCombo(SavePointButtonKey))
+        return false
+    if (!BotSleep(2000))
+        return false
     UpdateGameStats()
+    return true
 }
 
 GetFlyWings() {
-    sleep 100
+    if (BotShouldStop())
+        return false
+    if (!BotSleep(100))
+        return false
     ManageInventoryWindow()
+    if (BotShouldStop())
+        return false
     MoveCursorToImage(cell1_img,0,40)
     if !SendKeyCombo(OpenStorageButtonKey) {
         return false
     }
-    Sleep 800
+    if (!BotSleep(800))
+        return false
     if(CheckInventoryCell(flywing_img)){
         AltClicks(1)
 
     }
-    sleep 500
+    if (!BotSleep(500))
+        return false
     MoveCursorToImage(flywing_img)
-    sleep 100
+    if (!BotSleep(100))
+        return false
     Input.SendMouseButton(0, 1)
-    sleep 100
+    if (!BotSleep(100)) {
+        Input.SendMouseButton(0, 0)
+        return false
+    }
     MoveCursorToImage(etc_img,100,20)
     Input.SendMouseButton(0, 0)
-    sleep 200
+    if (!BotSleep(200))
+        return false
     send %wingsTaken%
-    sleep 200
+    if (!BotSleep(200))
+        return false
     enterSC := GetKeySC("Enter") + 0
     Input.SendKey(enterSC, 1)
-    sleep 50
+    if (!BotSleep(50)) {
+        Input.SendKey(enterSC, 0)
+        return false
+    }
     Input.SendKey(enterSC, 0)
     ManageInventoryWindow()
     MoveCursorToImage(close_img)
-    sleep 200
+    if (!BotSleep(200))
+        return false
     InputClick()
     wingcount := wingsTaken
-    sleep 200
+    return BotSleep(200)
 }
 
 ManageInventoryWindow(){
+    if (BotShouldStop())
+        return false
     action := "open"
     if(action = "close"){
         ImageSearch, FoundX, FoundY, 0, 0, A_ScreenWidth, A_ScreenHeight, etc_img
 
     }
     Input.SendKey(56, 1)
-    sleep 50
+    if (!BotSleep(50)) {
+        Input.SendKey(56, 0)
+        return false
+    }
     Input.SendKey(18, 1)
-    sleep 50
+    if (!BotSleep(50)) {
+        Input.SendKey(18, 0)
+        Input.SendKey(56, 0)
+        return false
+    }
     Input.SendKey(18, 0)
-    sleep 50
+    if (!BotSleep(50)) {
+        Input.SendKey(56, 0)
+        return false
+    }
     Input.SendKey(56, 0)
-    sleep 500
+    return BotSleep(500)
 }
 
 DetectCAPTCHA() {
@@ -318,10 +402,12 @@ DetectCAPTCHA() {
     PixelSearch, x, y, xs, ys, xs + ws, ys + hs, %captchaColor%, 1, Fast RGB 
     if (ErrorLevel = 0) {
         Loop,8{
+            if (BotShouldStop())
+                break
             SoundBeep, 750, 1000
-            sleep 500
+            if (!BotSleep(500))
+                break
         }
-        Pause, On
         return true
     }
     return false
@@ -357,50 +443,68 @@ CheckInventoryCell(image, ignoreWing := true) {
 }
 
 ItemsToStorage(){
-    Sleep 500
+    if (BotShouldStop())
+        return false
+    if (!BotSleep(500))
+        return false
     ManageInventoryWindow()
-    sleep 500
+    if (!BotSleep(500))
+        return false
     MoveCursorToImage(use_img)
-    Sleep 100
+    if (!BotSleep(100))
+        return false
     InputClick()
     SendKeyCombo(OpenStorageButtonKey)
     MoveCursorToImage(cell1_img,0,40)
-    while(!CheckInventoryCell(empty_cell_img)){
+    while(!BotShouldStop() && !CheckInventoryCell(empty_cell_img)){
         CheckInventoryCell(flywing_img, false)
         AltClicks(1)
-        sleep 50
+        if (!BotSleep(50))
+            return false
     }
-    sleep 100
+    if (BotShouldStop() || !BotSleep(100))
+        return false
     MoveCursorToImage(eqp_img)
-    sleep 100
+    if (!BotSleep(100))
+        return false
     InputClick()
-    sleep 50
+    if (!BotSleep(50))
+        return false
     MoveCursorToImage(cell1_img,0,40)
-    while(!CheckInventoryCell(empty_cell_img)){
+    while(!BotShouldStop() && !CheckInventoryCell(empty_cell_img)){
         AltClicks(1)
-        sleep 50
+        if (!BotSleep(50))
+            return false
     }
 
     MoveCursorToImage(etc_img)
-    sleep 100
+    if (!BotSleep(100))
+        return false
     InputClick()
-    sleep 100
+    if (!BotSleep(100))
+        return false
     MoveCursorToImage(cell1_img,0,40)
-    while(!CheckInventoryCell(empty_cell_img)){
-        sleep 50
+    while(!BotShouldStop() && !CheckInventoryCell(empty_cell_img)){
+        if (!BotSleep(50))
+            return false
         if(CheckImageOnScreen(ok_img)){
             Input.SendKey(284, 1)
-            sleep 50
+            if (!BotSleep(50)) {
+                Input.SendKey(284, 0)
+                return false
+            }
             Input.SendKey(284, 0)
             MouseGetPos, currentX, currentY
             MoveMouseTo(currentX + 40, currentY)
         }
         AltClicks(1)
     }
-    sleep 100
+    if (BotShouldStop() || !BotSleep(100))
+        return false
     MoveCursorToImage(close_img,10,10)
-    sleep 100
+    if (!BotSleep(100))
+        return false
     InputClick()
     ManageInventoryWindow()
-    sleep 500
+    return BotSleep(500)
 }

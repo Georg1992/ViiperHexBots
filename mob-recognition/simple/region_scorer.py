@@ -18,6 +18,7 @@ class RegionScore:
     accent_score: float
     rare_color_score: float
     local_pattern_score: float
+    color_purity_score: float
     size_score: float
     accepted: bool
     rejection_reason: str
@@ -26,12 +27,23 @@ class RegionScore:
 class SimpleRegionScorer:
     def __init__(self, config: dict):
         self.threshold = float(config.get("acceptThreshold", 0.46))
+        self.min_color_purity = float(config.get("minColorPurity", 0.62))
+        self.min_descriptor_color_match = float(config.get("minDescriptorColorMatch", 0.20))
+        self.max_sprite_palette_distance = float(config.get("maxSpritePaletteDistance", 32.0))
+        self.min_sprite_palette_match = float(config.get("minSpritePaletteMatch", 0.25))
+        self.max_rare_to_body_ratio = float(config.get("maxRareToBodyRatio", 1.15))
+        self.min_informative_fraction = float(config.get("minInformativePixelFraction", 0.06))
+        self.max_descriptor_pixel_fraction = float(config.get("maxDescriptorPixelFraction", 0.38))
+        self.min_discovery_size_score = float(config.get("minDiscoverySizeScore", 0.60))
+        self.min_object_size_score = float(config.get("minObjectSizeScore", 0.72))
+        self.enforce_object_size_gate = bool(config.get("enforceObjectSizeGate", False))
         weights = config.get("weights", {})
         self.weights = {
             "body": float(weights.get("bodyPalette", 0.30)),
             "accent": float(weights.get("accent", 0.35)),
             "rare": float(weights.get("rareColor", 0.10)),
             "pattern": float(weights.get("localPattern", 0.15)),
+            "purity": float(weights.get("colorPurity", 0.10)),
             "size": float(weights.get("size", 0.10)),
         }
 
@@ -41,35 +53,74 @@ class SimpleRegionScorer:
         hsv: np.ndarray,
         descriptor: SimpleMobDescriptor,
         bbox: tuple[int, int, int, int],
+        expected_scale: float = 1.0,
     ) -> RegionScore:
         x, y, w, h = bbox
         region_bgr = frame_bgr[y : y + h, x : x + w]
         region_hsv = hsv[y : y + h, x : x + w]
         if region_bgr.size == 0:
-            return RegionScore(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False, "empty_region")
+            return RegionScore(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False, "empty_region")
 
-        body = self._top_match_score(palette_heatmap(region_hsv, descriptor.body_colors), 0.22)
-        accent = self._top_match_score(palette_heatmap(region_hsv, descriptor.accent_colors), 0.12)
-        rare = self._top_match_score(palette_heatmap(region_hsv, descriptor.rare_colors), 0.08)
+        body_heat = palette_heatmap(region_hsv, descriptor.body_colors)
+        accent_heat = palette_heatmap(region_hsv, descriptor.accent_colors)
+        rare_heat = palette_heatmap(region_hsv, descriptor.rare_colors)
+        descriptor_heat = np.maximum.reduce([body_heat, accent_heat, rare_heat])
+        sprite_palette_heat = self._sprite_palette_heatmap(region_bgr, descriptor)
+
+        body = self._top_match_score(body_heat, 0.22)
+        accent = self._top_match_score(accent_heat, 0.12)
+        rare = self._top_match_score(rare_heat, 0.08)
         pattern = self._local_pattern(region_bgr, region_hsv, descriptor)
-        size = self._size_score(w, h, descriptor)
+        purity, informative_fraction, descriptor_fraction = self._color_purity(
+            region_bgr,
+            region_hsv,
+            descriptor_heat,
+            sprite_palette_heat,
+        )
+        size = self._object_size_score(descriptor_heat, descriptor, expected_scale)
         final = (
             self.weights["body"] * body
             + self.weights["accent"] * accent
             + self.weights["rare"] * rare
             + self.weights["pattern"] * pattern
+            + self.weights["purity"] * purity
             + self.weights["size"] * size
         )
-        accepted = final >= self.threshold
+        accepted = (
+            final >= self.threshold
+            and purity >= self.min_color_purity
+            and rare <= max(body * self.max_rare_to_body_ratio, 0.05)
+            and informative_fraction >= self.min_informative_fraction
+            and descriptor_fraction <= self.max_descriptor_pixel_fraction
+            and size >= self.min_discovery_size_score
+            and (not self.enforce_object_size_gate or size >= self.min_object_size_score)
+        )
+        rejection_reason = ""
+        if not accepted:
+            if final < self.threshold:
+                rejection_reason = "below_threshold"
+            elif purity < self.min_color_purity:
+                rejection_reason = "foreign_colors"
+            elif rare > max(body * self.max_rare_to_body_ratio, 0.05):
+                rejection_reason = "rare_color_imbalance"
+            elif descriptor_fraction > self.max_descriptor_pixel_fraction:
+                rejection_reason = "too_much_descriptor_color"
+            elif size < self.min_discovery_size_score:
+                rejection_reason = "wrong_size"
+            elif self.enforce_object_size_gate and size < self.min_object_size_score:
+                rejection_reason = "wrong_size"
+            else:
+                rejection_reason = "insufficient_sprite_pixels"
         return RegionScore(
             final_score=float(np.clip(final, 0.0, 1.0)),
             body_palette_score=body,
             accent_score=accent,
             rare_color_score=rare,
             local_pattern_score=pattern,
+            color_purity_score=purity,
             size_score=size,
             accepted=accepted,
-            rejection_reason="" if accepted else "below_threshold",
+            rejection_reason=rejection_reason,
         )
 
     @staticmethod
@@ -94,8 +145,73 @@ class SimpleRegionScorer:
         top = np.partition(flat, len(flat) - keep)[-keep:]
         return float(np.clip(top.mean(), 0.0, 1.0))
 
-    @staticmethod
-    def _size_score(w: int, h: int, descriptor: SimpleMobDescriptor) -> float:
-        width_ratio = min(w, descriptor.avg_width) / max(w, descriptor.avg_width, 1)
-        height_ratio = min(h, descriptor.avg_height) / max(h, descriptor.avg_height, 1)
+    def _color_purity(
+        self,
+        region_bgr: np.ndarray,
+        region_hsv: np.ndarray,
+        descriptor_heat: np.ndarray,
+        sprite_palette_heat: np.ndarray,
+    ) -> tuple[float, float, float]:
+        gray = cv2.cvtColor(region_bgr, cv2.COLOR_BGR2GRAY)
+        grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        edge = cv2.magnitude(grad_x, grad_y)
+        if float(edge.max()) > 0:
+            edge = edge / float(edge.max())
+
+        saturation = region_hsv[:, :, 1].astype(np.float32)
+        value = region_hsv[:, :, 2].astype(np.float32)
+        descriptor_pixels = descriptor_heat >= self.min_descriptor_color_match
+        if not np.any(descriptor_pixels):
+            return 0.0, 0.0, 0.0
+        descriptor_fraction = float(descriptor_pixels.mean())
+
+        object_zone = cv2.dilate(
+            descriptor_pixels.astype(np.uint8),
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        informative = ((saturation >= 35.0) | (edge >= 0.18)) & (value >= 35.0) & object_zone
+        if not np.any(informative):
+            return 0.0, 0.0, descriptor_fraction
+
+        matches = sprite_palette_heat[informative] >= self.min_sprite_palette_match
+        purity = float(matches.mean())
+        informative_fraction = float(informative.sum() / max(1, descriptor_heat.size))
+        return purity, informative_fraction, descriptor_fraction
+
+    def _sprite_palette_heatmap(self, region_bgr: np.ndarray, descriptor: SimpleMobDescriptor) -> np.ndarray:
+        if not descriptor.sprite_palette_bgr:
+            return np.zeros(region_bgr.shape[:2], dtype=np.float32)
+
+        pixels = region_bgr.reshape(-1, 3).astype(np.float32)
+        palette = np.asarray(descriptor.sprite_palette_bgr, dtype=np.float32)
+        min_dist_sq = np.full(pixels.shape[0], np.inf, dtype=np.float32)
+        for start in range(0, len(palette), 128):
+            chunk = palette[start : start + 128]
+            diff = pixels[:, None, :] - chunk[None, :, :]
+            dist_sq = np.sum(diff * diff, axis=2)
+            min_dist_sq = np.minimum(min_dist_sq, dist_sq.min(axis=1))
+
+        max_dist = max(self.max_sprite_palette_distance, 1.0)
+        heat = 1.0 - (np.sqrt(min_dist_sq) / max_dist)
+        return np.clip(heat, 0.0, 1.0).reshape(region_bgr.shape[:2]).astype(np.float32)
+
+    def _object_size_score(
+        self,
+        descriptor_heat: np.ndarray,
+        descriptor: SimpleMobDescriptor,
+        expected_scale: float,
+    ) -> float:
+        descriptor_pixels = descriptor_heat >= self.min_descriptor_color_match
+        if not np.any(descriptor_pixels):
+            return 0.0
+
+        ys, xs = np.where(descriptor_pixels)
+        object_width = int(xs.max() - xs.min() + 1)
+        object_height = int(ys.max() - ys.min() + 1)
+        expected_width = max(1, descriptor.avg_width * expected_scale)
+        expected_height = max(1, descriptor.avg_height * expected_scale)
+        width_ratio = min(object_width, expected_width) / max(object_width, expected_width)
+        height_ratio = min(object_height, expected_height) / max(object_height, expected_height)
         return float(np.sqrt(width_ratio * height_ratio))

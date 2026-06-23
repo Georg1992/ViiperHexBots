@@ -26,6 +26,7 @@ CoordMode, Pixel, Screen
 ; ====== CORE BOT STATES ======
 global botRunning := false
 global botPaused := false
+global botStopRequested := false
 
 ; ====== WINDOW MANAGEMENT ======
 global gameWindowID := 0
@@ -112,8 +113,6 @@ Gui, Add, Text, x10 y50 w700 h2 0x10 ; Divider
 Gui, Add, Text, x20 y70 w560 h25, Select Game Window:
 Gui, Add, DropDownList, x20 y100 w490 h25 r10 vSelectedWindow gOnWindowSelect, ||
     Gui, Add, Button, x515 y100 w75 h25 gRefreshWindows, Refresh
-    Gui, Add, Button, x515 y130 w75 h25 gTestMonsterSearch vTestSearchBtn, Test Search
-    Gui, Add, Button, x515 y160 w75 h25 gTestMobRecognition vTestMobRecBtn, Test OpenCV
     Gui, Add, Text, x20 y130 w490 h25 vWindowInfo, % (gameWindowTitle ? gameWindowTitle : "No window selected")
 
 ; Client profile
@@ -171,7 +170,7 @@ Loop % MobNames.MaxIndex() {
     }
 
     mobDetectY := monsterStartY + 30
-    Gui, Add, Text, x330 y%mobDetectY% w200 h25, Mob detection: OpenCV templates
+    Gui, Add, Text, x330 y%mobDetectY% w200 h25, Mob detection: simple descriptor
 
     ; Keybindings
     Gui, Add, Text, x160 y200 w130 h25, Attack Skill Button:
@@ -249,8 +248,6 @@ Loop % MobNames.MaxIndex() {
 
     GuiControl, Disable, SelectedWindow
     GuiControl, Disable, RefreshWindows
-    GuiControl, Disable, TestSearchBtn
-    GuiControl, Disable, TestMobRecBtn
     GuiControl, Disable, BotButton
 
     if (A_Args.Length() > 0 && A_Args[1] = "--validate") {
@@ -271,21 +268,11 @@ Loop % MobNames.MaxIndex() {
         SetInputStatus("Input: Ready", "Virtual keyboard and mouse active — launch the game now")
         GuiControl, Enable, SelectedWindow
         GuiControl, Enable, RefreshWindows
-        GuiControl, Enable, TestSearchBtn
-        GuiControl, Enable, TestMobRecBtn
         GuiControl, Enable, BotButton
         AppendLog("All set — select or launch the game window")
         MobRecognitionEnsureServer()
         SessionLogWriteRuntimeContext()
         Gosub, RefreshWindows
-    return
-
-    TestMonsterSearch:
-        TestMonsterSearch()
-    return
-
-    TestMobRecognition:
-        TestMobRecognition()
     return
 
     LogBoxFocus:
@@ -330,6 +317,7 @@ Loop % MobNames.MaxIndex() {
         }
         botRunning := true
         botPaused := false
+        botStopRequested := false
 
         ; Update buttons
         GuiControl,, BotButton, Stop Bot
@@ -349,6 +337,8 @@ Loop % MobNames.MaxIndex() {
         if IsFunc("AppendLog")
             AppendLog("Search box: " . searchWs . "x" . searchHs . " px (" . SearchRange . " cells) at " . searchXs . "," . searchYs)
         ShowSearchRegionOverlay(searchXs, searchYs, searchWs, searchHs, 2500)
+        HuntStateReset(true)
+        BotSessionStart(MobTemplateFolderName())
         SessionLogRegisterBotRun()
         ; Auto-pause when tabbing out
         SetTimer, CheckWindowFocus, 300 ; Checks every 500ms
@@ -369,7 +359,11 @@ Loop % MobNames.MaxIndex() {
     StopBotProcedure:
         botRunning := false
         botPaused := false
+        botStopRequested := true
         SetTimer, CheckWindowFocus, Off
+        MobRecognitionCancelActiveDetect()
+        ReleaseBotInputs()
+        BotSessionStop("stopped")
         AppendLog("Bot stopped (VIIPER still running)")
         GuiControl,, BotButton, Start Bot
         GuiControl, Hide, ContinueButton 
@@ -613,8 +607,6 @@ Loop % MobNames.MaxIndex() {
         ; Disable Window Selection controls
         GuiControl, Disable, SelectedWindow
         GuiControl, Disable, RefreshWindows
-        GuiControl, Disable, TestSearchBtn
-        GuiControl, Disable, TestMobRecBtn
 
         GuiControl, Disable, SelectedClientProfile
         GuiControl, Disable, UseMemoryReading
@@ -664,8 +656,6 @@ Loop % MobNames.MaxIndex() {
         ; Enable Window Selection controls
         GuiControl, Enable, SelectedWindow
         GuiControl, Enable, RefreshWindows
-        GuiControl, Enable, TestSearchBtn
-        GuiControl, Enable, TestMobRecBtn
 
         GuiControl, Enable, SelectedClientProfile
         GuiControl, Enable, UseMemoryReading
@@ -971,11 +961,14 @@ Loop % MobNames.MaxIndex() {
 
             ExitApplication:
                 global exitCleanupDone
+                global botStopRequested
                 if (exitCleanupDone) {
                     ExitApp
                     return
                 }
                 exitCleanupDone := true
+                botStopRequested := true
+                ReleaseBotInputs()
                 SetTimer, CheckWindowFocus, Off
                 SetTimer, InitViiperInput, Off
                 if (botRunning)
@@ -992,9 +985,12 @@ MainOnExit(ExitReason, ExitCode) {
     if (ExitReason = "Reload")
         return
     global exitCleanupDone
+    global botStopRequested
     if (exitCleanupDone)
         return
     exitCleanupDone := true
+    botStopRequested := true
+    ReleaseBotInputs()
 
     SetTimer, CheckWindowFocus, Off
     SetTimer, InitViiperInput, Off

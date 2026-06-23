@@ -13,6 +13,7 @@ for path in (str(MOB_REC), str(SIMPLE)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
+from cli import apply_scale_calibration, parse_scale_range  # noqa: E402
 from dataset_runner import run_fixtures  # noqa: E402
 from descriptor_builder import SimpleDescriptorBuilder  # noqa: E402
 from detector import SimpleMobDetector, load_simple_config  # noqa: E402
@@ -55,7 +56,16 @@ class SimplePipelineTests(unittest.TestCase):
         self.assertGreaterEqual(candidate.accent_score, 0.0)
         self.assertGreaterEqual(candidate.rare_color_score, 0.0)
         self.assertGreaterEqual(candidate.local_pattern_score, 0.0)
+        self.assertGreaterEqual(candidate.color_purity_score, 0.0)
         self.assertGreaterEqual(candidate.size_score, 0.0)
+        self.assertGreater(candidate.candidate_scale, 0.0)
+
+    def test_scale_calibration_config_overrides_scales(self) -> None:
+        scale_range = parse_scale_range("0.45,0.55")
+        calibrated = apply_scale_calibration(self.config, scale_range, enforce_size_gate=True)
+        self.assertEqual(calibrated["scales"], [0.45, 0.5, 0.55])
+        self.assertEqual(calibrated["centerScales"], [0.45, 0.5, 0.55])
+        self.assertTrue(calibrated["enforceObjectSizeGate"])
 
     def test_clear_negative_has_no_accepts(self) -> None:
         result = self.detector.detect(self._image("qqq.png"), "horn")

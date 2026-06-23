@@ -40,6 +40,25 @@ FormatWindowListEntry(title, process, minMaxStatus := 0) {
     return stateSymbol . safeTitle . " (" . process . ")"
 }
 
+BotShouldStop() {
+    global botStopRequested
+    return botStopRequested
+}
+
+BotSleep(ms) {
+    deadline := A_TickCount + ms
+    while (A_TickCount < deadline) {
+        if (BotShouldStop()) {
+            ReleaseBotInputs()
+            return false
+        }
+        remaining := deadline - A_TickCount
+        chunk := remaining < 50 ? remaining : 50
+        Sleep %chunk%
+    }
+    return true
+}
+
 SetDefaultKeyboardLayout(layout)
 {
     DllCall("LoadKeyboardLayout", Str, layout, UInt, 1)
@@ -47,8 +66,11 @@ SetDefaultKeyboardLayout(layout)
 }
 
 MoveMouseTo(x, y) {
+    if (BotShouldStop())
+        return false
     DllCall("SetCursorPos", "Int", x, "Int", y)
-    Sleep, 5
+    BotSleep(5)
+    return true
 }
 
 GetSearchBoxSizePx() {
@@ -176,98 +198,38 @@ HideSearchRegionOverlay() {
     Gui, SFRight:Destroy
 }
 
-TestMonsterSearch() {
-    global gameWindowID, gameWindowTitle, gameProcess, SearchRange
-    global cellSize, MobNames, selectedMonsterIndex
-
-    SyncSearchRangeFromUI()
-    AppendLog("--- Monster search test ---")
-
-    if (!gameWindowID || !WinExist("ahk_id " gameWindowID)) {
-        MsgBox, 48, Test Search, No game window selected.`n`nSelect your client.exe window and click Refresh first.
-        AppendLog("TEST FAIL: No valid game window (select one and Refresh)")
-        return
-    }
-
-    RestoreWindow()
-    Sleep 300
-
-    WinGetTitle, wTitle, ahk_id %gameWindowID%
-    WinGet, wProcess, ProcessName, ahk_id %gameWindowID%
-    WinGetPos, wx, wy, ww, wh, ahk_id %gameWindowID%
-    ControlGetPos, cx, cy, cw, ch, , ahk_id %gameWindowID%
-
-    GetHuntSearchRegion(xs, ys, ws, hs)
-    x2 := xs + ws
-    y2 := ys + hs
-
-    mobName := MobNames[selectedMonsterIndex]
-    mobFolder := MobTemplateFolderName()
-
-    AppendLog("TEST: hwnd=" . gameWindowID . " process=" . wProcess)
-    AppendLog("TEST: title=" . wTitle)
-    AppendLog("TEST: window rect " . wx . "," . wy . " size " . ww . "x" . wh)
-    AppendLog("TEST: client rect " . cx . "," . cy . " size " . cw . "x" . ch)
-    AppendLog("TEST: search box " . xs . "," . ys . " to " . x2 . "," . y2 . " (" . ws . "x" . hs . ")")
-    AppendLog("TEST: monster=" . mobName . " templates=" . mobFolder)
-
-    searchCenterX := xs + (ws // 2)
-    searchCenterY := ys + (hs // 2)
-    clientCenterX := cx + (cw // 2)
-    clientCenterY := cy + (ch // 2)
-
-    regionWarning := ""
-    if (searchCenterX < cx || searchCenterX > cx + cw || searchCenterY < cy || searchCenterY > cy + ch) {
-        regionWarning .= "`n- Search center is outside the game area (title bar offset)"
-        AppendLog("TEST: WARNING — search center is outside the client (game) area")
-    }
-    if (x2 < cx || xs > cx + cw || y2 < cy || ys > cy + ch) {
-        regionWarning .= "`n- Search box does not overlap the game area"
-        AppendLog("TEST: WARNING — search box does not overlap the client area")
-    }
-
-    foundX := 0
-    foundY := 0
-    found := FindMobTarget(foundX, foundY, xs, ys, ws, hs)
-    if (!found) {
-        matchResult := "No OpenCV match for " . mobName
-        AppendLog("TEST: OpenCV — no match")
-    } else {
-        matchResult := "Match at " . foundX . "," . foundY
-        AppendLog("TEST: OpenCV — match at " . foundX . "," . foundY)
-    }
-
-    AppendLog("TEST: red border shows where the bot searches for 3 seconds")
-    ShowSearchRegionOverlay(xs, ys, ws, hs)
-
-    summary := "Monster: " . mobName
-    summary .= "`nDescriptor: generated_descriptors\" . mobFolder . "\simple"
-    summary .= "`nSearch range: " . SearchRange . " cells = " . ws . "x" . hs . " px"
-    summary .= "`nSearch box: " . xs . "," . ys . " to " . x2 . "," . y2
-    summary .= "`n`nResult: " . matchResult
-    if (regionWarning != "")
-        summary .= "`n`nRegion warnings:" . regionWarning
-    summary .= "`n`nRed border = OpenCV search region. Full details in the Log panel."
-
-    MsgBox, 64, Test Search, %summary%
-}
-
 InputClick(){
+    if (BotShouldStop())
+        return false
     Input.SendMouseButton(0, 1)
-    sleep 50
+    if (!BotSleep(50)) {
+        Input.SendMouseButton(0, 0)
+        return false
+    }
     Input.SendMouseButton(0, 0)
+    return true
 }
 
 AltClicks(times){
+    if (BotShouldStop())
+        return false
     Input.SendKey(56, 1)
-    sleep 50
+    if (!BotSleep(50)) {
+        Input.SendKey(56, 0)
+        return false
+    }
     Loop, %times%{
+        if (BotShouldStop())
+            break
         Input.SendMouseButton(1, 1)
-        sleep 50
+        if (!BotSleep(50))
+            break
         Input.SendMouseButton(1, 0)
-        sleep 50
+        if (!BotSleep(50))
+            break
     }
     Input.SendKey(56, 0)
+    return !BotShouldStop()
 }
 
 SkillClick(KeySC){
@@ -281,12 +243,36 @@ SkillClick(KeySC){
 }
 
 HuntSkillClick(KeySC) {
+    if (BotShouldStop())
+        return false
     Input.SendKey(KeySC, 1)
-    Sleep 20
+    if (!BotSleep(20)) {
+        Input.SendKey(KeySC, 0)
+        Input.SendMouseButton(0, 0)
+        return false
+    }
     Input.SendKey(KeySC, 0)
     Input.SendMouseButton(0, 1)
-    Sleep 20
+    if (!BotSleep(20)) {
+        Input.SendMouseButton(0, 0)
+        return false
+    }
     Input.SendMouseButton(0, 0)
+    return true
+}
+
+ReleaseBotInputs() {
+    global SkillButtonKey, TeleportButtonKey, SavePointButtonKey, SkillTimerButtonKey
+    keys := [SkillButtonKey, TeleportButtonKey, SavePointButtonKey, SkillTimerButtonKey]
+    for index, keyName in keys {
+        if (keyName = "")
+            continue
+        keySC := GetKeySC(keyName) + 0
+        if (keySC > 0)
+            Input.SendKey(keySC, 0)
+    }
+    Input.SendMouseButton(0, 0)
+    Input.SendMouseButton(1, 0)
 }
 
 CheckImageOnScreen(image){
@@ -298,15 +284,18 @@ CheckImageOnScreen(image){
 }
 
 MoveCursorToImage(image, xOffset := 0, yOffset := 0){
+    if (BotShouldStop())
+        return false
     ImageSearch, FoundX, FoundY, 0, 0, A_ScreenWidth, A_ScreenHeight, %image%
     if (ErrorLevel = 0) {
         ; Image found, move the cursor
-        MoveMouseTo(FoundX + xOffset, FoundY + yOffset)
+        return MoveMouseTo(FoundX + xOffset, FoundY + yOffset)
     } else if (ErrorLevel = 1) {
-        MsgBox, Image was not found or an error occurred.
-        Pause, On
+        if IsFunc("AppendLog")
+            AppendLog("Image not found: " . image)
     }
-    sleep 200
+    BotSleep(200)
+    return false
 }
 
 ZoomOut(){
@@ -364,6 +353,9 @@ ParseKeyCombo(keyCombo, ByRef scKey, ByRef scModifier) {
 SendKeyCombo(rawKeyCombo, pressDuration := 50, holdDuration := 300) {
     static keyParser := Func("ParseKeyCombo") ; Cache the function reference
 
+    if (BotShouldStop())
+        return false
+
     ; Parse the key combination
     scKey := 0, scModifier := 0
     if !%keyParser%(rawKeyCombo, scKey, scModifier) {
@@ -382,14 +374,28 @@ SendKeyCombo(rawKeyCombo, pressDuration := 50, holdDuration := 300) {
             Input.SendKey(GetKeySC("LShift"), 1)
         if (scModifier & GetKeySC("LCtrl"))
             Input.SendKey(GetKeySC("LCtrl"), 1)
-        Sleep holdDuration
+        if (!BotSleep(holdDuration)) {
+            ClearModifiers()
+            return false
+        }
     }
 
     ; Press and release main key
+    if (BotShouldStop()) {
+        ClearModifiers()
+        return false
+    }
     Input.SendKey(scKey, 1)
-    Sleep pressDuration
+    if (!BotSleep(pressDuration)) {
+        Input.SendKey(scKey, 0)
+        ClearModifiers()
+        return false
+    }
     Input.SendKey(scKey, 0)
-    Sleep holdDuration
+    if (!BotSleep(holdDuration)) {
+        ClearModifiers()
+        return false
+    }
 
     ; Release modifiers
     ClearModifiers()
