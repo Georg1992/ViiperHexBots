@@ -87,7 +87,7 @@ class DeathValidator:
             living_at_dead_score,
         )
         threshold = self.attack_slot_threshold if attack_slot else self.threshold
-        is_dead = self._is_dead(signals, threshold)
+        is_dead = self._is_dead(signals, threshold, attack_slot=attack_slot)
         return DeathValidation(
             is_dead=is_dead,
             confidence=signals["confidence"],
@@ -125,6 +125,7 @@ class DeathValidator:
         return {
             "confidence": float(np.clip(confidence, 0.0, 1.0)),
             "mob_presence": float(np.clip(mob_presence, 0.0, 1.0)),
+            "living_score": living_score.final_score,
             "pose_score": pose_score,
             "size_gap_score": size_gap_score,
             "histogram_score": histogram_score,
@@ -132,10 +133,41 @@ class DeathValidator:
             "mean_opacity": mean_opacity,
         }
 
-    def _is_dead(self, signals: dict[str, float], threshold: float) -> bool:
-        if signals["mob_presence"] < self.min_mob_presence:
+    def _is_dead(self, signals: dict[str, float], threshold: float, *, attack_slot: bool = False) -> bool:
+        min_presence = self.min_mob_presence * (0.70 if attack_slot else 1.0)
+        if signals["mob_presence"] < min_presence:
             return False
-        return signals["confidence"] >= threshold
+
+        pose = signals["pose_score"]
+        living = signals["living_score"]
+        gap = signals["size_gap_score"]
+        confidence = signals["confidence"]
+        fade = signals["opacity_fade_score"]
+
+        if fade > 0.0 and confidence >= self.attack_slot_threshold:
+            return True
+
+        if attack_slot:
+            if gap >= 0.36 and pose >= 0.26:
+                return True
+            pose_living_ratio = pose / max(living, 1e-6)
+            if pose >= 0.24 and pose_living_ratio <= 0.84:
+                return True
+            if confidence >= threshold and pose >= living and pose >= 0.22:
+                return True
+            return False
+
+        if pose >= living and confidence >= threshold:
+            return True
+
+        if living >= 0.62 or pose < 0.30 or gap < 0.39:
+            return False
+
+        pose_living_ratio = pose / max(living, 1e-6)
+        mob_presence = signals["mob_presence"]
+        if mob_presence >= 0.535:
+            return pose_living_ratio <= 0.82
+        return pose_living_ratio <= 0.65
 
     @staticmethod
     def _size_gap_score(dead_score: RegionScore | None, living_at_dead_score: RegionScore) -> float:

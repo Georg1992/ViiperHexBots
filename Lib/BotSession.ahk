@@ -287,15 +287,29 @@ BotSessionDetectResponse(jsonText, elapsedMs) {
                 candidateCount++
             pos += StrLen(block)
         }
+    } else if (MobRecognitionCandidatesParsed(jsonText)) {
+        candidateCount := 0
     }
 
     bestX := ""
     bestY := ""
     bestConf := ""
-    if (RegExMatch(jsonText, "i)""candidates"":\[\{[^}]*""centerX"":(\d+)[^}]*""centerY"":(\d+)[^}]*""confidence"":([0-9.]+)", b)) {
-        bestX := b1
-        bestY := b2
-        bestConf := b3
+    if (section != "") {
+        pos := 1
+        while (pos := RegExMatch(section, "i)\{[^{}]+\}", block, pos)) {
+            if (!InStr(block, """centerX"":") || !InStr(block, """confidence"":"))
+                continue
+            candX := 0
+            candY := 0
+            candConf := 0
+            if (MobRecognitionParseCandidateBlock(block, candX, candY, candConf)) {
+                bestX := candX
+                bestY := candY
+                bestConf := candConf
+                break
+            }
+            pos += StrLen(block)
+        }
     }
 
     summary := "ok=" . ok . " elapsed=" . elapsedMs . "ms"

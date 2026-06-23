@@ -8,6 +8,7 @@
 #include Lib\BotSession.ahk
 #include Lib\MobData.ahk
 #include Lib\ClientProfile.ahk
+#include Lib\HuntTracks.ahk
 #include Lib\MobRecognition.ahk
 #include Lib\MemoryOperations.ahk
 #include Lib\BotLogic.ahk
@@ -332,7 +333,7 @@ Gui, Show, w920 h710, Hex Bot
         if IsFunc("AppendLog")
             AppendLog("Search box: " . searchWs . "x" . searchHs . " px (" . SearchRange . " cells) at " . searchXs . "," . searchYs)
         ShowSearchRegionOverlay(searchXs, searchYs, searchWs, searchHs, 2500)
-        HuntStateReset(true)
+        HuntSessionReset(true)
         BotSessionStart(MobTemplateFolderName())
         SessionLogRegisterBotRun()
         ; Auto-pause when tabbing out

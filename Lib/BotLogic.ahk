@@ -21,29 +21,28 @@ global totalWeight := 0
 global currentLocation := 0
 global huntLastWarpTime := 0
 global huntLastSkillTime := 0
-global huntAttackedXs := []
-global huntAttackedYs := []
-global huntAttackCounts := []
-global huntUnreachableXs := []
-global huntUnreachableYs := []
-global huntEmptyScans := 0
 global huntFastIdle := false
 
-HuntStateReset(resetWarpTimer := true) {
-    global huntLastWarpTime, huntLastSkillTime
-    global huntAttackedXs, huntAttackedYs, huntAttackCounts
-    global huntUnreachableXs, huntUnreachableYs, huntEmptyScans, huntFastIdle
+HuntAttackTrack(skillSC, track) {
+    global SkillDelay, botRunning, botStopRequested
 
-    if (resetWarpTimer)
-        huntLastWarpTime := 0
-    huntLastSkillTime := 0
-    huntAttackedXs := []
-    huntAttackedYs := []
-    huntAttackCounts := []
-    huntUnreachableXs := []
-    huntUnreachableYs := []
-    huntEmptyScans := 0
-    huntFastIdle := false
+    if (!IsObject(track))
+        return false
+
+    remainingDelay := SkillDelay - (A_TickCount - track.lastAttackTick)
+    if (remainingDelay > 0) {
+        BotSleep(remainingDelay)
+        if (!botRunning || botStopRequested)
+            return false
+    }
+
+    if IsFunc("AppendLog")
+        AppendLog("Hunt [engage]: attack track id=" . track.id . " @" . Round(track.x) . "," . Round(track.y) . " conf=" . Round(track.confidence, 2))
+    MoveMouseTo(Round(track.x), Round(track.y))
+    HuntSkillClick(skillSC)
+    HuntTracks_MarkAttack(track.id)
+    BotSessionRecordAttack(Round(track.x), Round(track.y), track.confidence)
+    return true
 }
 
 StartBot(){
@@ -106,16 +105,13 @@ StartBot(){
 
 Hunt(skillSC, teleportSC) {
     global botRunning, botPaused, botStopRequested
-    global huntLastWarpTime, huntLastSkillTime
-    global huntAttackedXs, huntAttackedYs, huntAttackCounts
-    global huntUnreachableXs, huntUnreachableYs, huntEmptyScans, huntFastIdle
+    global huntLastWarpTime, huntLastSkillTime, huntFastIdle
+    global huntTrackClearScans
+    global CurrentTargetTrackId, HUNT_TRACK_UNREACHABLE_ATTACKS, SkillDelay
 
-    attackedRadiusPx := 72
-    attacksBeforeUnreachable := 3
     postAttackSleepMs := 50
     emptyScanSleepMs := 25
     fastIdleScanSleepMs := 15
-    killWaitScanSleepMs := 8
 
     SyncSearchRangeFromUI()
 
@@ -165,6 +161,8 @@ Hunt(skillSC, teleportSC) {
             continue
         }
 
+        HuntTracks_SetRoiCenter(xs + (ws // 2), ys + (hs // 2))
+
         if (MemoryFeaturesActive() && DetectCaptcha && captchaEnabled && DetectCAPTCHA(xs, ys, ws, hs)) {
             RequestBotStop("captcha detected")
             break
@@ -176,7 +174,11 @@ Hunt(skillSC, teleportSC) {
             %fn%(mobName, xs, ys, ws, hs)
         }
 
-        jsonText := MobRecognitionHuntScan(mobName, xs, ys, ws, hs, huntAttackedXs, huntAttackedYs, huntUnreachableXs, huntUnreachableYs, huntEmptyScans, huntAttackCounts, huntFastIdle, false)
+        probeXs := []
+        probeYs := []
+        HuntTracks_CollectAttackProbes(probeXs, probeYs)
+
+        jsonText := MobRecognitionHuntDetect(mobName, xs, ys, ws, hs, probeXs, probeYs, false)
         if (!botRunning || botStopRequested)
             break
         if (jsonText = "") {
@@ -184,83 +186,96 @@ Hunt(skillSC, teleportSC) {
             continue
         }
 
-        livingInRange := 0
-        totalLivingInRange := 0
-        canTeleport := false
-        attackX := 0
-        attackY := 0
-        attackConf := 0
-        huntStatus := ""
-        engagementsResolved := true
-        teleportScansRequired := 6
-        if (!MobRecognitionParseHuntPlan(jsonText, livingInRange, canTeleport, attackX, attackY, attackConf, huntStatus, engagementsResolved, teleportScansRequired)) {
+        candidates := []
+        if (jsonText = "" || !MobJsonIsOk(jsonText)) {
             if IsFunc("AppendLog")
-                AppendLog("Hunt: invalid detect response — retrying")
+                AppendLog("Hunt: detect failed — retrying")
             BotSleep(200)
             continue
         }
-
-        if (RegExMatch(jsonText, "i)""totalLivingInRange"":(\d+)", match))
-            totalLivingInRange := match1 + 0
-
+        MobRecognitionParseCandidates(jsonText, candidates)
         GetMobSearchPlayerIgnore(xs, ys, ws, hs, ignoreX, ignoreY, ignoreW, ignoreH)
-        MobRecognitionApplyHuntMarkUnreachable(jsonText, huntUnreachableXs, huntUnreachableYs, attackedRadiusPx)
-        MobRecognitionUpdateUnreachableFromScan(jsonText, huntAttackedXs, huntAttackedYs, huntAttackCounts, huntUnreachableXs, huntUnreachableYs, ignoreX, ignoreY, ignoreW, ignoreH, attackedRadiusPx, attacksBeforeUnreachable)
+        filteredCandidates := []
+        for index, candidate in candidates {
+            if (candidate.dead) {
+                filteredCandidates.Push(candidate)
+                continue
+            }
+            if (MobPointInsideIgnore(candidate.x, candidate.y, ignoreX, ignoreY, ignoreW, ignoreH))
+                continue
+            filteredCandidates.Push(candidate)
+        }
+        HuntTracks_Update(filteredCandidates)
 
-        if (attackX != 0 && attackY != 0) {
+        engaged := false
+        if (CurrentTargetTrackId != "") {
+            currentTrack := HuntTracks_GetTrackById(CurrentTargetTrackId)
+            if (!IsObject(currentTrack) || currentTrack.state = "gone" || currentTrack.unreachable) {
+                HuntTracks_Log("HUNT", "clear currentTarget id=" . CurrentTargetTrackId . " reason=lost")
+                CurrentTargetTrackId := ""
+            } else if (currentTrack.state = "dead") {
+                HuntTracks_Log("HUNT", "clear currentTarget id=" . CurrentTargetTrackId . " reason=dead")
+                CurrentTargetTrackId := ""
+            } else if (!HuntTracks_IsFresh(currentTrack)) {
+                HuntTracks_Log("HUNT", "clear currentTarget id=" . CurrentTargetTrackId . " reason=stale")
+                CurrentTargetTrackId := ""
+            } else if (currentTrack.attackCount >= HUNT_TRACK_UNREACHABLE_ATTACKS) {
+                HuntTracks_MarkUnreachable(CurrentTargetTrackId)
+                HuntTracks_Log("HUNT", "clear currentTarget id=" . CurrentTargetTrackId . " reason=unreachable")
+                CurrentTargetTrackId := ""
+            } else {
+                engaged := HuntAttackTrack(skillSC, currentTrack)
+                if (engaged)
+                    BotSleep(postAttackSleepMs)
+            }
+        }
+
+        if (engaged) {
+            huntFastIdle := false
+            continue
+        }
+
+        newTargetId := HuntTracks_SelectTarget()
+        if (newTargetId) {
             if (!botRunning || botStopRequested)
                 break
-            huntEmptyScans := 0
-            huntFastIdle := false
+            CurrentTargetTrackId := newTargetId
+            newTrack := HuntTracks_GetTrackById(newTargetId)
             if IsFunc("AppendLog")
-                AppendLog("Hunt [" . huntStatus . "]: attack @" . attackX . "," . attackY . " conf=" . attackConf . " targets=" . livingInRange . " living=" . totalLivingInRange)
-            MoveMouseTo(attackX, attackY)
+                AppendLog("Hunt [target]: attack track id=" . newTargetId . " @" . Round(newTrack.x) . "," . Round(newTrack.y) . " conf=" . Round(newTrack.confidence, 2) . " alive=" . HuntTracks_GetAliveCount())
+            MoveMouseTo(Round(newTrack.x), Round(newTrack.y))
             HuntSkillClick(skillSC)
-            MobRecognitionRecordAttackSlot(attackX, attackY, huntAttackedXs, huntAttackedYs, huntAttackCounts, attackedRadiusPx)
-            BotSessionRecordAttack(attackX, attackY, attackConf)
+            HuntTracks_MarkAttack(newTargetId)
+            BotSessionRecordAttack(Round(newTrack.x), Round(newTrack.y), newTrack.confidence)
+            huntFastIdle := false
             BotSleep(postAttackSleepMs)
             continue
         }
 
-        scanSleepMs := emptyScanSleepMs
-        if (huntFastIdle && huntAttackedXs.MaxIndex() = 0)
-            scanSleepMs := fastIdleScanSleepMs
-        else if (huntAttackedXs.MaxIndex() = 0)
-            scanSleepMs := fastIdleScanSleepMs
+        scanSleepMs := huntFastIdle ? fastIdleScanSleepMs : emptyScanSleepMs
+        clearScansRequired := (huntFastIdle || HuntTracks_AllTracksDead()) ? 1 : 2
 
-        if (totalLivingInRange > 0) {
-            if IsFunc("AppendLog")
-                AppendLog("Hunt [" . huntStatus . "]: " . totalLivingInRange . " living mob(s) in range — keep hunting")
-            huntEmptyScans := 0
-            huntFastIdle := false
-            BotSleep(scanSleepMs)
-            continue
-        }
-
-        if (!engagementsResolved) {
-            huntEmptyScans++
-            if IsFunc("AppendLog")
-                AppendLog("Hunt [" . huntStatus . "]: waiting for kill confirmation (" . huntEmptyScans . ")")
-            BotSleep(killWaitScanSleepMs)
-            continue
-        }
-
-        huntEmptyScans++
-        if IsFunc("AppendLog")
-            AppendLog("Hunt [" . huntStatus . "]: clear scan " . huntEmptyScans . "/" . teleportScansRequired)
-
-        if (canTeleport) {
+        if (CurrentTargetTrackId = "" && HuntTracks_AllCleared(clearScansRequired)) {
             if (!botRunning || botStopRequested)
                 break
             if IsFunc("AppendLog")
-                AppendLog("Hunt: area clear — teleporting")
+                AppendLog("Hunt: area clear — teleporting (alive=" . HuntTracks_GetAliveCount() . " areaClear=" . HuntTracks_GetAreaClearAliveCount() . ")")
             Teleport(teleportSC)
-            HuntStateReset(false)
+            HuntAreaReset()
             huntFastIdle := true
             BotSleep(40)
             continue
         }
 
+        if (HuntTracks_GetActionableAliveCount() > 0) {
+            if IsFunc("AppendLog")
+                AppendLog("Hunt [scan]: actionable tracks=" . HuntTracks_GetActionableAliveCount() . " waiting")
+            BotSleep(scanSleepMs)
+            continue
+        }
+
+        if IsFunc("AppendLog")
+            AppendLog("Hunt [scan]: clear scan pending " . huntTrackClearScans . "/" . clearScansRequired)
         BotSleep(scanSleepMs)
     }
 }

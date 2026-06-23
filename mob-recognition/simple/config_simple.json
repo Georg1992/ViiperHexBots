@@ -10,7 +10,7 @@
   "minDiscoverySizeScore": 0.60,
   "minObjectSizeScore": 0.72,
   "enforceObjectSizeGate": false,
-  "topCandidateCenters": 50,
+  "topCandidateCenters": 24,
   "minCenterDistancePx": 35,
   "minCenterHeat": 0.02,
   "nmsDistancePx": 35,

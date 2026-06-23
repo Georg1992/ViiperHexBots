@@ -5,8 +5,6 @@
 global mobRecognitionDebug := false
 global mobRecognitionPython := ""
 global mobRecognitionCli := "mob-recognition\cli.py"
-global MobRecognitionEngagementRadius := 72
-global MobRecognitionAttackSuppressRadius := 28
 global mobRecognitionShutdownDone := false
 global mobRecognitionActiveDetectPid := 0
 
@@ -100,180 +98,74 @@ MobRecognitionIsHuntTargetBlock(block) {
 }
 
 MobRecognitionIsLivingBlock(block) {
-    return InStr(block, """living"":true")
-}
-
-MobRecognitionIsDeadBlock(block) {
-    return InStr(block, """dead"":true")
-}
-
-MobRecognitionExtractCandidatesSection(jsonText) {
-    if (jsonText = "" || !InStr(jsonText, """candidates"":"))
-        return ""
-    if (RegExMatch(jsonText, "i)""candidates"":\[\]", match))
-        return ""
-    if (RegExMatch(jsonText, "i)""candidates"":\[([^\]]*)\]", match))
-        return match1
-    return ""
-}
-
-MobRecognitionCountLivingInRange(jsonText, ignoreX, ignoreY, ignoreW, ignoreH) {
-    count := 0
-    if (jsonText = "" || !MobJsonIsOk(jsonText))
-        return 0
-
-    section := MobRecognitionExtractCandidatesSection(jsonText)
-    if (section = "")
-        return 0
-
-    pos := 1
-    while (pos := RegExMatch(section, "i)\{[^{}]+\}", block, pos)) {
-        if (!MobRecognitionIsLivingBlock(block)) {
-            pos += StrLen(block)
-            continue
-        }
-
-        candX := 0
-        candY := 0
-        candConf := 0
-        if (!MobRecognitionParseCandidateBlock(block, candX, candY, candConf)) {
-            pos += StrLen(block)
-            continue
-        }
-        if (MobPointInsideIgnore(candX, candY, ignoreX, ignoreY, ignoreW, ignoreH)) {
-            pos += StrLen(block)
-            continue
-        }
-
-        count++
-        pos += StrLen(block)
-    }
-
-    return count
-}
-
-MobRecognitionEngagementsResolved(jsonText, attackedXs, attackedYs, radius) {
-    slotCount := attackedXs.MaxIndex()
-    if (!slotCount)
+    if (InStr(block, """living"":true") || InStr(block, """living"": true"))
         return true
-    if (jsonText = "" || !MobJsonIsOk(jsonText))
-        return false
-
-    livingXs := []
-    livingYs := []
-    deadXs := []
-    deadYs := []
-    section := MobRecognitionExtractCandidatesSection(jsonText)
-    if (section = "")
-        return true
-
-    pos := 1
-    while (pos := RegExMatch(section, "i)\{[^{}]+\}", block, pos)) {
-        candX := 0
-        candY := 0
-        candConf := 0
-        if (!MobRecognitionParseCandidateBlock(block, candX, candY, candConf)) {
-            pos += StrLen(block)
-            continue
-        }
-
-        if (MobRecognitionIsDeadBlock(block)) {
-            deadXs.Push(candX)
-            deadYs.Push(candY)
-        } else if (MobRecognitionIsLivingBlock(block)) {
-            livingXs.Push(candX)
-            livingYs.Push(candY)
-        }
-        pos += StrLen(block)
-    }
-
-    Loop %slotCount% {
-        slotX := attackedXs[A_Index]
-        slotY := attackedYs[A_Index]
-        if (MobPointNearPoints(slotX, slotY, deadXs, deadYs, radius))
-            continue
-        if (MobPointNearPoints(slotX, slotY, livingXs, livingYs, radius))
-            return false
-    }
-
-    return true
-}
-
-MobRecognitionSlotHasDead(jsonText, slotX, slotY, radius) {
-    if (jsonText = "" || !MobJsonIsOk(jsonText))
-        return false
-
-    section := MobRecognitionExtractCandidatesSection(jsonText)
-    if (section = "")
-        return false
-
-    pos := 1
-    while (pos := RegExMatch(section, "i)\{[^{}]+\}", block, pos)) {
-        if (!MobRecognitionIsDeadBlock(block)) {
-            pos += StrLen(block)
-            continue
-        }
-
-        candX := 0
-        candY := 0
-        candConf := 0
-        if (!MobRecognitionParseCandidateBlock(block, candX, candY, candConf)) {
-            pos += StrLen(block)
-            continue
-        }
-        dx := slotX - candX
-        dy := slotY - candY
-        if ((dx * dx) + (dy * dy) <= radius * radius)
-            return true
-        pos += StrLen(block)
-    }
-
     return false
 }
 
-MobRecognitionPurgeResolvedAttackSlots(jsonText, ByRef attackedXs, ByRef attackedYs, ByRef attackCounts, radius) {
-    purged := 0
-    slotCount := attackedXs.MaxIndex()
-    if (!slotCount)
-        return 0
-
-    index := slotCount
-    while (index >= 1) {
-        slotX := attackedXs[index]
-        slotY := attackedYs[index]
-        if (MobRecognitionSlotHasDead(jsonText, slotX, slotY, radius)) {
-            attackedXs.RemoveAt(index)
-            attackedYs.RemoveAt(index)
-            attackCounts.RemoveAt(index)
-            purged++
-        }
-        index--
-    }
-
-    return purged
+MobRecognitionIsDeadBlock(block) {
+    return InStr(block, """dead"":true") || InStr(block, """dead"": true")
 }
 
-MobRecognitionSelectLivingTarget(jsonText, ByRef outX, ByRef outY, ByRef outConf, ignoreX, ignoreY, ignoreW, ignoreH, unreachableXs, unreachableYs, radius) {
-    outX := 0
-    outY := 0
-    outConf := 0
-    bestConf := 0.0
+MobRecognitionFindJsonArrayBounds(jsonText, key) {
+    marker := """" . key . """:["
+    markerPos := InStr(jsonText, marker)
+    if (!markerPos)
+        return {start: 0, end: 0, innerStart: 0, innerEnd: 0}
 
+    arrayStart := markerPos + StrLen(marker) - 1
+    depth := 0
+    index := arrayStart
+    length := StrLen(jsonText)
+    while (index <= length) {
+        ch := SubStr(jsonText, index, 1)
+        if (ch = "[")
+            depth++
+        else if (ch = "]") {
+            depth--
+            if (depth = 0)
+                return {start: arrayStart, end: index, innerStart: arrayStart + 1, innerEnd: index - 1}
+        }
+        index++
+    }
+    return {start: 0, end: 0, innerStart: 0, innerEnd: 0}
+}
+
+MobRecognitionCandidatesParsed(jsonText) {
+    return MobRecognitionFindJsonArrayBounds(jsonText, "candidates").start > 0
+}
+
+MobRecognitionExtractCandidatesSection(jsonText) {
+    bounds := MobRecognitionFindJsonArrayBounds(jsonText, "candidates")
+    if (bounds.innerStart = 0 || bounds.innerEnd < bounds.innerStart)
+        return ""
+    return SubStr(jsonText, bounds.innerStart, bounds.innerEnd - bounds.innerStart + 1)
+}
+
+MobRecognitionExtractCandidatesJson(jsonText) {
+    bounds := MobRecognitionFindJsonArrayBounds(jsonText, "candidates")
+    if (bounds.start = 0)
+        return "[]"
+    return SubStr(jsonText, bounds.start, bounds.end - bounds.start + 1)
+}
+
+MobRecognitionParseCandidateLivingDead(block, ByRef living, ByRef dead) {
+    living := (InStr(block, """living"":true") || InStr(block, """living"": true")) ? true : false
+    dead := (InStr(block, """dead"":true") || InStr(block, """dead"": true")) ? true : false
+}
+
+MobRecognitionParseCandidates(jsonText, ByRef outCandidates) {
+    outCandidates := []
     if (jsonText = "" || !MobJsonIsOk(jsonText))
-        return false
-
-    if (!IsObject(unreachableXs))
-        unreachableXs := []
-    if (!IsObject(unreachableYs))
-        unreachableYs := []
+        return 0
 
     section := MobRecognitionExtractCandidatesSection(jsonText)
     if (section = "")
-        return false
+        return 0
 
     pos := 1
     while (pos := RegExMatch(section, "i)\{[^{}]+\}", block, pos)) {
-        if (!MobRecognitionIsLivingBlock(block)) {
+        if (!MobRecognitionIsAcceptedBlock(block)) {
             pos += StrLen(block)
             continue
         }
@@ -285,25 +177,39 @@ MobRecognitionSelectLivingTarget(jsonText, ByRef outX, ByRef outY, ByRef outConf
             pos += StrLen(block)
             continue
         }
-        if (MobPointInsideIgnore(candX, candY, ignoreX, ignoreY, ignoreW, ignoreH)) {
-            pos += StrLen(block)
-            continue
-        }
-        if (MobPointNearPoints(candX, candY, unreachableXs, unreachableYs, radius)) {
-            pos += StrLen(block)
-            continue
-        }
 
-        if (candConf > bestConf) {
-            bestConf := candConf
-            outX := candX
-            outY := candY
-            outConf := candConf
-        }
+        living := false
+        dead := false
+        MobRecognitionParseCandidateLivingDead(block, living, dead)
+        candidate := {}
+        candidate.x := candX
+        candidate.y := candY
+        candidate.confidence := candConf
+        candidate.living := living
+        candidate.dead := dead
+        outCandidates.Push(candidate)
         pos += StrLen(block)
     }
 
-    return (outX > 0 && outY > 0)
+    return outCandidates.MaxIndex() ? outCandidates.MaxIndex() : 0
+}
+
+MobRecognitionHuntDetect(mobName, roiX, roiY, roiW, roiH, probeXs := "", probeYs := "", showProgress := false) {
+    if (roiW <= 0 || roiH <= 0) {
+        MobRecognitionLog("MobRecognition: invalid hunt ROI " . roiX . "," . roiY . " " . roiW . "x" . roiH)
+        return ""
+    }
+
+    if (!MobRecognitionEnsureServer()) {
+        MobRecognitionLog("MobRecognition: detector unavailable")
+        return ""
+    }
+
+    if (!IsObject(probeXs))
+        probeXs := []
+    if (!IsObject(probeYs))
+        probeYs := []
+    return MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, false, showProgress, probeXs, probeYs)
 }
 
 MobRecognitionProcessRunning(pid) {
@@ -391,118 +297,6 @@ MobRecognitionDetect(mobName, roiX, roiY, roiW, roiH, debug := "", showProgress 
 
     useDebug := (debug != "") ? debug : mobRecognitionDebug
     return MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, useDebug, showProgress)
-}
-
-MobRecognitionHuntScan(mobName, roiX, roiY, roiW, roiH, attackedXs, attackedYs, unreachableXs, unreachableYs, emptyScans, attackCounts, fastIdle := false, showProgress := false) {
-    if (roiW <= 0 || roiH <= 0) {
-        MobRecognitionLog("MobRecognition: invalid hunt ROI " . roiX . "," . roiY . " " . roiW . "x" . roiH)
-        return ""
-    }
-
-    if (!MobRecognitionEnsureServer()) {
-        MobRecognitionLog("MobRecognition: detector unavailable")
-        return ""
-    }
-
-    jsonText := MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, false, showProgress, attackedXs, attackedYs)
-    if (jsonText = "")
-        return ""
-    MobRecognitionPurgeResolvedAttackSlots(jsonText, attackedXs, attackedYs, attackCounts, MobRecognitionEngagementRadius)
-    return MobRecognitionBuildSimpleHuntResponse(jsonText, attackedXs, attackedYs, unreachableXs, unreachableYs, emptyScans, fastIdle)
-}
-
-MobRecognitionExtractCandidatesJson(jsonText) {
-    if (RegExMatch(jsonText, "i)""candidates"":(\[[^\]]*\])", match))
-        return match1
-    return "[]"
-}
-
-MobRecognitionBuildSimpleHuntResponse(jsonText, attackedXs, attackedYs, unreachableXs, unreachableYs, emptyScans, fastIdle := false) {
-    attackX := 0
-    attackY := 0
-    attackConf := 0
-    targetXs := []
-    targetYs := []
-    targetConfs := []
-    suppressRadius := MobRecognitionAttackSuppressRadius
-    engagementRadius := MobRecognitionEngagementRadius
-    totalLivingInRange := MobRecognitionCountLivingInRange(jsonText, 0, 0, 0, 0)
-    livingInRange := MobRecognitionCollectHuntTargets(jsonText, targetXs, targetYs, targetConfs, 0, 0, 0, 0, attackedXs, attackedYs, suppressRadius, unreachableXs, unreachableYs, engagementRadius)
-    engagementsResolved := MobRecognitionEngagementsResolved(jsonText, attackedXs, attackedYs, engagementRadius)
-
-    if (livingInRange > 0) {
-        attackX := targetXs[1]
-        attackY := targetYs[1]
-        attackConf := targetConfs[1]
-    }
-
-    teleportScansRequired := fastIdle ? 1 : 2
-    pendingAttackSlots := attackedXs.MaxIndex() ? attackedXs.MaxIndex() : 0
-    scanReady := pendingAttackSlots = 0 ? ((emptyScans + 1) >= teleportScansRequired) : true
-    canTeleport := (totalLivingInRange = 0 && engagementsResolved && scanReady) ? "true" : "false"
-    status := (totalLivingInRange > 0) ? "target" : (engagementsResolved ? "clear" : "wait_kill")
-    attackJson := "null"
-    if (attackX > 0 && attackY > 0)
-        attackJson := "{""centerX"":" . attackX . ",""centerY"":" . attackY . ",""confidence"":" . attackConf . ",""accepted"":true,""living"":true,""dead"":false}"
-
-    candidatesJson := MobRecognitionExtractCandidatesJson(jsonText)
-    return "{""ok"":true,""pipeline"":""simple"",""hunt"":true,""status"":""" . status . """,""livingInRange"":" . livingInRange . ",""totalLivingInRange"":" . totalLivingInRange . ",""canTeleport"":" . canTeleport . ",""engagementsResolved"":" . (engagementsResolved ? "true" : "false") . ",""teleportScansRequired"":" . teleportScansRequired . ",""candidates"":" . candidatesJson . ",""attack"":" . attackJson . ",""markUnreachable"":[]}"
-}
-
-MobRecognitionParseHuntPlan(jsonText, ByRef livingInRange, ByRef canTeleport, ByRef attackX, ByRef attackY, ByRef attackConf, ByRef huntStatus, ByRef engagementsResolved, ByRef teleportScansRequired) {
-    livingInRange := 0
-    canTeleport := false
-    attackX := 0
-    attackY := 0
-    attackConf := 0
-    huntStatus := ""
-    engagementsResolved := true
-    teleportScansRequired := 6
-    totalLivingInRange := 0
-
-    if (jsonText = "" || !MobJsonIsOk(jsonText) || !InStr(jsonText, """hunt"":"))
-        return false
-
-    if (RegExMatch(jsonText, "i)""livingInRange"":(\d+)", match))
-        livingInRange := match1 + 0
-    if (RegExMatch(jsonText, "i)""totalLivingInRange"":(\d+)", match))
-        totalLivingInRange := match1 + 0
-    if (RegExMatch(jsonText, "i)""canTeleport"":(true|false)", match))
-        canTeleport := (match1 = "true")
-    if (RegExMatch(jsonText, "i)""engagementsResolved"":(true|false)", match))
-        engagementsResolved := (match1 = "true")
-    if (RegExMatch(jsonText, "i)""teleportScansRequired"":(\d+)", match))
-        teleportScansRequired := match1 + 0
-    if (RegExMatch(jsonText, "i)""status"":""([^""]+)""", match))
-        huntStatus := match1
-
-    if (RegExMatch(jsonText, "i)""attack"":\{[^}]*""centerX"":(\d+)[^}]*""centerY"":(\d+)[^}]*""confidence"":([0-9.]+)", match)) {
-        attackX := match1 + 0
-        attackY := match2 + 0
-        attackConf := match3 + 0
-    }
-
-    return true
-}
-
-MobRecognitionApplyHuntMarkUnreachable(jsonText, ByRef unreachableXs, ByRef unreachableYs, radius) {
-    marked := 0
-    if (jsonText = "" || !InStr(jsonText, """markUnreachable"":"))
-        return 0
-
-    pos := 1
-    while (pos := RegExMatch(jsonText, "i)""markUnreachable"":\[\[(\d+),(\d+)\]", match, pos)) {
-        x := match1 + 0
-        y := match2 + 0
-        if (MobRecognitionMarkUnreachable(x, y, unreachableXs, unreachableYs, radius)) {
-            marked++
-            if IsFunc("AppendLog")
-                AppendLog("Hunt: slot @" . x . "," . y . " abandoned — marked unreachable")
-        }
-        pos += StrLen(match)
-    }
-
-    return marked
 }
 
 MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, debug := false, showProgress := false, attackedXs := "", attackedYs := "") {
@@ -615,88 +409,8 @@ MobRecognitionIsAcceptedBlock(block) {
     return InStr(block, """accepted"":true")
 }
 
-MobRecognitionIsHuntEligiblePoint(x, y, ignoreX, ignoreY, ignoreW, ignoreH, attackedXs, attackedYs, attackedRadius, unreachableXs, unreachableYs, unreachableRadius) {
-    if (MobPointInsideIgnore(x, y, ignoreX, ignoreY, ignoreW, ignoreH))
-        return false
-    if (!IsObject(attackedXs))
-        attackedXs := []
-    if (!IsObject(attackedYs))
-        attackedYs := []
-    if (!IsObject(unreachableXs))
-        unreachableXs := []
-    if (!IsObject(unreachableYs))
-        unreachableYs := []
-    if (MobPointNearPoints(x, y, attackedXs, attackedYs, attackedRadius))
-        return false
-    if (MobPointNearPoints(x, y, unreachableXs, unreachableYs, unreachableRadius))
-        return false
-    return true
-}
-
-MobRecognitionRecordAttackSlot(x, y, ByRef attackedXs, ByRef attackedYs, ByRef attackCounts, radius) {
-    count := attackedXs.MaxIndex()
-    if (count) {
-        radiusSq := radius * radius
-        Loop %count% {
-            dx := x - attackedXs[A_Index]
-            dy := y - attackedYs[A_Index]
-            if ((dx * dx) + (dy * dy) <= radiusSq) {
-                attackCounts[A_Index] += 1
-                return A_Index
-            }
-        }
-    }
-
-    attackedXs.Push(x)
-    attackedYs.Push(y)
-    attackCounts.Push(1)
-    return attackCounts.MaxIndex()
-}
-
-MobRecognitionMarkUnreachable(x, y, ByRef unreachableXs, ByRef unreachableYs, radius) {
-    if (MobPointNearPoints(x, y, unreachableXs, unreachableYs, radius))
-        return false
-
-    unreachableXs.Push(x)
-    unreachableYs.Push(y)
-    return true
-}
-
-MobRecognitionUpdateUnreachableFromScan(jsonText, attackedXs, attackedYs, attackCounts, ByRef unreachableXs, ByRef unreachableYs, ignoreX, ignoreY, ignoreW, ignoreH, radius, attacksBeforeUnreachable) {
-    if (jsonText = "" || !MobJsonIsOk(jsonText))
-        return 0
-
-    marked := 0
-    slotCount := attackedXs.MaxIndex()
-    if (!slotCount)
-        return 0
-
-    huntXs := []
-    huntYs := []
-    huntConfs := []
-    emptyXs := []
-    emptyYs := []
-    emptyUnreachableXs := []
-    emptyUnreachableYs := []
-    MobRecognitionCollectHuntTargets(jsonText, huntXs, huntYs, huntConfs, ignoreX, ignoreY, ignoreW, ignoreH, emptyXs, emptyYs, radius, emptyUnreachableXs, emptyUnreachableYs, radius)
-
-    Loop %slotCount% {
-        if (attackCounts[A_Index] < attacksBeforeUnreachable)
-            continue
-
-        slotX := attackedXs[A_Index]
-        slotY := attackedYs[A_Index]
-        if (!MobPointNearPoints(slotX, slotY, huntXs, huntYs, radius))
-            continue
-
-        if (MobRecognitionMarkUnreachable(slotX, slotY, unreachableXs, unreachableYs, radius)) {
-            marked++
-            if IsFunc("AppendLog")
-                AppendLog("Hunt: mob @" . slotX . "," . slotY . " marked unreachable (attacks not landing)")
-        }
-    }
-
-    return marked
+MobRecognitionIsHuntEligiblePoint(x, y, ignoreX, ignoreY, ignoreW, ignoreH) {
+    return !MobPointInsideIgnore(x, y, ignoreX, ignoreY, ignoreW, ignoreH)
 }
 
 MobRecognitionSortTargetsByConfidence(ByRef xs, ByRef ys, ByRef confs) {
@@ -725,89 +439,7 @@ MobRecognitionSortTargetsByConfidence(ByRef xs, ByRef ys, ByRef confs) {
     }
 }
 
-MobRecognitionCountInSearchRange(jsonText, ignoreX, ignoreY, ignoreW, ignoreH, unreachableXs := "", unreachableYs := "", radius := 72) {
-    targetXs := []
-    targetYs := []
-    targetConfs := []
-    attackedXs := []
-    attackedYs := []
-    return MobRecognitionCollectHuntTargets(jsonText, targetXs, targetYs, targetConfs, ignoreX, ignoreY, ignoreW, ignoreH, attackedXs, attackedYs, radius, unreachableXs, unreachableYs, radius)
-}
-
-MobRecognitionPurgeAttacked(ByRef attackedXs, ByRef attackedYs, ByRef attackedAt, maxAgeMs) {
-    now := A_TickCount
-    index := 1
-    while (index <= attackedXs.MaxIndex()) {
-        if (now - attackedAt[index] > maxAgeMs) {
-            attackedXs.RemoveAt(index)
-            attackedYs.RemoveAt(index)
-            attackedAt.RemoveAt(index)
-        } else {
-            index++
-        }
-    }
-}
-
-MobRecognitionIsAttackSuppressed(x, y, attackedXs, attackedYs, attackedAt, suppressMs, radius) {
-    count := attackedXs.MaxIndex()
-    if (!count)
-        return false
-
-    now := A_TickCount
-    radiusSq := radius * radius
-    Loop %count% {
-        if ((now - attackedAt[A_Index]) > suppressMs)
-            continue
-        dx := x - attackedXs[A_Index]
-        dy := y - attackedYs[A_Index]
-        if ((dx * dx) + (dy * dy) <= radiusSq)
-            return true
-    }
-    return false
-}
-
-MobRecognitionSelectHuntTarget(jsonText, ByRef outX, ByRef outY, ByRef outConf, ignoreX, ignoreY, ignoreW, ignoreH, attackedXs, attackedYs, attackedAt, suppressMs := 0, suppressRadius := 72, unreachableXs := "", unreachableYs := "") {
-    outX := 0
-    outY := 0
-    outConf := 0
-
-    targetXs := []
-    targetYs := []
-    targetConfs := []
-    emptyXs := []
-    emptyYs := []
-    count := MobRecognitionCollectHuntTargets(jsonText, targetXs, targetYs, targetConfs, ignoreX, ignoreY, ignoreW, ignoreH, emptyXs, emptyYs, suppressRadius, unreachableXs, unreachableYs, suppressRadius)
-    if (count = 0)
-        return 0
-
-    bestIdx := 0
-    bestConf := 0.0
-    Loop %count% {
-        x := targetXs[A_Index]
-        y := targetYs[A_Index]
-        if (MobRecognitionIsAttackSuppressed(x, y, attackedXs, attackedYs, attackedAt, suppressMs, suppressRadius))
-            continue
-        conf := targetConfs[A_Index]
-        if (conf > bestConf) {
-            bestConf := conf
-            bestIdx := A_Index
-        }
-    }
-
-    if (bestIdx = 0)
-        return 0
-
-    outX := targetXs[bestIdx]
-    outY := targetYs[bestIdx]
-    outConf := targetConfs[bestIdx]
-    return bestIdx
-}
-
-MobRecognitionCountHuntTargets(jsonText, ignoreX, ignoreY, ignoreW, ignoreH, unreachableXs := "", unreachableYs := "", radius := 72) {
-    return MobRecognitionCountInSearchRange(jsonText, ignoreX, ignoreY, ignoreW, ignoreH, unreachableXs, unreachableYs, radius)
-}
-
-MobRecognitionCollectHuntTargets(jsonText, ByRef outXs, ByRef outYs, ByRef outConfs, ignoreX, ignoreY, ignoreW, ignoreH, attackedXs, attackedYs, attackedRadius := 72, unreachableXs := "", unreachableYs := "", unreachableRadius := 72) {
+MobRecognitionCollectHuntTargets(jsonText, ByRef outXs, ByRef outYs, ByRef outConfs, ignoreX, ignoreY, ignoreW, ignoreH) {
     outXs := []
     outYs := []
     outConfs := []
@@ -833,7 +465,7 @@ MobRecognitionCollectHuntTargets(jsonText, ByRef outXs, ByRef outYs, ByRef outCo
             pos += StrLen(block)
             continue
         }
-        if (!MobRecognitionIsHuntEligiblePoint(candX, candY, ignoreX, ignoreY, ignoreW, ignoreH, attackedXs, attackedYs, attackedRadius, unreachableXs, unreachableYs, unreachableRadius)) {
+        if (!MobRecognitionIsHuntEligiblePoint(candX, candY, ignoreX, ignoreY, ignoreW, ignoreH)) {
             pos += StrLen(block)
             continue
         }
@@ -848,10 +480,8 @@ MobRecognitionCollectHuntTargets(jsonText, ByRef outXs, ByRef outYs, ByRef outCo
     return outXs.MaxIndex() ? outXs.MaxIndex() : 0
 }
 
-MobRecognitionCollectAccepted(jsonText, ByRef outXs, ByRef outYs, ByRef outConfs, ignoreX, ignoreY, ignoreW, ignoreH, attackedXs, attackedYs, attackedRadius := 72) {
-    emptyUnreachableXs := []
-    emptyUnreachableYs := []
-    return MobRecognitionCollectHuntTargets(jsonText, outXs, outYs, outConfs, ignoreX, ignoreY, ignoreW, ignoreH, attackedXs, attackedYs, attackedRadius, emptyUnreachableXs, emptyUnreachableYs, attackedRadius)
+MobRecognitionCollectAccepted(jsonText, ByRef outXs, ByRef outYs, ByRef outConfs, ignoreX, ignoreY, ignoreW, ignoreH) {
+    return MobRecognitionCollectHuntTargets(jsonText, outXs, outYs, outConfs, ignoreX, ignoreY, ignoreW, ignoreH)
 }
 
 GetMobSearchPlayerIgnore(xs, ys, ws, hs, ByRef ignoreX, ByRef ignoreY, ByRef ignoreW, ByRef ignoreH) {
@@ -871,9 +501,7 @@ MobRecognitionBestCandidateFiltered(jsonText, ByRef outX, ByRef outY, ByRef conf
     targetXs := []
     targetYs := []
     targetConfs := []
-    attackedXs := []
-    attackedYs := []
-    count := MobRecognitionCollectAccepted(jsonText, targetXs, targetYs, targetConfs, ignoreX, ignoreY, ignoreW, ignoreH, attackedXs, attackedYs)
+    count := MobRecognitionCollectAccepted(jsonText, targetXs, targetYs, targetConfs, ignoreX, ignoreY, ignoreW, ignoreH)
     if (count = 0) {
         outX := 0
         outY := 0
@@ -953,9 +581,7 @@ FindMobTarget(ByRef outX, ByRef outY, xs, ys, ws, hs, ignoreX := 0, ignoreY := 0
     targetXs := []
     targetYs := []
     targetConfs := []
-    attackedXs := []
-    attackedYs := []
-    count := MobRecognitionCollectAccepted(jsonText, targetXs, targetYs, targetConfs, ignoreX, ignoreY, ignoreW, ignoreH, attackedXs, attackedYs)
+    count := MobRecognitionCollectAccepted(jsonText, targetXs, targetYs, targetConfs, ignoreX, ignoreY, ignoreW, ignoreH)
     if (count = 0) {
         if (showProgress && IsFunc("AppendLog"))
             AppendLog("Mob search finished — no valid match")

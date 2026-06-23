@@ -1,0 +1,22 @@
+{
+  "images": [
+    {
+      "file": "corpse_1.png",
+      "attackSlots": [[485, 225]],
+      "expectDead": 1,
+      "expectLiving": 0
+    },
+    {
+      "file": "corpse_2.png",
+      "attackSlots": [[476, 231]],
+      "expectDead": 1,
+      "expectLiving": 0
+    },
+    {
+      "file": "corpse_3.png",
+      "attackSlots": [[436, 371], [484, 234]],
+      "expectDead": 2,
+      "expectLiving": 0
+    }
+  ]
+}

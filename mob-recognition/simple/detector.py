@@ -189,7 +189,13 @@ class SimpleMobDetector:
         centers = self.heatmap_detector.top_centers(heatmaps.final_center)
         score_start = time.perf_counter()
         candidates: list[SimpleCandidate] = []
+        slot_guard_px = int(self.config["nmsDistancePx"])
+        slot_guard_sq = slot_guard_px * slot_guard_px
         for cx, cy, heat_score in centers:
+            if attack_slots and any(
+                (cx - slot_x) ** 2 + (cy - slot_y) ** 2 <= slot_guard_sq for slot_x, slot_y in attack_slots
+            ):
+                continue
             candidates.extend(self._evaluate_center(frame_bgr, hsv, descriptor, cx, cy, heat_score))
         if attack_slots:
             for slot_x, slot_y in attack_slots:
@@ -197,12 +203,7 @@ class SimpleMobDetector:
                     self._evaluate_center(frame_bgr, hsv, descriptor, slot_x, slot_y, 1.0, attack_slot=True)
                 )
         nms_start = time.perf_counter()
-        candidates.sort(key=lambda c: c.final_score, reverse=True)
-        accepted = self._nms([candidate for candidate in candidates if candidate.accepted])
-        if attack_slots:
-            for candidate in candidates:
-                if candidate.accepted and candidate.is_dead and candidate not in accepted:
-                    accepted.append(candidate)
+        accepted = self._finalize_accepted(candidates)
         accepted_ids = {id(candidate) for candidate in accepted}
         final_candidates = []
         for candidate in candidates:
@@ -247,11 +248,11 @@ class SimpleMobDetector:
         if attack_slot and descriptor.dead is None:
             return []
 
-        best_living: tuple[float, tuple[int, int, int, int], RegionScore, DeathValidation] | None = None
+        best_living: tuple[float, tuple[int, int, int, int], tuple[int, int, int, int], RegionScore, DeathValidation] | None = None
         best_dead: tuple[float, tuple[int, int, int, int], RegionScore | None, DeathValidation] | None = None
         presence_gate = self.death_validator.min_mob_presence * (0.55 if attack_slot else 0.5)
 
-        for scale in self._candidate_scales(frame_bgr.shape[1]):
+        for scale in self._candidate_scales(frame_bgr.shape[1], attack_slot=attack_slot):
             living_bbox = self._bbox_for_size(
                 cx,
                 cy,
@@ -267,10 +268,10 @@ class SimpleMobDetector:
             )
             if descriptor.dead is None:
                 if living_score.accepted and (
-                    best_living is None or living_score.final_score > best_living[2].final_score
+                    best_living is None or living_score.final_score > best_living[3].final_score
                 ):
                     empty_validation = DeathValidation(False, 0.0, living_score.final_score, 0.0, 0.0, 0.0, 0.0, 1.0)
-                    best_living = (float(scale), living_bbox, living_score, empty_validation)
+                    best_living = (float(scale), living_bbox, living_bbox, living_score, empty_validation)
                 continue
 
             dead_bbox = self._bbox_for_size(
@@ -307,12 +308,33 @@ class SimpleMobDetector:
                 attack_slot=attack_slot,
             )
 
-            if validation.is_dead and (best_dead is None or validation.confidence > best_dead[3].confidence):
+            if validation.is_dead and (
+                best_dead is None or validation.confidence > best_dead[3].confidence
+            ):
                 best_dead = (float(scale), dead_bbox, dead_score, validation)
             elif living_score.accepted and not validation.is_dead and (
-                best_living is None or living_score.final_score > best_living[2].final_score
+                best_living is None or living_score.final_score > best_living[3].final_score
             ):
-                best_living = (float(scale), living_bbox, living_score, validation)
+                best_living = (float(scale), living_bbox, dead_bbox, living_score, validation)
+
+        if attack_slot:
+            if best_dead is None:
+                return []
+            scale, bbox, score, validation = best_dead
+            region_score = score if score is not None else RegionScore(0, 0, 0, 0, 0, 0, 0, False, "missing_dead_score")
+            return [
+                self._candidate(
+                    descriptor.mob_name,
+                    cx,
+                    cy,
+                    bbox,
+                    region_score,
+                    heat_score,
+                    scale,
+                    is_dead=True,
+                    death_validation=validation,
+                )
+            ]
 
         if best_dead is not None:
             scale, bbox, score, validation = best_dead
@@ -330,14 +352,15 @@ class SimpleMobDetector:
                     death_validation=validation,
                 )
             ]
+
         if best_living is not None:
-            scale, bbox, score, validation = best_living
+            scale, living_bbox, dead_bbox, score, validation = best_living
             return [
                 self._candidate(
                     descriptor.mob_name,
                     cx,
                     cy,
-                    bbox,
+                    living_bbox,
                     score,
                     heat_score,
                     scale,
@@ -345,6 +368,7 @@ class SimpleMobDetector:
                     death_validation=validation,
                 )
             ]
+
         return []
 
     @staticmethod
@@ -370,12 +394,22 @@ class SimpleMobDetector:
         half_height = height * self.self_exclusion_height_ratio * 0.5
         return abs(cx - width / 2) <= half_width and abs(cy - height / 2) <= half_height
 
-    def _candidate_scales(self, frame_width: int) -> list[float]:
+    def _candidate_scales(self, frame_width: int, *, attack_slot: bool = False) -> list[float]:
+        if attack_slot:
+            return [0.45, 0.55, 0.65]
         return [
             float(scale)
             for scale in self.config["scales"]
             if float(scale) >= 0.75 or frame_width >= self.small_scale_min_frame_width
         ]
+
+    def _finalize_accepted(self, candidates: list[SimpleCandidate]) -> list[SimpleCandidate]:
+        candidates.sort(key=lambda c: c.final_score, reverse=True)
+        accepted = self._nms([candidate for candidate in candidates if candidate.accepted])
+        for candidate in candidates:
+            if candidate.accepted and candidate.is_dead and candidate not in accepted:
+                accepted.append(candidate)
+        return accepted
 
     @staticmethod
     def _candidate(
