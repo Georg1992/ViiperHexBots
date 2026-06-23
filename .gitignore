@@ -4,6 +4,8 @@ viiper-input.exe.bak
 bot_log.txt
 logs/sessions/
 mob-recognition/debug/
+__pycache__/
+*.pyc
 NUL.tmp
 ahk-err.txt
 query
