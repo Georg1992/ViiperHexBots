@@ -14,6 +14,7 @@ SIMPLE = MOB_REC / "simple"
 sys.path[:0] = [str(MOB_REC), str(SIMPLE)]
 
 from detector import SimpleMobDetector, load_simple_config  # noqa: E402
+from state_recognizer import evaluate_track_states  # noqa: E402
 
 
 def playfield_roi(frame):
@@ -40,19 +41,28 @@ def main() -> None:
     detector = SimpleMobDetector(ROOT, config)
     frame = cv2.imread(str(MOB_REC / "test-fixtures" / "game-screenshots" / "333.png"))
     roi = playfield_roi(frame)
-    watch3 = [(200, 180), (300, 220), (400, 260)]
+    track3 = [
+        {"trackId": 1, "x": 200, "y": 180},
+        {"trackId": 2, "x": 300, "y": 220},
+        {"trackId": 3, "x": 400, "y": 260},
+    ]
+    track6 = track3 + [
+        {"trackId": 4, "x": 200, "y": 180},
+        {"trackId": 5, "x": 300, "y": 220},
+        {"trackId": 6, "x": 400, "y": 260},
+    ]
 
     bench("discovery_scan", lambda: detector.detect(roi, "horn"))
-    bench("watch_3_points", lambda: detector.detect(roi, "horn", watch_points=watch3, watch_only=True))
-    bench("watch_6_points", lambda: detector.detect(roi, "horn", watch_points=watch3 * 2, watch_only=True))
+    bench("state_3_tracks", lambda: evaluate_track_states(detector, roi, "horn", track3))
+    bench("state_6_tracks", lambda: evaluate_track_states(detector, roi, "horn", track6))
 
     descriptor = detector.ensure_descriptor("horn")
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     start = time.perf_counter()
-    for x, y in watch3:
-        detector._evaluate_center(roi, hsv, descriptor, x, y, 1.0, watch_point=True)
+    for track in track3:
+        detector._evaluate_track_point(roi, hsv, descriptor, track["x"], track["y"])
     elapsed = time.perf_counter() - start
-    print(f"watch_eval_3_points_no_heatmap: {elapsed:.3f}s")
+    print(f"state_eval_3_points_no_drift: {elapsed:.3f}s")
     print("python_subprocess_overhead_estimate: ~0.4-0.8s import+capture+spawn per CLI call")
 
 

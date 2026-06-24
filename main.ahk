@@ -9,7 +9,9 @@
 #include Lib\MobData.ahk
 #include Lib\ClientProfile.ahk
 #include Lib\HuntTracks.ahk
+#include Lib\HuntPolicy.ahk
 #include Lib\MobRecognition.ahk
+#include Lib\MobStateRecognition.ahk
 #include Lib\MemoryOperations.ahk
 #include Lib\BotLogic.ahk
 #include Lib\utilityFunctions.ahk
@@ -356,7 +358,6 @@ Gui, Show, w920 h710, Hex Bot
         botPaused := false
         botStopRequested := true
         SetTimer, CheckWindowFocus, Off
-        MobRecognitionCancelActiveDetect()
         ReleaseBotInputs()
         BotSessionStop("stopped")
         AppendLog("Bot stopped (VIIPER still running)")

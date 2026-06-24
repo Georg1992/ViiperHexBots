@@ -1,34 +1,45 @@
-# Hunt Scan Architecture
+# Hunt Architecture
 
-## Runtime model
+## Layers
 
-| Layer | Interval | Entry point | Detector command |
-|-------|----------|-------------|------------------|
-| **Watch** | 150ms (`HUNT_WATCH_INTERVAL_MS`) | `HuntWatchTick` | `watch` — `watch_only` at alive track coordinates |
-| **Discovery** | 1000ms (`HUNT_DISCOVERY_INTERVAL_MS`) | `HuntDiscoveryTick` | `scan` — heatmap, always runs |
-| **Hunt** | ~25ms loop | `Hunt()` | attack + target select only |
+| Layer | Module | Interval | IPC | Output |
+|-------|--------|----------|-----|--------|
+| **Mob recognition** | `MobRecognition.ahk` | 1000ms | `scan` | `detections[]` (living only) |
+| **Mob state recognition** | `MobStateRecognition.ahk` | 150ms | `state` | `trackUpdates[]` by trackId |
+| **Track store** | `HuntTracks.ahk` | — | — | `ApplyDetections`, `ApplyStateUpdates` |
+| **Hunt policy** | `HuntPolicy.ahk` + `BotLogic.ahk` | ~25ms | — | select, attack, teleport |
 
-All track state flows through **HuntTracks** (single source of truth).
+## Responsibilities
 
-## Rules
+### MobRecognition
+- Heatmap discovery, living targets only
+- `MobRecognitionDiscoveryDetect` → `HuntTracks_ApplyDetections`
+- Does not evaluate death on known tracks
 
-1. **Discovery** runs every second regardless of combat. It creates/updates tracks for every living horn on screen.
-2. **Watch** runs only while alive tracks exist. It updates positions and marks deaths at track coordinates.
-3. **Attack** uses alive tracks only. One path: `HuntAttackTrack` (skill held through click).
-4. **Teleport** only from `HuntDiscoveryTick` when all of:
-   - `CurrentTargetTrackId` is empty
-   - `HuntTracks_GetAliveCount()` is 0
-   - latest discovery scan has 0 living candidates
-   - area was engaged (`huntAreaEngaged`) or initial seek (`huntSeekMobWarp`) is active
+### MobStateRecognition
+- `MobStateRecognize` / `MobStateRecognizeAndApply`
+- Input: `[{id, x, y}]` screen coordinates
+- Output: `[{trackId, state, confidence, x, y}]` where state is `alive`, `dead`, or `gone`
+- Python: `cmd: state` → `evaluate_track_states` / `DeathValidator`
 
-No clear-scan counters, no discovery pause during combat, no teleport from watch.
+### HuntTracks
+- Single source of truth for track identity
+- `HuntTracks_ApplyDetections` — match living detections to tracks or create new ones
+- `HuntTracks_ApplyStateUpdates` — state recognition removes dead/gone tracks, refreshes alive positions
+- `HuntTracks_ApplyAttackEvent` — per-track attack timing only
 
-## AHK
+### HuntPolicy
+- Round-robin target selection: lowest `attackCount` each swing, then repeat until all tracks removed
+- Teleport when tracks and scan are both empty
+- Does not run vision or parse detector JSON
 
-- **Discovery timer:** periodic `SetTimer` only; first scan via direct `HuntDiscoveryTick()` in `HuntStartScanTimers`.
-- **Do not** follow periodic `SetTimer` with `SetTimer, -1` on the same label (AHK replaces the timer).
+## Timers
+
+- `HuntDiscoveryTick` — discovery
+- `HuntStateTick` — mob state (replaces old `HuntWatchTick`)
+- `Hunt()` — attack loop only
 
 ## Python
 
-- Persistent server: `py -3 mob-recognition/cli.py serve --ipc-dir %TEMP%\mob_recognition_ipc`
-- Commands: `scan`, `watch`, `shutdown`
+- `scan` — discovery (`_evaluate_living_center`)
+- `state` — track state (`evaluate_track_states` / `DeathValidator`)

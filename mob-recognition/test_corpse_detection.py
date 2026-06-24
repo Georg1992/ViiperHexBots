@@ -15,6 +15,7 @@ for path in (str(MOB_REC), str(SIMPLE)):
         sys.path.insert(0, path)
 
 from detector import SimpleMobDetector, load_simple_config  # noqa: E402
+from state_recognizer import evaluate_track_states  # noqa: E402
 
 
 def playfield_roi(frame):
@@ -39,18 +40,23 @@ class CorpseDetectionTests(unittest.TestCase):
                 image_path = self.fixture_dir / entry["file"]
                 frame = cv2.imread(str(image_path))
                 self.assertIsNotNone(frame, entry["file"])
-                watch_points = [tuple(point) for point in entry["watchPoints"]]
-                result = self.detector.detect(
+                track_points = [tuple(point) for point in entry["watchPoints"]]
+                tracks = [
+                    {"trackId": index + 1, "x": point[0], "y": point[1]}
+                    for index, point in enumerate(track_points)
+                ]
+                updates = evaluate_track_states(
+                    self.detector,
                     playfield_roi(frame),
                     "horn",
-                    watch_points=watch_points,
-                    watch_only=True,
+                    tracks,
                 )
-                dead = sum(1 for candidate in result.accepted if candidate.is_dead)
-                living = sum(1 for candidate in result.accepted if not candidate.is_dead)
-                self.assertEqual(dead, entry["expectDead"], result.accepted)
-                self.assertEqual(living, entry["expectLiving"], result.accepted)
-                self.assertTrue(all(candidate.is_dead for candidate in result.accepted))
+                dead = sum(1 for update in updates if update["state"] == "dead")
+                living = sum(1 for update in updates if update["state"] == "alive")
+                self.assertEqual(dead, entry["expectDead"], updates)
+                self.assertEqual(living, entry["expectLiving"], updates)
+                if entry["expectLiving"] == 0:
+                    self.assertTrue(all(update["state"] == "dead" for update in updates))
 
 
 if __name__ == "__main__":

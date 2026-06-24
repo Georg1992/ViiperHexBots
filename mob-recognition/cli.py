@@ -32,19 +32,6 @@ def parse_roi(value: str) -> tuple[int, int, int, int]:
     return tuple(parts)
 
 
-def parse_watch_points(value: str) -> list[tuple[int, int]]:
-    slots: list[tuple[int, int]] = []
-    for part in value.split(";"):
-        part = part.strip()
-        if not part:
-            continue
-        coords = [int(p.strip()) for p in part.split(",")]
-        if len(coords) != 2:
-            raise argparse.ArgumentTypeError("watch point must be x,y")
-        slots.append((coords[0], coords[1]))
-    return slots
-
-
 def parse_scale_range(value: str) -> tuple[float, float]:
     parts = [float(p.strip()) for p in value.split(",")]
     if len(parts) != 2:
@@ -128,6 +115,8 @@ def build_detect_response(
     accept_threshold: float = 0.0,
 ) -> dict:
     accepted_json = [candidate_to_json(candidate, screen_offset) for candidate in result.accepted]
+    if pipeline == "scan":
+        accepted_json = [item for item in accepted_json if item.get("living")]
     return {
         "ok": True,
         "pipeline": pipeline,
@@ -154,14 +143,39 @@ def parse_request_scale_range(value) -> tuple[float, float] | None:
     return None
 
 
-def parse_request_watch_points(value) -> list[tuple[int, int]]:
+def parse_request_tracks(value) -> list[dict]:
     if not value:
         return []
-    points: list[tuple[int, int]] = []
+    tracks: list[dict] = []
     for entry in value:
-        if isinstance(entry, (list, tuple)) and len(entry) == 2:
-            points.append((int(entry[0]), int(entry[1])))
-    return points
+        if not isinstance(entry, dict):
+            continue
+        if "trackId" not in entry or "x" not in entry or "y" not in entry:
+            continue
+        tracks.append(
+            {
+                "trackId": int(entry["trackId"]),
+                "x": int(entry["x"]),
+                "y": int(entry["y"]),
+            }
+        )
+    return tracks
+
+
+def build_state_response(
+    track_updates: list[dict],
+    *,
+    session_id: str = "",
+    elapsed_s: float = 0.0,
+) -> dict:
+    return {
+        "ok": True,
+        "pipeline": "state",
+        "sessionId": session_id,
+        "trackUpdateCount": len(track_updates),
+        "elapsedS": round(elapsed_s, 4),
+        "trackUpdates": track_updates,
+    }
 
 
 def run_detect_request(detector: SimpleMobDetector, config: dict, request: dict) -> dict:
@@ -181,18 +195,32 @@ def run_detect_request(detector: SimpleMobDetector, config: dict, request: dict)
     frame = capture_region(x, y, w, h)
     session_id = str(request.get("sessionId", ""))
 
-    if command == "watch":
-        watch_points = parse_request_watch_points(request.get("watchPoints"))
-        result = detector.detect(frame, mob_name, watch_points=watch_points, watch_only=True)
-        return build_detect_response(
-            result,
-            (x, y),
-            pipeline="watch",
-            session_id=session_id,
-            scale_range=scale_range,
-            enforce_size_gate=enforce_size_gate,
-            accept_threshold=float(calibrated["acceptThreshold"]),
-        )
+    if command == "state":
+        from state_recognizer import evaluate_track_state_direct, evaluate_track_states
+
+        tracks = parse_request_tracks(request.get("tracks"))
+        mode = str(request.get("mode", "")).lower()
+        start = time.perf_counter()
+        if mode == "direct":
+            if len(tracks) != 1:
+                raise ValueError("direct state requires exactly one track")
+            track = tracks[0]
+            track_updates = [
+                evaluate_track_state_direct(
+                    detector,
+                    frame,
+                    mob_name,
+                    int(track["trackId"]),
+                    int(track["x"]),
+                    int(track["y"]),
+                    offset_x=x,
+                    offset_y=y,
+                )
+            ]
+        else:
+            track_updates = evaluate_track_states(detector, frame, mob_name, tracks, offset_x=x, offset_y=y)
+        elapsed = time.perf_counter() - start
+        return build_state_response(track_updates, session_id=session_id, elapsed_s=elapsed)
 
     if command == "scan":
         result = detector.detect(frame, mob_name)
@@ -292,16 +320,7 @@ def cmd_detect_simple(args: argparse.Namespace) -> int:
         config = load_simple_config(Path(args.config_simple) if args.config_simple else None)
         config = apply_scale_calibration(config, args.scale_range, args.enforce_size_gate)
         detector = SimpleMobDetector(PROJECT_ROOT, config)
-        watch_points = parse_watch_points(args.watch_points) if args.watch_points else []
-        if watch_points:
-            result = detector.detect(
-                frame,
-                args.mob.lower(),
-                watch_points=watch_points,
-                watch_only=True,
-            )
-        else:
-            result = detector.detect(frame, args.mob.lower())
+        result = detector.detect(frame, args.mob.lower())
         accepted_json = [candidate_to_json(candidate, screen_offset) for candidate in result.accepted]
         if args.debug:
             label = Path(args.image).name if args.image else "live_capture"
@@ -377,7 +396,6 @@ def build_parser() -> argparse.ArgumentParser:
     detect.add_argument("--session-id", default="", help="bot session id for logs/calibration")
     detect.add_argument("--scale-range", type=parse_scale_range, help="locked session scale range as min,max")
     detect.add_argument("--enforce-size-gate", action="store_true", help="enforce strict object size gate")
-    detect.add_argument("--watch-points", help="ROI-local watch points for watch-only CLI evaluation (no heatmap)")
 
     fixtures = sub.add_parser("fixtures-simple", help="run screenshot fixture suite with simple detector")
     fixtures.add_argument("--mob", required=True)
@@ -389,7 +407,7 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("--spr", required=True)
     inspect.add_argument("--act", required=True)
 
-    serve = sub.add_parser("serve", help="persistent detector server for scan/watch commands")
+    serve = sub.add_parser("serve", help="persistent detector server for scan/state commands")
     serve.add_argument("--ipc-dir", help="file IPC directory for hidden parent process communication")
     return parser
 

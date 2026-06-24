@@ -201,64 +201,11 @@ class SimpleMobDetector:
         self,
         frame_bgr: np.ndarray,
         mob_name: str,
-        watch_points: list[tuple[int, int]] | None = None,
-        *,
-        watch_only: bool = False,
     ) -> SimpleDetectionResult:
         start = time.perf_counter()
         descriptor = self.ensure_descriptor(mob_name)
         hsv_start = time.perf_counter()
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-
-        if not watch_only and watch_points:
-            raise ValueError("watch_points are only valid with watch_only")
-
-        if watch_only:
-            if not watch_points:
-                elapsed = time.perf_counter() - start
-                return SimpleDetectionResult(
-                    mob_name=mob_name.lower(),
-                    descriptor=descriptor,
-                    heatmaps=None,
-                    candidates=[],
-                    accepted=[],
-                    elapsed_s=elapsed,
-                    timing={"hsv": hsv_start - start, "total": elapsed},
-                )
-            score_start = time.perf_counter()
-            candidates: list[SimpleCandidate] = []
-            for watch_x, watch_y in watch_points:
-                point_candidates: list[SimpleCandidate] = []
-                for center_x, center_y in self._watch_search_centers(watch_x, watch_y, frame_bgr.shape):
-                    point_candidates.extend(
-                        self._evaluate_center(
-                            frame_bgr,
-                            hsv,
-                            descriptor,
-                            center_x,
-                            center_y,
-                            1.0,
-                            watch_point=True,
-                        )
-                    )
-                best_candidate = self._best_watch_point_candidate(point_candidates)
-                if best_candidate is not None:
-                    candidates.append(best_candidate)
-            accepted = self._finalize_accepted(candidates)
-            elapsed = time.perf_counter() - start
-            return SimpleDetectionResult(
-                mob_name=mob_name.lower(),
-                descriptor=descriptor,
-                heatmaps=None,
-                candidates=candidates[: int(self.config["maxCandidates"])],
-                accepted=accepted,
-                elapsed_s=elapsed,
-                timing={
-                    "hsv": hsv_start - start,
-                    "scoring": score_start - hsv_start,
-                    "total": elapsed,
-                },
-            )
 
         heatmap_start = time.perf_counter()
         heatmaps = self.heatmap_detector.build_heatmaps(frame_bgr, hsv, descriptor)
@@ -267,7 +214,7 @@ class SimpleMobDetector:
         score_start = time.perf_counter()
         candidates: list[SimpleCandidate] = []
         for cx, cy, heat_score in centers:
-            candidates.extend(self._evaluate_center(frame_bgr, hsv, descriptor, cx, cy, heat_score))
+            candidates.extend(self._evaluate_living_center(frame_bgr, hsv, descriptor, cx, cy, heat_score))
         nms_start = time.perf_counter()
         accepted = self._finalize_accepted(candidates)
         accepted_ids = {id(candidate) for candidate in accepted}
@@ -296,7 +243,7 @@ class SimpleMobDetector:
             timing=timing,
         )
 
-    def _evaluate_center(
+    def _evaluate_living_center(
         self,
         frame_bgr: np.ndarray,
         hsv: np.ndarray,
@@ -304,21 +251,15 @@ class SimpleMobDetector:
         cx: int,
         cy: int,
         heat_score: float,
-        *,
-        watch_point: bool = False,
     ) -> list[SimpleCandidate]:
-        if not watch_point and self._is_self_center(cx, cy, frame_bgr.shape):
+        """Discovery scan: living attack targets only."""
+        if self._is_self_center(cx, cy, frame_bgr.shape):
             return []
-        if watch_point and (cx < 0 or cy < 0 or cx >= frame_bgr.shape[1] or cy >= frame_bgr.shape[0]):
-            return []
-        if watch_point and descriptor.dead is None:
+        if heat_score < self.min_discovery_heatmap_score:
             return []
 
-        best_living: tuple[float, tuple[int, int, int, int], tuple[int, int, int, int], RegionScore, DeathValidation] | None = None
-        best_dead: tuple[float, tuple[int, int, int, int], RegionScore | None, DeathValidation] | None = None
-        presence_gate = self.death_validator.min_mob_presence * (0.55 if watch_point else 0.5)
-
-        for scale in self._candidate_scales(frame_bgr.shape[1], watch_point=watch_point):
+        best: tuple[float, tuple[int, int, int, int], RegionScore] | None = None
+        for scale in self._candidate_scales(frame_bgr.shape[1], track_point=False):
             living_bbox = self._bbox_for_size(
                 cx,
                 cy,
@@ -332,15 +273,64 @@ class SimpleMobDetector:
             living_score = self.region_scorer.score(
                 frame_bgr, hsv, descriptor, living_bbox, expected_scale=float(scale)
             )
-            if descriptor.dead is None:
-                if (
-                    living_score.accepted
-                    and self._discovery_heatmap_passes(heat_score, watch_point)
-                    and (best_living is None or living_score.final_score > best_living[3].final_score)
-                ):
-                    empty_validation = DeathValidation(False, 0.0, living_score.final_score, 0.0, 0.0, 0.0, 0.0, 1.0)
-                    best_living = (float(scale), living_bbox, living_bbox, living_score, empty_validation)
+            if living_score.accepted and (
+                best is None or living_score.final_score > best[2].final_score
+            ):
+                best = (float(scale), living_bbox, living_score)
+
+        if best is None:
+            return []
+
+        scale, living_bbox, score = best
+        bx, by, bw, bh = living_bbox
+        return [
+            self._living_candidate(
+                descriptor.mob_name,
+                bx + bw // 2,
+                by + bh // 2,
+                living_bbox,
+                score,
+                heat_score,
+                scale,
+            )
+        ]
+
+    def _evaluate_track_point(
+        self,
+        frame_bgr: np.ndarray,
+        hsv: np.ndarray,
+        descriptor: SimpleMobDescriptor,
+        cx: int,
+        cy: int,
+        scales: list[float] | None = None,
+    ) -> list[SimpleCandidate]:
+        """Track state: death validation and living position at a known track point."""
+        if cx < 0 or cy < 0 or cx >= frame_bgr.shape[1] or cy >= frame_bgr.shape[0]:
+            return []
+        if descriptor.dead is None:
+            return []
+
+        best_living: tuple[float, tuple[int, int, int, int], tuple[int, int, int, int], RegionScore, DeathValidation] | None = None
+        best_dead: tuple[float, tuple[int, int, int, int], RegionScore | None, DeathValidation] | None = None
+        presence_gate = self.death_validator.min_mob_presence * 0.55
+
+        if scales is None:
+            scales = self._candidate_scales(frame_bgr.shape[1], track_point=True)
+
+        for scale in scales:
+            living_bbox = self._bbox_for_size(
+                cx,
+                cy,
+                int(round(descriptor.avg_width * scale)),
+                int(round(descriptor.avg_height * scale)),
+                frame_bgr.shape,
+            )
+            if living_bbox is None:
                 continue
+
+            living_score = self.region_scorer.score(
+                frame_bgr, hsv, descriptor, living_bbox, expected_scale=float(scale)
+            )
 
             dead_bbox = self._bbox_for_size(
                 cx,
@@ -373,71 +363,30 @@ class SimpleMobDetector:
                 living_score,
                 dead_score,
                 living_at_dead_score,
-                watch_point=watch_point,
+                watch_point=True,
             )
 
-            if (
-                validation.is_dead
-                and self._discovery_heatmap_passes(heat_score, watch_point)
-                and (best_dead is None or validation.confidence > best_dead[3].confidence)
+            if validation.is_dead and (
+                best_dead is None or validation.confidence > best_dead[3].confidence
             ):
                 best_dead = (float(scale), dead_bbox, dead_score, validation)
             elif (
                 living_score.accepted
                 and not validation.is_dead
-                and self._discovery_heatmap_passes(heat_score, watch_point)
                 and (best_living is None or living_score.final_score > best_living[3].final_score)
             ):
                 best_living = (float(scale), living_bbox, dead_bbox, living_score, validation)
-
-        if watch_point:
-            if best_dead is not None:
-                scale, bbox, score, validation = best_dead
-                region_score = score if score is not None else RegionScore(0, 0, 0, 0, 0, 0, 0, False, "missing_dead_score")
-                return [
-                    self._candidate(
-                        descriptor.mob_name,
-                        cx,
-                        cy,
-                        bbox,
-                        region_score,
-                        heat_score,
-                        scale,
-                        is_dead=True,
-                        death_validation=validation,
-                    )
-                ]
-            if best_living is not None:
-                scale, living_bbox, dead_bbox, score, validation = best_living
-                bx, by, bw, bh = living_bbox
-                living_cx = bx + bw // 2
-                living_cy = by + bh // 2
-                return [
-                    self._candidate(
-                        descriptor.mob_name,
-                        living_cx,
-                        living_cy,
-                        living_bbox,
-                        score,
-                        heat_score,
-                        scale,
-                        is_dead=False,
-                        death_validation=validation,
-                    )
-                ]
-            return []
 
         if best_dead is not None:
             scale, bbox, score, validation = best_dead
             region_score = score if score is not None else RegionScore(0, 0, 0, 0, 0, 0, 0, False, "missing_dead_score")
             return [
-                self._candidate(
+                self._track_candidate(
                     descriptor.mob_name,
                     cx,
                     cy,
                     bbox,
                     region_score,
-                    heat_score,
                     scale,
                     is_dead=True,
                     death_validation=validation,
@@ -446,14 +395,16 @@ class SimpleMobDetector:
 
         if best_living is not None:
             scale, living_bbox, dead_bbox, score, validation = best_living
+            bx, by, bw, bh = living_bbox
+            living_cx = bx + bw // 2
+            living_cy = by + bh // 2
             return [
-                self._candidate(
+                self._track_candidate(
                     descriptor.mob_name,
-                    cx,
-                    cy,
+                    living_cx,
+                    living_cy,
                     living_bbox,
                     score,
-                    heat_score,
                     scale,
                     is_dead=False,
                     death_validation=validation,
@@ -461,6 +412,113 @@ class SimpleMobDetector:
             ]
 
         return []
+
+    def evaluate_track_states(
+        self,
+        frame_bgr: np.ndarray,
+        mob_name: str,
+        tracks: list[dict],
+        *,
+        offset_x: int = 0,
+        offset_y: int = 0,
+    ) -> list[dict]:
+        """Evaluate known tracks by id (ROI-local x,y). Returns trackUpdates with screen coordinates."""
+        if not tracks:
+            return []
+
+        descriptor = self.ensure_descriptor(mob_name)
+        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        updates: list[dict] = []
+
+        for track in tracks:
+            track_id = int(track["trackId"])
+            cx = int(track["x"])
+            cy = int(track["y"])
+            point_candidates: list[SimpleCandidate] = []
+            for center_x, center_y in self._track_search_centers(cx, cy, frame_bgr.shape):
+                point_candidates.extend(
+                    self._evaluate_track_point(frame_bgr, hsv, descriptor, center_x, center_y)
+                )
+            best = self._best_track_point_candidate(point_candidates)
+            if best is None:
+                updates.append(
+                    {
+                        "trackId": track_id,
+                        "state": "gone",
+                        "confidence": 0.0,
+                        "x": cx + offset_x,
+                        "y": cy + offset_y,
+                    }
+                )
+            elif best.is_dead:
+                updates.append(
+                    {
+                        "trackId": track_id,
+                        "state": "dead",
+                        "confidence": round(best.final_score, 4),
+                        "x": best.center_x + offset_x,
+                        "y": best.center_y + offset_y,
+                    }
+                )
+            else:
+                updates.append(
+                    {
+                        "trackId": track_id,
+                        "state": "alive",
+                        "confidence": round(best.final_score, 4),
+                        "x": best.center_x + offset_x,
+                        "y": best.center_y + offset_y,
+                    }
+                )
+
+        return updates
+
+    def _direct_track_scale(self, frame_width: int) -> float:
+        track_scales = self._candidate_scales(frame_width, track_point=True)
+        return track_scales[len(track_scales) // 2]
+
+    def evaluate_track_state_direct(
+        self,
+        frame_bgr: np.ndarray,
+        mob_name: str,
+        track_id: int,
+        cx: int,
+        cy: int,
+        *,
+        offset_x: int = 0,
+        offset_y: int = 0,
+    ) -> dict:
+        """Fast post-attack state: one center point, single scale, no drift."""
+        descriptor = self.ensure_descriptor(mob_name)
+        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        scale = self._direct_track_scale(frame_bgr.shape[1])
+        point_candidates = self._evaluate_track_point(
+            frame_bgr, hsv, descriptor, cx, cy, scales=[scale]
+        )
+        best = self._best_track_point_candidate(point_candidates)
+        if best is None:
+            return {
+                "trackId": track_id,
+                "state": "unknown",
+                "confidence": 0.0,
+                "x": cx + offset_x,
+                "y": cy + offset_y,
+            }
+        if best.is_dead:
+            return {
+                "trackId": track_id,
+                "state": "dead",
+                "confidence": round(best.final_score, 4),
+                "x": best.center_x + offset_x,
+                "y": best.center_y + offset_y,
+            }
+        return {
+            "trackId": track_id,
+            "state": "alive",
+            "confidence": round(best.final_score, 4),
+            "x": best.center_x + offset_x,
+            "y": best.center_y + offset_y,
+        }
 
     @staticmethod
     def _bbox_for_size(
@@ -479,7 +537,7 @@ class SimpleMobDetector:
             return None
         return x, y, w, h
 
-    def _watch_search_centers(self, cx: int, cy: int, frame_shape: tuple[int, ...]) -> list[tuple[int, int]]:
+    def _track_search_centers(self, cx: int, cy: int, frame_shape: tuple[int, ...]) -> list[tuple[int, int]]:
         radius = self.watch_drift_radius_px
         step = max(8, self.watch_drift_step_px)
         if radius <= 0:
@@ -495,7 +553,7 @@ class SimpleMobDetector:
                     points.append((nx, ny))
         return points or [(cx, cy)]
 
-    def _best_watch_point_candidate(self, candidates: list[SimpleCandidate]) -> SimpleCandidate | None:
+    def _best_track_point_candidate(self, candidates: list[SimpleCandidate]) -> SimpleCandidate | None:
         if not candidates:
             return None
         dead_candidates = [candidate for candidate in candidates if candidate.is_dead]
@@ -506,19 +564,14 @@ class SimpleMobDetector:
             return max(living_candidates, key=lambda candidate: candidate.final_score)
         return None
 
-    def _discovery_heatmap_passes(self, heat_score: float, watch_point: bool) -> bool:
-        if watch_point:
-            return True
-        return heat_score >= self.min_discovery_heatmap_score
-
     def _is_self_center(self, cx: int, cy: int, frame_shape: tuple[int, ...]) -> bool:
         height, width = frame_shape[:2]
         half_width = width * self.self_exclusion_width_ratio * 0.5
         half_height = height * self.self_exclusion_height_ratio * 0.5
         return abs(cx - width / 2) <= half_width and abs(cy - height / 2) <= half_height
 
-    def _candidate_scales(self, frame_width: int, *, watch_point: bool = False) -> list[float]:
-        if watch_point:
+    def _candidate_scales(self, frame_width: int, *, track_point: bool = False) -> list[float]:
+        if track_point:
             return [0.45, 0.55, 0.65]
         return [
             float(scale)
@@ -528,20 +581,47 @@ class SimpleMobDetector:
 
     def _finalize_accepted(self, candidates: list[SimpleCandidate]) -> list[SimpleCandidate]:
         candidates.sort(key=lambda c: c.final_score, reverse=True)
-        accepted = self._nms([candidate for candidate in candidates if candidate.accepted])
-        for candidate in candidates:
-            if candidate.accepted and candidate.is_dead and candidate not in accepted:
-                accepted.append(candidate)
-        return accepted
+        return self._nms([candidate for candidate in candidates if candidate.accepted])
 
     @staticmethod
-    def _candidate(
+    def _living_candidate(
         mob_name: str,
         cx: int,
         cy: int,
         bbox: tuple[int, int, int, int],
         score: RegionScore,
         heat_score: float,
+        candidate_scale: float,
+    ) -> SimpleCandidate:
+        return SimpleCandidate(
+            mob_name=mob_name,
+            center_x=cx,
+            center_y=cy,
+            bbox=bbox,
+            final_score=score.final_score,
+            body_palette_score=score.body_palette_score,
+            accent_score=score.accent_score,
+            rare_color_score=score.rare_color_score,
+            local_pattern_score=score.local_pattern_score,
+            color_purity_score=score.color_purity_score,
+            size_score=score.size_score,
+            candidate_scale=candidate_scale,
+            accepted=score.accepted,
+            is_dead=False,
+            dead_score=0.0,
+            mean_opacity=1.0,
+            opacity_confirmed=False,
+            rejection_reason=score.rejection_reason,
+            heatmap_score=heat_score,
+        )
+
+    @staticmethod
+    def _track_candidate(
+        mob_name: str,
+        cx: int,
+        cy: int,
+        bbox: tuple[int, int, int, int],
+        score: RegionScore,
         candidate_scale: float,
         *,
         is_dead: bool,
@@ -568,7 +648,7 @@ class SimpleMobDetector:
             mean_opacity=death_validation.mean_opacity,
             opacity_confirmed=death_validation.opacity_fade_score > 0.0,
             rejection_reason="" if is_dead else region_score.rejection_reason,
-            heatmap_score=heat_score,
+            heatmap_score=1.0,
         )
 
     def _nms(self, candidates: list[SimpleCandidate]) -> list[SimpleCandidate]:

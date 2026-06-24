@@ -13,6 +13,8 @@ global botSessionEmptyScans := 0
 global botSessionTargetScans := 0
 global botSessionDetectFailures := 0
 global botSessionAttacksIssued := 0
+global botSessionKillCount := 0
+global botSessionTeleportCount := 0
 global botSessionAcceptedCandidates := 0
 global botSessionLastRoi := ""
 global botSessionScaleMob := ""
@@ -26,7 +28,8 @@ BotSessionStart(mobName) {
     global sessionBotRunCount, sessionLogId
     global botSessionActive, botSessionId, botSessionDir, botSessionSummaryPath, botSessionStartedTick
     global botSessionTargetMob, botSessionTotalScans, botSessionEmptyScans, botSessionTargetScans
-    global botSessionDetectFailures, botSessionAttacksIssued, botSessionAcceptedCandidates
+    global botSessionDetectFailures, botSessionAttacksIssued, botSessionKillCount, botSessionTeleportCount
+    global botSessionAcceptedCandidates
     global botSessionLastRoi, botSessionScaleMob, botSessionScaleObservations, botSessionScaleCount
     global botSessionScaleLocked, botSessionScaleMin, botSessionScaleMax
     global gameWindowID, gameWindowTitle, gameProcess
@@ -50,6 +53,8 @@ BotSessionStart(mobName) {
     botSessionTargetScans := 0
     botSessionDetectFailures := 0
     botSessionAttacksIssued := 0
+    botSessionKillCount := 0
+    botSessionTeleportCount := 0
     botSessionAcceptedCandidates := 0
     botSessionLastRoi := ""
     botSessionScaleMob := mobName
@@ -75,7 +80,8 @@ BotSessionStart(mobName) {
 BotSessionStop(reason := "stopped") {
     global botSessionActive, botSessionId, botSessionStartedTick
     global botSessionTotalScans, botSessionTargetScans, botSessionEmptyScans
-    global botSessionDetectFailures, botSessionAttacksIssued, botSessionAcceptedCandidates
+    global botSessionDetectFailures, botSessionAttacksIssued, botSessionKillCount, botSessionTeleportCount
+    global botSessionAcceptedCandidates
 
     if (!botSessionActive)
         return
@@ -90,6 +96,8 @@ BotSessionStop(reason := "stopped") {
     lines .= "emptyScans: " . botSessionEmptyScans . "`n"
     lines .= "detectFailures: " . botSessionDetectFailures . "`n"
     lines .= "attacksIssued: " . botSessionAttacksIssued . "`n"
+    lines .= "kills: " . botSessionKillCount . "`n"
+    lines .= "teleports: " . botSessionTeleportCount . "`n"
     lines .= "acceptedCandidates: " . botSessionAcceptedCandidates
     SessionLogWriteBlock("bot session end", lines)
     BotSessionWriteSummary(reason)
@@ -115,6 +123,24 @@ BotSessionRecordAttack(x, y, confidence := 0) {
         return
     botSessionAttacksIssued++
     SessionLogWrite("DEBUG", "session", "attack #" . botSessionAttacksIssued . " @" . x . "," . y . " conf=" . confidence)
+    BotSessionWriteSummary("running")
+}
+
+BotSessionRecordKill(trackId) {
+    global botSessionActive, botSessionKillCount
+    if (!botSessionActive)
+        return
+    botSessionKillCount++
+    SessionLogWrite("DEBUG", "session", "kill #" . botSessionKillCount . " trackId=" . trackId)
+    BotSessionWriteSummary("running")
+}
+
+BotSessionRecordTeleport() {
+    global botSessionActive, botSessionTeleportCount
+    if (!botSessionActive)
+        return
+    botSessionTeleportCount++
+    SessionLogWrite("DEBUG", "session", "teleport #" . botSessionTeleportCount)
     BotSessionWriteSummary("running")
 }
 
@@ -246,7 +272,8 @@ BotSessionScaleRangeJson(mobName) {
 BotSessionWriteSummary(status := "running") {
     global botSessionActive, botSessionSummaryPath, botSessionId, botSessionTargetMob
     global botSessionStartedTick, botSessionTotalScans, botSessionEmptyScans, botSessionTargetScans
-    global botSessionDetectFailures, botSessionAttacksIssued, botSessionAcceptedCandidates
+    global botSessionDetectFailures, botSessionAttacksIssued, botSessionKillCount, botSessionTeleportCount
+    global botSessionAcceptedCandidates
     global botSessionLastRoi, botSessionScaleObservations, botSessionScaleCount
     global botSessionScaleLocked, botSessionScaleMin, botSessionScaleMax
 
@@ -261,7 +288,7 @@ BotSessionWriteSummary(status := "running") {
     json .= ",""durationSec"":" . elapsedSec
     json .= ",""active"":" . (botSessionActive ? "true" : "false")
     json .= ",""lastRoi"":""" . SessionLogJsonEscape(botSessionLastRoi) . """"
-    json .= ",""stats"":{""scans"":" . botSessionTotalScans . ",""emptyScans"":" . botSessionEmptyScans . ",""targetScans"":" . botSessionTargetScans . ",""detectFailures"":" . botSessionDetectFailures . ",""attacksIssued"":" . botSessionAttacksIssued . ",""acceptedCandidates"":" . botSessionAcceptedCandidates . "}"
+    json .= ",""stats"":{""scans"":" . botSessionTotalScans . ",""emptyScans"":" . botSessionEmptyScans . ",""targetScans"":" . botSessionTargetScans . ",""detectFailures"":" . botSessionDetectFailures . ",""attacksIssued"":" . botSessionAttacksIssued . ",""kills"":" . botSessionKillCount . ",""teleports"":" . botSessionTeleportCount . ",""acceptedCandidates"":" . botSessionAcceptedCandidates . "}"
     json .= ",""scaleCalibration"":{""locked"":" . (botSessionScaleLocked ? "true" : "false") . ",""observations"":""" . SessionLogJsonEscape(botSessionScaleObservations) . """,""count"":" . botSessionScaleCount . ",""min"":" . botSessionScaleMin . ",""max"":" . botSessionScaleMax . "}"
     json .= "}"
 

@@ -21,13 +21,129 @@ global totalWeight := 0
 global currentLocation := 0
 global huntLastWarpTime := 0
 global huntLastSkillTime := 0
-global HUNT_WATCH_INTERVAL_MS := 150
+global HUNT_STATE_INTERVAL_MS := 150
 global HUNT_DISCOVERY_INTERVAL_MS := 1000
+global HUNT_POST_ATTACK_STATE_DELAY_MS := 120
 global huntServerBusy := false
 global huntScanTimersActive := false
 global huntSkillSC := 0
 global huntTeleportSC := 0
-global huntSeekMobWarp := false
+global huntPendingDirectState := ""
+
+HuntClearPendingDirectState(reason := "") {
+    global huntPendingDirectState
+    if (!IsObject(huntPendingDirectState))
+        return
+    if (reason != "" && IsFunc("AppendLog"))
+        AppendLog("[DIRECT] clear reason=" . reason)
+    huntPendingDirectState := ""
+}
+
+HuntDropPendingDirectState(reason) {
+    global huntPendingDirectState
+    if (!IsObject(huntPendingDirectState))
+        return
+    if IsFunc("AppendLog")
+        AppendLog("[DIRECT] drop reason=" . reason . " id=" . huntPendingDirectState.trackId . " epoch=" . huntPendingDirectState.areaEpoch)
+    huntPendingDirectState := ""
+}
+
+HuntValidatePendingDirectState(ByRef dropReason) {
+    global huntPendingDirectState, HUNT_AREA_EPOCH
+    dropReason := ""
+    if (!IsObject(huntPendingDirectState))
+        return false
+    if (huntPendingDirectState.areaEpoch != HUNT_AREA_EPOCH) {
+        dropReason := "epoch_changed"
+        return false
+    }
+    if (!IsObject(HuntTracks_GetTrackById(huntPendingDirectState.trackId))) {
+        dropReason := "track_missing"
+        return false
+    }
+    GetHuntSearchRegion(xs, ys, ws, hs)
+    if (!ws || !hs) {
+        dropReason := "invalid_roi"
+        return false
+    }
+    return true
+}
+
+HuntPendingDirectStateReadyToRun() {
+    global huntPendingDirectState
+    dropReason := ""
+    if (!IsObject(huntPendingDirectState))
+        return false
+    if (!HuntValidatePendingDirectState(dropReason)) {
+        HuntDropPendingDirectState(dropReason)
+        return false
+    }
+    return (A_TickCount >= huntPendingDirectState.readyTick)
+}
+
+HuntShouldBlockDiscoveryForDirect() {
+    global huntPendingDirectState
+    if (!HuntPendingDirectStateReadyToRun())
+        return false
+    if IsFunc("AppendLog")
+        AppendLog("[DISCOVERY] skip reason=direct_ready id=" . huntPendingDirectState.trackId . " epoch=" . huntPendingDirectState.areaEpoch)
+    return true
+}
+
+HuntScheduleDirectStateCheck(trackId, screenX, screenY) {
+    global huntPendingDirectState, HUNT_POST_ATTACK_STATE_DELAY_MS, HUNT_AREA_EPOCH
+
+    huntPendingDirectState := {}
+    huntPendingDirectState.trackId := trackId
+    huntPendingDirectState.x := screenX
+    huntPendingDirectState.y := screenY
+    huntPendingDirectState.areaEpoch := HUNT_AREA_EPOCH
+    huntPendingDirectState.readyTick := A_TickCount + HUNT_POST_ATTACK_STATE_DELAY_MS
+
+    if IsFunc("AppendLog")
+        AppendLog("[DIRECT] queue id=" . trackId . " epoch=" . HUNT_AREA_EPOCH . " ready=" . huntPendingDirectState.readyTick)
+}
+
+HuntTryRunDirectStateCheck() {
+    global huntPendingDirectState, huntServerBusy, botRunning, botPaused, botStopRequested
+
+    if (!IsObject(huntPendingDirectState))
+        return false
+
+    dropReason := ""
+    if (!HuntValidatePendingDirectState(dropReason)) {
+        HuntDropPendingDirectState(dropReason)
+        return false
+    }
+
+    if (A_TickCount < huntPendingDirectState.readyTick)
+        return false
+    if (huntServerBusy)
+        return false
+    if (!botRunning || botPaused || botStopRequested)
+        return false
+
+    trackId := huntPendingDirectState.trackId
+    screenX := huntPendingDirectState.x
+    screenY := huntPendingDirectState.y
+    epoch := huntPendingDirectState.areaEpoch
+
+    GetHuntSearchRegion(xs, ys, ws, hs)
+    if (!ws || !hs) {
+        HuntDropPendingDirectState("invalid_roi")
+        return false
+    }
+
+    mobName := MobTemplateFolderName()
+    if IsFunc("AppendLog")
+        AppendLog("[DIRECT] run id=" . trackId . " epoch=" . epoch)
+
+    huntServerBusy := true
+    MobStateRecognizeDirectAndApply(mobName, xs, ys, ws, hs, trackId, screenX, screenY)
+    huntServerBusy := false
+    huntPendingDirectState := ""
+    return true
+}
 
 HuntAttackTrack(skillSC, track) {
     global SkillDelay, botRunning, botStopRequested
@@ -47,7 +163,8 @@ HuntAttackTrack(skillSC, track) {
     MoveMouseTo(Round(track.x), Round(track.y))
     if (!HuntSkillClick(skillSC))
         return false
-    HuntTracks_MarkAttack(track.id)
+    HuntTracks_ApplyAttackEvent(track.id)
+    HuntScheduleDirectStateCheck(track.id, Round(track.x), Round(track.y))
     BotSessionRecordAttack(Round(track.x), Round(track.y), track.confidence)
     return true
 }
@@ -56,10 +173,8 @@ HuntFilterCandidates(candidates, xs, ys, ws, hs, ByRef filteredCandidates) {
     filteredCandidates := []
     GetMobSearchPlayerIgnore(xs, ys, ws, hs, ignoreX, ignoreY, ignoreW, ignoreH)
     for index, candidate in candidates {
-        if (candidate.dead) {
-            filteredCandidates.Push(candidate)
+        if (!candidate.living)
             continue
-        }
         if (MobPointInsideIgnore(candidate.x, candidate.y, ignoreX, ignoreY, ignoreW, ignoreH))
             continue
         filteredCandidates.Push(candidate)
@@ -67,35 +182,24 @@ HuntFilterCandidates(candidates, xs, ys, ws, hs, ByRef filteredCandidates) {
 }
 
 HuntTryAreaClear(discoveryLivingCount) {
-    global botRunning, botPaused, botStopRequested, huntTeleportSC, CurrentTargetTrackId
-    global huntAreaEngaged, huntSeekMobWarp
+    global botRunning, botPaused, botStopRequested, huntTeleportSC
 
     if (!botRunning || botPaused || botStopRequested)
         return
-    if (CurrentTargetTrackId != "")
-        return
-    if (discoveryLivingCount > 0)
-        return
-    if (HuntTracks_GetAliveCount() > 0)
-        return
-    if (!huntTeleportSC)
-        return
-    if (!huntAreaEngaged && !huntSeekMobWarp)
+    if (!HuntPolicy_ShouldTeleport(discoveryLivingCount))
         return
 
     if IsFunc("AppendLog")
         AppendLog("Hunt: area clear — teleporting (alive=" . HuntTracks_GetAliveCount() . " scanLiving=" . discoveryLivingCount . ")")
     Teleport(huntTeleportSC)
-    huntSeekMobWarp := huntAreaEngaged
     HuntAreaReset()
 }
 
 HuntStartScanTimers() {
-    global huntScanTimersActive, HUNT_WATCH_INTERVAL_MS, HUNT_DISCOVERY_INTERVAL_MS, huntServerBusy, huntSeekMobWarp
+    global huntScanTimersActive, HUNT_STATE_INTERVAL_MS, HUNT_DISCOVERY_INTERVAL_MS, huntServerBusy
     if (huntScanTimersActive)
         return
-    huntSeekMobWarp := true
-    SetTimer, HuntWatchTick, %HUNT_WATCH_INTERVAL_MS%
+    SetTimer, HuntStateTick, %HUNT_STATE_INTERVAL_MS%
     SetTimer, HuntDiscoveryTick, %HUNT_DISCOVERY_INTERVAL_MS%
     huntScanTimersActive := true
     if (!huntServerBusy)
@@ -104,47 +208,54 @@ HuntStartScanTimers() {
 
 HuntStopScanTimers() {
     global huntScanTimersActive, huntServerBusy
-    SetTimer, HuntWatchTick, Off
+    SetTimer, HuntStateTick, Off
     SetTimer, HuntDiscoveryTick, Off
     huntScanTimersActive := false
     huntServerBusy := false
+    HuntClearPendingDirectState("stop")
 }
 
-HuntWatchTick() {
+HuntStateTick() {
     global botRunning, botPaused, botStopRequested, huntServerBusy
 
-    if (!botRunning || botPaused || botStopRequested || huntServerBusy)
+    if (!botRunning || botPaused || botStopRequested)
+        return
+
+    if (HuntTryRunDirectStateCheck())
+        return
+
+    if (huntServerBusy)
         return
 
     GetHuntSearchRegion(xs, ys, ws, hs)
     if (!ws || !hs)
         return
 
-    watchXs := []
-    watchYs := []
-    HuntTracks_CollectWatchPoints(watchXs, watchYs)
-    if (!watchXs.MaxIndex())
+    stateRequests := []
+    HuntTracks_CollectStateRequests(stateRequests)
+    if (!stateRequests.MaxIndex())
         return
 
     mobName := MobTemplateFolderName()
     huntServerBusy := true
-    jsonText := MobRecognitionWatchDetect(mobName, xs, ys, ws, hs, watchXs, watchYs)
+    MobStateRecognizeAndApply(mobName, xs, ys, ws, hs, stateRequests)
     huntServerBusy := false
-
-    if (!botRunning || botStopRequested)
-        return
-    if (jsonText = "" || !MobJsonIsOk(jsonText))
-        return
-
-    candidates := []
-    MobRecognitionParseCandidates(jsonText, candidates)
-    HuntTracks_ApplyWatch(candidates)
+    HuntTryRunDirectStateCheck()
 }
 
 HuntDiscoveryTick() {
     global botRunning, botPaused, botStopRequested, huntServerBusy
 
-    if (!botRunning || botPaused || botStopRequested || huntServerBusy)
+    if (!botRunning || botPaused || botStopRequested)
+        return
+
+    if (HuntTryRunDirectStateCheck())
+        return
+
+    if (HuntShouldBlockDiscoveryForDirect())
+        return
+
+    if (huntServerBusy)
         return
 
     GetHuntSearchRegion(xs, ys, ws, hs)
@@ -161,11 +272,13 @@ HuntDiscoveryTick() {
 
     huntServerBusy := true
     jsonText := MobRecognitionDiscoveryDetect(mobName, xs, ys, ws, hs, false)
-    huntServerBusy := false
 
-    if (!botRunning || botStopRequested)
+    if (!botRunning || botStopRequested) {
+        huntServerBusy := false
         return
+    }
     if (jsonText = "" || !MobJsonIsOk(jsonText)) {
+        huntServerBusy := false
         if (jsonText != "" && IsFunc("AppendLog"))
             AppendLog("Hunt: discovery failed — retrying")
         return
@@ -175,9 +288,11 @@ HuntDiscoveryTick() {
     MobRecognitionParseCandidates(jsonText, candidates)
     filteredCandidates := []
     HuntFilterCandidates(candidates, xs, ys, ws, hs, filteredCandidates)
-    discoveryLivingCount := HuntTracks_CountLivingCandidates(filteredCandidates)
-    HuntTracks_Update(filteredCandidates)
+    discoveryLivingCount := HuntTracks_CountLivingDetections(filteredCandidates)
+    HuntTracks_ApplyDetections(filteredCandidates)
     HuntTryAreaClear(discoveryLivingCount)
+    huntServerBusy := false
+    HuntTryRunDirectStateCheck()
 }
 
 StartBot(){
@@ -209,10 +324,6 @@ StartBot(){
             BotSleep(100)
         if (!botRunning || botStopRequested)
             break
-        if(SkillTimerButtonKey != ""){
-            if (!SendKeyCombo(SkillTimerButtonKey))
-                break
-        }
 
         if (MemoryFeaturesActive()) {
             if(warperCoordsSet && (currentLocation == warperLocation)){ 
@@ -242,7 +353,7 @@ Hunt(skillSC, teleportSC) {
     global botRunning, botPaused, botStopRequested
     global huntLastWarpTime, huntLastSkillTime
     global huntSkillSC, huntTeleportSC
-    global CurrentTargetTrackId, HUNT_TRACK_UNREACHABLE_ATTACKS, SkillDelay
+    global SkillDelay
 
     huntSkillSC := skillSC
     huntTeleportSC := teleportSC
@@ -307,42 +418,16 @@ Hunt(skillSC, teleportSC) {
             break
         }
 
-        HuntTracks_ClearTargetIfDead()
+        HuntTryRunDirectStateCheck()
 
-        engaged := false
-        if (CurrentTargetTrackId != "") {
-            currentTrack := HuntTracks_GetTrackById(CurrentTargetTrackId)
-            if (!IsObject(currentTrack) || currentTrack.state = "gone" || currentTrack.unreachable) {
-                HuntTracks_Log("HUNT", "clear currentTarget id=" . CurrentTargetTrackId . " reason=lost")
-                CurrentTargetTrackId := ""
-            } else if (currentTrack.state = "dead") {
-                HuntTracks_Log("HUNT", "clear currentTarget id=" . CurrentTargetTrackId . " reason=dead")
-                CurrentTargetTrackId := ""
-            } else if (currentTrack.attackCount >= HUNT_TRACK_UNREACHABLE_ATTACKS) {
-                HuntTracks_MarkUnreachable(CurrentTargetTrackId)
-                HuntTracks_Log("HUNT", "clear currentTarget id=" . CurrentTargetTrackId . " reason=unreachable")
-                CurrentTargetTrackId := ""
-            } else {
-                engaged := HuntAttackTrack(skillSC, currentTrack)
-                if (engaged)
-                    BotSleep(postAttackSleepMs)
-            }
-        }
-
-        if (engaged) {
-            BotSleep(20)
-            continue
-        }
-
-        newTargetId := HuntTracks_SelectTarget()
-        if (newTargetId) {
+        targetId := HuntPolicy_SelectTarget()
+        if (targetId) {
             if (!botRunning || botStopRequested)
                 break
-            CurrentTargetTrackId := newTargetId
-            newTrack := HuntTracks_GetTrackById(newTargetId)
+            targetTrack := HuntTracks_GetTrackById(targetId)
             if IsFunc("AppendLog")
-                AppendLog("Hunt [target]: attack track id=" . newTargetId . " @" . Round(newTrack.x) . "," . Round(newTrack.y) . " conf=" . Round(newTrack.confidence, 2) . " alive=" . HuntTracks_GetAliveCount())
-            if (HuntAttackTrack(skillSC, newTrack))
+                AppendLog("Hunt [target]: track id=" . targetId . " @" . Round(targetTrack.x) . "," . Round(targetTrack.y) . " attacks=" . targetTrack.attackCount . " alive=" . HuntTracks_GetAliveCount())
+            if (HuntAttackTrack(skillSC, targetTrack))
                 BotSleep(postAttackSleepMs)
             continue
         }
@@ -362,6 +447,8 @@ Teleport(teleportSC){
         Input.SendKey(teleportSC, 0)
         return
     }
+    if IsFunc("BotSessionRecordTeleport")
+        BotSessionRecordTeleport()
     if (!botRunning || botStopRequested) {
         Input.SendKey(teleportSC, 0)
         return
@@ -463,11 +550,6 @@ GetFlyWings() {
 ManageInventoryWindow(){
     if (BotShouldStop())
         return false
-    action := "open"
-    if(action = "close"){
-        ImageSearch, FoundX, FoundY, 0, 0, A_ScreenWidth, A_ScreenHeight, etc_img
-
-    }
     Input.SendKey(56, 1)
     if (!BotSleep(50)) {
         Input.SendKey(56, 0)

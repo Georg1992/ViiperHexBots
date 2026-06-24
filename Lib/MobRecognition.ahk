@@ -6,7 +6,6 @@ global mobRecognitionDebug := false
 global mobRecognitionPython := ""
 global mobRecognitionCli := "mob-recognition\cli.py"
 global mobRecognitionShutdownDone := false
-global mobRecognitionActiveDetectPid := 0
 global mobRecognitionServerPid := 0
 global mobRecognitionIpcDir := ""
 global mobRecognitionServerReady := false
@@ -70,13 +69,6 @@ MobRecognitionLog(message) {
     }
 }
 
-MobRecognitionShowDetectProgress(elapsed) {
-    if IsFunc("ShowMobSearchHint") {
-        fn := "ShowMobSearchHint"
-        %fn%("Searching... " . elapsed . "s", 0, "search")
-    }
-}
-
 MobRecognitionWriteUtf8File(path, text) {
     FileDelete, %path%
     file := FileOpen(path, "w", "UTF-8-RAW")
@@ -100,30 +92,6 @@ MobRecognitionParseCandidateBlock(block, ByRef candX, ByRef candY, ByRef candCon
         candConf := match1 + 0
 
     return (candX > 0 && candY > 0 && candConf > 0)
-}
-
-MobRecognitionParseCandidateFlags(block, ByRef dead, ByRef unreachable) {
-    dead := InStr(block, """dead"":true") ? true : false
-    unreachable := InStr(block, """unreachable"":true") ? true : false
-}
-
-MobRecognitionIsHuntTargetBlock(block) {
-    if (!InStr(block, """accepted"":true"))
-        return false
-    dead := false
-    unreachable := false
-    MobRecognitionParseCandidateFlags(block, dead, unreachable)
-    return (!dead && !unreachable)
-}
-
-MobRecognitionIsLivingBlock(block) {
-    if (InStr(block, """living"":true") || InStr(block, """living"": true"))
-        return true
-    return false
-}
-
-MobRecognitionIsDeadBlock(block) {
-    return InStr(block, """dead"":true") || InStr(block, """dead"": true")
 }
 
 MobRecognitionFindJsonArrayBounds(jsonText, key) {
@@ -222,33 +190,19 @@ MobRecognitionDiscoveryDetect(mobName, roiX, roiY, roiW, roiH, showProgress := f
         MobRecognitionLog("MobRecognition: detector unavailable")
         return ""
     }
-    return MobRecognitionServerRequest("scan", mobName, roiX, roiY, roiW, roiH, "", "", showProgress)
-}
-
-MobRecognitionWatchDetect(mobName, roiX, roiY, roiW, roiH, watchXs, watchYs) {
-    if (roiW <= 0 || roiH <= 0)
-        return ""
-    if (!IsObject(watchXs) || !watchXs.MaxIndex())
-        return ""
-    if (!MobRecognitionEnsureServer())
-        return ""
-    return MobRecognitionServerRequest("watch", mobName, roiX, roiY, roiW, roiH, watchXs, watchYs, false)
-}
-
-MobRecognitionBuildWatchPointsJson(roiX, roiY, watchXs, watchYs) {
-    watchJson := "["
-    Loop % watchXs.MaxIndex() {
-        if (A_Index > 1)
-            watchJson .= ","
-        localX := watchXs[A_Index] - roiX
-        localY := watchYs[A_Index] - roiY
-        watchJson .= "[" . localX . "," . localY . "]"
+    requestJson := MobRecognitionBuildScanRequest(mobName, roiX, roiY, roiW, roiH)
+    startTick := A_TickCount
+    jsonText := MobRecognitionSendServerRequest(requestJson, 60000)
+    if (showProgress && IsFunc("AppendLog") && jsonText != "")
+        AppendLog("Mob detect " . Round((A_TickCount - startTick) / 1000, 2) . "s")
+    if (jsonText != "" && IsFunc("BotSessionDetectResponse")) {
+        fn := "BotSessionDetectResponse"
+        %fn%(jsonText, A_TickCount - startTick)
     }
-    watchJson .= "]"
-    return watchJson
+    return jsonText
 }
 
-MobRecognitionBuildServerRequest(cmd, mobName, roiX, roiY, roiW, roiH, watchXs, watchYs) {
+MobRecognitionBuildScanRequest(mobName, roiX, roiY, roiW, roiH) {
     sessionId := ""
     if IsFunc("BotSessionGetId") {
         fn := "BotSessionGetId"
@@ -259,11 +213,29 @@ MobRecognitionBuildServerRequest(cmd, mobName, roiX, roiY, roiW, roiH, watchXs, 
         fn := "BotSessionScaleRangeJson"
         scaleJson := %fn%(mobName)
     }
-    watchJson := "[]"
-    if (IsObject(watchXs) && watchXs.MaxIndex() > 0)
-        watchJson := MobRecognitionBuildWatchPointsJson(roiX, roiY, watchXs, watchYs)
-    request := "{""cmd"":""" . cmd . """,""mob"":""" . mobName . """,""roi"":[" . roiX . "," . roiY . "," . roiW . "," . roiH . "],""watchPoints"":" . watchJson . ",""sessionId"":""" . sessionId . """" . scaleJson . "}"
-    return request
+    return "{""cmd"":""scan"",""mob"":""" . mobName . """,""roi"":[" . roiX . "," . roiY . "," . roiW . "," . roiH . "],""sessionId"":""" . sessionId . """" . scaleJson . "}"
+}
+
+MobRecognitionSendServerRequest(requestJson, timeoutMs := 60000) {
+    global mobRecognitionIpcDir
+
+    if (!MobRecognitionStartServer())
+        return ""
+
+    requestFile := mobRecognitionIpcDir . "\request.json"
+    responseFile := mobRecognitionIpcDir . "\response.json"
+    FileDelete, %responseFile%
+    FileDelete, %requestFile%
+    if (!MobRecognitionWriteUtf8File(requestFile, requestJson))
+        return ""
+
+    jsonText := MobRecognitionWaitForJsonFile(responseFile, timeoutMs)
+    if (jsonText = "") {
+        MobRecognitionLog("MobRecognition: server request timed out")
+        MobRecognitionStopServer()
+        return ""
+    }
+    return jsonText
 }
 
 MobRecognitionClearIpcFiles(ipcDir) {
@@ -289,42 +261,6 @@ MobRecognitionWaitForJsonFile(filePath, timeoutMs) {
         Sleep, 25
     }
     return ""
-}
-
-MobRecognitionServerRequest(cmd, mobName, roiX, roiY, roiW, roiH, watchXs, watchYs, showProgress := false) {
-    global mobRecognitionIpcDir, botStopRequested
-
-    if (!IsObject(watchXs))
-        watchXs := []
-    if (!IsObject(watchYs))
-        watchYs := []
-
-    if (!MobRecognitionStartServer())
-        return ""
-
-    request := MobRecognitionBuildServerRequest(cmd, mobName, roiX, roiY, roiW, roiH, watchXs, watchYs)
-    requestFile := mobRecognitionIpcDir . "\request.json"
-    responseFile := mobRecognitionIpcDir . "\response.json"
-    FileDelete, %responseFile%
-    FileDelete, %requestFile%
-    if (!MobRecognitionWriteUtf8File(requestFile, request))
-        return ""
-
-    startTick := A_TickCount
-    timeoutMs := (cmd = "watch") ? 3000 : 60000
-    jsonText := MobRecognitionWaitForJsonFile(responseFile, timeoutMs)
-    if (jsonText = "") {
-        MobRecognitionLog("MobRecognition: server request timed out cmd=" . cmd)
-        MobRecognitionStopServer()
-        return ""
-    }
-    if (showProgress && IsFunc("AppendLog"))
-        AppendLog("Mob detect " . Round((A_TickCount - startTick) / 1000, 2) . "s")
-    if IsFunc("BotSessionDetectResponse") {
-        fn := "BotSessionDetectResponse"
-        %fn%(jsonText, A_TickCount - startTick)
-    }
-    return jsonText
 }
 
 MobRecognitionStartServer() {
@@ -426,14 +362,6 @@ MobRecognitionEnsureServer() {
     return MobRecognitionStartServer()
 }
 
-MobRecognitionCancelActiveDetect() {
-    global mobRecognitionActiveDetectPid
-    if (mobRecognitionActiveDetectPid) {
-        MobRecognitionKillPid(mobRecognitionActiveDetectPid)
-        mobRecognitionActiveDetectPid := 0
-    }
-}
-
 MobRecognitionExitCleanup() {
     global mobRecognitionShutdownDone
 
@@ -441,7 +369,6 @@ MobRecognitionExitCleanup() {
         return
     mobRecognitionShutdownDone := true
 
-    MobRecognitionCancelActiveDetect()
     MobRecognitionStopServer()
     MobRecognitionKillOwnedDetectorProcesses()
 
@@ -454,100 +381,6 @@ MobRecognitionOnExit(ExitReason, ExitCode) {
 }
 
 OnExit("MobRecognitionOnExit")
-
-MobRecognitionDetect(mobName, roiX, roiY, roiW, roiH, debug := "", showProgress := false) {
-    global mobRecognitionDebug
-
-    if (roiW <= 0 || roiH <= 0) {
-        MobRecognitionLog("MobRecognition: invalid ROI " . roiX . "," . roiY . " " . roiW . "x" . roiH)
-        return ""
-    }
-
-    if (!MobRecognitionEnsureServer()) {
-        MobRecognitionLog("MobRecognition: detector unavailable")
-        return ""
-    }
-
-    useDebug := (debug != "") ? debug : mobRecognitionDebug
-    if (useDebug)
-        return MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, true, showProgress)
-    return MobRecognitionDiscoveryDetect(mobName, roiX, roiY, roiW, roiH, showProgress)
-}
-
-MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, debug := false, showProgress := false) {
-    global mobRecognitionCli, mobRecognitionActiveDetectPid
-    global botStopRequested
-
-    pythonCmd := EnsureMobRecognitionPython()
-    if (pythonCmd = "")
-        return ""
-
-    cliPath := A_ScriptDir . "\" . mobRecognitionCli
-    debugFlag := debug ? " --debug" : ""
-    roiArg := roiX . "," . roiY . "," . roiW . "," . roiH
-    outFile := A_Temp . "\mob_recognition_" . A_TickCount . ".json"
-    sessionArg := ""
-    if IsFunc("BotSessionGetId") {
-        fn := "BotSessionGetId"
-        activeSessionId := %fn%()
-        if (activeSessionId != "")
-            sessionArg := " --session-id " . activeSessionId
-    }
-    scaleArg := ""
-    if IsFunc("BotSessionScaleArgs") {
-        fn := "BotSessionScaleArgs"
-        scaleArg := %fn%(mobName)
-    }
-    cmd := """" . pythonCmd . """ -u """ . cliPath . """ detect-simple --mob " . mobName . " --roi " . roiArg . " --output """ . outFile . """" . sessionArg . scaleArg . debugFlag
-
-    startTick := A_TickCount
-    jsonText := ""
-    Run, %cmd%, %A_ScriptDir%, Hide, pid
-    mobRecognitionActiveDetectPid := pid
-
-    while (MobRecognitionProcessRunning(pid)) {
-        if (botStopRequested) {
-            MobRecognitionKillPid(pid)
-            mobRecognitionActiveDetectPid := 0
-            FileDelete, %outFile%
-            return ""
-        }
-        elapsed := (A_TickCount - startTick) // 1000
-        if (showProgress)
-            MobRecognitionShowDetectProgress(elapsed)
-
-        if (FileExist(outFile)) {
-            FileRead, jsonText, *P65001 %outFile%
-            if (MobJsonIsComplete(jsonText))
-                break
-        }
-
-        if (elapsed >= 60) {
-            MobRecognitionKillPid(pid)
-            MobRecognitionLog("MobRecognition: detect-simple timed out after 60s")
-            mobRecognitionActiveDetectPid := 0
-            FileDelete, %outFile%
-            return ""
-        }
-
-        Sleep, 50
-    }
-
-    if (MobRecognitionProcessRunning(pid))
-        Process, Wait, %pid%, 3
-    mobRecognitionActiveDetectPid := 0
-
-    if (!FileExist(outFile))
-        return ""
-
-    FileRead, jsonText, *P65001 %outFile%
-    FileDelete, %outFile%
-    if IsFunc("BotSessionDetectResponse") {
-        fn := "BotSessionDetectResponse"
-        %fn%(jsonText, A_TickCount - startTick)
-    }
-    return jsonText
-}
 
 MobPointInsideIgnore(x, y, ignoreX, ignoreY, ignoreW, ignoreH) {
     if (ignoreW <= 0 || ignoreH <= 0)
@@ -573,81 +406,6 @@ MobRecognitionIsAcceptedBlock(block) {
     return InStr(block, """accepted"":true")
 }
 
-MobRecognitionIsHuntEligiblePoint(x, y, ignoreX, ignoreY, ignoreW, ignoreH) {
-    return !MobPointInsideIgnore(x, y, ignoreX, ignoreY, ignoreW, ignoreH)
-}
-
-MobRecognitionSortTargetsByConfidence(ByRef xs, ByRef ys, ByRef confs) {
-    count := xs.MaxIndex()
-    if (!count || count < 2)
-        return
-
-    Loop % count - 1 {
-        outer := A_Index
-        Loop % count - outer {
-            inner := outer + A_Index
-            if (confs[inner] > confs[outer]) {
-                tmp := confs[outer]
-                confs[outer] := confs[inner]
-                confs[inner] := tmp
-
-                tmp := xs[outer]
-                xs[outer] := xs[inner]
-                xs[inner] := tmp
-
-                tmp := ys[outer]
-                ys[outer] := ys[inner]
-                ys[inner] := tmp
-            }
-        }
-    }
-}
-
-MobRecognitionCollectHuntTargets(jsonText, ByRef outXs, ByRef outYs, ByRef outConfs, ignoreX, ignoreY, ignoreW, ignoreH) {
-    outXs := []
-    outYs := []
-    outConfs := []
-
-    if (jsonText = "" || !MobJsonIsOk(jsonText))
-        return 0
-
-    section := MobRecognitionExtractCandidatesSection(jsonText)
-    if (section = "")
-        return 0
-
-    pos := 1
-    while (pos := RegExMatch(section, "i)\{[^{}]+\}", block, pos)) {
-        if (!MobRecognitionIsHuntTargetBlock(block)) {
-            pos += StrLen(block)
-            continue
-        }
-
-        candX := 0
-        candY := 0
-        candConf := 0
-        if (!MobRecognitionParseCandidateBlock(block, candX, candY, candConf)) {
-            pos += StrLen(block)
-            continue
-        }
-        if (!MobRecognitionIsHuntEligiblePoint(candX, candY, ignoreX, ignoreY, ignoreW, ignoreH)) {
-            pos += StrLen(block)
-            continue
-        }
-
-        outXs.Push(candX)
-        outYs.Push(candY)
-        outConfs.Push(candConf)
-        pos += StrLen(block)
-    }
-
-    MobRecognitionSortTargetsByConfidence(outXs, outYs, outConfs)
-    return outXs.MaxIndex() ? outXs.MaxIndex() : 0
-}
-
-MobRecognitionCollectAccepted(jsonText, ByRef outXs, ByRef outYs, ByRef outConfs, ignoreX, ignoreY, ignoreW, ignoreH) {
-    return MobRecognitionCollectHuntTargets(jsonText, outXs, outYs, outConfs, ignoreX, ignoreY, ignoreW, ignoreH)
-}
-
 GetMobSearchPlayerIgnore(xs, ys, ws, hs, ByRef ignoreX, ByRef ignoreY, ByRef ignoreW, ByRef ignoreH) {
     global cellSize
 
@@ -655,107 +413,5 @@ GetMobSearchPlayerIgnore(xs, ys, ws, hs, ByRef ignoreX, ByRef ignoreY, ByRef ign
     ignoreH := cellSize * 2
     ignoreX := xs + (ws // 2) - (ignoreW // 2)
     ignoreY := ys + (hs // 2) - (ignoreH // 2)
-}
-
-MobRecognitionBestCandidate(jsonText, ByRef outX, ByRef outY, ByRef confidence := "") {
-    return MobRecognitionBestCandidateFiltered(jsonText, outX, outY, confidence, 0, 0, 0, 0)
-}
-
-MobRecognitionBestCandidateFiltered(jsonText, ByRef outX, ByRef outY, ByRef confidence, ignoreX, ignoreY, ignoreW, ignoreH) {
-    targetXs := []
-    targetYs := []
-    targetConfs := []
-    count := MobRecognitionCollectAccepted(jsonText, targetXs, targetYs, targetConfs, ignoreX, ignoreY, ignoreW, ignoreH)
-    if (count = 0) {
-        outX := 0
-        outY := 0
-        confidence := 0
-        return false
-    }
-
-    outX := targetXs[1]
-    outY := targetYs[1]
-    confidence := targetConfs[1]
-    return true
-}
-
-MobRecognitionLogCandidates(jsonText) {
-    if (!IsFunc("AppendLog") || jsonText = "")
-        return
-
-    if (!MobJsonIsOk(jsonText)) {
-        MobRecognitionLog("MobRecognition: detect failed")
-        return
-    }
-
-    if (InStr(jsonText, """candidates"":[]")) {
-        MobRecognitionLog("MobRecognition: no candidates")
-        return
-    }
-
-    section := MobRecognitionExtractCandidatesSection(jsonText)
-    if (section = "")
-        return
-
-    pos := 1
-    while (pos := RegExMatch(section, "i)\{[^{}]+\}", block, pos)) {
-        if (!MobRecognitionIsAcceptedBlock(block)) {
-            pos += StrLen(block)
-            continue
-        }
-        candX := 0
-        candY := 0
-        candConf := 0
-        if (!MobRecognitionParseCandidateBlock(block, candX, candY, candConf)) {
-            pos += StrLen(block)
-            continue
-        }
-        dead := false
-        unreachable := false
-        MobRecognitionParseCandidateFlags(block, dead, unreachable)
-        flags := ""
-        if (dead)
-            flags .= " dead"
-        if (unreachable)
-            flags .= " unreachable"
-        MobRecognitionLog("MobRecognition: candidate @ " . candX . "," . candY . " conf=" . candConf . flags)
-        pos += StrLen(block)
-    }
-}
-
-FindMobTarget(ByRef outX, ByRef outY, xs, ys, ws, hs, ignoreX := 0, ignoreY := 0, ignoreW := 0, ignoreH := 0, showProgress := false) {
-    outX := 0
-    outY := 0
-
-    if (ignoreW <= 0 || ignoreH <= 0)
-        GetMobSearchPlayerIgnore(xs, ys, ws, hs, ignoreX, ignoreY, ignoreW, ignoreH)
-
-    mobName := MobTemplateFolderName()
-    if (showProgress && IsFunc("AppendLog"))
-        AppendLog("Mob search started (" . mobName . ")")
-
-    jsonText := MobRecognitionDetect(mobName, xs, ys, ws, hs, "", showProgress)
-    if (jsonText = "") {
-        if (showProgress && IsFunc("AppendLog"))
-            AppendLog("Mob search finished — detect failed")
-        return false
-    }
-
-    MobRecognitionLogCandidates(jsonText)
-    targetXs := []
-    targetYs := []
-    targetConfs := []
-    count := MobRecognitionCollectAccepted(jsonText, targetXs, targetYs, targetConfs, ignoreX, ignoreY, ignoreW, ignoreH)
-    if (count = 0) {
-        if (showProgress && IsFunc("AppendLog"))
-            AppendLog("Mob search finished — no valid match")
-        return false
-    }
-
-    outX := targetXs[1]
-    outY := targetYs[1]
-    if (showProgress && IsFunc("AppendLog"))
-        AppendLog("Mob search finished — match at " . outX . "," . outY . " conf=" . targetConfs[1])
-    return true
 }
 
