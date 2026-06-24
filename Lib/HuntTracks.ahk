@@ -1,10 +1,23 @@
 #Requires AutoHotkey v1.1.33+
 
-; Track identity and state machine (single source of truth for mob tracks).
+; HuntTracks: single source of truth for mob track storage and updates.
+; Presence in huntTracks means alive. Dead/gone tracks are removed by ApplyStateUpdates.
 
+; Track matching.
 global HUNT_TRACK_MATCH_RADIUS := 45
+
+; Attack pendingResult: after an attack, the track is skipped until state says alive/dead/gone
+; or pendingResultUntilTick expires (re-attack allowed without marking dead).
 global HUNT_ATTACK_RESULT_WINDOW_MS := 1800
+
+; AreaEpoch: incremented on teleport area reset; DirectState queue entries store this epoch
+; and are dropped when it changes.
 global HUNT_AREA_EPOCH := 0
+
+; Recent dead spots: block discovery from re-creating tracks on corpses briefly after state=dead.
+global HUNT_RECENT_DEAD_TTL_MS := 3000
+
+; Debug: extra session-log detail when true.
 global HUNT_TRACK_DEBUG := false
 
 global huntTracks := []
@@ -12,6 +25,7 @@ global huntTrackNextId := 1
 global huntTrackScanId := 0
 global huntTrackRoiCenterX := 0
 global huntTrackRoiCenterY := 0
+global huntRecentDeadSpots := []
 
 HuntTracks_Log(prefix, message) {
     if IsFunc("AppendLog")
@@ -21,10 +35,47 @@ HuntTracks_Log(prefix, message) {
 }
 
 HuntTracks_Reset() {
-    global huntTracks, huntTrackNextId, huntTrackScanId
+    global huntTracks, huntTrackNextId, huntTrackScanId, huntRecentDeadSpots
     huntTracks := []
     huntTrackNextId := 1
     huntTrackScanId := 0
+    huntRecentDeadSpots := []
+}
+
+HuntTracks_PurgeRecentDead() {
+    global huntRecentDeadSpots
+    now := A_TickCount
+    kept := []
+    for index, spot in huntRecentDeadSpots {
+        if (spot.expiresTick > now)
+            kept.Push(spot)
+    }
+    huntRecentDeadSpots := kept
+}
+
+HuntTracks_RecordRecentDead(x, y) {
+    global huntRecentDeadSpots, HUNT_RECENT_DEAD_TTL_MS
+    HuntTracks_PurgeRecentDead()
+    spot := {}
+    spot.x := x
+    spot.y := y
+    spot.expiresTick := A_TickCount + HUNT_RECENT_DEAD_TTL_MS
+    huntRecentDeadSpots.Push(spot)
+}
+
+HuntTracks_IsNearRecentDead(x, y) {
+    global huntRecentDeadSpots, HUNT_TRACK_MATCH_RADIUS
+    HuntTracks_PurgeRecentDead()
+    if (!huntRecentDeadSpots.MaxIndex())
+        return false
+    radiusSq := HUNT_TRACK_MATCH_RADIUS * HUNT_TRACK_MATCH_RADIUS
+    for index, spot in huntRecentDeadSpots {
+        dx := x - spot.x
+        dy := y - spot.y
+        if ((dx * dx) + (dy * dy) <= radiusSq)
+            return true
+    }
+    return false
 }
 
 HuntTracks_CountLivingDetections(detections) {
@@ -77,7 +128,6 @@ HuntTracks_ClearPendingResult(track, reason := "") {
     if (!IsObject(track))
         return
     track.pendingResultUntilTick := 0
-    track.pendingResultReason := ""
 }
 
 HuntTracks_CollectStateRequests(ByRef outRequests) {
@@ -115,7 +165,6 @@ HuntTracks_CreateTrack(x, y, confidence) {
     track.lastAttackTick := 0
     track.lastStateCheckTick := 0
     track.pendingResultUntilTick := 0
-    track.pendingResultReason := ""
     track.createdScan := huntTrackScanId
     track.updatedTick := A_TickCount
     huntTracks.Push(track)
@@ -173,6 +222,9 @@ HuntTracks_ApplyDetections(detections) {
             track := huntTracks[bestTrackIndex]
             matchedTrackIds[track.id] := true
             HuntTracks_ApplyLivingDetectionMatch(track, detection)
+        } else if (HuntTracks_IsNearRecentDead(detection.x, detection.y)) {
+            if IsFunc("AppendLog")
+                AppendLog("[TRACK] skip create reason=recent_dead @" . Round(detection.x) . "," . Round(detection.y))
         } else {
             HuntTracks_CreateTrack(detection.x, detection.y, detection.confidence)
         }
@@ -196,6 +248,9 @@ HuntTracks_ApplyStateUpdates(updates) {
                 AppendLog("[TRACK] state dead id=" . track.id . " remove")
             if IsFunc("BotSessionRecordKill")
                 BotSessionRecordKill(track.id)
+            deadX := update.x ? update.x : track.x
+            deadY := update.y ? update.y : track.y
+            HuntTracks_RecordRecentDead(deadX, deadY)
             HuntTracks_RemoveTrackById(track.id)
         } else if (update.state = "gone") {
             if IsFunc("AppendLog")
@@ -223,7 +278,6 @@ HuntTracks_ApplyAttackEvent(trackId) {
     track.attackCount++
     track.lastAttackTick := A_TickCount
     track.pendingResultUntilTick := A_TickCount + HUNT_ATTACK_RESULT_WINDOW_MS
-    track.pendingResultReason := "attack"
     if IsFunc("AppendLog")
         AppendLog("[HUNT] attack id=" . trackId . " pendingUntil=" . track.pendingResultUntilTick)
     return true

@@ -1,6 +1,6 @@
 #Requires AutoHotkey v1.1.33+
 
-; Mob recognition bridge (simple descriptor heatmap CLI).
+; MobRecognition: discovery bridge to Python detector (scan IPC only).
 
 global mobRecognitionDebug := false
 global mobRecognitionPython := ""
@@ -59,14 +59,11 @@ MobJsonIsComplete(jsonText) {
 }
 
 MobRecognitionLog(message) {
-    if IsFunc("SessionLogWrite") {
-        fn := "SessionLogWrite"
-        %fn%("DEBUG", "mob", message)
-    }
-    if IsFunc("AppendLog") {
-        fn := "AppendLog"
-        %fn%(message)
-    }
+    global mobRecognitionDebug
+    if (mobRecognitionDebug && IsFunc("AppendLog"))
+        AppendLog(message)
+    if IsFunc("SessionLogWrite")
+        SessionLogWrite("DEBUG", "mob", message)
 }
 
 MobRecognitionWriteUtf8File(path, text) {
@@ -129,13 +126,6 @@ MobRecognitionExtractCandidatesSection(jsonText) {
     return SubStr(jsonText, bounds.innerStart, bounds.innerEnd - bounds.innerStart + 1)
 }
 
-MobRecognitionExtractCandidatesJson(jsonText) {
-    bounds := MobRecognitionFindJsonArrayBounds(jsonText, "candidates")
-    if (bounds.start = 0)
-        return "[]"
-    return SubStr(jsonText, bounds.start, bounds.end - bounds.start + 1)
-}
-
 MobRecognitionParseCandidateLivingDead(block, ByRef living, ByRef dead) {
     living := (InStr(block, """living"":true") || InStr(block, """living"": true")) ? true : false
     dead := (InStr(block, """dead"":true") || InStr(block, """dead"": true")) ? true : false
@@ -186,7 +176,7 @@ MobRecognitionDiscoveryDetect(mobName, roiX, roiY, roiW, roiH, showProgress := f
         MobRecognitionLog("MobRecognition: invalid hunt ROI " . roiX . "," . roiY . " " . roiW . "x" . roiH)
         return ""
     }
-    if (!MobRecognitionEnsureServer()) {
+    if (!MobRecognitionStartServer()) {
         MobRecognitionLog("MobRecognition: detector unavailable")
         return ""
     }
@@ -358,10 +348,6 @@ MobRecognitionKillOwnedDetectorProcesses() {
     RunWait, %sweepCmd%, , Hide UseErrorLevel
 }
 
-MobRecognitionEnsureServer() {
-    return MobRecognitionStartServer()
-}
-
 MobRecognitionExitCleanup() {
     global mobRecognitionShutdownDone
 
@@ -386,20 +372,6 @@ MobPointInsideIgnore(x, y, ignoreX, ignoreY, ignoreW, ignoreH) {
     if (ignoreW <= 0 || ignoreH <= 0)
         return false
     return (x >= ignoreX && x <= ignoreX + ignoreW && y >= ignoreY && y <= ignoreY + ignoreH)
-}
-
-MobPointNearPoints(x, y, xs, ys, radius) {
-    count := xs.MaxIndex()
-    if (!count)
-        return false
-    radiusSq := radius * radius
-    Loop %count% {
-        dx := x - xs[A_Index]
-        dy := y - ys[A_Index]
-        if ((dx * dx) + (dy * dy) <= radiusSq)
-            return true
-    }
-    return false
 }
 
 MobRecognitionIsAcceptedBlock(block) {

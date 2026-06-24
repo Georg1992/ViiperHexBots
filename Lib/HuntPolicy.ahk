@@ -1,6 +1,7 @@
 #Requires AutoHotkey v1.1.33+
 
-; Hunt policy: round-robin target selection, attack pending gate, teleport gating.
+; HuntPolicy: target selection and teleport gating only.
+; Does not run vision, parse JSON, or mutate track storage beyond what callers apply.
 
 HuntPolicy_IsTrackSkillReady(track) {
     global SkillDelay

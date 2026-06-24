@@ -50,7 +50,6 @@ global warperLocation := 0
 global SearchRange := 16 ; Default search range (9-16 cells)
 global cellSize := 50 ; Pixels per RO viewport cell
 global TimeOnLocation := 20 ; Default time in seconds
-global Iterations := 0 ; Default iterations before Kafra
 global WeightModifier := 49
 
 ; Checkboxes
@@ -446,7 +445,6 @@ Gui, Show, w920 h710, Hex Bot
         FileAppend, `n`n[Settings]`n, config.ini
         IniWrite, %SearchRange%, config.ini, Settings, SearchRange
         IniWrite, %TimeOnLocation%, config.ini, Settings, TimeOnLocation
-        IniWrite, %Iterations%, config.ini, Settings, Iterations
         IniWrite, %WeightModifier%, config.ini, Settings, WeightModifier
         IniWrite, %TakeFlyWings%, config.ini, Settings, TakeFlyWings
         IniWrite, %DetectCaptcha%, config.ini, Settings, DetectCaptcha

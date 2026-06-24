@@ -10,28 +10,6 @@ if TYPE_CHECKING:
     from detector import SimpleMobDetector
 
 
-def evaluate_track_state(
-    detector: SimpleMobDetector,
-    frame_bgr: np.ndarray,
-    mob_name: str,
-    track_id: int,
-    x: int,
-    y: int,
-    *,
-    offset_x: int = 0,
-    offset_y: int = 0,
-) -> dict:
-    updates = evaluate_track_states(
-        detector,
-        frame_bgr,
-        mob_name,
-        [{"trackId": track_id, "x": x, "y": y}],
-        offset_x=offset_x,
-        offset_y=offset_y,
-    )
-    return updates[0]
-
-
 def evaluate_track_state_direct(
     detector: SimpleMobDetector,
     frame_bgr: np.ndarray,

@@ -1,12 +1,18 @@
 #Requires AutoHotkey v1.1.33+
 
-; Mob state recognition for known tracks (not discovery).
+; MobStateRecognition: evaluate existing HuntTracks via Python state IPC.
+; Discovery (new mobs) is owned by MobRecognition.
 
 global MOB_STATE_DEBUG := false
 
 MobState_Log(message) {
+    global MOB_STATE_DEBUG
+    if (!MOB_STATE_DEBUG)
+        return
     if IsFunc("AppendLog")
         AppendLog("[STATE] " . message)
+    if IsFunc("SessionLogWrite")
+        SessionLogWrite("DEBUG", "state", message)
 }
 
 MobStateBuildRequestJson(mobName, roiX, roiY, roiW, roiH, requests) {
@@ -153,15 +159,6 @@ MobStateRecognize(mobName, roiX, roiY, roiW, roiH, requests) {
     if (jsonText = "" || !MobJsonIsOk(jsonText))
         return ""
 
-    updates := []
-    MobStateParseUpdates(jsonText, updates)
-    updateCount := updates.MaxIndex()
-    if (updateCount) {
-        Loop % updateCount {
-            u := updates[A_Index]
-            MobState_Log("update id=" . u.id . " state=" . u.state . " conf=" . Round(u.confidence, 2))
-        }
-    }
     return jsonText
 }
 
@@ -185,7 +182,6 @@ MobStateRecognizeDirect(mobName, roiX, roiY, roiW, roiH, trackId, screenX, scree
         return ""
 
     requestJson := MobStateBuildDirectRequestJson(mobName, roiX, roiY, roiW, roiH, trackId, screenX, screenY)
-    MobState_Log("direct req id=" . trackId)
 
     jsonText := MobRecognitionSendServerRequest(requestJson, 3000)
     if (jsonText = "" || !MobJsonIsOk(jsonText))

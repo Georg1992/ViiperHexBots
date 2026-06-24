@@ -164,13 +164,6 @@ RestoreWindow() {
     }
 }
 
-ColorToHex(color) {
-    SetFormat, IntegerFast, Hex
-    hex := SubStr(color + 0x1000000, 2, 6)
-    SetFormat, IntegerFast, D
-    return hex
-}
-
 ShowSearchRegionOverlay(x, y, w, h, durationMs := 3000) {
     HideSearchRegionOverlay()
     border := 3
@@ -246,7 +239,7 @@ HuntSkillClick(KeySC) {
         return false
     if (!KeySC) {
         if IsFunc("AppendLog")
-            AppendLog("Hunt: skill key not set — skipping attack")
+            AppendLog("[HUNT] skill key not set")
         return false
     }
     Input.SendKey(KeySC, 1)

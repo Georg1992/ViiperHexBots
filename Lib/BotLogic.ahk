@@ -10,26 +10,31 @@ global flywing_img := "images\wing_img.bmp"
 global ok_img := "images\ok_img.bmp"
 global empty_cell_img := "images\empty_cell_img.bmp"
 
-global cellSize = 50
 global wingcount := 0
 
-; Game variables
+; Memory-mode game stats (read in Hunt loop when memory features are active).
 global maxSp := 0
 global currentSp := 0
 global currentWeight := 0
 global totalWeight := 0
 global currentLocation := 0
-global huntLastWarpTime := 0
-global huntLastSkillTime := 0
+
+; Hunt timing (ms).
 global HUNT_STATE_INTERVAL_MS := 150
 global HUNT_DISCOVERY_INTERVAL_MS := 1000
 global HUNT_POST_ATTACK_STATE_DELAY_MS := 120
+global huntLastWarpTime := 0
+global huntLastSkillTime := 0
+
+; Hunt runtime flags.
 global huntServerBusy := false
 global huntScanTimersActive := false
-global huntSkillSC := 0
 global huntTeleportSC := 0
+
+; DirectState: one post-attack state check queued per attack; cleared on area reset/stop.
 global huntPendingDirectState := ""
 
+; DirectState queue: one post-attack state check per attack (see docs/hunt-scan-audit.md).
 HuntClearPendingDirectState(reason := "") {
     global huntPendingDirectState
     if (!IsObject(huntPendingDirectState))
@@ -151,6 +156,7 @@ HuntAttackTrack(skillSC, track) {
     if (!IsObject(track))
         return false
 
+    trackId := track.id
     remainingDelay := SkillDelay - (A_TickCount - track.lastAttackTick)
     if (remainingDelay > 0) {
         BotSleep(remainingDelay)
@@ -158,12 +164,20 @@ HuntAttackTrack(skillSC, track) {
             return false
     }
 
+    track := HuntTracks_GetTrackById(trackId)
+    if (!IsObject(track)) {
+        if IsFunc("AppendLog")
+            AppendLog("[HUNT] skip engage id=" . trackId . " reason=track_removed")
+        return false
+    }
+
     if IsFunc("AppendLog")
-        AppendLog("Hunt [engage]: attack track id=" . track.id . " @" . Round(track.x) . "," . Round(track.y) . " conf=" . Round(track.confidence, 2))
+        AppendLog("[HUNT] engage id=" . track.id . " @" . Round(track.x) . "," . Round(track.y) . " conf=" . Round(track.confidence, 2))
     MoveMouseTo(Round(track.x), Round(track.y))
     if (!HuntSkillClick(skillSC))
         return false
-    HuntTracks_ApplyAttackEvent(track.id)
+    if (!HuntTracks_ApplyAttackEvent(track.id))
+        return false
     HuntScheduleDirectStateCheck(track.id, Round(track.x), Round(track.y))
     BotSessionRecordAttack(Round(track.x), Round(track.y), track.confidence)
     return true
@@ -190,7 +204,7 @@ HuntTryAreaClear(discoveryLivingCount) {
         return
 
     if IsFunc("AppendLog")
-        AppendLog("Hunt: area clear — teleporting (alive=" . HuntTracks_GetAliveCount() . " scanLiving=" . discoveryLivingCount . ")")
+        AppendLog("[HUNT] area clear teleport alive=" . HuntTracks_GetAliveCount() . " scanLiving=" . discoveryLivingCount)
     Teleport(huntTeleportSC)
     HuntAreaReset()
 }
@@ -265,10 +279,7 @@ HuntDiscoveryTick() {
     HuntTracks_SetRoiCenter(xs + (ws // 2), ys + (hs // 2))
 
     mobName := MobTemplateFolderName()
-    if IsFunc("BotSessionHuntScan") {
-        fn := "BotSessionHuntScan"
-        %fn%(mobName, xs, ys, ws, hs)
-    }
+    BotSessionHuntScan(mobName, xs, ys, ws, hs)
 
     huntServerBusy := true
     jsonText := MobRecognitionDiscoveryDetect(mobName, xs, ys, ws, hs, false)
@@ -280,7 +291,7 @@ HuntDiscoveryTick() {
     if (jsonText = "" || !MobJsonIsOk(jsonText)) {
         huntServerBusy := false
         if (jsonText != "" && IsFunc("AppendLog"))
-            AppendLog("Hunt: discovery failed — retrying")
+            AppendLog("[DISCOVERY] failed retry")
         return
     }
 
@@ -344,7 +355,6 @@ StartBot(){
         } else {
             Hunt(skillSC, teleportSC)
         }
-        iterations++
     }
     BotSessionStop("loop ended")
 }
@@ -352,10 +362,9 @@ StartBot(){
 Hunt(skillSC, teleportSC) {
     global botRunning, botPaused, botStopRequested
     global huntLastWarpTime, huntLastSkillTime
-    global huntSkillSC, huntTeleportSC
+    global huntTeleportSC
     global SkillDelay
 
-    huntSkillSC := skillSC
     huntTeleportSC := teleportSC
 
     postAttackSleepMs := 50
@@ -365,7 +374,7 @@ Hunt(skillSC, teleportSC) {
 
     if (teleportSC = 0) {
         if IsFunc("AppendLog")
-            AppendLog("Hunt: Teleport key not set — bot cannot move")
+            AppendLog("[HUNT] teleport key not set")
         return
     }
 
@@ -407,7 +416,7 @@ Hunt(skillSC, teleportSC) {
         GetHuntSearchRegion(xs, ys, ws, hs)
         if (!ws || !hs) {
             if IsFunc("AppendLog")
-                AppendLog("Hunt: invalid search region — select game window and refresh")
+                AppendLog("[HUNT] invalid search region")
             BotSleep(500)
             continue
         }
@@ -426,7 +435,7 @@ Hunt(skillSC, teleportSC) {
                 break
             targetTrack := HuntTracks_GetTrackById(targetId)
             if IsFunc("AppendLog")
-                AppendLog("Hunt [target]: track id=" . targetId . " @" . Round(targetTrack.x) . "," . Round(targetTrack.y) . " attacks=" . targetTrack.attackCount . " alive=" . HuntTracks_GetAliveCount())
+                AppendLog("[HUNT] target id=" . targetId . " @" . Round(targetTrack.x) . "," . Round(targetTrack.y) . " attacks=" . targetTrack.attackCount . " alive=" . HuntTracks_GetAliveCount())
             if (HuntAttackTrack(skillSC, targetTrack))
                 BotSleep(postAttackSleepMs)
             continue
