@@ -177,7 +177,7 @@ BotSessionMaybeRecordScale(block) {
     if (RegExMatch(block, "i)""rareColorScore"":([0-9.]+)", m))
         rare := m1 + 0.0
 
-    if (finalScore < 0.46 || purity < 0.55 || body < 0.35 || accent < 0.25 || pattern < 0.20)
+    if (finalScore < 0.46 || purity < 0.50 || body < 0.12 || accent < 0.18 || pattern < 0.15)
         return
     if (rare > body * 1.15)
         return

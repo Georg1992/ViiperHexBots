@@ -244,19 +244,25 @@ AltClicks(times){
 HuntSkillClick(KeySC) {
     if (BotShouldStop())
         return false
+    if (!KeySC) {
+        if IsFunc("AppendLog")
+            AppendLog("Hunt: skill key not set — skipping attack")
+        return false
+    }
     Input.SendKey(KeySC, 1)
     if (!BotSleep(20)) {
         Input.SendKey(KeySC, 0)
         Input.SendMouseButton(0, 0)
         return false
     }
-    Input.SendKey(KeySC, 0)
     Input.SendMouseButton(0, 1)
     if (!BotSleep(20)) {
+        Input.SendKey(KeySC, 0)
         Input.SendMouseButton(0, 0)
         return false
     }
     Input.SendMouseButton(0, 0)
+    Input.SendKey(KeySC, 0)
     return true
 }
 

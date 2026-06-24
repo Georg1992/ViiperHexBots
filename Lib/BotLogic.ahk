@@ -21,12 +21,13 @@ global totalWeight := 0
 global currentLocation := 0
 global huntLastWarpTime := 0
 global huntLastSkillTime := 0
-global huntFastIdle := false
 global HUNT_WATCH_INTERVAL_MS := 150
 global HUNT_DISCOVERY_INTERVAL_MS := 1000
 global huntServerBusy := false
 global huntScanTimersActive := false
-global huntDiscoveryReady := false
+global huntSkillSC := 0
+global huntTeleportSC := 0
+global huntSeekMobWarp := false
 
 HuntAttackTrack(skillSC, track) {
     global SkillDelay, botRunning, botStopRequested
@@ -44,7 +45,8 @@ HuntAttackTrack(skillSC, track) {
     if IsFunc("AppendLog")
         AppendLog("Hunt [engage]: attack track id=" . track.id . " @" . Round(track.x) . "," . Round(track.y) . " conf=" . Round(track.confidence, 2))
     MoveMouseTo(Round(track.x), Round(track.y))
-    HuntSkillClick(skillSC)
+    if (!HuntSkillClick(skillSC))
+        return false
     HuntTracks_MarkAttack(track.id)
     BotSessionRecordAttack(Round(track.x), Round(track.y), track.confidence)
     return true
@@ -64,23 +66,48 @@ HuntFilterCandidates(candidates, xs, ys, ws, hs, ByRef filteredCandidates) {
     }
 }
 
+HuntTryAreaClear(discoveryLivingCount) {
+    global botRunning, botPaused, botStopRequested, huntTeleportSC, CurrentTargetTrackId
+    global huntAreaEngaged, huntSeekMobWarp
+
+    if (!botRunning || botPaused || botStopRequested)
+        return
+    if (CurrentTargetTrackId != "")
+        return
+    if (discoveryLivingCount > 0)
+        return
+    if (HuntTracks_GetAliveCount() > 0)
+        return
+    if (!huntTeleportSC)
+        return
+    if (!huntAreaEngaged && !huntSeekMobWarp)
+        return
+
+    if IsFunc("AppendLog")
+        AppendLog("Hunt: area clear — teleporting (alive=" . HuntTracks_GetAliveCount() . " scanLiving=" . discoveryLivingCount . ")")
+    Teleport(huntTeleportSC)
+    huntSeekMobWarp := huntAreaEngaged
+    HuntAreaReset()
+}
+
 HuntStartScanTimers() {
-    global huntScanTimersActive, HUNT_WATCH_INTERVAL_MS, HUNT_DISCOVERY_INTERVAL_MS, huntDiscoveryReady
+    global huntScanTimersActive, HUNT_WATCH_INTERVAL_MS, HUNT_DISCOVERY_INTERVAL_MS, huntServerBusy, huntSeekMobWarp
     if (huntScanTimersActive)
         return
-    huntDiscoveryReady := false
+    huntSeekMobWarp := true
     SetTimer, HuntWatchTick, %HUNT_WATCH_INTERVAL_MS%
     SetTimer, HuntDiscoveryTick, %HUNT_DISCOVERY_INTERVAL_MS%
-    SetTimer, HuntDiscoveryTick, -1
     huntScanTimersActive := true
+    if (!huntServerBusy)
+        HuntDiscoveryTick()
 }
 
 HuntStopScanTimers() {
-    global huntScanTimersActive, huntDiscoveryReady
+    global huntScanTimersActive, huntServerBusy
     SetTimer, HuntWatchTick, Off
     SetTimer, HuntDiscoveryTick, Off
     huntScanTimersActive := false
-    huntDiscoveryReady := false
+    huntServerBusy := false
 }
 
 HuntWatchTick() {
@@ -115,7 +142,7 @@ HuntWatchTick() {
 }
 
 HuntDiscoveryTick() {
-    global botRunning, botPaused, botStopRequested, huntServerBusy, huntDiscoveryReady, huntFastIdle
+    global botRunning, botPaused, botStopRequested, huntServerBusy
 
     if (!botRunning || botPaused || botStopRequested || huntServerBusy)
         return
@@ -138,14 +165,9 @@ HuntDiscoveryTick() {
 
     if (!botRunning || botStopRequested)
         return
-    if (jsonText = "") {
-        huntDiscoveryReady := true
-        return
-    }
-    if (!MobJsonIsOk(jsonText)) {
-        if IsFunc("AppendLog")
+    if (jsonText = "" || !MobJsonIsOk(jsonText)) {
+        if (jsonText != "" && IsFunc("AppendLog"))
             AppendLog("Hunt: discovery failed — retrying")
-        huntDiscoveryReady := true
         return
     }
 
@@ -153,9 +175,9 @@ HuntDiscoveryTick() {
     MobRecognitionParseCandidates(jsonText, candidates)
     filteredCandidates := []
     HuntFilterCandidates(candidates, xs, ys, ws, hs, filteredCandidates)
+    discoveryLivingCount := HuntTracks_CountLivingCandidates(filteredCandidates)
     HuntTracks_Update(filteredCandidates)
-    huntFastIdle := false
-    huntDiscoveryReady := true
+    HuntTryAreaClear(discoveryLivingCount)
 }
 
 StartBot(){
@@ -218,13 +240,15 @@ StartBot(){
 
 Hunt(skillSC, teleportSC) {
     global botRunning, botPaused, botStopRequested
-    global huntLastWarpTime, huntLastSkillTime, huntFastIdle
-    global huntTrackClearScans, huntDiscoveryReady
+    global huntLastWarpTime, huntLastSkillTime
+    global huntSkillSC, huntTeleportSC
     global CurrentTargetTrackId, HUNT_TRACK_UNREACHABLE_ATTACKS, SkillDelay
+
+    huntSkillSC := skillSC
+    huntTeleportSC := teleportSC
 
     postAttackSleepMs := 50
     emptyScanSleepMs := 25
-    fastIdleScanSleepMs := 15
 
     SyncSearchRangeFromUI()
 
@@ -294,9 +318,6 @@ Hunt(skillSC, teleportSC) {
             } else if (currentTrack.state = "dead") {
                 HuntTracks_Log("HUNT", "clear currentTarget id=" . CurrentTargetTrackId . " reason=dead")
                 CurrentTargetTrackId := ""
-            } else if (!HuntTracks_IsEngageable(currentTrack)) {
-                HuntTracks_Log("HUNT", "clear currentTarget id=" . CurrentTargetTrackId . " reason=stale")
-                CurrentTargetTrackId := ""
             } else if (currentTrack.attackCount >= HUNT_TRACK_UNREACHABLE_ATTACKS) {
                 HuntTracks_MarkUnreachable(CurrentTargetTrackId)
                 HuntTracks_Log("HUNT", "clear currentTarget id=" . CurrentTargetTrackId . " reason=unreachable")
@@ -309,7 +330,6 @@ Hunt(skillSC, teleportSC) {
         }
 
         if (engaged) {
-            huntFastIdle := false
             BotSleep(20)
             continue
         }
@@ -322,45 +342,12 @@ Hunt(skillSC, teleportSC) {
             newTrack := HuntTracks_GetTrackById(newTargetId)
             if IsFunc("AppendLog")
                 AppendLog("Hunt [target]: attack track id=" . newTargetId . " @" . Round(newTrack.x) . "," . Round(newTrack.y) . " conf=" . Round(newTrack.confidence, 2) . " alive=" . HuntTracks_GetAliveCount())
-            MoveMouseTo(Round(newTrack.x), Round(newTrack.y))
-            HuntSkillClick(skillSC)
-            HuntTracks_MarkAttack(newTargetId)
-            BotSessionRecordAttack(Round(newTrack.x), Round(newTrack.y), newTrack.confidence)
-            huntFastIdle := false
-            BotSleep(postAttackSleepMs)
+            if (HuntAttackTrack(skillSC, newTrack))
+                BotSleep(postAttackSleepMs)
             continue
         }
 
-        scanSleepMs := huntFastIdle ? fastIdleScanSleepMs : emptyScanSleepMs
-        clearScansRequired := (huntFastIdle || HuntTracks_AllTracksDead()) ? 1 : 2
-
-        if (huntDiscoveryReady && CurrentTargetTrackId = "" && HuntTracks_AllCleared(clearScansRequired)) {
-            huntDiscoveryReady := false
-            if (!botRunning || botStopRequested)
-                break
-            if IsFunc("AppendLog")
-                AppendLog("Hunt: area clear — teleporting (alive=" . HuntTracks_GetAliveCount() . " areaClear=" . HuntTracks_GetAreaClearAliveCount() . ")")
-            Teleport(teleportSC)
-            HuntAreaReset()
-            huntFastIdle := true
-            BotSleep(40)
-            continue
-        }
-
-        if (huntDiscoveryReady && HuntTracks_GetActionableAliveCount() > 0) {
-            if IsFunc("AppendLog")
-                AppendLog("Hunt [scan]: actionable tracks=" . HuntTracks_GetActionableAliveCount() . " waiting")
-            huntDiscoveryReady := false
-            BotSleep(scanSleepMs)
-            continue
-        }
-
-        if (huntDiscoveryReady) {
-            if IsFunc("AppendLog")
-                AppendLog("Hunt [scan]: clear scan pending " . huntTrackClearScans . "/" . clearScansRequired)
-            huntDiscoveryReady := false
-        }
-        BotSleep(scanSleepMs)
+        BotSleep(emptyScanSleepMs)
     }
 
     HuntStopScanTimers()

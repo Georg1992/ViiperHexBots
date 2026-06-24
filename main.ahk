@@ -262,7 +262,6 @@ Gui, Show, w920 h710, Hex Bot
         GuiControl, Enable, RefreshWindows
         GuiControl, Enable, BotButton
         AppendLog("All set — select or launch the game window")
-        MobRecognitionEnsureServer()
         SessionLogWriteRuntimeContext()
         Gosub, RefreshWindows
     return

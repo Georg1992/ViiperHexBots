@@ -7,7 +7,8 @@ global mobRecognitionPython := ""
 global mobRecognitionCli := "mob-recognition\cli.py"
 global mobRecognitionShutdownDone := false
 global mobRecognitionActiveDetectPid := 0
-global mobRecognitionServerExec := ""
+global mobRecognitionServerPid := 0
+global mobRecognitionIpcDir := ""
 global mobRecognitionServerReady := false
 
 MobTemplateFolderName(monsterIndex := "") {
@@ -30,7 +31,23 @@ EnsureMobRecognitionPython() {
         return ""
     }
 
-    mobRecognitionPython := "py -3"
+    tempFile := A_Temp . "\mob_recognition_python_exe.txt"
+    FileDelete, %tempFile%
+    resolveCmd := A_ComSpec . " /c py -3 -c ""import sys; open(r'" . tempFile . "', 'w', encoding='utf-8').write(sys.executable)"""
+    RunWait, %resolveCmd%, , Hide UseErrorLevel
+    if (ErrorLevel || !FileExist(tempFile)) {
+        MobRecognitionLog("MobRecognition: failed to resolve Python executable")
+        return ""
+    }
+    FileRead, pythonExe, *P65001 %tempFile%
+    FileDelete, %tempFile%
+    pythonExe := Trim(pythonExe, "`r`n `t")
+    if (pythonExe = "" || !FileExist(pythonExe)) {
+        MobRecognitionLog("MobRecognition: resolved Python executable is missing")
+        return ""
+    }
+
+    mobRecognitionPython := pythonExe
     return mobRecognitionPython
 }
 
@@ -249,28 +266,33 @@ MobRecognitionBuildServerRequest(cmd, mobName, roiX, roiY, roiW, roiH, watchXs, 
     return request
 }
 
-MobRecognitionReadServerLine(timeoutMs) {
-    global mobRecognitionServerExec
+MobRecognitionClearIpcFiles(ipcDir) {
+    if (ipcDir = "")
+        return
+    FileDelete, %ipcDir%\ready.json
+    FileDelete, %ipcDir%\request.json
+    FileDelete, %ipcDir%\response.json
+    FileDelete, %ipcDir%\ready.json.tmp
+    FileDelete, %ipcDir%\request.json.tmp
+    FileDelete, %ipcDir%\response.json.tmp
+}
 
-    if (!IsObject(mobRecognitionServerExec))
-        return ""
-
+MobRecognitionWaitForJsonFile(filePath, timeoutMs) {
     deadline := A_TickCount + timeoutMs
+    jsonText := ""
     while (A_TickCount < deadline) {
-        if (!mobRecognitionServerExec.Status = 0)
-            return ""
-        if (!mobRecognitionServerExec.Stdout.AtEndOfStream) {
-            line := mobRecognitionServerExec.Stdout.ReadLine()
-            if (line != "")
-                return line
+        if (FileExist(filePath)) {
+            FileRead, jsonText, *P65001 %filePath%
+            if (MobJsonIsComplete(jsonText))
+                return jsonText
         }
-        Sleep, 10
+        Sleep, 25
     }
     return ""
 }
 
 MobRecognitionServerRequest(cmd, mobName, roiX, roiY, roiW, roiH, watchXs, watchYs, showProgress := false) {
-    global mobRecognitionServerExec, botStopRequested
+    global mobRecognitionIpcDir, botStopRequested
 
     if (!IsObject(watchXs))
         watchXs := []
@@ -281,11 +303,16 @@ MobRecognitionServerRequest(cmd, mobName, roiX, roiY, roiW, roiH, watchXs, watch
         return ""
 
     request := MobRecognitionBuildServerRequest(cmd, mobName, roiX, roiY, roiW, roiH, watchXs, watchYs)
-    startTick := A_TickCount
-    mobRecognitionServerExec.StdIn.Write(request . "`n")
+    requestFile := mobRecognitionIpcDir . "\request.json"
+    responseFile := mobRecognitionIpcDir . "\response.json"
+    FileDelete, %responseFile%
+    FileDelete, %requestFile%
+    if (!MobRecognitionWriteUtf8File(requestFile, request))
+        return ""
 
+    startTick := A_TickCount
     timeoutMs := (cmd = "watch") ? 3000 : 60000
-    jsonText := MobRecognitionReadServerLine(timeoutMs)
+    jsonText := MobRecognitionWaitForJsonFile(responseFile, timeoutMs)
     if (jsonText = "") {
         MobRecognitionLog("MobRecognition: server request timed out cmd=" . cmd)
         MobRecognitionStopServer()
@@ -301,14 +328,12 @@ MobRecognitionServerRequest(cmd, mobName, roiX, roiY, roiW, roiH, watchXs, watch
 }
 
 MobRecognitionStartServer() {
-    global mobRecognitionCli, mobRecognitionServerExec, mobRecognitionServerReady
+    global mobRecognitionCli, mobRecognitionServerPid, mobRecognitionIpcDir, mobRecognitionServerReady
 
-    if (mobRecognitionServerReady && IsObject(mobRecognitionServerExec)) {
-        if (mobRecognitionServerExec.Status = 0)
-            return true
-        mobRecognitionServerReady := false
-        mobRecognitionServerExec := ""
-    }
+    if (mobRecognitionServerReady && mobRecognitionServerPid && MobRecognitionProcessRunning(mobRecognitionServerPid))
+        return true
+
+    MobRecognitionStopServer()
 
     pythonCmd := EnsureMobRecognitionPython()
     if (pythonCmd = "")
@@ -320,10 +345,16 @@ MobRecognitionStartServer() {
         return false
     }
 
-    shell := ComObjCreate("WScript.Shell")
-    shell.CurrentDirectory := A_ScriptDir
-    mobRecognitionServerExec := shell.Exec(pythonCmd . " -u """ . cliPath . """ serve")
-    readyLine := MobRecognitionReadServerLine(15000)
+    mobRecognitionIpcDir := A_Temp . "\mob_recognition_ipc"
+    FileCreateDir, %mobRecognitionIpcDir%
+    MobRecognitionClearIpcFiles(mobRecognitionIpcDir)
+
+    serverCmd := """" . pythonCmd . """ -u """ . cliPath . """ serve --ipc-dir """ . mobRecognitionIpcDir . """"
+    Run, %serverCmd%, %A_ScriptDir%, Hide, pid
+    mobRecognitionServerPid := pid
+
+    readyFile := mobRecognitionIpcDir . "\ready.json"
+    readyLine := MobRecognitionWaitForJsonFile(readyFile, 15000)
     if (readyLine = "" || !InStr(readyLine, """ready"":true")) {
         MobRecognitionLog("MobRecognition: detector server failed to start")
         MobRecognitionStopServer()
@@ -335,17 +366,22 @@ MobRecognitionStartServer() {
 }
 
 MobRecognitionStopServer() {
-    global mobRecognitionServerExec, mobRecognitionServerReady
+    global mobRecognitionServerPid, mobRecognitionIpcDir, mobRecognitionServerReady
 
-    if (!IsObject(mobRecognitionServerExec)) {
-        mobRecognitionServerReady := false
-        return
+    ipcDir := mobRecognitionIpcDir
+    if (mobRecognitionServerPid && MobRecognitionProcessRunning(mobRecognitionServerPid) && ipcDir != "") {
+        requestFile := ipcDir . "\request.json"
+        responseFile := ipcDir . "\response.json"
+        FileDelete, %responseFile%
+        FileDelete, %requestFile%
+        MobRecognitionWriteUtf8File(requestFile, "{""cmd"":""shutdown""}")
+        MobRecognitionWaitForJsonFile(responseFile, 3000)
     }
-    if (mobRecognitionServerExec.Status = 0)
-        mobRecognitionServerExec.StdIn.Write("{""cmd"":""shutdown""}`n")
-    MobRecognitionReadServerLine(3000)
-    mobRecognitionServerExec.Terminate()
-    mobRecognitionServerExec := ""
+    if (mobRecognitionServerPid)
+        MobRecognitionKillPid(mobRecognitionServerPid)
+    MobRecognitionClearIpcFiles(ipcDir)
+    mobRecognitionServerPid := 0
+    mobRecognitionIpcDir := ""
     mobRecognitionServerReady := false
 }
 
@@ -373,8 +409,17 @@ MobRecognitionKillPid(pid) {
     if (!pid || !MobRecognitionProcessRunning(pid))
         return
 
-    Process, Close, %pid%
+    RunWait, %ComSpec% /c taskkill /T /F /PID %pid%, , Hide UseErrorLevel
     MobRecognitionWaitForProcessExit(pid, 3000)
+}
+
+MobRecognitionKillOwnedDetectorProcesses() {
+    cliPath := A_ScriptDir . "\" . mobRecognitionCli
+    if (!FileExist(cliPath))
+        return
+
+    sweepCmd := A_ComSpec . " /c set ""MOB_REC_CLI=" . cliPath . """ && powershell -NoProfile -WindowStyle Hidden -Command ""Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($env:MOB_REC_CLI) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"""
+    RunWait, %sweepCmd%, , Hide UseErrorLevel
 }
 
 MobRecognitionEnsureServer() {
@@ -398,6 +443,7 @@ MobRecognitionExitCleanup() {
 
     MobRecognitionCancelActiveDetect()
     MobRecognitionStopServer()
+    MobRecognitionKillOwnedDetectorProcesses()
 
     if IsFunc("MobRecognitionLog")
         MobRecognitionLog("MobRecognition: simple detector cleanup complete")
@@ -452,7 +498,7 @@ MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, debug := false, showPro
         fn := "BotSessionScaleArgs"
         scaleArg := %fn%(mobName)
     }
-    cmd := A_ComSpec . " /c " . pythonCmd . " """ . cliPath . """ detect-simple --mob " . mobName . " --roi " . roiArg . " --output """ . outFile . """" . sessionArg . scaleArg . debugFlag
+    cmd := """" . pythonCmd . """ -u """ . cliPath . """ detect-simple --mob " . mobName . " --roi " . roiArg . " --output """ . outFile . """" . sessionArg . scaleArg . debugFlag
 
     startTick := A_TickCount
     jsonText := ""
@@ -477,7 +523,7 @@ MobRecognitionDetectCli(mobName, roiX, roiY, roiW, roiH, debug := false, showPro
         }
 
         if (elapsed >= 60) {
-            Process, Close, %pid%
+            MobRecognitionKillPid(pid)
             MobRecognitionLog("MobRecognition: detect-simple timed out after 60s")
             mobRecognitionActiveDetectPid := 0
             FileDelete, %outFile%

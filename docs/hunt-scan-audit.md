@@ -4,37 +4,31 @@
 
 | Layer | Interval | Entry point | Detector command |
 |-------|----------|-------------|------------------|
-| **Watch** | 150ms (`HUNT_WATCH_INTERVAL_MS`) | `HuntWatchTick` | `watch` — `watch_only` at track coordinates |
-| **Discovery** | 1000ms (`HUNT_DISCOVERY_INTERVAL_MS`) | `HuntDiscoveryTick` | `scan` — heatmap discovery only |
-| **Hunt** | ~20–50ms loop | `Hunt()` | No detect — attack, target select, teleport |
+| **Watch** | 150ms (`HUNT_WATCH_INTERVAL_MS`) | `HuntWatchTick` | `watch` — `watch_only` at alive track coordinates |
+| **Discovery** | 1000ms (`HUNT_DISCOVERY_INTERVAL_MS`) | `HuntDiscoveryTick` | `scan` — heatmap, always runs |
+| **Hunt** | ~25ms loop | `Hunt()` | attack + target select only |
 
 All track state flows through **HuntTracks** (single source of truth).
 
-## Python
+## Rules
 
-- **Persistent server:** `py -3 mob-recognition/cli.py serve` (JSON-lines stdin/stdout)
-- **Commands:** `scan`, `watch`, `shutdown`
-- **One-shot CLI:** `detect-simple` for debug/GUI only (optional `--watch-points` = watch-only mode)
+1. **Discovery** runs every second regardless of combat. It creates/updates tracks for every living horn on screen.
+2. **Watch** runs only while alive tracks exist. It updates positions and marks deaths at track coordinates.
+3. **Attack** uses alive tracks only. One path: `HuntAttackTrack` (skill held through click).
+4. **Teleport** only from `HuntDiscoveryTick` when all of:
+   - `CurrentTargetTrackId` is empty
+   - `HuntTracks_GetAliveCount()` is 0
+   - latest discovery scan has 0 living candidates
+   - area was engaged (`huntAreaEngaged`) or initial seek (`huntSeekMobWarp`) is active
 
-`SimpleMobDetector.detect()`:
-- Default → discovery (heatmap)
-- `watch_only=True` + `watch_points` → watch path (no heatmap)
-- Watch points cannot be combined with discovery in one call
+No clear-scan counters, no discovery pause during combat, no teleport from watch.
 
 ## AHK
 
-- **Hunt bot:** `MobRecognitionDiscoveryDetect`, `MobRecognitionWatchDetect` via persistent server
-- **GUI debug search:** `MobRecognitionDetectCli` subprocess (debug bundles only)
-- **Track watch apply:** `HuntTracks_ApplyWatch` (no scan increment)
-- **Discovery apply:** `HuntTracks_Update` (increments scan id)
-- **Engage:** `HuntTracks_IsEngageable` (discovery fresh OR watch within 400ms)
+- **Discovery timer:** periodic `SetTimer` only; first scan via direct `HuntDiscoveryTick()` in `HuntStartScanTimers`.
+- **Do not** follow periodic `SetTimer` with `SetTimer, -1` on the same label (AHK replaces the timer).
 
-## Benchmark reference (800×800 ROI, horn)
+## Python
 
-| Path | Typical time |
-|------|--------------|
-| Discovery `scan` | ~1.25s |
-| Watch 3 points | ~0.05s |
-| Subprocess one-shot | +0.4–0.8s spawn overhead |
-
-Run: `py -3 mob-recognition/bench_scan_paths.py`
+- Persistent server: `py -3 mob-recognition/cli.py serve --ipc-dir %TEMP%\mob_recognition_ipc`
+- Commands: `scan`, `watch`, `shutdown`

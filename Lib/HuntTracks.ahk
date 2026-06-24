@@ -4,17 +4,15 @@
 
 global HUNT_TRACK_MATCH_RADIUS := 45
 global HUNT_TRACK_MISS_LIMIT := 4
-global HUNT_TRACK_REQUIRE_CLEAR_SCAN := true
 global HUNT_TRACK_UNREACHABLE_ATTACKS := 3
 global HUNT_TRACK_DEBUG := false
-global HUNT_WATCH_MAX_AGE_MS := 400
 
 global huntTracks := []
 global huntTrackNextId := 1
 global huntTrackScanId := 0
-global huntTrackClearScans := 0
 global huntTrackRoiCenterX := 0
 global huntTrackRoiCenterY := 0
+global huntAreaEngaged := false
 
 global CurrentTargetTrackId := ""
 
@@ -26,11 +24,27 @@ HuntTracks_Log(prefix, message) {
 }
 
 HuntTracks_Reset() {
-    global huntTracks, huntTrackNextId, huntTrackScanId, huntTrackClearScans
+    global huntTracks, huntTrackNextId, huntTrackScanId, huntAreaEngaged
     huntTracks := []
     huntTrackNextId := 1
     huntTrackScanId := 0
-    huntTrackClearScans := 0
+    huntAreaEngaged := false
+}
+
+HuntTracks_NoteLivingPresent() {
+    global huntAreaEngaged
+    huntAreaEngaged := true
+}
+
+HuntTracks_CountLivingCandidates(candidates) {
+    count := 0
+    if (!IsObject(candidates))
+        return 0
+    for index, candidate in candidates {
+        if (candidate.living)
+            count++
+    }
+    return count
 }
 
 HuntTracks_SetRoiCenter(centerX, centerY) {
@@ -44,25 +58,6 @@ HuntTracks_GetAliveCount() {
     count := 0
     for index, track in huntTracks {
         if (track.state = "alive" && !track.unreachable)
-            count++
-    }
-    return count
-}
-
-HuntTracks_CountsForAreaClear(track) {
-    global huntTrackScanId
-    if (track.state != "alive" || track.unreachable)
-        return false
-    if (track.lastSeenScan = huntTrackScanId)
-        return true
-    return (track.attackCount < 1)
-}
-
-HuntTracks_GetAreaClearAliveCount() {
-    global huntTracks
-    count := 0
-    for index, track in huntTracks {
-        if (HuntTracks_CountsForAreaClear(track))
             count++
     }
     return count
@@ -106,6 +101,7 @@ HuntTracks_CreateTrack(x, y, confidence) {
     track.createdScan := huntTrackScanId
     track.updatedTick := A_TickCount
     huntTracks.Push(track)
+    HuntTracks_NoteLivingPresent()
     HuntTracks_Log("TRACK", "new id=" . track.id . " x=" . Round(x) . " y=" . Round(y) . " conf=" . Round(confidence, 2))
     return track
 }
@@ -153,13 +149,6 @@ HuntTracks_CandidateNearDeadTrack(x, y, radius) {
     return false
 }
 
-HuntTracks_AllTracksDead() {
-    global huntTracks
-    if (!huntTracks.MaxIndex())
-        return false
-    return (HuntTracks_GetAliveCount() = 0)
-}
-
 HuntTracks_ApplyDeadCandidate(candidate, ByRef matchedTrackIds) {
     global huntTracks, HUNT_TRACK_MATCH_RADIUS
     matchRadiusSq := HUNT_TRACK_MATCH_RADIUS * HUNT_TRACK_MATCH_RADIUS
@@ -196,7 +185,7 @@ HuntTracks_FindNearestTrack(x, y, matchRadiusSq, matchedTrackIds, aliveOnly := f
 }
 
 HuntTracks_Update(candidates) {
-    global huntTracks, huntTrackScanId, huntTrackClearScans, HUNT_TRACK_MATCH_RADIUS, HUNT_TRACK_MISS_LIMIT
+    global huntTracks, huntTrackScanId, HUNT_TRACK_MATCH_RADIUS, HUNT_TRACK_MISS_LIMIT
     huntTrackScanId++
 
     matchedTrackIds := {}
@@ -219,6 +208,7 @@ HuntTracks_Update(candidates) {
     if (livingCandidates.MaxIndex() > 1)
         HuntTracks_SortCandidatesByConfidence(livingCandidates)
 
+    hadLivingDiscovery := false
     for candIndex, candidate in livingCandidates {
         if (HuntTracks_CandidateNearDeadTrack(candidate.x, candidate.y, HUNT_TRACK_MATCH_RADIUS))
             continue
@@ -228,8 +218,10 @@ HuntTracks_Update(candidates) {
             track := huntTracks[bestTrackIndex]
             matchedTrackIds[track.id] := true
             HuntTracks_ApplyMatch(track, candidate)
+            hadLivingDiscovery := true
         } else if (!HuntTracks_CandidateNearDeadTrack(candidate.x, candidate.y, HUNT_TRACK_MATCH_RADIUS)) {
             HuntTracks_CreateTrack(candidate.x, candidate.y, candidate.confidence)
+            hadLivingDiscovery := true
         }
     }
 
@@ -245,8 +237,8 @@ HuntTracks_Update(candidates) {
         }
     }
 
-    if (HuntTracks_GetAreaClearAliveCount() > 0)
-        huntTrackClearScans := 0
+    if (hadLivingDiscovery)
+        HuntTracks_NoteLivingPresent()
 }
 
 HuntTracks_SortCandidatesByConfidence(ByRef candidates) {
@@ -269,15 +261,6 @@ HuntTracks_SortCandidatesByConfidence(ByRef candidates) {
 HuntTracks_IsFresh(track) {
     global huntTrackScanId
     return (IsObject(track) && track.lastSeenScan = huntTrackScanId)
-}
-
-HuntTracks_IsEngageable(track) {
-    global HUNT_WATCH_MAX_AGE_MS
-    if (!IsObject(track) || track.state != "alive" || track.unreachable)
-        return false
-    if (HuntTracks_IsFresh(track))
-        return true
-    return (track.lastWatchTick > 0 && (A_TickCount - track.lastWatchTick) <= HUNT_WATCH_MAX_AGE_MS)
 }
 
 HuntTracks_ClearTargetIfDead() {
@@ -311,6 +294,7 @@ HuntTracks_ApplyWatch(candidates) {
     for candIndex, candidate in deadCandidates
         HuntTracks_ApplyDeadCandidate(candidate, matchedTrackIds)
 
+    hadLivingWatch := false
     for candIndex, candidate in livingCandidates {
         if (HuntTracks_CandidateNearDeadTrack(candidate.x, candidate.y, HUNT_TRACK_MATCH_RADIUS))
             continue
@@ -324,35 +308,24 @@ HuntTracks_ApplyWatch(candidates) {
             track.confidence := candidate.confidence
             track.lastWatchTick := A_TickCount
             track.updatedTick := A_TickCount
+            hadLivingWatch := true
         }
     }
+
+    if (hadLivingWatch)
+        HuntTracks_NoteLivingPresent()
 
     HuntTracks_ClearTargetIfDead()
 }
 
-HuntTracks_GetActionableAliveCount() {
-    global huntTracks, huntTrackScanId
-    count := 0
-    for index, track in huntTracks {
-        if (track.state != "alive" || track.unreachable)
-            continue
-        if (track.lastSeenScan != huntTrackScanId)
-            continue
-        count++
-    }
-    return count
-}
-
 HuntTracks_SelectTarget() {
-    global huntTracks, huntTrackScanId, CurrentTargetTrackId
+    global huntTracks, CurrentTargetTrackId
     bestId := 0
     bestScore := -1.0e9
     for index, track in huntTracks {
         if (track.state != "alive")
             continue
         if (track.unreachable)
-            continue
-        if (track.lastSeenScan != huntTrackScanId)
             continue
         if (CurrentTargetTrackId != "" && track.id = CurrentTargetTrackId)
             continue
@@ -400,29 +373,14 @@ HuntTracks_MarkUnreachable(id) {
     if (!IsObject(track))
         return false
     track.unreachable := true
+    track.state := "gone"
     HuntTracks_Log("TRACK", "unreachable id=" . id)
     return true
 }
 
-HuntTracks_AllCleared(requiredClearScans := 1) {
-    global huntTrackClearScans, HUNT_TRACK_REQUIRE_CLEAR_SCAN
-    if (HuntTracks_GetAreaClearAliveCount() > 0) {
-        huntTrackClearScans := 0
-        return false
-    }
-    if (!HUNT_TRACK_REQUIRE_CLEAR_SCAN)
-        return true
-    huntTrackClearScans++
-    if (huntTrackClearScans >= requiredClearScans) {
-        HuntTracks_Log("HUNT", "cleared alive=0 currentTarget=none")
-        return true
-    }
-    return false
-}
-
 HuntTracks_DebugDump() {
-    global huntTracks, huntTrackScanId, CurrentTargetTrackId, huntTrackClearScans
-    HuntTracks_Log("TRACK", "dump scan=" . huntTrackScanId . " tracks=" . huntTracks.MaxIndex() . " alive=" . HuntTracks_GetAliveCount() . " clearScans=" . huntTrackClearScans . " current=" . CurrentTargetTrackId)
+    global huntTracks, huntTrackScanId, CurrentTargetTrackId, huntAreaEngaged
+    HuntTracks_Log("TRACK", "dump scan=" . huntTrackScanId . " tracks=" . huntTracks.MaxIndex() . " alive=" . HuntTracks_GetAliveCount() . " engaged=" . huntAreaEngaged . " current=" . CurrentTargetTrackId)
     for index, track in huntTracks {
         HuntTracks_Log("TRACK", "  id=" . track.id . " " . track.state . " x=" . Round(track.x) . " y=" . Round(track.y) . " miss=" . track.missCount . " atk=" . track.attackCount . " conf=" . Round(track.confidence, 2) . (track.unreachable ? " UNR" : ""))
     }
@@ -435,10 +393,9 @@ HuntAreaReset() {
 }
 
 HuntSessionReset(resetWarpTimer := true) {
-    global huntLastWarpTime, huntLastSkillTime, huntFastIdle
+    global huntLastWarpTime, huntLastSkillTime
     if (resetWarpTimer)
         huntLastWarpTime := 0
     huntLastSkillTime := 0
-    huntFastIdle := false
     HuntAreaReset()
 }

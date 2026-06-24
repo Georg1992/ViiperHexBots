@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -61,8 +62,7 @@ def apply_scale_calibration(config: dict, scale_range: tuple[float, float] | Non
         mid = (low + high) / 2.0
         calibrated["scales"] = [low, mid, high]
         calibrated["centerScales"] = [low, mid, high]
-    if enforce_size_gate:
-        calibrated["enforceObjectSizeGate"] = True
+    calibrated["enforceObjectSizeGate"] = enforce_size_gate
     return calibrated
 
 
@@ -176,7 +176,7 @@ def run_detect_request(detector: SimpleMobDetector, config: dict, request: dict)
     scale_range = parse_request_scale_range(request.get("scaleRange"))
     enforce_size_gate = bool(request.get("enforceSizeGate", False))
     calibrated = apply_scale_calibration(config, scale_range, enforce_size_gate)
-    detector.config.update(calibrated)
+    detector.apply_runtime_config(calibrated)
 
     frame = capture_region(x, y, w, h)
     session_id = str(request.get("sessionId", ""))
@@ -209,7 +209,54 @@ def run_detect_request(detector: SimpleMobDetector, config: dict, request: dict)
     raise ValueError(f"unsupported cmd: {command}")
 
 
-def cmd_serve() -> int:
+def write_json_file(path: Path, payload: dict) -> None:
+    text = json.dumps(payload, separators=(",", ":"))
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def cmd_serve_ipc(ipc_dir: Path) -> int:
+    ipc_dir.mkdir(parents=True, exist_ok=True)
+    ready_path = ipc_dir / "ready.json"
+    request_path = ipc_dir / "request.json"
+    response_path = ipc_dir / "response.json"
+    for path in (request_path, response_path):
+        if path.exists():
+            path.unlink()
+
+    config = load_simple_config()
+    detector = SimpleMobDetector(PROJECT_ROOT, config)
+    write_json_file(ready_path, {"ok": True, "ready": True, "pipeline": "serve"})
+
+    while True:
+        while not request_path.exists():
+            time.sleep(0.01)
+        try:
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            write_json_file(
+                response_path,
+                {"ok": False, "error": f"invalid json: {exc}", "candidates": []},
+            )
+            request_path.unlink(missing_ok=True)
+            continue
+        request_path.unlink(missing_ok=True)
+        if str(request.get("cmd", "")).lower() == "shutdown":
+            write_json_file(response_path, {"ok": True, "shutdown": True})
+            break
+        try:
+            response = run_detect_request(detector, config, request)
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc), "candidates": []}
+        write_json_file(response_path, response)
+    return 0
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    if args.ipc_dir:
+        return cmd_serve_ipc(Path(args.ipc_dir))
+
     config = load_simple_config()
     detector = SimpleMobDetector(PROJECT_ROOT, config)
     sys.stdout.write(json.dumps({"ok": True, "ready": True, "pipeline": "serve"}) + "\n")
@@ -342,7 +389,8 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("--spr", required=True)
     inspect.add_argument("--act", required=True)
 
-    serve = sub.add_parser("serve", help="persistent JSON-lines detector server for scan/watch commands")
+    serve = sub.add_parser("serve", help="persistent detector server for scan/watch commands")
+    serve.add_argument("--ipc-dir", help="file IPC directory for hidden parent process communication")
     return parser
 
 
@@ -358,7 +406,7 @@ def main() -> int:
     if args.command == "inspect":
         return cmd_inspect(args)
     if args.command == "serve":
-        return cmd_serve()
+        return cmd_serve(args)
     parser.print_help()
     return 1
 

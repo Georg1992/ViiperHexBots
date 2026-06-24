@@ -20,6 +20,12 @@ from region_scorer import RegionScore, SimpleRegionScorer
 REQUIRED_CONFIG_KEYS = {
     "acceptThreshold",
     "minColorPurity",
+    "minBodyPaletteScore",
+    "minAccentScore",
+    "minLocalPatternScore",
+    "minDiscoveryHeatmapScore",
+    "watchDriftRadiusPx",
+    "watchDriftStepPx",
     "minDescriptorColorMatch",
     "maxSpritePaletteDistance",
     "minSpritePaletteMatch",
@@ -153,6 +159,24 @@ class SimpleMobDetector:
         self.self_exclusion_width_ratio = float(self.config["selfExclusionWidthRatio"])
         self.self_exclusion_height_ratio = float(self.config["selfExclusionHeightRatio"])
         self.small_scale_min_frame_width = int(self.config["smallScaleMinFrameWidth"])
+        self.min_discovery_heatmap_score = float(self.config["minDiscoveryHeatmapScore"])
+        self.watch_drift_radius_px = int(self.config["watchDriftRadiusPx"])
+        self.watch_drift_step_px = int(self.config["watchDriftStepPx"])
+
+    def apply_runtime_config(self, config: dict) -> None:
+        prior = self.config
+        self.config = dict(config)
+        scale_keys = ("scales", "centerScales")
+        if any(prior.get(key) != self.config.get(key) for key in scale_keys):
+            self.heatmap_detector = HeatmapDetector(self.config)
+        self.region_scorer = SimpleRegionScorer(self.config)
+        self.death_validator = DeathValidator(self.config, self.region_scorer)
+        self.self_exclusion_width_ratio = float(self.config["selfExclusionWidthRatio"])
+        self.self_exclusion_height_ratio = float(self.config["selfExclusionHeightRatio"])
+        self.small_scale_min_frame_width = int(self.config["smallScaleMinFrameWidth"])
+        self.min_discovery_heatmap_score = float(self.config["minDiscoveryHeatmapScore"])
+        self.watch_drift_radius_px = int(self.config["watchDriftRadiusPx"])
+        self.watch_drift_step_px = int(self.config["watchDriftStepPx"])
 
     def descriptor_path(self, mob_name: str) -> Path:
         return self.project_root / "generated_descriptors" / mob_name.lower() / "simple" / "descriptor.json"
@@ -204,9 +228,22 @@ class SimpleMobDetector:
             score_start = time.perf_counter()
             candidates: list[SimpleCandidate] = []
             for watch_x, watch_y in watch_points:
-                candidates.extend(
-                    self._evaluate_center(frame_bgr, hsv, descriptor, watch_x, watch_y, 1.0, watch_point=True)
-                )
+                point_candidates: list[SimpleCandidate] = []
+                for center_x, center_y in self._watch_search_centers(watch_x, watch_y, frame_bgr.shape):
+                    point_candidates.extend(
+                        self._evaluate_center(
+                            frame_bgr,
+                            hsv,
+                            descriptor,
+                            center_x,
+                            center_y,
+                            1.0,
+                            watch_point=True,
+                        )
+                    )
+                best_candidate = self._best_watch_point_candidate(point_candidates)
+                if best_candidate is not None:
+                    candidates.append(best_candidate)
             accepted = self._finalize_accepted(candidates)
             elapsed = time.perf_counter() - start
             return SimpleDetectionResult(
@@ -296,8 +333,10 @@ class SimpleMobDetector:
                 frame_bgr, hsv, descriptor, living_bbox, expected_scale=float(scale)
             )
             if descriptor.dead is None:
-                if living_score.accepted and (
-                    best_living is None or living_score.final_score > best_living[3].final_score
+                if (
+                    living_score.accepted
+                    and self._discovery_heatmap_passes(heat_score, watch_point)
+                    and (best_living is None or living_score.final_score > best_living[3].final_score)
                 ):
                     empty_validation = DeathValidation(False, 0.0, living_score.final_score, 0.0, 0.0, 0.0, 0.0, 1.0)
                     best_living = (float(scale), living_bbox, living_bbox, living_score, empty_validation)
@@ -337,33 +376,56 @@ class SimpleMobDetector:
                 watch_point=watch_point,
             )
 
-            if validation.is_dead and (
-                best_dead is None or validation.confidence > best_dead[3].confidence
+            if (
+                validation.is_dead
+                and self._discovery_heatmap_passes(heat_score, watch_point)
+                and (best_dead is None or validation.confidence > best_dead[3].confidence)
             ):
                 best_dead = (float(scale), dead_bbox, dead_score, validation)
-            elif living_score.accepted and not validation.is_dead and (
-                best_living is None or living_score.final_score > best_living[3].final_score
+            elif (
+                living_score.accepted
+                and not validation.is_dead
+                and self._discovery_heatmap_passes(heat_score, watch_point)
+                and (best_living is None or living_score.final_score > best_living[3].final_score)
             ):
                 best_living = (float(scale), living_bbox, dead_bbox, living_score, validation)
 
         if watch_point:
-            if best_dead is None:
-                return []
-            scale, bbox, score, validation = best_dead
-            region_score = score if score is not None else RegionScore(0, 0, 0, 0, 0, 0, 0, False, "missing_dead_score")
-            return [
-                self._candidate(
-                    descriptor.mob_name,
-                    cx,
-                    cy,
-                    bbox,
-                    region_score,
-                    heat_score,
-                    scale,
-                    is_dead=True,
-                    death_validation=validation,
-                )
-            ]
+            if best_dead is not None:
+                scale, bbox, score, validation = best_dead
+                region_score = score if score is not None else RegionScore(0, 0, 0, 0, 0, 0, 0, False, "missing_dead_score")
+                return [
+                    self._candidate(
+                        descriptor.mob_name,
+                        cx,
+                        cy,
+                        bbox,
+                        region_score,
+                        heat_score,
+                        scale,
+                        is_dead=True,
+                        death_validation=validation,
+                    )
+                ]
+            if best_living is not None:
+                scale, living_bbox, dead_bbox, score, validation = best_living
+                bx, by, bw, bh = living_bbox
+                living_cx = bx + bw // 2
+                living_cy = by + bh // 2
+                return [
+                    self._candidate(
+                        descriptor.mob_name,
+                        living_cx,
+                        living_cy,
+                        living_bbox,
+                        score,
+                        heat_score,
+                        scale,
+                        is_dead=False,
+                        death_validation=validation,
+                    )
+                ]
+            return []
 
         if best_dead is not None:
             scale, bbox, score, validation = best_dead
@@ -417,6 +479,38 @@ class SimpleMobDetector:
             return None
         return x, y, w, h
 
+    def _watch_search_centers(self, cx: int, cy: int, frame_shape: tuple[int, ...]) -> list[tuple[int, int]]:
+        radius = self.watch_drift_radius_px
+        step = max(8, self.watch_drift_step_px)
+        if radius <= 0:
+            return [(cx, cy)]
+
+        frame_h, frame_w = frame_shape[:2]
+        points: list[tuple[int, int]] = []
+        for dx in range(-radius, radius + 1, step):
+            for dy in range(-radius, radius + 1, step):
+                nx = cx + dx
+                ny = cy + dy
+                if 0 <= nx < frame_w and 0 <= ny < frame_h:
+                    points.append((nx, ny))
+        return points or [(cx, cy)]
+
+    def _best_watch_point_candidate(self, candidates: list[SimpleCandidate]) -> SimpleCandidate | None:
+        if not candidates:
+            return None
+        dead_candidates = [candidate for candidate in candidates if candidate.is_dead]
+        if dead_candidates:
+            return max(dead_candidates, key=lambda candidate: candidate.final_score)
+        living_candidates = [candidate for candidate in candidates if not candidate.is_dead]
+        if living_candidates:
+            return max(living_candidates, key=lambda candidate: candidate.final_score)
+        return None
+
+    def _discovery_heatmap_passes(self, heat_score: float, watch_point: bool) -> bool:
+        if watch_point:
+            return True
+        return heat_score >= self.min_discovery_heatmap_score
+
     def _is_self_center(self, cx: int, cy: int, frame_shape: tuple[int, ...]) -> bool:
         height, width = frame_shape[:2]
         half_width = width * self.self_exclusion_width_ratio * 0.5
@@ -454,6 +548,7 @@ class SimpleMobDetector:
         death_validation: DeathValidation,
     ) -> SimpleCandidate:
         region_score = score if score is not None else RegionScore(0, 0, 0, 0, 0, 0, 0, False, "missing_score")
+        accepted = (not is_dead) or death_validation.is_dead
         return SimpleCandidate(
             mob_name=mob_name,
             center_x=cx,
@@ -467,7 +562,7 @@ class SimpleMobDetector:
             color_purity_score=region_score.color_purity_score,
             size_score=region_score.size_score,
             candidate_scale=candidate_scale,
-            accepted=True,
+            accepted=accepted,
             is_dead=is_dead,
             dead_score=death_validation.confidence if is_dead else 0.0,
             mean_opacity=death_validation.mean_opacity,

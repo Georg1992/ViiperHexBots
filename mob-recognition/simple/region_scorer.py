@@ -37,6 +37,9 @@ class SimpleRegionScorer:
         self.min_discovery_size_score = float(config["minDiscoverySizeScore"])
         self.min_object_size_score = float(config["minObjectSizeScore"])
         self.enforce_object_size_gate = bool(config["enforceObjectSizeGate"])
+        self.min_body_palette_score = float(config["minBodyPaletteScore"])
+        self.min_accent_score = float(config["minAccentScore"])
+        self.min_local_pattern_score = float(config["minLocalPatternScore"])
         weights = config["weights"]
         self.weights = {
             "body": float(weights["bodyPalette"]),
@@ -89,6 +92,9 @@ class SimpleRegionScorer:
         accepted = (
             final >= self.threshold
             and purity >= self.min_color_purity
+            and body >= self.min_body_palette_score
+            and accent >= self.min_accent_score
+            and pattern >= self.min_local_pattern_score
             and rare <= max(body * self.max_rare_to_body_ratio, 0.05)
             and informative_fraction >= self.min_informative_fraction
             and descriptor_fraction <= self.max_descriptor_pixel_fraction
@@ -101,6 +107,12 @@ class SimpleRegionScorer:
                 rejection_reason = "below_threshold"
             elif purity < self.min_color_purity:
                 rejection_reason = "foreign_colors"
+            elif body < self.min_body_palette_score:
+                rejection_reason = "weak_body_palette"
+            elif accent < self.min_accent_score:
+                rejection_reason = "weak_accent"
+            elif pattern < self.min_local_pattern_score:
+                rejection_reason = "weak_pattern"
             elif rare > max(body * self.max_rare_to_body_ratio, 0.05):
                 rejection_reason = "rare_color_imbalance"
             elif descriptor_fraction > self.max_descriptor_pixel_fraction:
