@@ -214,7 +214,7 @@ class SimpleMobDetector:
         score_start = time.perf_counter()
         candidates: list[SimpleCandidate] = []
         for cx, cy, heat_score in centers:
-            candidates.extend(self._evaluate_living_center(frame_bgr, hsv, descriptor, cx, cy, heat_score))
+            candidates.extend(self._evaluate_discovery_center(frame_bgr, hsv, descriptor, cx, cy, heat_score))
         nms_start = time.perf_counter()
         accepted = self._finalize_accepted(candidates)
         accepted_ids = {id(candidate) for candidate in accepted}
@@ -243,7 +243,7 @@ class SimpleMobDetector:
             timing=timing,
         )
 
-    def _evaluate_living_center(
+    def _evaluate_discovery_center(
         self,
         frame_bgr: np.ndarray,
         hsv: np.ndarray,
@@ -252,50 +252,24 @@ class SimpleMobDetector:
         cy: int,
         heat_score: float,
     ) -> list[SimpleCandidate]:
-        """Discovery scan: living attack targets only."""
+        """Discovery scan: shared point scorer; living only when it beats corpse signal."""
         if self._is_self_center(cx, cy, frame_bgr.shape):
             return []
         if heat_score < self.min_discovery_heatmap_score:
             return []
 
-        best: tuple[float, tuple[int, int, int, int], RegionScore] | None = None
-        for scale in self._candidate_scales(frame_bgr.shape[1], track_point=False):
-            living_bbox = self._bbox_for_size(
-                cx,
-                cy,
-                int(round(descriptor.avg_width * scale)),
-                int(round(descriptor.avg_height * scale)),
-                frame_bgr.shape,
-            )
-            if living_bbox is None:
-                continue
-
-            living_score = self.region_scorer.score(
-                frame_bgr, hsv, descriptor, living_bbox, expected_scale=float(scale)
-            )
-            if living_score.accepted and (
-                best is None or living_score.final_score > best[2].final_score
-            ):
-                best = (float(scale), living_bbox, living_score)
-
-        if best is None:
+        scales = self._candidate_scales(frame_bgr.shape[1], track_point=False)
+        living, dead = self._score_point_at(frame_bgr, hsv, descriptor, cx, cy, scales=scales)
+        if dead and not living:
             return []
+        if living and living.accepted:
+            if dead and dead.final_score >= living.final_score:
+                return []
+            living.heatmap_score = heat_score
+            return [living]
+        return []
 
-        scale, living_bbox, score = best
-        bx, by, bw, bh = living_bbox
-        return [
-            self._living_candidate(
-                descriptor.mob_name,
-                bx + bw // 2,
-                by + bh // 2,
-                living_bbox,
-                score,
-                heat_score,
-                scale,
-            )
-        ]
-
-    def _evaluate_track_point(
+    def _score_point_at(
         self,
         frame_bgr: np.ndarray,
         hsv: np.ndarray,
@@ -303,12 +277,12 @@ class SimpleMobDetector:
         cx: int,
         cy: int,
         scales: list[float] | None = None,
-    ) -> list[SimpleCandidate]:
-        """Track state: death validation and living position at a known track point."""
+    ) -> tuple[SimpleCandidate | None, SimpleCandidate | None]:
+        """Score living and corpse signals at one point. Returns (living, dead) candidates."""
         if cx < 0 or cy < 0 or cx >= frame_bgr.shape[1] or cy >= frame_bgr.shape[0]:
-            return []
+            return None, None
         if descriptor.dead is None:
-            return []
+            return None, None
 
         best_living: tuple[float, tuple[int, int, int, int], tuple[int, int, int, int], RegionScore, DeathValidation] | None = None
         best_dead: tuple[float, tuple[int, int, int, int], RegionScore | None, DeathValidation] | None = None
@@ -370,47 +344,58 @@ class SimpleMobDetector:
                 best_dead is None or validation.confidence > best_dead[3].confidence
             ):
                 best_dead = (float(scale), dead_bbox, dead_score, validation)
-            elif (
-                living_score.accepted
-                and not validation.is_dead
-                and (best_living is None or living_score.final_score > best_living[3].final_score)
+            elif living_score.accepted and (
+                best_living is None or living_score.final_score > best_living[3].final_score
             ):
                 best_living = (float(scale), living_bbox, dead_bbox, living_score, validation)
 
+        dead_candidate: SimpleCandidate | None = None
         if best_dead is not None:
             scale, bbox, score, validation = best_dead
             region_score = score if score is not None else RegionScore(0, 0, 0, 0, 0, 0, 0, False, "missing_dead_score")
-            return [
-                self._track_candidate(
-                    descriptor.mob_name,
-                    cx,
-                    cy,
-                    bbox,
-                    region_score,
-                    scale,
-                    is_dead=True,
-                    death_validation=validation,
-                )
-            ]
+            dead_candidate = self._track_candidate(
+                descriptor.mob_name,
+                cx,
+                cy,
+                bbox,
+                region_score,
+                scale,
+                is_dead=True,
+                death_validation=validation,
+            )
 
+        living_candidate: SimpleCandidate | None = None
         if best_living is not None:
             scale, living_bbox, dead_bbox, score, validation = best_living
             bx, by, bw, bh = living_bbox
-            living_cx = bx + bw // 2
-            living_cy = by + bh // 2
-            return [
-                self._track_candidate(
-                    descriptor.mob_name,
-                    living_cx,
-                    living_cy,
-                    living_bbox,
-                    score,
-                    scale,
-                    is_dead=False,
-                    death_validation=validation,
-                )
-            ]
+            living_candidate = self._track_candidate(
+                descriptor.mob_name,
+                bx + bw // 2,
+                by + bh // 2,
+                living_bbox,
+                score,
+                scale,
+                is_dead=False,
+                death_validation=validation,
+            )
 
+        return living_candidate, dead_candidate
+
+    def _evaluate_track_point(
+        self,
+        frame_bgr: np.ndarray,
+        hsv: np.ndarray,
+        descriptor: SimpleMobDescriptor,
+        cx: int,
+        cy: int,
+        scales: list[float] | None = None,
+    ) -> list[SimpleCandidate]:
+        """Track state: death validation and living position at a known track point."""
+        living, dead = self._score_point_at(frame_bgr, hsv, descriptor, cx, cy, scales=scales)
+        if dead:
+            return [dead]
+        if living:
+            return [living]
         return []
 
     def evaluate_track_states(

@@ -10,8 +10,10 @@
 #include Lib\ClientProfile.ahk
 #include Lib\HuntTracks.ahk
 #include Lib\HuntPolicy.ahk
+#include Lib\HuntMode.ahk
 #include Lib\MobRecognition.ahk
 #include Lib\MobStateRecognition.ahk
+#include Lib\HuntLogOverlay.ahk
 #include Lib\MemoryOperations.ahk
 #include Lib\BotLogic.ahk
 #include Lib\utilityFunctions.ahk
@@ -55,7 +57,9 @@ global WeightModifier := 49
 ; Checkboxes
 global TakeFlyWings := 0 ; Default checked (true)
 global wingsTaken := 100
+global FlyWingsAmount := 100
 global DetectCaptcha := 0 ; Default unchecked (false)
+global HuntLogOverlay := 1
 
 ; Keybindings
 global SkillButtonKey := "" ; Default attack key
@@ -186,7 +190,7 @@ Gui, Add, Text, x445 y497 w45 h25 vWeightModifierText Center, % (WeightModifier 
 Gui, Add, Text, x490 y497 w25 h25, `%
 
 Gui, Add, CheckBox, x35 y535 vTakeFlyWings gUpdateTakeFlyWings Checked%TakeFlyWings%, Take Fly Wings
-Gui, Add, Edit, x145 y532 w50 vFlyWingsAmount Number Limit3 -WantReturn, %FlyWingsAmount%
+Gui, Add, Edit, x145 y532 w50 vFlyWingsAmount Number Limit3 -WantReturn gUpdateGlobalsFromUI, %FlyWingsAmount%
 Gui, Add, UpDown, Range1-500, %FlyWingsAmount% ; This adds spin controls
 GuiControl,, FlyWingsAmount, % (FlyWingsAmount ? FlyWingsAmount : 100)
 GuiControl, % (TakeFlyWings ? "Enable" : "Disable"), FlyWingsAmount
@@ -216,7 +220,8 @@ if (!warperCoordsSet) {
 
 ; Log panel
 Gui, Add, GroupBox, x610 y430 w280 h225, Log
-Gui, Add, Edit, x625 y455 w250 h185 ReadOnly -WantReturn +VScroll vLogBox gLogBoxFocus
+Gui, Add, Edit, x625 y455 w250 h155 ReadOnly -WantReturn +VScroll vLogBox gLogBoxFocus
+Gui, Add, Checkbox, x625 y618 w250 h22 vHuntLogOverlay Checked%HuntLogOverlay% gUpdateGlobalsFromUI, Hunt log overlay on game
 
 GuiControl, ChooseString, SelectedClientProfile, %clientProfileName%
 Gosub, ApplyMemoryDependentUI
@@ -286,7 +291,6 @@ Gui, Show, w920 h710, Hex Bot
 
     StartBotProcedure:
         Critical
-        Gui, Submit, NoHide
 
         if (!inputReady) {
             MsgBox, 16, Error, VIIPER is not ready yet.`nPlease wait for initialization to finish.
@@ -307,9 +311,16 @@ Gui, Show, w920 h710, Hex Bot
             Gosub, RefreshWindows
             return
         }
+
+        Gosub, UpdateGlobalsFromUI
+
         botRunning := true
         botPaused := false
         botStopRequested := false
+
+        ; Persist settings while hotkey controls are still enabled (LockGUI disables them;
+        ; GuiControlGet on disabled hotkeys returns empty and would wipe config.ini).
+        Gosub, SaveSettings
 
         ; Update buttons
         GuiControl,, BotButton, Stop Bot
@@ -324,7 +335,6 @@ Gui, Show, w920 h710, Hex Bot
             AppendLog("Bot started (memory reading off)")
 
         RestoreWindow()
-        SyncSearchRangeFromUI()
         if (!GetHuntSearchRegion(searchXs, searchYs, searchWs, searchHs)) {
             AppendLog("ERROR: Game window not selected — select window and try again")
             Gosub, StopBotProcedure
@@ -333,21 +343,13 @@ Gui, Show, w920 h710, Hex Bot
         if IsFunc("AppendLog")
             AppendLog("Search box: " . searchWs . "x" . searchHs . " px (" . SearchRange . " cells) at " . searchXs . "," . searchYs)
         ShowSearchRegionOverlay(searchXs, searchYs, searchWs, searchHs, 2500)
+        if (huntLogOverlayEnabled && IsFunc("HuntLogOverlay_Show"))
+            HuntLogOverlay_Show()
         HuntSessionReset(true)
         BotSessionStart(MobTemplateFolderName())
         SessionLogRegisterBotRun()
         ; Auto-pause when tabbing out
         SetTimer, CheckWindowFocus, 300 ; Checks every 500ms
-
-        ; Read hotkey inputs
-        GuiControlGet, skillKey,, SkillButtonKey
-        GuiControlGet, teleportKey,, TeleportButtonKey
-        GuiControlGet, savePointKey,, SavePointButtonKey
-        GuiControlGet, spKey,, SPButtonKey
-        GuiControlGet, storageKey,, OpenStorageButtonKey
-        GuiControlGet, skillTimerKey,, SkillTimerButtonKey
-
-        Gosub, SaveSettings
 
         SetTimer, StartBotWrapper, -1
     return
@@ -357,6 +359,7 @@ Gui, Show, w920 h710, Hex Bot
         botPaused := false
         botStopRequested := true
         SetTimer, CheckWindowFocus, Off
+        HuntLogOverlay_Hide()
         ReleaseBotInputs()
         BotSessionStop("stopped")
         AppendLog("Bot stopped (VIIPER still running)")
@@ -370,6 +373,8 @@ Gui, Show, w920 h710, Hex Bot
 
     PauseBotProcedure:
         botPaused := true
+        if IsFunc("HuntLogOverlay_Hide")
+            HuntLogOverlay_Hide()
         WinGet, focusLostActiveId, ID, A
         SessionLogFocusChange("paused (focus lost)", focusLostActiveId)
         AppendLog("Bot paused (focus lost)")
@@ -387,6 +392,9 @@ Gui, Show, w920 h710, Hex Bot
         botPaused := false
         SessionLogFocusChange("resumed")
         AppendLog("Bot resumed")
+        global huntLogOverlayEnabled
+        if (huntLogOverlayEnabled && botRunning && IsFunc("HuntLogOverlay_Show"))
+            HuntLogOverlay_Show()
         GuiControl, Hide, ContinueButton
         GuiControl,, BotStatus, Status: ONLINE
         GuiControl, +cGreen, StatusLight
@@ -404,8 +412,9 @@ Gui, Show, w920 h710, Hex Bot
     ; SAVE SETTINGS FUNCTION
     ; --------------------------
     SaveSettings:
-        ; Submit current GUI values
-        Gui, Submit, NoHide
+        ; Hotkey controls are disabled while bot runs — Submit/GuiControlGet would read empty.
+        if (!botRunning)
+            Gui, Submit, NoHide
 
         ; Clear existing file and build with formatting
         FileDelete, config.ini
@@ -425,17 +434,19 @@ Gui, Show, w920 h710, Hex Bot
 
         ; ====== [Client] ======
         FileAppend, `n`n[Client]`n, config.ini
-        IniWrite, %SelectedClientProfile%, config.ini, Client, Profile
-        IniWrite, %UseMemoryReading%, config.ini, Client, UseMemoryReading
+        if (!botRunning) {
+            GuiControlGet, SelectedClientProfile,, SelectedClientProfile
+            GuiControlGet, UseMemoryReading,, UseMemoryReading
+            memoryReadingEnabled := UseMemoryReading
+            if (SelectedClientProfile != "")
+                clientProfileName := SelectedClientProfile
+        }
+        IniWrite, %clientProfileName%, config.ini, Client, Profile
+        IniWrite, %memoryReadingEnabled%, config.ini, Client, UseMemoryReading
 
         ; ====== [MonsterSettings] ======
         FileAppend, `n`n[MonsterSettings]`n, config.ini
-        Loop % MobNames.MaxIndex() {
-            if (SelectedMonster%A_Index%) {
-                IniWrite, %A_Index%, config.ini, MonsterSettings, SelectedMonster
-                break
-            }
-        }
+        IniWrite, %selectedMonsterIndex%, config.ini, MonsterSettings, SelectedMonster
 
         ; ====== [MobRecognition] ======
         FileAppend, `n`n[MobRecognition]`n, config.ini
@@ -447,7 +458,13 @@ Gui, Show, w920 h710, Hex Bot
         IniWrite, %TimeOnLocation%, config.ini, Settings, TimeOnLocation
         IniWrite, %WeightModifier%, config.ini, Settings, WeightModifier
         IniWrite, %TakeFlyWings%, config.ini, Settings, TakeFlyWings
+        IniWrite, %FlyWingsAmount%, config.ini, Settings, FlyWingsAmount
         IniWrite, %DetectCaptcha%, config.ini, Settings, DetectCaptcha
+        if (!botRunning)
+            GuiControlGet, HuntLogOverlay,, HuntLogOverlay
+        else
+            HuntLogOverlay := huntLogOverlayEnabled
+        IniWrite, %HuntLogOverlay%, config.ini, Settings, HuntLogOverlay
 
         ; ====== [Warper] ======
         FileAppend, `n`n[Warper]`n, config.ini
@@ -463,12 +480,16 @@ Gui, Show, w920 h710, Hex Bot
 
         ; ====== [Keybindings] ======
         FileAppend, `n`n[Keybindings]`n, config.ini
-        GuiControlGet, SkillButtonKey,, SkillButtonKey
-        GuiControlGet, TeleportButtonKey,, TeleportButtonKey
-        GuiControlGet, SavePointButtonKey,, SavePointButtonKey
-        GuiControlGet, SPButtonKey,, SPButtonKey
-        GuiControlGet, OpenStorageButtonKey,, OpenStorageButtonKey
-        GuiControlGet, SkillTimerButtonKey,, SkillTimerButtonKey
+        if (!botRunning) {
+            GuiControlGet, SkillButtonKey,, SkillButtonKey
+            GuiControlGet, TeleportButtonKey,, TeleportButtonKey
+            GuiControlGet, SavePointButtonKey,, SavePointButtonKey
+            GuiControlGet, SPButtonKey,, SPButtonKey
+            GuiControlGet, OpenStorageButtonKey,, OpenStorageButtonKey
+            GuiControlGet, SkillTimerButtonKey,, SkillTimerButtonKey
+            GuiControlGet, SkillDelay,, SkillDelay
+            GuiControlGet, SkillTimerInterval,, SkillTimerInterval
+        }
 
         IniWrite, %SkillButtonKey%, config.ini, Keybindings, SkillButton
         IniWrite, %SkillDelay%, config.ini, Keybindings, SkillDelay
@@ -498,7 +519,12 @@ Gui, Show, w920 h710, Hex Bot
 
         ; Checkboxes
         IniRead, TakeFlyWings, config.ini, Settings, TakeFlyWings, %TakeFlyWings%
+        IniRead, FlyWingsAmount, config.ini, Settings, FlyWingsAmount, %FlyWingsAmount%
+        wingsTaken := FlyWingsAmount
         IniRead, DetectCaptcha, config.ini, Settings, DetectCaptcha, %DetectCaptcha%
+        IniRead, HuntLogOverlay, config.ini, Settings, HuntLogOverlay, 1
+        global huntLogOverlayEnabled
+        huntLogOverlayEnabled := HuntLogOverlay
 
         ; Warper
         IniRead, warperX, config.ini, Warper, X
@@ -618,6 +644,7 @@ Gui, Show, w920 h710, Hex Bot
 
         ; Disable Checkboxes
         GuiControl, Disable, TakeFlyWings
+        GuiControl, Disable, FlyWingsAmount
         GuiControl, Disable, DetectCaptcha
 
         ; Visual feedback
@@ -668,7 +695,6 @@ Gui, Show, w920 h710, Hex Bot
         ; Enable Checkboxes
         GuiControl, Enable, TakeFlyWings
         GuiControl, Enable, DetectCaptcha
-
         Gosub, ApplyMemoryDependentUI
 
         ; Restore visual style
@@ -875,9 +901,24 @@ Gui, Show, w920 h710, Hex Bot
             UpdateTakeFlyWings:
                 Gui, Submit, NoHide
                 GuiControl, % (TakeFlyWings ? "Enable" : "Disable"), FlyWingsAmount
+                wingsTaken := FlyWingsAmount
             return
 
             UpdateGlobalsFromUI:
+                global botRunning, huntLogOverlayEnabled
+
+                ; While bot runs, most controls are disabled — Gui Submit/GuiControlGet
+                ; returns empty/stale values (same class of bug as SearchRange after LockGUI).
+                if (botRunning) {
+                    GuiControlGet, HuntLogOverlay,, HuntLogOverlay
+                    huntLogOverlayEnabled := HuntLogOverlay
+                    if (huntLogOverlayEnabled)
+                        HuntLogOverlay_Show()
+                    else
+                        HuntLogOverlay_Hide()
+                    return
+                }
+
                 Gui, Submit, NoHide
                 memoryReadingEnabled := UseMemoryReading
 
@@ -889,14 +930,20 @@ Gui, Show, w920 h710, Hex Bot
                     }
                 }
 
-                ; Update slider values
-                SearchRange := SearchRange
-                TimeOnLocation := TimeOnLocation
-                WeightModifier := WeightModifier
+                ; Update slider values from controls (Submit alone is unreliable for sliders).
+                GuiControlGet, SearchRange,, SearchRange
+                if (SearchRange < 9)
+                    SearchRange := 9
+                if (SearchRange > 16)
+                    SearchRange := 16
+                GuiControlGet, TimeOnLocation,, TimeOnLocation
+                GuiControlGet, WeightModifier,, WeightModifier
+                UpdateSearchRangeLabel()
 
                 ; Update checkbox states
                 TakeFlyWings := TakeFlyWings
                 DetectCaptcha := DetectCaptcha
+                huntLogOverlayEnabled := HuntLogOverlay
 
                 ; Update keybindings
                 SkillButtonKey := SkillButtonKey

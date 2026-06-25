@@ -1,26 +1,8 @@
 #Requires AutoHotkey v1.1.33+
 
-; HuntPolicy: target selection and teleport gating only.
-; Does not run vision, parse JSON, or mutate track storage beyond what callers apply.
-
-HuntPolicy_IsTrackSkillReady(track) {
-    global SkillDelay
-    if (!IsObject(track))
-        return false
-    if (track.lastAttackTick = 0)
-        return true
-    return ((A_TickCount - track.lastAttackTick) >= SkillDelay)
-}
-
-HuntPolicy_IsTrackAttackable(track) {
-    if (!IsObject(track))
-        return false
-    if (HuntTracks_IsResultPending(track))
-        return false
-    if (!HuntPolicy_IsTrackSkillReady(track))
-        return false
-    return true
-}
+; HuntPolicy: attackable target selection only.
+; Reads MobTracks; never mutates them or runs vision.
+; No-target / mode behavior lives in HuntMode.ahk.
 
 HuntPolicy_SelectTarget() {
     global huntTracks, HUNT_TRACK_DEBUG
@@ -29,12 +11,12 @@ HuntPolicy_SelectTarget() {
     bestDistSq := -1
 
     for index, track in huntTracks {
-        if (!HuntPolicy_IsTrackAttackable(track)) {
-            if (HUNT_TRACK_DEBUG && HuntTracks_IsResultPending(track) && IsFunc("AppendLog")) {
+        if (!MobTrack_IsAttackable(track)) {
+            if (HUNT_TRACK_DEBUG && MobTrack_IsPending(track) && IsFunc("AppendLog")) {
                 msLeft := track.pendingResultUntilTick - A_TickCount
                 if (msLeft < 0)
                     msLeft := 0
-                AppendLog("[HUNT] skip id=" . track.id . " reason=pendingResult msLeft=" . msLeft)
+                AppendLog("[HUNT] skip id=" . track.id . " reason=pending msLeft=" . msLeft)
             }
             continue
         }
@@ -52,15 +34,4 @@ HuntPolicy_SelectTarget() {
         }
     }
     return bestId
-}
-
-HuntPolicy_ShouldTeleport(discoveryLivingCount) {
-    global huntTeleportSC
-    if (HuntTracks_GetAliveCount() > 0)
-        return false
-    if (discoveryLivingCount > 0)
-        return false
-    if (!huntTeleportSC)
-        return false
-    return true
 }

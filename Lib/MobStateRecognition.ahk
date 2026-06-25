@@ -1,7 +1,6 @@
 #Requires AutoHotkey v1.1.33+
 
-; MobStateRecognition: evaluate existing HuntTracks via Python state IPC.
-; Discovery (new mobs) is owned by MobRecognition.
+; MobStateRecognition: state IPC bridge only — proposes observations, does not own tracks.
 
 global MOB_STATE_DEBUG := false
 
@@ -152,27 +151,13 @@ MobStateRecognize(mobName, roiX, roiY, roiW, roiH, requests) {
         return ""
 
     requestJson := MobStateBuildRequestJson(mobName, roiX, roiY, roiW, roiH, requests)
-    count := requests.MaxIndex()
-    MobState_Log("req tracks=" . count)
+    MobState_Log("req tracks=" . requests.MaxIndex())
 
     jsonText := MobRecognitionSendServerRequest(requestJson, 3000)
     if (jsonText = "" || !MobJsonIsOk(jsonText))
         return ""
 
     return jsonText
-}
-
-MobStateRecognizeAndApply(mobName, roiX, roiY, roiW, roiH, requests) {
-    jsonText := MobStateRecognize(mobName, roiX, roiY, roiW, roiH, requests)
-    if (jsonText = "")
-        return false
-
-    updates := []
-    if (!MobStateParseUpdates(jsonText, updates))
-        return false
-
-    HuntTracks_ApplyStateUpdates(updates)
-    return true
 }
 
 MobStateRecognizeDirect(mobName, roiX, roiY, roiW, roiH, trackId, screenX, screenY) {
@@ -182,7 +167,6 @@ MobStateRecognizeDirect(mobName, roiX, roiY, roiW, roiH, trackId, screenX, scree
         return ""
 
     requestJson := MobStateBuildDirectRequestJson(mobName, roiX, roiY, roiW, roiH, trackId, screenX, screenY)
-
     jsonText := MobRecognitionSendServerRequest(requestJson, 3000)
     if (jsonText = "" || !MobJsonIsOk(jsonText))
         return ""
@@ -190,28 +174,43 @@ MobStateRecognizeDirect(mobName, roiX, roiY, roiW, roiH, trackId, screenX, scree
     return jsonText
 }
 
-MobStateRecognizeDirectAndApply(mobName, roiX, roiY, roiW, roiH, trackId, screenX, screenY) {
+MobStateFetchObservations(mobName, roiX, roiY, roiW, roiH, requests) {
+    jsonText := MobStateRecognize(mobName, roiX, roiY, roiW, roiH, requests)
+    if (jsonText = "")
+        return false
+
+    observations := []
+    if (!MobStateParseUpdates(jsonText, observations))
+        return false
+
+    HuntTracks_ReceiveStateObservations(observations)
+    return true
+}
+
+MobStateFetchDirectObservation(mobName, roiX, roiY, roiW, roiH, trackId, screenX, screenY) {
     jsonText := MobStateRecognizeDirect(mobName, roiX, roiY, roiW, roiH, trackId, screenX, screenY)
     if (jsonText = "")
         return false
 
-    updates := []
-    if (!MobStateParseUpdates(jsonText, updates))
+    observations := []
+    if (!MobStateParseUpdates(jsonText, observations))
         return false
 
-    update := updates[1]
-    if (update.state = "unknown") {
-        if IsFunc("AppendLog")
-            AppendLog("[STATE] direct unknown id=" . trackId)
-        track := HuntTracks_GetTrackById(trackId)
-        if (IsObject(track))
-            track.lastStateCheckTick := A_TickCount
-        return true
+    if (observations.MaxIndex() >= 1 && IsFunc("AppendLog")) {
+        obs := observations[1]
+        if (obs.state != "unknown")
+            AppendLog("[STATE] direct id=" . trackId . " state=" . obs.state . " conf=" . Round(obs.confidence, 2))
     }
 
-    if IsFunc("AppendLog")
-        AppendLog("[STATE] direct result id=" . trackId . " state=" . update.state . " conf=" . Round(update.confidence, 2))
-
-    HuntTracks_ApplyStateUpdates(updates)
+    HuntTracks_ReceiveStateObservations(observations)
     return true
+}
+
+; Legacy names used by BotLogic timers
+MobStateRecognizeAndApply(mobName, roiX, roiY, roiW, roiH, requests) {
+    return MobStateFetchObservations(mobName, roiX, roiY, roiW, roiH, requests)
+}
+
+MobStateRecognizeDirectAndApply(mobName, roiX, roiY, roiW, roiH, trackId, screenX, screenY) {
+    return MobStateFetchDirectObservation(mobName, roiX, roiY, roiW, roiH, trackId, screenX, screenY)
 }

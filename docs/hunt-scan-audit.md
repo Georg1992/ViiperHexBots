@@ -1,93 +1,146 @@
-# Hunt Architecture
+# Hunt Architecture — MobTrack Model
+
+## Central concept
+
+**MobTrack** is the single source of truth for one tracked mob instance.  
+Only `HuntTracks.ahk` owns MobTracks. Every other layer **proposes events**; HuntTracks applies them.
+
+```mermaid
+flowchart TB
+    subgraph propose [Propose only]
+        D[Discovery scan]
+        S[State IPC]
+        A[Attack loop]
+    end
+
+    subgraph own [Own truth]
+        HT[HuntTracks / MobTrack]
+    end
+
+    subgraph consume [Consume only]
+        P[HuntPolicy]
+    end
+
+    D -->|"detections[]"| HT
+    S -->|"observations[]"| HT
+    A -->|"ApplyAttack(id)"| HT
+    HT --> P
+    P --> A
+```
 
 ## Layers
 
-| Layer | Module | Interval | IPC | Output |
-|-------|--------|----------|-----|--------|
-| **Discovery** | `MobRecognition.ahk` | 1000ms | `scan` | living detections → `HuntTracks_ApplyDetections` |
-| **Mob state** | `MobStateRecognition.ahk` | 150ms | `state` | `trackUpdates[]` → `HuntTracks_ApplyStateUpdates` |
-| **Direct state** | `BotLogic.ahk` + `MobStateRecognition.ahk` | post-attack +120ms | `state` mode `direct` | single-track update |
-| **Track store** | `HuntTracks.ahk` | — | — | track storage, pendingResult, area epoch |
-| **Hunt policy** | `HuntPolicy.ahk` | — | — | target selection, teleport gate |
-| **Hunt loop** | `BotLogic.ahk` | ~25ms | — | attack, timers, DirectState queue |
+| Layer | Module | Interval | IPC | Proposes |
+|-------|--------|----------|-----|----------|
+| **Discovery** | `MobRecognition.ahk` | 1000ms | `scan` | living detections |
+| **State** | `MobStateRecognition.ahk` | 150ms + post-attack | `state` | observations per track id |
+| **Attack** | `BotLogic.ahk` | ~25ms | none | attack event |
+| **MobTrack store** | `HuntTracks.ahk` | — | — | applies all events |
+| **Policy** | `HuntPolicy.ahk` | — | — | picks attackable id |
 
-## Responsibilities
+## MobTrack fields
 
-### MobRecognition (Discovery)
-- Heatmap discovery; living targets only
-- `MobRecognitionDiscoveryDetect` → parse candidates → `HuntTracks_ApplyDetections`
-- Does not evaluate death on known tracks
+| Field | Set by |
+|-------|--------|
+| `id` | create |
+| `mobName` | create |
+| `x`, `y` | create; discovery lerp; state alive (authoritative) |
+| `confidence` | create; discovery; state alive |
+| `attackCount` | attack |
+| `lastDiscoveryTick` | discovery |
+| `lastStateTick` | state |
+| `lastAttackTick` | attack |
+| `pendingResultUntilTick` | attack |
+| `state` | `alive` / `pending` / removed on `dead`/`gone` |
+| `areaEpoch` | create (current `HUNT_AREA_EPOCH`) |
 
-### MobStateRecognition
-- Periodic: `MobStateRecognizeAndApply` for all alive tracks
-- Direct: `MobStateRecognizeDirectAndApply` for one track after attack
-- Input: `[{id, x, y}]` screen coordinates
-- Output: `[{trackId, state, confidence, x, y}]` where state is `alive`, `dead`, `gone`, or `unknown` (direct only)
-- Python: `cmd: state` → `evaluate_track_states` / `evaluate_track_state_direct`
+## Event receivers (HuntTracks)
 
-### HuntTracks
-- Single source of truth for track identity; presence in `huntTracks` means alive
-- `HuntTracks_ApplyDetections` — match living detections or create tracks
-- `HuntTracks_ApplyStateUpdates` — remove dead/gone, refresh alive, record kills
-- `HuntTracks_ApplyAttackEvent` — attack timing and **pendingResult** window
-- `HuntAreaReset` — clears tracks, increments **AreaEpoch**, clears DirectState queue
+| Event | Function |
+|-------|----------|
+| Discovery batch | `HuntTracks_ReceiveDiscoveryDetections` → `MobTrack_ApplyDiscoveryDetection` |
+| State batch | `HuntTracks_ReceiveStateObservations` → `MobTrack_ApplyStateObservation` |
+| Attack | `MobTrack_ApplyAttack` |
+
+Legacy aliases: `HuntTracks_ApplyDetections`, `HuntTracks_ApplyStateUpdates`, `HuntTracks_ApplyAttackEvent`.
+
+## MobTrack lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> alive: discovery create
+    alive --> alive: discovery lerp / state alive
+    alive --> pending: attack
+    pending --> alive: state alive OR pending expired
+    alive --> removed: state dead/gone
+    pending --> removed: state dead/gone
+    removed --> [*]
+```
+
+## Coordinate ownership
+
+| Source | Rule |
+|--------|------|
+| **Discovery** | Lerp correction: `lerp(track, detection, HUNT_DISCOVERY_LERP_ALPHA)` on match |
+| **State alive** | Authoritative replace of `x`, `y`, `confidence` |
+| **Attack** | Read only — never IPC, never writes position |
+
+## Module responsibilities
+
+### Discovery (`MobRecognition` + `HuntDiscoveryTick`)
+- Run `scan` IPC
+- Parse candidates, filter player ignore
+- Call `HuntTracks_ApplyDetections`
+- Does **not** own tracks, lifecycle, attackability, or death decisions
+
+### State (`MobStateRecognition` + timers)
+- Run `state` / direct IPC
+- Parse `trackUpdates` → `HuntTracks_ReceiveStateObservations`
+- Does **not** create tracks or mutate attack state
+
+### Attack (`HuntAttackTrack`)
+- Read latest MobTrack by id
+- `MobTrack_IsAttackable` (via policy selection)
+- `MoveMouseTo` + skill click
+- `MobTrack_ApplyAttack` + queue post-attack direct state
+- **No vision IPC**
 
 ### HuntPolicy
-- Round-robin: lowest `attackCount` each swing; skip tracks with pendingResult
-- Teleport when tracks and discovery scan are both empty
-- Does not run vision or parse detector JSON
+- `HuntPolicy_SelectTarget` using `MobTrack_IsAttackable`
+- `HuntPolicy_ShouldTeleport` — requires `huntScansSinceAreaReset >= 1` (fresh discovery on this area), zero tracks, zero scan living
 
-### BotLogic (DirectState + scheduling)
-- `huntPendingDirectState` — one queued direct check per attack (`trackId`, `x`, `y`, `areaEpoch`, `readyTick`)
-- Discovery blocked only when a **ready and valid** direct request exists
-- Stale direct requests dropped on epoch mismatch, missing track, or invalid ROI
-- `huntServerBusy` — single Python IPC slot shared by discovery, state, and direct
+### HuntTracks
+- All MobTrack storage and lifecycle
+- `MobTrack_IsAlive`, `MobTrack_IsPending`, `MobTrack_IsExpired`, `MobTrack_IsAttackable`
 
-## pendingResult
+## Timers & IPC slot
 
-After `HuntTracks_ApplyAttackEvent`:
-- `pendingResultUntilTick = now + HUNT_ATTACK_RESULT_WINDOW_MS` (1800ms)
-- `HuntPolicy` skips the track while pending
-- State `alive` clears pending via `HuntTracks_ClearPendingResult`
-- Timeout re-allows attack without marking dead
-
-## AreaEpoch
-
-- `HUNT_AREA_EPOCH` incremented in `HuntAreaReset` (teleport area clear)
-- DirectState queue stores epoch at schedule time; dropped if epoch changed before run
-
-## Timers
-
-- `HuntDiscoveryTick` — discovery (1000ms); runs immediately on timer start if IPC idle
-- `HuntStateTick` — periodic state (150ms); direct check takes priority when ready
-- `Hunt()` — attack loop only (~25ms idle sleep when no target)
+- `huntServerBusy` — one Python IPC at a time (discovery / periodic state / direct state)
+- Attack never waits on `huntServerBusy`
 
 ## Logging prefixes
 
 | Prefix | Source |
 |--------|--------|
 | `[DISCOVERY]` | discovery skip/fail |
-| `[STATE]` | direct state results; periodic detail when `MOB_STATE_DEBUG` |
-| `[TRACK]` | track create/remove/state apply |
-| `[HUNT]` | attack, target, teleport, area clear |
-| `[DIRECT]` | direct queue/run/clear/drop |
+| `[STATE]` | state observations |
+| `[TRACK]` | MobTrack create/remove/state |
+| `[HUNT]` | attack, target, teleport |
+| `[DIRECT]` | post-attack direct queue |
 
-## Session stats
+## Python (unchanged)
 
-`BotSession` records `kills` (state `dead`), `teleports` (`Teleport()`), `attacksIssued`, scans.
-
-## Python (unchanged algorithms)
-
-- `scan` — discovery
-- `state` — track state (`evaluate_track_states` / `evaluate_track_state_direct`)
-- Detector watch-point drift keys in `config_simple.json` are internal search geometry, not AHK watch slots
+- `scan` — discovery (`_evaluate_discovery_center`)
+- `state` — track observations (`evaluate_track_states` / `evaluate_track_state_direct`)
 
 ## AHK timing constants
 
-| Constant | Value | File |
-|----------|-------|------|
-| `HUNT_STATE_INTERVAL_MS` | 150 | BotLogic |
-| `HUNT_DISCOVERY_INTERVAL_MS` | 1000 | BotLogic |
-| `HUNT_POST_ATTACK_STATE_DELAY_MS` | 120 | BotLogic |
-| `HUNT_TRACK_MATCH_RADIUS` | 45 | HuntTracks |
-| `HUNT_ATTACK_RESULT_WINDOW_MS` | 1800 | HuntTracks |
+| Constant | Value |
+|----------|-------|
+| `HUNT_STATE_INTERVAL_MS` | 150 |
+| `HUNT_DISCOVERY_INTERVAL_MS` | 1000 |
+| `HUNT_POST_ATTACK_STATE_DELAY_MS` | 120 |
+| `HUNT_TRACK_MATCH_RADIUS` | 45 |
+| `HUNT_ATTACK_RESULT_WINDOW_MS` | 1800 |
+| `HUNT_DISCOVERY_LERP_ALPHA` | 0.35 |
+| `HUNT_NEW_TRACK_STATE_GRACE_MS` | 1000 — state cannot remove never-attacked tracks as dead/gone |

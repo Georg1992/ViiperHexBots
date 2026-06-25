@@ -20,6 +20,8 @@ AppendLog(message) {
     GuiControl,, LogBox, %newText%
     if (LogBoxHwnd)
         SendMessage, 0x115, 7, 0,, ahk_id %LogBoxHwnd%
+    if IsFunc("HuntLogOverlay_OnLog")
+        HuntLogOverlay_OnLog(line, message)
 }
 
 SetInputStatus(statusText, hintText := "") {
@@ -86,7 +88,11 @@ GetSearchBoxSizePx() {
 }
 
 SyncSearchRangeFromUI() {
-    global SearchRange
+    global SearchRange, botRunning
+
+    ; Disabled sliders return empty/stale values (same issue as hotkeys during bot run).
+    if (botRunning)
+        return
 
     GuiControlGet, sliderValue,, SearchRange
     SearchRange := sliderValue + 0

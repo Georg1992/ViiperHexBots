@@ -14,6 +14,11 @@ global botSessionTargetScans := 0
 global botSessionDetectFailures := 0
 global botSessionAttacksIssued := 0
 global botSessionKillCount := 0
+global botSessionIgnoredUnattackedDead := 0
+global botSessionIgnoredUnattackedGone := 0
+global botSessionDiscoveryMissRemovals := 0
+global botSessionGoneRemovals := 0
+global botSessionAttackEventFailed := 0
 global botSessionTeleportCount := 0
 global botSessionAcceptedCandidates := 0
 global botSessionLastRoi := ""
@@ -29,6 +34,8 @@ BotSessionStart(mobName) {
     global botSessionActive, botSessionId, botSessionDir, botSessionSummaryPath, botSessionStartedTick
     global botSessionTargetMob, botSessionTotalScans, botSessionEmptyScans, botSessionTargetScans
     global botSessionDetectFailures, botSessionAttacksIssued, botSessionKillCount, botSessionTeleportCount
+    global botSessionIgnoredUnattackedDead, botSessionIgnoredUnattackedGone, botSessionDiscoveryMissRemovals
+    global botSessionGoneRemovals, botSessionAttackEventFailed
     global botSessionAcceptedCandidates
     global botSessionLastRoi, botSessionScaleMob, botSessionScaleObservations, botSessionScaleCount
     global botSessionScaleLocked, botSessionScaleMin, botSessionScaleMax
@@ -54,6 +61,11 @@ BotSessionStart(mobName) {
     botSessionDetectFailures := 0
     botSessionAttacksIssued := 0
     botSessionKillCount := 0
+    botSessionIgnoredUnattackedDead := 0
+    botSessionIgnoredUnattackedGone := 0
+    botSessionDiscoveryMissRemovals := 0
+    botSessionGoneRemovals := 0
+    botSessionAttackEventFailed := 0
     botSessionTeleportCount := 0
     botSessionAcceptedCandidates := 0
     botSessionLastRoi := ""
@@ -81,6 +93,8 @@ BotSessionStop(reason := "stopped") {
     global botSessionActive, botSessionId, botSessionStartedTick
     global botSessionTotalScans, botSessionTargetScans, botSessionEmptyScans
     global botSessionDetectFailures, botSessionAttacksIssued, botSessionKillCount, botSessionTeleportCount
+    global botSessionIgnoredUnattackedDead, botSessionIgnoredUnattackedGone, botSessionDiscoveryMissRemovals
+    global botSessionGoneRemovals, botSessionAttackEventFailed
     global botSessionAcceptedCandidates
 
     if (!botSessionActive)
@@ -96,7 +110,12 @@ BotSessionStop(reason := "stopped") {
     lines .= "emptyScans: " . botSessionEmptyScans . "`n"
     lines .= "detectFailures: " . botSessionDetectFailures . "`n"
     lines .= "attacksIssued: " . botSessionAttacksIssued . "`n"
-    lines .= "kills: " . botSessionKillCount . "`n"
+    lines .= "confirmedKills: " . botSessionKillCount . "`n"
+    lines .= "ignoredUnattackedDead: " . botSessionIgnoredUnattackedDead . "`n"
+    lines .= "ignoredUnattackedGone: " . botSessionIgnoredUnattackedGone . "`n"
+    lines .= "discoveryMissRemovals: " . botSessionDiscoveryMissRemovals . "`n"
+    lines .= "goneRemovals: " . botSessionGoneRemovals . "`n"
+    lines .= "attackEventFailed: " . botSessionAttackEventFailed . "`n"
     lines .= "teleports: " . botSessionTeleportCount . "`n"
     lines .= "acceptedCandidates: " . botSessionAcceptedCandidates
     SessionLogWriteBlock("bot session end", lines)
@@ -126,12 +145,61 @@ BotSessionRecordAttack(x, y, confidence := 0) {
     BotSessionWriteSummary("running")
 }
 
-BotSessionRecordKill(trackId) {
+BotSessionRecordConfirmedKill(trackId) {
     global botSessionActive, botSessionKillCount
     if (!botSessionActive)
         return
     botSessionKillCount++
-    SessionLogWrite("DEBUG", "session", "kill #" . botSessionKillCount . " trackId=" . trackId)
+    SessionLogWrite("DEBUG", "session", "confirmedKill #" . botSessionKillCount . " trackId=" . trackId)
+    BotSessionWriteSummary("running")
+}
+
+BotSessionRecordKill(trackId) {
+    BotSessionRecordConfirmedKill(trackId)
+}
+
+BotSessionRecordIgnoredUnattackedDead(trackId) {
+    global botSessionActive, botSessionIgnoredUnattackedDead
+    if (!botSessionActive)
+        return
+    botSessionIgnoredUnattackedDead++
+    SessionLogWrite("DEBUG", "session", "ignoredUnattackedDead #" . botSessionIgnoredUnattackedDead . " trackId=" . trackId)
+    BotSessionWriteSummary("running")
+}
+
+BotSessionRecordIgnoredUnattackedGone(trackId) {
+    global botSessionActive, botSessionIgnoredUnattackedGone
+    if (!botSessionActive)
+        return
+    botSessionIgnoredUnattackedGone++
+    SessionLogWrite("DEBUG", "session", "ignoredUnattackedGone #" . botSessionIgnoredUnattackedGone . " trackId=" . trackId)
+    BotSessionWriteSummary("running")
+}
+
+BotSessionRecordDiscoveryMissRemoval(trackId) {
+    global botSessionActive, botSessionDiscoveryMissRemovals
+    if (!botSessionActive)
+        return
+    botSessionDiscoveryMissRemovals++
+    SessionLogWrite("DEBUG", "session", "discoveryMissRemoval #" . botSessionDiscoveryMissRemovals . " trackId=" . trackId)
+    BotSessionWriteSummary("running")
+}
+
+BotSessionRecordGoneRemoval(trackId) {
+    global botSessionActive, botSessionGoneRemovals
+    if (!botSessionActive)
+        return
+    botSessionGoneRemovals++
+    SessionLogWrite("DEBUG", "session", "goneRemoval #" . botSessionGoneRemovals . " trackId=" . trackId)
+    BotSessionWriteSummary("running")
+}
+
+BotSessionRecordAttackEventFailed(trackId, reason, attackCountBefore := 0) {
+    global botSessionActive, botSessionAttackEventFailed
+    if (!botSessionActive)
+        return
+    botSessionAttackEventFailed++
+    SessionLogWrite("DEBUG", "session", "attackEventFailed #" . botSessionAttackEventFailed . " trackId=" . trackId . " reason=" . reason . " attackCountBefore=" . attackCountBefore)
     BotSessionWriteSummary("running")
 }
 
@@ -273,6 +341,8 @@ BotSessionWriteSummary(status := "running") {
     global botSessionActive, botSessionSummaryPath, botSessionId, botSessionTargetMob
     global botSessionStartedTick, botSessionTotalScans, botSessionEmptyScans, botSessionTargetScans
     global botSessionDetectFailures, botSessionAttacksIssued, botSessionKillCount, botSessionTeleportCount
+    global botSessionIgnoredUnattackedDead, botSessionIgnoredUnattackedGone, botSessionDiscoveryMissRemovals
+    global botSessionGoneRemovals, botSessionAttackEventFailed
     global botSessionAcceptedCandidates
     global botSessionLastRoi, botSessionScaleObservations, botSessionScaleCount
     global botSessionScaleLocked, botSessionScaleMin, botSessionScaleMax
@@ -288,7 +358,7 @@ BotSessionWriteSummary(status := "running") {
     json .= ",""durationSec"":" . elapsedSec
     json .= ",""active"":" . (botSessionActive ? "true" : "false")
     json .= ",""lastRoi"":""" . SessionLogJsonEscape(botSessionLastRoi) . """"
-    json .= ",""stats"":{""scans"":" . botSessionTotalScans . ",""emptyScans"":" . botSessionEmptyScans . ",""targetScans"":" . botSessionTargetScans . ",""detectFailures"":" . botSessionDetectFailures . ",""attacksIssued"":" . botSessionAttacksIssued . ",""kills"":" . botSessionKillCount . ",""teleports"":" . botSessionTeleportCount . ",""acceptedCandidates"":" . botSessionAcceptedCandidates . "}"
+    json .= ",""stats"":{""scans"":" . botSessionTotalScans . ",""emptyScans"":" . botSessionEmptyScans . ",""targetScans"":" . botSessionTargetScans . ",""detectFailures"":" . botSessionDetectFailures . ",""attacksIssued"":" . botSessionAttacksIssued . ",""confirmedKills"":" . botSessionKillCount . ",""kills"":" . botSessionKillCount . ",""ignoredUnattackedDead"":" . botSessionIgnoredUnattackedDead . ",""ignoredUnattackedGone"":" . botSessionIgnoredUnattackedGone . ",""discoveryMissRemovals"":" . botSessionDiscoveryMissRemovals . ",""goneRemovals"":" . botSessionGoneRemovals . ",""attackEventFailed"":" . botSessionAttackEventFailed . ",""teleports"":" . botSessionTeleportCount . ",""acceptedCandidates"":" . botSessionAcceptedCandidates . "}"
     json .= ",""scaleCalibration"":{""locked"":" . (botSessionScaleLocked ? "true" : "false") . ",""observations"":""" . SessionLogJsonEscape(botSessionScaleObservations) . """,""count"":" . botSessionScaleCount . ",""min"":" . botSessionScaleMin . ",""max"":" . botSessionScaleMax . "}"
     json .= "}"
 
