@@ -20,7 +20,7 @@ for path in (str(MOB_REC_DIR), str(SIMPLE_DIR)):
 from act_reader import ActReader
 from capture import capture_region
 from debug_renderer import save_simple_debug_bundle
-from descriptor_builder import SimpleDescriptorBuilder
+from descriptors.descriptor_builder import SimpleDescriptorBuilder
 from detector import SimpleMobDetector, load_simple_config
 from spr_reader import SprReader
 
@@ -159,6 +159,8 @@ def parse_request_tracks(value) -> list[dict]:
                 "y": int(entry["y"]),
             }
         )
+        if "scale" in entry:
+            tracks[-1]["scale"] = float(entry["scale"])
     return tracks
 
 
@@ -196,7 +198,7 @@ def run_detect_request(detector: SimpleMobDetector, config: dict, request: dict)
     session_id = str(request.get("sessionId", ""))
 
     if command == "state":
-        from state_recognizer import evaluate_track_state_direct, evaluate_track_states
+        from tracking.state_recognizer import evaluate_track_state_direct, evaluate_track_states
 
         tracks = parse_request_tracks(request.get("tracks"))
         mode = str(request.get("mode", "")).lower()
@@ -205,6 +207,7 @@ def run_detect_request(detector: SimpleMobDetector, config: dict, request: dict)
             if len(tracks) != 1:
                 raise ValueError("direct state requires exactly one track")
             track = tracks[0]
+            scale_hint = track.get("scale")
             track_updates = [
                 evaluate_track_state_direct(
                     detector,
@@ -215,6 +218,7 @@ def run_detect_request(detector: SimpleMobDetector, config: dict, request: dict)
                     int(track["y"]),
                     offset_x=x,
                     offset_y=y,
+                    scale_hint=scale_hint,
                 )
             ]
         else:
@@ -390,7 +394,7 @@ def build_parser() -> argparse.ArgumentParser:
     detect.add_argument("--mob", required=True)
     detect.add_argument("--roi", type=parse_roi, help="screen x,y,width,height")
     detect.add_argument("--image", help="existing image path")
-    detect.add_argument("--output", help="JSON output file for AHK")
+    detect.add_argument("--output", help="JSON output file for Python runtime")
     detect.add_argument("--debug", action="store_true")
     detect.add_argument("--config-simple", help="simple config path")
     detect.add_argument("--session-id", default="", help="bot session id for logs/calibration")

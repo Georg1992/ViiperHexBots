@@ -14,7 +14,8 @@ SIMPLE = MOB_REC / "simple"
 sys.path[:0] = [str(MOB_REC), str(SIMPLE)]
 
 from detector import SimpleMobDetector, load_simple_config  # noqa: E402
-from state_recognizer import evaluate_track_states  # noqa: E402
+from tracking.state_recognizer import evaluate_track_state, evaluate_track_states  # noqa: E402
+from detector import STATE_PROFILE_DIRECT  # noqa: E402
 
 
 def playfield_roi(frame):
@@ -53,8 +54,23 @@ def main() -> None:
     ]
 
     bench("discovery_scan", lambda: detector.detect(roi, "horn"))
-    bench("state_3_tracks", lambda: evaluate_track_states(detector, roi, "horn", track3))
-    bench("state_6_tracks", lambda: evaluate_track_states(detector, roi, "horn", track6))
+    bench("state_3_tracks_full", lambda: evaluate_track_states(detector, roi, "horn", track3))
+    bench("state_6_tracks_full", lambda: evaluate_track_states(detector, roi, "horn", track6))
+    bench(
+        "state_3_tracks_direct",
+        lambda: [
+            evaluate_track_state(
+                detector,
+                roi,
+                "horn",
+                track["trackId"],
+                track["x"],
+                track["y"],
+                profile=STATE_PROFILE_DIRECT,
+            )
+            for track in track3
+        ],
+    )
 
     descriptor = detector.ensure_descriptor("horn")
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)

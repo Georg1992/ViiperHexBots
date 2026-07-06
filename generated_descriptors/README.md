@@ -14,5 +14,5 @@ generated_descriptors/<mob>/
     descriptor.json
 ```
 
-Source files: `assets/mobs/<mob>/<mob>.spr` and `.act`.
+Source files: `assets/<mob>/<mob>.spr` and `.act` (not tracked, add as needed).
 The bot UI uses these descriptor folders as the mob catalog.

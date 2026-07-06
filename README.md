@@ -5,9 +5,9 @@ Fork of [HexBots](https://github.com/Georg1992/HexBots) that sends keyboard and 
 ## Prerequisites
 
 - Windows 64-bit
-- AutoHotkey v1.1.33+
-- Go 1.26+ (for building the input bridge)
+- Python 3.10+
 - [usbip-win2](https://github.com/vadimgrn/usbip-win2) kernel driver (one-time install + reboot)
+- Go 1.26+ (only for building `viiper.exe`, not needed at runtime)
 
 ## Build
 
@@ -16,39 +16,33 @@ git submodule update --init --recursive
 .\build.ps1
 ```
 
-This produces `viiper-input.exe` in the project root (embeds `viiper.exe`).
+This produces `VIIPER/dist/viiper.exe`.
 
 ## Run
 
 1. Install usbip-win2 and reboot if you have not already.
-2. Run `build.ps1` once to build `viiper-input.exe`.
-3. Launch `main.ahk` with AutoHotkey v1 **before** starting the game.
+2. Run `build.ps1` once to build `viiper.exe`.
+3. Launch `run.bat` to start the Python GUI.
 
-On startup the script launches `viiper-input.exe`, waits for virtual keyboard/mouse devices, then enables game window selection. Launch HoneyRO only after the log shows VIIPER is ready.
+The Python bot launches `viiper.exe` directly, sets up virtual keyboard/mouse devices via the VIIPER TCP API, and sends binary input reports over device streams — no Go bridge needed.
 
 ## Layout
 
 ```
 ViiperHexBots/
-  main.ahk                 Bot GUI and entry point
-  build.ps1                Build script for the input bridge
+  run.bat                  Python launcher
+  build.ps1                Build script for viiper.exe
   config.ini               Local runtime settings (generated)
-  Lib/                     AHK runtime modules
-  Lib/BotLogic.ahk         Hunting, inventory, warp logic
-  Lib/utilityFunctions.ahk Shared bot/input helpers
-  Lib/MobData.ahk          Descriptor-backed mob catalog
-  Lib/MemoryOperations.ahk Memory reading helpers
+  pybot/
+    app/                   Desktop GUI (tkinter)
+    runtime/               Hunt runtime logic
+    viiper/                Pure Python VIIPER TCP client
   clients/                 Per-server profiles (memory addresses, captcha)
-  Lib/ClientProfile.ahk    Loads client JSON profiles
-  Lib/ViiperInput.ahk      AHK client for the input bridge
   logs/                    Runtime/session logs (generated)
   scripts/                 Maintenance and descriptor-build scripts
   mob-recognition/         Python descriptor/detection pipeline
-  assets/mobs/             Source SPR/ACT assets for descriptor builds
-  generated_descriptors/   Runtime mob descriptors
-  input-bridge/            Go HTTP bridge to VIIPER
-  viiper-input.exe         Built bridge (not in git)
-  VIIPER/                  Git submodule
+  generated_descriptors/   Runtime mob descriptors (built from SPR/ACT assets)
+  VIIPER/                  Git submodule (viiper virtual HID driver)
 ```
 
 ## Logs
@@ -63,9 +57,9 @@ Only the latest 3 session folders are kept.
 ## Differences from HexBots
 
 - No AutoHotInterception DLLs or Interception driver
-- No VID/PID device detection (`DeviceDetector.ahk` removed)
 - Requires usbip-win2 instead
 - Virtual HID devices instead of routing through physical keyboard/mouse
+- Pure Python VIIPER TCP client (no Go input bridge)
 
 ## Upstream
 

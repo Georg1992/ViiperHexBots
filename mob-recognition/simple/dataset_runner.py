@@ -17,7 +17,7 @@ for path in (str(SIMPLE_DIR), str(MOB_REC_DIR)):
         sys.path.insert(0, path)
 
 from debug_renderer import save_simple_debug_bundle, save_summary_contact_sheet
-from descriptor_builder import SimpleDescriptorBuilder
+from descriptors.descriptor_builder import SimpleDescriptorBuilder
 from detector import SimpleMobDetector, load_simple_config
 
 

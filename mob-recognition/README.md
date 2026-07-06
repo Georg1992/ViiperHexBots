@@ -11,7 +11,7 @@ The runtime detector does not use sprite blob proposals, bbox refinement scans, 
 ## Commands
 
 ```powershell
-# Build descriptor from assets/mobs/horn/horn.spr + horn.act
+# Build descriptor from extracted SPR/ACT assets (e.g. horn.spr + horn.act)
 .\scripts\build-mob-descriptor.ps1 -Mob horn -Force
 
 # Detect on a screenshot
