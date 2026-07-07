@@ -20,9 +20,8 @@ from pybot._protocols import (
     CanPolicy,
     CanStop,
     CanTrack,
-    CanUrgentState,
+    CanTrackLocal,
     CanValidate,
-    CanVisionBusy,
     CanWakeDiscovery,
     HasConfig,
 )
@@ -31,8 +30,8 @@ from pybot._protocols import (
 
 
 class HuntModeControllerContext(CanStop, CanLog, HasConfig,
-                                CanTrack, CanValidate, CanUrgentState,
-                                CanWakeDiscovery, CanVisionBusy,
+                                CanTrack, CanValidate,
+                                CanWakeDiscovery,
                                 CanAreaReset, Protocol):
     """Hunt runtime subset consumed by HuntModeController."""
     pass
@@ -42,6 +41,12 @@ class HuntModeControllerContext(CanStop, CanLog, HasConfig,
 # Each lists exactly what its worker touches from the runtime context.
 
 
+class TrackingWorkerContext(CanStop, CanLog,
+                            CanCapture, CanTrackLocal, CanTrack, Protocol):
+    """Hunt runtime subset consumed by TrackingWorker."""
+    pass
+
+
 class DiscoveryWorkerContext(CanStop, CanLog, HasConfig,
                              CanCapture, CanDetect, CanTrack,
                              CanValidate, CanWakeDiscovery, Protocol):
@@ -49,23 +54,9 @@ class DiscoveryWorkerContext(CanStop, CanLog, HasConfig,
     pass
 
 
-class TrackingWorkerContext(CanStop, CanLog, HasConfig,
-                            CanCapture, CanDetect, CanTrack,
-                            CanValidate, Protocol):
-    """Hunt runtime subset consumed by TrackingWorker."""
-    pass
-
-
-class ConfirmStateWorkerContext(CanStop, CanLog, HasConfig,
-                                CanCapture, CanDetect, CanTrack,
-                                CanValidate, CanUrgentState, Protocol):
-    """Hunt runtime subset consumed by ConfirmStateWorker."""
-    pass
-
-
 class AttackLoopContext(CanStop, CanLog, HasConfig,
                         CanTrack, CanValidate,
-                        CanUrgentState, CanPolicy, Protocol):
+                        CanPolicy, Protocol):
     """Hunt runtime subset consumed by AttackLoop."""
     pass
 

@@ -18,11 +18,8 @@ from pybot.runtime.hunt_tracks import HuntTracks
 from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.logging import HuntLogger
 from pybot.runtime.runtime_context import HuntRuntimeContext
-from pybot.runtime.urgent_state import UrgentStateQueue
 from pybot.runtime.validation_log import HuntValidationLogger
 from pybot.runtime.detection.detector_session import DetectorSession
-from pybot.runtime.workers.discovery_worker import DiscoveryWorker
-from pybot.runtime.workers.tracking_worker import TrackingWorker
 
 FIXTURE = PROJECT_ROOT / "mob-recognition" / "test-fixtures" / "game-screenshots" / "333.png"
 
@@ -42,9 +39,6 @@ class FixtureDetector(DetectorSession):
 
     def discover(self, roi: HuntRoi):
         return self.discover_frame(self._fixture_frame, roi)
-
-    def track_locals(self, roi: HuntRoi, track_snapshots):
-        return self.track_locals_frame(self._fixture_frame, roi, track_snapshots)
 
 
 class FakeCapture:
@@ -71,13 +65,9 @@ def make_config() -> HuntRuntimeConfig:
         teleport_scan_code=16,
         search_range_cells=16,
         cell_size_px=64,
-        state_interval_ms=100,
         discovery_interval_ms=3000,
-        post_attack_state_delay_ms=120,
         teleport_duration_ms=500,
-        coord_stale_skip_ms=None,
         validation_enabled=False,
-        validation_state_every_n=1,
         control_file=None,
     )
 
@@ -91,7 +81,7 @@ class ShadowPipelineTests(unittest.TestCase):
         cls.roi_frame = playfield_roi(frame)
         cls.roi = HuntRoi(x=0, y=0, w=cls.roi_frame.shape[1], h=cls.roi_frame.shape[0])
 
-    def test_discovery_and_local_track_shadow_tick(self) -> None:
+    def test_discovery_creates_tracks_on_fixture(self) -> None:
         config = make_config()
         logger = HuntLogger(session_id="test_shadow_pipeline")
         tracks = HuntTracks()
@@ -106,23 +96,39 @@ class ShadowPipelineTests(unittest.TestCase):
             policy=HuntPolicy(),
             capture=capture,
             detector=detector,
-            urgent=UrgentStateQueue(),
+            tracker=detector,
             validation=HuntValidationLogger(logger, tracks, enabled=False),
             control=RuntimeControl(None),
             stop_event=stop,
         )
         hunt_mode = create_hunt_mode(ctx, ShadowInputBackend())
 
-        discovery = DiscoveryWorker(ctx, hunt_mode)
-        discovery._run_scan()
+        from pybot.runtime._mob_rec_path import import_hunt_track_rules
+        _hunt = import_hunt_track_rules()
+        DiscoveryDetection = _hunt.DiscoveryDetection
+
+        scan = detector.discover(self.roi)
+        detections = [
+            DiscoveryDetection(
+                x=d.x, y=d.y, confidence=d.confidence, candidate_scale=d.candidate_scale, living=True
+            )
+            for d in scan.detections
+        ]
+
+        summary = tracks.reconcile_detections(
+            detections,
+            mob_name="horn",
+            now_tick=int(1_000_000),
+        )
 
         self.assertGreater(tracks.get_track_count(), 0)
-        self.assertTrue(hunt_mode.discovery_since_reset)
+        self.assertGreater(summary.added_count, 0)
 
-        tracking = TrackingWorker(ctx)
-        tracking._run_local_track_batch()
-
-        self.assertGreaterEqual(tracks.get_track_count(), 1)
         track = tracks.get_track_by_id(1)
         assert track is not None
         self.assertGreater(track.updated_tick, 0)
+        self.assertEqual(track.state, "alive")
+
+
+if __name__ == "__main__":
+    unittest.main()

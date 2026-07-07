@@ -4,7 +4,8 @@ Checks that behaviour modules (hunt_policy, hunt_mode, hunt_tracks)
 don't import detection/capture modules directly — they must access
 detector and capture only through the runtime context (ctx).
 Worker modules and hunt_runtime.py, which orchestrate detection,
-are verified to import the expected detection boundaries."""
+are verified to import the expected detection boundaries.
+"""
 
 from __future__ import annotations
 
@@ -44,19 +45,17 @@ class HuntArchitectureTests(unittest.TestCase):
                 )
 
     def test_worker_modules_import_detection_boundaries(self) -> None:
-        """Orchestration workers (discovery, confirm state) import detection modules."""
+        """Orchestration workers import detection modules."""
         discovery = (PYBOT_RUNTIME / "workers" / "discovery_worker.py").read_text(
             encoding="utf-8", errors="replace"
         )
         self.assertIn("discovery_filter", discovery)
-        self.assertIn("detector", discovery)
 
-        confirm = (PYBOT_RUNTIME / "workers" / "confirm_state_worker.py").read_text(
+        tracking = (PYBOT_RUNTIME / "workers" / "tracking_worker.py").read_text(
             encoding="utf-8", errors="replace"
         )
-        self.assertIn("detector", confirm)
+        self.assertIn("detector_session", tracking)
 
-        # Attack loop does its own direct state scheduling via ctx.urgent
         attack = (PYBOT_RUNTIME / "workers" / "attack_loop.py").read_text(
             encoding="utf-8", errors="replace"
         )
@@ -70,9 +69,8 @@ class HuntArchitectureTests(unittest.TestCase):
         )
         self.assertIn("DetectorSession", runtime)
         self.assertIn("HuntWindowCapture", runtime)
-        self.assertIn("DiscoveryWorker", runtime)
         self.assertIn("TrackingWorker", runtime)
-        self.assertIn("ConfirmStateWorker", runtime)
+        self.assertIn("DiscoveryWorker", runtime)
         self.assertIn("AttackLoop", runtime)
 
 

@@ -51,7 +51,7 @@ class StateCanonicalTests(unittest.TestCase):
     def test_full_profile_finds_living_mob_at_discovery_coords(self) -> None:
         detector = self._detector()
         discovery = detector.detect(self.roi, "horn")
-        living = [c for c in discovery.accepted if not c.is_dead]
+        living = [c for c in discovery.accepted]
         self.assertGreater(len(living), 0)
         anchor = living[0]
         tracks = [
@@ -67,10 +67,10 @@ class StateCanonicalTests(unittest.TestCase):
         self.assertEqual(updates[0]["state"], "alive")
         self.assertGreater(updates[0]["confidence"], 0.4)
 
-    def test_direct_profile_returns_alive_dead_or_unreachable_not_unknown(self) -> None:
+    def test_direct_profile_returns_alive_or_unreachable_not_unknown(self) -> None:
         detector = self._detector()
         discovery = detector.detect(self.roi, "horn")
-        living = [c for c in discovery.accepted if not c.is_dead]
+        living = [c for c in discovery.accepted]
         self.assertGreater(len(living), 0)
         anchor = living[0]
         update = evaluate_track_state(
@@ -83,7 +83,7 @@ class StateCanonicalTests(unittest.TestCase):
             scale_hint=anchor.candidate_scale,
             profile=STATE_PROFILE_DIRECT,
         )
-        self.assertIn(update["state"], ("alive", "dead", "unreachable"))
+        self.assertIn(update["state"], ("alive", "unreachable"))
         self.assertNotEqual(update["state"], "unknown")
 
 

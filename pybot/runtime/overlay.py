@@ -1,8 +1,7 @@
 """Transparent click-through hunt overlay on the game client window.
 
 Creates a full-client-area layered window over the game showing:
-- Colored dots at tracked mob positions (green=attackable,
-  yellow=pending, orange=non-attackable alive)
+- Green dots at tracked mob positions
 - A dark right-side panel with track stats + scrolling log.
 The dots render on a transparent overlay and never appear in
 captured game frames, so detection is not affected.
@@ -51,10 +50,8 @@ COLOR_BLACK = 0x001A1A1A
 COLOR_TEXT = 0x00B8F0B8
 COLOR_STATUS = 0x00FFD966
 
-# Dot colours (GDI COLORREF = BGR)
-COLOR_DOT_LIVING = 0x0000FF00      # green — attackable
-COLOR_DOT_PENDING = 0x0000FFFF     # yellow — pending result
-COLOR_DOT_ALIVE = 0x0000A5FF       # orange — alive, not attackable
+# Dot colour (GDI COLORREF = BGR)
+COLOR_DOT_LIVING = 0x0000FF00      # green — tracked mob
 
 # Search region border colour
 COLOR_ROI = 0x00FFE066  # light amber — visible but unobtrusive
@@ -98,18 +95,14 @@ class _OverlayState:
     visible: bool = False
     last_scan_living: int = 0
     track_count: int = 0
-    alive_or_pending_count: int = 0
-    attackable_count: int = 0
+    alive_count: int = 0
     total_attacks: int = 0
-    total_kills: int = 0
     total_teleports: int = 0
-    track_positions: list[tuple[int, int, str]] = field(default_factory=list)
+    track_positions: list[tuple[int, int]] = field(default_factory=list)
     client_left: int = 0  # screen X of game client origin
     client_top: int = 0   # screen Y of game client origin
     client_w: int = 0     # game client width (for panel calc)
     brush_living: int = 0
-    brush_pending: int = 0
-    brush_alive: int = 0
     brush_roi: int = 0
     roi_x: int = 0
     roi_y: int = 0
@@ -212,24 +205,17 @@ def _paint_overlay(hdc: int) -> None:
         user32.FrameRect(hdc, ctypes.byref(roi_rect), s.brush_roi)
 
     # ── Draw track position dots (over the game area) ──────────
-    if s.track_positions and s.client_w > 0:
-        for tx, ty, state_type in s.track_positions:
+    if s.track_positions and s.client_w > 0 and s.brush_living:
+        for tx, ty in s.track_positions:
             # Convert game-client-absolute coords to overlay-relative
             dx = tx - s.client_left
             dy = ty - s.client_top
             # Skip if inside the right-side panel
             if dx >= cw - PANEL_W:
                 continue
-            if state_type == "attackable":
-                brush = s.brush_living
-            elif state_type == "pending":
-                brush = s.brush_pending
-            else:
-                brush = s.brush_alive
-            if brush:
-                old_b = gdi32.SelectObject(hdc, brush)
-                gdi32.Ellipse(hdc, dx - 4, dy - 4, dx + 4, dy + 4)
-                gdi32.SelectObject(hdc, old_b)
+            old_b = gdi32.SelectObject(hdc, s.brush_living)
+            gdi32.Ellipse(hdc, dx - 4, dy - 4, dx + 4, dy + 4)
+            gdi32.SelectObject(hdc, old_b)
 
     # ── Right-side panel background ────────────────────────────
     panel_rect = wintypes.RECT(
@@ -245,7 +231,7 @@ def _paint_overlay(hdc: int) -> None:
     gdi32.SetBkMode(hdc, 1)  # TRANSPARENT
     # Left-align panel content with 6px padding
     px = cw - PANEL_W + 6 if cw > PANEL_W else 6
-    status = f"T:{s.track_count} A:{s.alive_or_pending_count} Atk:{s.attackable_count} K:{s.total_kills} TP:{s.total_teleports}"
+    status = f"T:{s.track_count} A:{s.alive_count} Atk:{s.total_attacks} TP:{s.total_teleports}"
     gdi32.TextOutW(hdc, px, 6, status, len(status))
 
     # ── Log lines ──────────────────────────────────────────────
@@ -284,12 +270,10 @@ def _reposition() -> None:
 WINDOW_CLASS = "HuntOverlayClass"
 
 
-def _create_brushes() -> tuple[int, int, int, int]:
+def _create_brushes() -> tuple[int, int]:
     """Create solid GDI brushes for dots and ROI border."""
     return (
         gdi32.CreateSolidBrush(COLOR_DOT_LIVING),
-        gdi32.CreateSolidBrush(COLOR_DOT_PENDING),
-        gdi32.CreateSolidBrush(COLOR_DOT_ALIVE),
         gdi32.CreateSolidBrush(COLOR_ROI),
     )
 
@@ -339,8 +323,6 @@ def create(game_hwnd: int) -> bool:
     _state.font_log = _create_font("Consolas", 12)
     (
         _state.brush_living,
-        _state.brush_pending,
-        _state.brush_alive,
         _state.brush_roi,
     ) = _create_brushes()
     if not _state.font_status or not _state.font_log:
@@ -377,7 +359,7 @@ def last_error() -> str:
 
 
 def _destroy_brushes() -> None:
-    for attr in ("brush_living", "brush_pending", "brush_alive", "brush_roi"):
+    for attr in ("brush_living", "brush_roi"):
         brush = getattr(_state, attr, 0)
         if brush:
             gdi32.DeleteObject(brush)
@@ -426,12 +408,10 @@ def set_scan_living(count: int) -> None:
 def set_track_stats(
     track_count: int,
     alive_count: int,
-    attackable_count: int,
 ) -> None:
     """Update track stats shown in the overlay status line."""
     _state.track_count = track_count
-    _state.alive_or_pending_count = alive_count
-    _state.attackable_count = attackable_count
+    _state.alive_count = alive_count
     _invalidate()
 
 
@@ -447,20 +427,12 @@ def increment_teleports() -> None:
     _invalidate()
 
 
-def increment_kills() -> None:
-    """Increment the total kills counter."""
-    _state.total_kills += 1
-    _invalidate()
-
-
 def set_track_positions(
-    positions: list[tuple[int, int, str]],
+    positions: list[tuple[int, int]],
 ) -> None:
     """Update tracked mob positions for dot rendering.
 
-    Each entry is ``(screen_x, screen_y, state_type)`` where
-    *state_type* is one of ``"attackable"``, ``"pending"``, or
-    ``"alive"``.
+    Each entry is ``(screen_x, screen_y)``.
     """
     _state.track_positions = positions
     _invalidate()
@@ -479,10 +451,8 @@ def reset_stats() -> None:
     """Reset all counters and positions (call when a new bot session starts)."""
     _state.last_scan_living = 0
     _state.track_count = 0
-    _state.alive_or_pending_count = 0
-    _state.attackable_count = 0
+    _state.alive_count = 0
     _state.total_attacks = 0
-    _state.total_kills = 0
     _state.total_teleports = 0
     _state.track_positions.clear()
     _invalidate()

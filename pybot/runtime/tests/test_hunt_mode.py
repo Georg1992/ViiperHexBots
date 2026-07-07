@@ -14,7 +14,6 @@ from pybot.runtime.hunt_tracks import HuntTracks, monotonic_ms
 from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.logging import HuntLogger
 from pybot.runtime.runtime_context import HuntRuntimeContext
-from pybot.runtime.urgent_state import UrgentStateQueue
 from pybot.runtime.validation_log import HuntValidationLogger
 from pybot.runtime.detection.detector_session import DetectorSession
 
@@ -32,13 +31,9 @@ def make_config(**overrides) -> HuntRuntimeConfig:
         "teleport_scan_code": 16,
         "search_range_cells": 16,
         "cell_size_px": 64,
-        "state_interval_ms": 100,
         "discovery_interval_ms": 3000,
-        "post_attack_state_delay_ms": 120,
         "teleport_duration_ms": 500,
-        "coord_stale_skip_ms": None,
         "validation_enabled": False,
-        "validation_state_every_n": 1,
         "control_file": None,
     }
     base.update(overrides)
@@ -59,7 +54,7 @@ class HuntModeTests(unittest.TestCase):
             policy=HuntPolicy(),
             capture=MagicMock(spec=HuntWindowCapture),
             detector=self.detector,
-            urgent=UrgentStateQueue(),
+            tracker=self.detector,
             validation=HuntValidationLogger(self.logger, self.tracks, enabled=False),
             control=RuntimeControl(None),
         )
@@ -77,12 +72,13 @@ class HuntModeTests(unittest.TestCase):
         self.assertEqual(self.tracks.get_track_count(), 0)
         self.assertEqual(self.tracks.area_epoch, 1)
 
-    def test_waits_when_alive_pending_not_attackable(self) -> None:
+    def test_attacks_when_alive_tracks_exist_does_not_teleport(self) -> None:
         now = monotonic_ms()
         track = self.tracks.create_track("horn", 100, 200, 0.7, 0.9, now_tick=now)
         self.tracks.apply_attack_event(track.id, now_tick=now + 10)
         self.mode.note_discovery_scan_completed(living_count=1, added_count=1)
         teleported = self.mode.on_no_attackable_targets()
+        # Track is still alive after attack (no pending state), so no teleport
         self.assertFalse(teleported)
 
 

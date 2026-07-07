@@ -59,6 +59,12 @@ class DeviceStream:
         handshake = f"bus/{bus_id}/{dev_id}\x00".encode("utf-8")
         s.sendall(handshake)
 
+        # Set a send timeout so write() never blocks indefinitely.
+        # The existing try/except in attack_loop._attack_one catches
+        # socket.timeout and logs [ATTACK] input error, allowing the
+        # loop to continue instead of hanging for 10+ seconds.
+        s.settimeout(1.0)
+
         return cls(s, bus_id, dev_id)
 
     def write(self, data: bytes) -> int:

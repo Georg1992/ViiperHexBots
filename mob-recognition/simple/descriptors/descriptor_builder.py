@@ -16,12 +16,10 @@ from act_reader import ActReader
 from frame_renderer import render_act_frame
 from spr_reader import SprReader
 
-from descriptors.descriptor import ColorCluster, DeadStateProfile, SimpleMobDescriptor, SizeDescriptor
+from descriptors.descriptor import ColorCluster, SimpleMobDescriptor, SizeDescriptor
 
 DESCRIPTOR_VERSION = 4
 LIVING_ACTIONS = (0, 1)
-DEATH_ACTIONS = tuple(range(32, 40))
-DEATH_CORPSE_FRAME_START = 5
 
 
 class SimpleDescriptorBuilder:
@@ -69,49 +67,27 @@ class SimpleDescriptorBuilder:
         if not living_frames:
             raise RuntimeError(f"no stand/walk frames could be rendered for {mob_name}")
 
-        dead_frames = self._collect_frames(
-            spr_file,
-            act_file,
-            DEATH_ACTIONS,
-            frame_start=DEATH_CORPSE_FRAME_START,
-        )
-        if not dead_frames:
-            raise RuntimeError(f"no death corpse frames could be rendered for {mob_name}")
-
-        # Build full profiles via k-means pipeline (accent_colors, body_colors, rare_colors, histograms)
+        # Build full profile via k-means pipeline (accent_colors, body_colors, rare_colors, histograms)
         # Tighten hue+sat tolerance on the dominant cluster for more selective color matching
-        living_profile = self._build_frame_profile(living_frames, dominant_tolerance=(12, 35, 55))
-        dead_profile = self._build_frame_profile(dead_frames)
+        profile = self._build_frame_profile(living_frames, dominant_tolerance=(12, 35, 55))
 
-        # Living body colors: use k-means centroids (robust across animation frames)
-        living_body_colors = living_profile["body_colors"]
-        living_dominant = living_body_colors[0] if living_body_colors else living_profile["body_colors"][0]
-        living_supporting = living_body_colors[1:] if len(living_body_colors) > 1 else []
+        profile_body_colors = profile["body_colors"]
+        profile_dominant = profile_body_colors[0] if profile_body_colors else profile["body_colors"][0]
+        profile_supporting = profile_body_colors[1:] if len(profile_body_colors) > 1 else []
         # Single most common pixel color across all sprite frames (not a cluster center)
         dominant_pixel_bgr = self._find_dominant_pixel(living_frames)
-
-        # Death body colors: use per-frame intersection (stricter — corpse has fewer frame variants)
-        dead_dominant_color, dead_supporting_colors = self._extract_dominant_colors(dead_frames)
 
         descriptor = SimpleMobDescriptor(
             mob_name=mob_name,
             version=DESCRIPTOR_VERSION,
-            size=living_profile["size"],
-            dominant_color=living_dominant,
-            supporting_colors=living_supporting,
-            accent_colors=living_profile["accent_colors"],
-            rare_colors=living_profile["rare_colors"],
-            sprite_palette_bgr=living_profile["sprite_palette_bgr"],
-            hsv_histogram=living_profile["hsv_histogram"],
+            size=profile["size"],
+            dominant_color=profile_dominant,
+            supporting_colors=profile_supporting,
+            accent_colors=profile["accent_colors"],
+            rare_colors=profile["rare_colors"],
+            sprite_palette_bgr=profile["sprite_palette_bgr"],
+            hsv_histogram=profile["hsv_histogram"],
             dominant_pixel_bgr=dominant_pixel_bgr,
-            dead=DeadStateProfile(
-                size=dead_profile["size"],
-                # Use per-frame intersection for corpse body colors
-                body_colors=[dead_dominant_color] + dead_supporting_colors,
-                accent_colors=dead_profile["accent_colors"],
-                hsv_histogram=dead_profile["hsv_histogram"],
-                sprite_palette_bgr=dead_profile["sprite_palette_bgr"],
-            ),
         )
         descriptor.save(descriptor_path)
         return descriptor

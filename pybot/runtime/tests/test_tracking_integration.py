@@ -1,4 +1,4 @@
-"""LocalTracker + ConfirmState integration on fixture frames."""
+"""Tracking + discovery integration on fixture frames."""
 
 from __future__ import annotations
 
@@ -17,17 +17,9 @@ from pybot.runtime.hunt_tracks import HuntTracks, monotonic_ms
 from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.logging import HuntLogger
 from pybot.runtime.runtime_context import HuntRuntimeContext
-from pybot.runtime.urgent_state import UrgentStateQueue
 from pybot.runtime.validation_log import HuntValidationLogger
-from pybot.runtime.detection.detector_session import DetectorSession, StateTrackSnapshot
+from pybot.runtime.detection.detector_session import DetectorSession
 from pybot.runtime.workers.attack_loop import AttackLoop
-from pybot.runtime.workers.confirm_state_worker import ConfirmStateWorker
-from pybot.runtime.workers.discovery_worker import DiscoveryWorker
-from pybot.runtime.workers.tracking_worker import TrackingWorker
-
-from pybot.runtime._mob_rec_path import import_hunt_track_rules
-_hunt = import_hunt_track_rules()
-HUNT_LOCAL_TRACK_MISS_LIMIT = _hunt.HUNT_LOCAL_TRACK_MISS_LIMIT
 
 FIXTURE = PROJECT_ROOT / "mob-recognition" / "test-fixtures" / "game-screenshots" / "333.png"
 
@@ -47,15 +39,6 @@ class FixtureDetector(DetectorSession):
 
     def discover(self, roi: HuntRoi):
         return self.discover_frame(self._fixture_frame, roi)
-
-    def track_locals(self, roi: HuntRoi, track_snapshots):
-        return self.track_locals_frame(self._fixture_frame, roi, track_snapshots)
-
-    def state_direct(self, roi: HuntRoi, snapshot: StateTrackSnapshot):
-        return self.state_direct_frame(self._fixture_frame, roi, snapshot)
-
-    def state_confirm(self, roi: HuntRoi, snapshot: StateTrackSnapshot):
-        return self.state_confirm_frame(self._fixture_frame, roi, snapshot)
 
 
 class FakeCapture:
@@ -82,13 +65,9 @@ def make_config(**overrides) -> HuntRuntimeConfig:
         teleport_scan_code=16,
         search_range_cells=16,
         cell_size_px=64,
-        state_interval_ms=100,
         discovery_interval_ms=3000,
-        post_attack_state_delay_ms=0,
         teleport_duration_ms=500,
-        coord_stale_skip_ms=None,
         validation_enabled=False,
-        validation_state_every_n=1,
         control_file=None,
     )
     base.update(overrides)
@@ -100,11 +79,11 @@ def make_context(
     *,
     roi: HuntRoi,
     detector: DetectorSession,
+    stop_event: threading.Event | None = None,
 ) -> HuntRuntimeContext:
     logger = HuntLogger(session_id="test_tracking_integration")
     tracks = HuntTracks()
-    stop = threading.Event()
-    stop.set()
+    stop = stop_event or threading.Event()
     return HuntRuntimeContext(
         config=config,
         logger=logger,
@@ -112,7 +91,7 @@ def make_context(
         policy=HuntPolicy(),
         capture=FakeCapture(roi),
         detector=detector,
-        urgent=UrgentStateQueue(),
+        tracker=detector,
         validation=HuntValidationLogger(logger, tracks, enabled=False),
         control=RuntimeControl(None),
         stop_event=stop,
@@ -128,37 +107,51 @@ class TrackingIntegrationTests(unittest.TestCase):
         cls.roi_frame = playfield_roi(frame)
         cls.roi = HuntRoi(x=0, y=0, w=cls.roi_frame.shape[1], h=cls.roi_frame.shape[0])
 
-    def test_local_track_batch_updates_all_alive_tracks(self) -> None:
+    def test_discovery_creates_tracks(self) -> None:
         config = make_config()
         detector = FixtureDetector(self.roi_frame)
         ctx = make_context(config, roi=self.roi, detector=detector)
-        hunt_mode = create_hunt_mode(ctx, ShadowInputBackend())
 
-        DiscoveryWorker(ctx, hunt_mode)._run_scan()
+        # Discover from frame
+        scan = detector.discover(self.roi)
+        self.assertTrue(scan.ok)
+        self.assertGreater(scan.accepted_count, 0)
+
+        # Reconcile into tracks
+        from pybot.runtime._mob_rec_path import import_hunt_track_rules
+        _hunt = import_hunt_track_rules()
+        DiscoveryDetection = _hunt.DiscoveryDetection
+
+        detections = [
+            DiscoveryDetection(x=d.x, y=d.y, confidence=d.confidence, candidate_scale=d.candidate_scale, living=True)
+            for d in scan.detections
+        ]
+        summary = ctx.tracks.reconcile_detections(
+            detections,
+            mob_name="horn",
+            now_tick=monotonic_ms(),
+        )
+        self.assertGreater(summary.added_count, 0)
         self.assertGreater(ctx.tracks.get_track_count(), 0)
 
-        before = {
-            track.id: (track.x, track.y, track.updated_tick)
-            for track in ctx.tracks.tracks_for_policy(monotonic_ms())
-        }
-
-        TrackingWorker(ctx)._run_local_track_batch()
-
-        after_tick = monotonic_ms()
-        for track in ctx.tracks.tracks_for_policy(after_tick):
-            self.assertIn(track.id, before)
-            self.assertGreaterEqual(track.updated_tick, before[track.id][2])
-
-    def test_shadow_attack_then_direct_confirm(self) -> None:
-        config = make_config(post_attack_state_delay_ms=0, skill_delay_ms=0)
+    def test_shadow_attack_on_discovered_track(self) -> None:
+        config = make_config(skill_delay_ms=0)
         detector = FixtureDetector(self.roi_frame)
         ctx = make_context(config, roi=self.roi, detector=detector)
         hunt_mode = create_hunt_mode(ctx, ShadowInputBackend())
         attack = AttackLoop(ctx, hunt_mode, ShadowInputBackend())
-        confirm = ConfirmStateWorker(ctx)
 
-        DiscoveryWorker(ctx, hunt_mode)._run_scan()
-        TrackingWorker(ctx)._run_local_track_batch()
+        # Discover from frame
+        from pybot.runtime._mob_rec_path import import_hunt_track_rules
+        _hunt = import_hunt_track_rules()
+        DiscoveryDetection = _hunt.DiscoveryDetection
+
+        scan = detector.discover(self.roi)
+        detections = [
+            DiscoveryDetection(x=d.x, y=d.y, confidence=d.confidence, candidate_scale=d.candidate_scale, living=True)
+            for d in scan.detections
+        ]
+        ctx.tracks.reconcile_detections(detections, mob_name="horn", now_tick=monotonic_ms())
 
         now = monotonic_ms()
         target_id = ctx.policy.select_target(ctx.tracks.tracks_for_policy(now), now)
@@ -170,54 +163,93 @@ class TrackingIntegrationTests(unittest.TestCase):
         self.assertEqual(track_before.state, "alive")
         self.assertEqual(track_before.attack_count, 0)
 
-        attack._handle_target(target_id, now)
-
-        track_pending = ctx.tracks.get_track_by_id(target_id)
-        assert track_pending is not None
-        self.assertEqual(track_pending.state, "pending")
-        self.assertEqual(track_pending.attack_count, 1)
-        self.assertTrue(ctx.urgent.has_pending())
-
-        self.assertTrue(confirm._run_urgent_direct())
-        self.assertFalse(ctx.urgent.has_pending())
+        attack._attack_one(target_id, now)
 
         track_after = ctx.tracks.get_track_by_id(target_id)
+        self.assertIsNotNone(track_after)
         if track_after is not None:
-            self.assertIn(track_after.state, ("alive", "dead", "unreachable"))
-        else:
-            self.assertEqual(track_before.attack_count, 1)
+            self.assertEqual(track_after.state, "alive")
+            self.assertEqual(track_after.attack_count, 1)
 
-    def test_local_miss_streak_schedules_confirm(self) -> None:
+    def test_rediscovery_dedups_without_duplicates_or_moving(self) -> None:
         config = make_config()
         detector = FixtureDetector(self.roi_frame)
         ctx = make_context(config, roi=self.roi, detector=detector)
-        hunt_mode = create_hunt_mode(ctx, ShadowInputBackend())
-        tracking = TrackingWorker(ctx)
-        confirm = ConfirmStateWorker(ctx)
 
-        DiscoveryWorker(ctx, hunt_mode)._run_scan()
+        from pybot.runtime._mob_rec_path import import_hunt_track_rules
+        _hunt = import_hunt_track_rules()
+        DiscoveryDetection = _hunt.DiscoveryDetection
+
+        # Discover
+        scan = detector.discover(self.roi)
+        detections = [
+            DiscoveryDetection(x=d.x, y=d.y, confidence=d.confidence, candidate_scale=d.candidate_scale, living=True)
+            for d in scan.detections
+        ]
+        ctx.tracks.reconcile_detections(detections, mob_name="horn", now_tick=monotonic_ms())
+
         track = ctx.tracks.get_track_by_id(1)
         assert track is not None
-        track.x = -5000
-        track.y = -5000
+        old_x, old_y = track.x, track.y
+        count_before = ctx.tracks.get_track_count()
 
-        now = monotonic_ms()
-        for _ in range(HUNT_LOCAL_TRACK_MISS_LIMIT):
-            tracking._run_local_track_batch()
-            now = monotonic_ms()
+        # Re-discover the same mobs slightly shifted (within one object radius):
+        # discovery is create-only, so it must NOT spawn duplicates and must NOT
+        # move existing tracks (tracking owns position).
+        detections2 = [
+            DiscoveryDetection(x=d.x + 5, y=d.y + 5, confidence=d.confidence, candidate_scale=d.candidate_scale, living=True)
+            for d in scan.detections
+        ]
+        summary = ctx.tracks.reconcile_detections(
+            detections2, mob_name="horn", now_tick=monotonic_ms() + 1000
+        )
 
-        missed = ctx.tracks.get_track_by_id(1)
-        assert missed is not None
-        self.assertGreaterEqual(missed.local_track_miss_count, HUNT_LOCAL_TRACK_MISS_LIMIT)
+        self.assertEqual(summary.added_count, 0)
+        self.assertEqual(ctx.tracks.get_track_count(), count_before)
+        self.assertEqual(track.x, old_x)
+        self.assertEqual(track.y, old_y)
 
-        confirm_id = ctx.tracks.select_state_confirm_track_id(now)
-        self.assertEqual(confirm_id, 1)
-        self.assertTrue(confirm._run_state_confirm())
+    def test_tracking_keeps_track_coords_fresh(self) -> None:
+        config = make_config()
+        detector = FixtureDetector(self.roi_frame)
+        ctx = make_context(config, roi=self.roi, detector=detector)
 
-        after = ctx.tracks.get_track_by_id(1)
-        assert after is not None
-        self.assertEqual(after.local_track_miss_count, 0)
-        self.assertIn(after.state, ("alive", "dead", "unreachable"))
+        from pybot.runtime._mob_rec_path import import_hunt_track_rules
+        from pybot.runtime.detection.detector_session import StateTrackSnapshot
+        _hunt = import_hunt_track_rules()
+        DiscoveryDetection = _hunt.DiscoveryDetection
+
+        scan = detector.discover(self.roi)
+        detections = [
+            DiscoveryDetection(x=d.x, y=d.y, confidence=d.confidence, candidate_scale=d.candidate_scale, living=True)
+            for d in scan.detections
+        ]
+        ctx.tracks.reconcile_detections(detections, mob_name="horn", now_tick=monotonic_ms())
+
+        snapshots = [
+            StateTrackSnapshot(
+                track_id=s.id,
+                x=s.x,
+                y=s.y,
+                scale=s.discovery_scale if s.discovery_scale > 0 else 1.0,
+            )
+            for s in ctx.tracks.snapshot_alive(monotonic_ms())
+        ]
+        self.assertGreater(len(snapshots), 0)
+
+        batch = detector.track_locals_frame(self.roi_frame, self.roi, snapshots)
+        now = monotonic_ms() + 50
+        removed = ctx.tracks.apply_tracking(batch.results, now_tick=now)
+
+        # Static fixture: at least one track is re-found and stays alive, and no
+        # found track is dropped.
+        self.assertGreater(batch.found_count, 0)
+        found_ids = {r.track_id for r in batch.results if r.found}
+        for track_id in found_ids:
+            self.assertNotIn(track_id, removed)
+            track = ctx.tracks.get_track_by_id(track_id)
+            assert track is not None
+            self.assertEqual(track.updated_tick, now)
 
 
 if __name__ == "__main__":

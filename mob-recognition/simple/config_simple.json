@@ -41,17 +41,5 @@
     "accent": 0.35,
     "rareColor": 0.10,
     "localPattern": 0.15
-  },
-  "deadValidationThreshold": 0.34,
-  "deadWatchPointThreshold": 0.24,
-  "minDeadMobPresence": 0.18,
-  "maxFullOpacity": 0.90,
-  "minOpacitySpriteFraction": 0.04,
-  "minOpacitySamplePixels": 12,
-  "deadValidationWeights": {
-    "pose": 0.35,
-    "sizeGap": 0.15,
-    "histogram": 0.15,
-    "opacity": 0.35
   }
 }

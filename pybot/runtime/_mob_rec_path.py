@@ -11,7 +11,7 @@ Preferred usage
 
         from pybot.runtime._mob_rec_path import import_hunt_track_rules
         hunt_rules = import_hunt_track_rules()
-        HUNT_TRACK_MISS_LIMIT = hunt_rules.HUNT_TRACK_MISS_LIMIT
+        HUNT_OBJECT_RADIUS = hunt_rules.HUNT_OBJECT_RADIUS
 
     This makes the dependency explicit and avoids ``# noqa: F401`` /
     ``# noqa: E402`` suppression comments.

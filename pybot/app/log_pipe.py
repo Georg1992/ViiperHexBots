@@ -1,22 +1,36 @@
-"""Thread-safe log and status message dispatcher for the tkinter GUI."""
+"""Thread-safe log and status message dispatcher for the tkinter GUI.
+
+Worker threads must never call into Tk directly — doing so (e.g. via
+``root.after`` from a non-main thread) blocks the caller until the GUI
+thread services the request, which freezes the bot whenever the Tk main
+loop stalls (window drag/resize, open menu, any modal loop).
+
+Instead, producers only ``put_nowait`` onto an in-memory queue (truly
+non-blocking, thread-safe), and the Tk main thread drains that queue on a
+periodic ``after`` poll scheduled from the main thread. A stalled GUI can
+therefore only lag the log display, never the hunt runtime.
+"""
 
 from __future__ import annotations
 
+import queue
 import tkinter as tk
 from collections.abc import Callable
 from tkinter import ttk
 
+_DRAIN_INTERVAL_MS = 50
+
 
 class LogPipe:
-    """Thread-safe log/status dispatcher that uses root.after() for GUI updates.
+    """Thread-safe log/status dispatcher backed by a queue drained on the UI thread.
 
     Usage::
 
-        pipe = LogPipe(root)
+        pipe = LogPipe(root)              # starts the drain loop (main thread)
         pipe.set_log_box(text_widget)
         pipe.set_status_widgets(status_label, hint_label)
 
-        # Safe to call from any thread:
+        # Safe to call from any thread — never blocks:
         pipe.log("Bot started")
         pipe.status("Input: Ready", "Launch the game")
     """
@@ -27,6 +41,10 @@ class LogPipe:
         self._status_label: ttk.Label | None = None
         self._hint_label: ttk.Label | None = None
         self._on_append_log: Callable[[str], None] | None = None
+        self._queue: queue.Queue[tuple] = queue.Queue()
+        # __init__ runs on the main thread, so scheduling the drain here
+        # keeps every Tk interaction on the main thread.
+        self._root.after(_DRAIN_INTERVAL_MS, self._drain)
 
     # ── Widget registration (call from UI thread after building UI) ──
 
@@ -47,17 +65,30 @@ class LogPipe:
         """Register a callback fired for every appended log line (e.g. overlay)."""
         self._on_append_log = callback
 
-    # ── Thread-safe public API ──────────────────────────────────────
+    # ── Thread-safe public API (never blocks) ───────────────────────
 
     def log(self, message: str) -> None:
-        """Append *message* to the log box (safe from any thread)."""
-        self._root.after(0, self._do_log, message)
+        """Queue *message* for the log box (safe from any thread)."""
+        self._queue.put_nowait(("log", message))
 
     def status(self, title: str, hint: str = "") -> None:
-        """Update the input status labels (safe from any thread)."""
-        self._root.after(0, self._do_status, title, hint)
+        """Queue an input status update (safe from any thread)."""
+        self._queue.put_nowait(("status", title, hint))
 
     # ── Internal dispatch (runs on main thread via root.after) ──────
+
+    def _drain(self) -> None:
+        try:
+            while True:
+                item = self._queue.get_nowait()
+                if item[0] == "log":
+                    self._do_log(item[1])
+                else:
+                    self._do_status(item[1], item[2])
+        except queue.Empty:
+            pass
+        finally:
+            self._root.after(_DRAIN_INTERVAL_MS, self._drain)
 
     def _do_log(self, message: str) -> None:
         if self._log_box is not None:

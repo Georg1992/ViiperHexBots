@@ -11,7 +11,6 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from scoring.death_validator import DeathValidation, DeathValidator
 from descriptors.descriptor import SimpleMobDescriptor
 from descriptors.descriptor_builder import DESCRIPTOR_VERSION
 from scoring.heatmap_detector import HeatmapDetector, Heatmaps
@@ -56,27 +55,16 @@ REQUIRED_CONFIG_KEYS = {
     "playfieldRightRatio",
     "debugOutputDir",
     "centerWeights",
-    "deadValidationThreshold",
-    "deadWatchPointThreshold",
-    "minDeadMobPresence",
-    "maxFullOpacity",
-    "minOpacitySpriteFraction",
-    "minOpacitySamplePixels",
-    "deadValidationWeights",
     "minDominantPixelFraction",
     "dominantPixelDistance",
 }
 
-REQUIRED_DEAD_VALIDATION_WEIGHT_KEYS = {"pose", "sizeGap", "histogram", "opacity"}
-
 REQUIRED_CENTER_WEIGHT_KEYS = {"bodyPalette", "accent", "rareColor", "localPattern"}
-
-STATE_DEAD_OVERRIDE_MARGIN = 0.08
 
 
 @dataclass(frozen=True)
 class StateSearchProfile:
-    """Search geometry for canonical state evaluation (not a separate classifier)."""
+    """Search geometry for canonical state evaluation."""
 
     drift_radius_px: int | None = None
     drift_step_px: int | None = None
@@ -107,10 +95,6 @@ class SimpleCandidate:
     size_score: float
     candidate_scale: float
     accepted: bool
-    is_dead: bool
-    dead_score: float
-    mean_opacity: float
-    opacity_confirmed: bool
     rejection_reason: str
     heatmap_score: float
 
@@ -132,11 +116,6 @@ class SimpleCandidate:
             "candidateScale": round(self.candidate_scale, 4),
             "heatmapScore": round(self.heatmap_score, 4),
             "accepted": self.accepted,
-            "dead": self.is_dead,
-            "living": self.accepted and not self.is_dead,
-            "deadScore": round(self.dead_score, 4),
-            "meanOpacity": round(self.mean_opacity, 4),
-            "opacityConfirmed": self.opacity_confirmed,
             "rejectionReason": self.rejection_reason,
         }
 
@@ -163,9 +142,6 @@ def load_simple_config(path: Optional[Path] = None) -> dict:
     center_weight_missing = sorted(REQUIRED_CENTER_WEIGHT_KEYS - set(config["centerWeights"]))
     if center_weight_missing:
         raise ValueError(f"missing center weight keys: {', '.join(center_weight_missing)}")
-    dead_weight_missing = sorted(REQUIRED_DEAD_VALIDATION_WEIGHT_KEYS - set(config["deadValidationWeights"]))
-    if dead_weight_missing:
-        raise ValueError(f"missing dead validation weight keys: {', '.join(dead_weight_missing)}")
     return config
 
 
@@ -175,7 +151,6 @@ class SimpleMobDetector:
         self.config = load_simple_config() if config is None else config
         self.heatmap_detector = HeatmapDetector(self.config)
         self.region_scorer = SimpleRegionScorer(self.config)
-        self.death_validator = DeathValidator(self.config, self.region_scorer)
         self._descriptor_cache: dict[str, SimpleMobDescriptor] = {}
         self.self_exclusion_width_ratio = float(self.config["selfExclusionWidthRatio"])
         self.self_exclusion_height_ratio = float(self.config["selfExclusionHeightRatio"])
@@ -195,7 +170,6 @@ class SimpleMobDetector:
         if any(prior.get(key) != self.config.get(key) for key in scale_keys):
             self.heatmap_detector = HeatmapDetector(self.config)
         self.region_scorer = SimpleRegionScorer(self.config)
-        self.death_validator = DeathValidator(self.config, self.region_scorer)
         self.self_exclusion_width_ratio = float(self.config["selfExclusionWidthRatio"])
         self.self_exclusion_height_ratio = float(self.config["selfExclusionHeightRatio"])
         self.small_scale_min_frame_width = int(self.config["smallScaleMinFrameWidth"])
@@ -297,14 +271,14 @@ class SimpleMobDetector:
         cy: int,
         heat_score: float,
     ) -> list[SimpleCandidate]:
-        """Discovery scan: shared point scorer; living only when it beats corpse signal."""
+        """Discovery scan: score one heatmap peak center. Returns accepted candidate or empty list."""
         if self._is_self_center(cx, cy, frame_bgr.shape):
             return []
         if heat_score < self.min_discovery_heatmap_score:
             return []
 
         scales = self._candidate_scales(frame_bgr.shape[1])
-        living, dead = self._score_point_at(frame_bgr, hsv, descriptor, cx, cy, scales=scales, skip_death_validation=True)
+        living = self._score_point_at(frame_bgr, hsv, descriptor, cx, cy, scales=scales)
         if living and living.accepted:
             # Dominant pixel gate: discovery-only filter. Rejects candidates where
             # too few pixels match the exact dominant sprite pixel color.
@@ -331,22 +305,12 @@ class SimpleMobDetector:
         cx: int,
         cy: int,
         scales: list[float] | None = None,
-        *,
-        skip_death_validation: bool = False,
-    ) -> tuple[SimpleCandidate | None, SimpleCandidate | None]:
-        """Score living and optional corpse signals at one point. Returns (living, dead).
-
-        When skip_death_validation=True (discovery), only evaluates living scores —
-        the death validator runs exclusively during state tracking.
-        """
+    ) -> SimpleCandidate | None:
+        """Score living signal at one point. Returns the best accepted candidate or None."""
         if cx < 0 or cy < 0 or cx >= frame_bgr.shape[1] or cy >= frame_bgr.shape[0]:
-            return None, None
-        if descriptor.dead is None:
-            return None, None
+            return None
 
-        best_living: tuple[float, tuple[int, int, int, int], tuple[int, int, int, int], RegionScore, DeathValidation] | None = None
-        best_dead: tuple[float, tuple[int, int, int, int], RegionScore | None, DeathValidation] | None = None
-        presence_gate = self.death_validator.min_mob_presence * 0.55
+        best: tuple[float, tuple[int, int, int, int], RegionScore] | None = None
 
         if scales is None:
             scales = self._candidate_scales(frame_bgr.shape[1])
@@ -366,109 +330,28 @@ class SimpleMobDetector:
                 frame_bgr, hsv, descriptor, living_bbox, expected_scale=float(scale)
             )
 
-            if skip_death_validation:
-                if living_score.accepted and (
-                    best_living is None or living_score.final_score > best_living[3].final_score
-                ):
-                    best_living = (float(scale), living_bbox, living_bbox, living_score, None)
-                    if living_score.final_score >= 0.30:
-                        break
-                continue
-
-            dead_bbox = self._bbox_for_size(
-                cx,
-                cy,
-                int(round(descriptor.dead.size.avg_width * scale)),
-                int(round(descriptor.dead.size.avg_height * scale)),
-                frame_bgr.shape,
-            )
-            if dead_bbox is None:
-                continue
-
-            dead_score = self.death_validator.score_dead_region(frame_bgr, hsv, descriptor, dead_bbox, float(scale))
-            living_at_dead_score = self.region_scorer.score(
-                frame_bgr, hsv, descriptor, dead_bbox, expected_scale=float(scale)
-            )
-            mob_signal = max(
-                living_score.final_score,
-                living_at_dead_score.final_score,
-                dead_score.final_score if dead_score is not None else 0.0,
-            )
-            if mob_signal < presence_gate:
-                continue
-
-            validation = self.death_validator.validate(
-                frame_bgr,
-                hsv,
-                descriptor,
-                living_bbox,
-                dead_bbox,
-                living_score,
-                dead_score,
-                living_at_dead_score,
-                watch_point=True,
-            )
-
-            if validation.is_dead and (
-                best_dead is None or validation.confidence > best_dead[3].confidence
+            if living_score.accepted and (
+                best is None or living_score.final_score > best[2].final_score
             ):
-                best_dead = (float(scale), dead_bbox, dead_score, validation)
-            elif living_score.accepted and (
-                best_living is None or living_score.final_score > best_living[3].final_score
-            ):
-                best_living = (float(scale), living_bbox, dead_bbox, living_score, validation)
+                best = (float(scale), living_bbox, living_score)
+                if living_score.final_score >= 0.30:
+                    break
 
-            # Early-exit: if body score is clearly good, skip remaining scales
-            if (
-                best_living is not None
-                and best_living[3].final_score >= 0.30
-            ):
-                break
-
-        dead_candidate: SimpleCandidate | None = None
-        if best_dead is not None:
-            scale, bbox, score, validation = best_dead
-            region_score = score if score is not None else RegionScore(0, 0, 0, 0, 0, 0, 0, False, "missing_dead_score")
-            dead_candidate = self._track_candidate(
+        if best is not None:
+            scale, bbox, score = best
+            bx, by, bw, bh = bbox
+            cx = bx + bw // 2
+            cy = by + bh // 2
+            return self._living_candidate(
                 descriptor.mob_name,
                 cx,
                 cy,
                 bbox,
-                region_score,
+                score,
+                1.0,
                 scale,
-                is_dead=True,
-                death_validation=validation,
             )
-
-        living_candidate: SimpleCandidate | None = None
-        if best_living is not None:
-            scale, living_bbox, _, score, validation = best_living
-            bx, by, bw, bh = living_bbox
-            cx = bx + bw // 2
-            cy = by + bh // 2
-            if skip_death_validation:
-                living_candidate = self._living_candidate(
-                    descriptor.mob_name,
-                    cx,
-                    cy,
-                    living_bbox,
-                    score,
-                    1.0,
-                    scale,
-                )
-            else:
-                living_candidate = self._track_candidate(
-                    descriptor.mob_name,
-                    cx,
-                    cy,
-                    living_bbox,
-                    score,
-                    scale,
-                    is_dead=False,
-                    death_validation=validation,
-                )
-
-        return living_candidate, dead_candidate
+        return None
 
     def _score_living_only_at(
         self,
@@ -479,7 +362,7 @@ class SimpleMobDetector:
         cy: int,
         scale: float,
     ) -> tuple[RegionScore | None, tuple[int, int, int, int] | None]:
-        """Living region score at one point — no death validator, single scale."""
+        """Living region score at one point — single scale."""
         living_bbox = self._bbox_for_size(
             cx,
             cy,
@@ -529,14 +412,10 @@ class SimpleMobDetector:
         cy: int,
         scales: list[float] | None = None,
     ) -> list[SimpleCandidate]:
-        """Track state: death validation and living position at a known track point."""
-        living, dead = self._score_point_at(frame_bgr, hsv, descriptor, cx, cy, scales=scales)
+        """Track state: living position at a known track point."""
+        living = self._score_point_at(frame_bgr, hsv, descriptor, cx, cy, scales=scales)
         if living is not None and living.accepted:
-            if dead is not None and self._death_override(dead, living):
-                return [dead]
             return [living]
-        if dead is not None:
-            return [dead]
         return []
 
     def _state_update_from_candidate(
@@ -556,14 +435,6 @@ class SimpleMobDetector:
                 "confidence": 0.0,
                 "x": cx + offset_x,
                 "y": cy + offset_y,
-            }
-        if best.is_dead:
-            return {
-                "trackId": track_id,
-                "state": "dead",
-                "confidence": round(best.final_score, 4),
-                "x": best.center_x + offset_x,
-                "y": best.center_y + offset_y,
             }
         return {
             "trackId": track_id,
@@ -616,11 +487,7 @@ class SimpleMobDetector:
             )
             if profile.early_exit_at_center and index == 0:
                 center_best, _ = self._select_track_state_candidate(point_candidates)
-                if (
-                    center_best is not None
-                    and not center_best.is_dead
-                    and center_best.accepted
-                ):
+                if center_best is not None and center_best.accepted:
                     break
         best, arbitration = self._select_track_state_candidate(point_candidates)
         arbitration["scales"] = track_scales
@@ -647,7 +514,7 @@ class SimpleMobDetector:
         scale_hint: float | None = None,
         profile: StateSearchProfile = STATE_PROFILE_FULL,
     ) -> dict:
-        """Canonical single-track state: alive, dead, or unreachable."""
+        """Canonical single-track state: alive or unreachable."""
         descriptor = self.ensure_descriptor(mob_name)
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         return self._evaluate_one_track(
@@ -717,7 +584,7 @@ class SimpleMobDetector:
         offset_y: int = 0,
         scale_hint: float | None = None,
     ) -> dict:
-        """Post-attack / urgent state: canonical evaluator with direct search profile."""
+        """Post-attack / urgent state: lightweight search profile."""
         return self.evaluate_track_state(
             frame_bgr,
             mob_name,
@@ -772,87 +639,28 @@ class SimpleMobDetector:
                     points.append((nx, ny))
         return points or [(cx, cy)]
 
-    @staticmethod
-    def _death_override(dead: SimpleCandidate, living: SimpleCandidate) -> bool:
-        """Check if a dead candidate should override a living candidate.
-
-        Uses living_death_conf (accent+pattern+purity) for fair comparison
-        against death_validation.confidence, since body palette alone can't
-        distinguish alive from dead.
-        """
-        living_conf = (
-            living.accent_score * 0.50
-            + living.local_pattern_score * 0.30
-            + living.color_purity_score * 0.20
-        )
-        return dead.final_score >= float(np.clip(living_conf, 0.0, 1.0)) + STATE_DEAD_OVERRIDE_MARGIN
-
     def _select_track_state_candidate(
         self, candidates: list[SimpleCandidate]
     ) -> tuple[SimpleCandidate | None, dict[str, object]]:
-        living_scores = [
-            candidate.final_score for candidate in candidates if not candidate.is_dead
-        ]
-        dead_scores = [candidate.final_score for candidate in candidates if candidate.is_dead]
-        best_living_score = max(living_scores) if living_scores else 0.0
-        best_dead_score = max(dead_scores) if dead_scores else 0.0
-
         if not candidates:
             return None, {
-                "bestLivingScore": best_living_score,
-                "bestDeadScore": best_dead_score,
+                "bestScore": 0.0,
                 "selectedState": "unreachable",
                 "reason": "unreachable_no_candidate",
             }
 
-        accepted_living = [
-            candidate
-            for candidate in candidates
-            if not candidate.is_dead and candidate.accepted
-        ]
-        dead_candidates = [candidate for candidate in candidates if candidate.is_dead]
-        best_accepted_living = (
-            max(accepted_living, key=lambda candidate: candidate.final_score)
-            if accepted_living
-            else None
-        )
-        best_dead = (
-            max(dead_candidates, key=lambda candidate: candidate.final_score)
-            if dead_candidates
-            else None
-        )
-
-        if best_accepted_living is not None:
-            if (
-                best_dead is not None
-                and self._death_override(best_dead, best_accepted_living)
-            ):
-                return best_dead, {
-                    "bestLivingScore": best_living_score,
-                    "bestDeadScore": best_dead_score,
-                    "selectedState": "dead",
-                    "reason": "dead_override",
-                }
-            return best_accepted_living, {
-                "bestLivingScore": best_living_score,
-                "bestDeadScore": best_dead_score,
+        best = max(candidates, key=lambda c: c.final_score)
+        if best.accepted:
+            return best, {
+                "bestScore": best.final_score,
                 "selectedState": "alive",
-                "reason": "living_preferred",
-            }
-
-        if best_dead is not None:
-            return best_dead, {
-                "bestLivingScore": best_living_score,
-                "bestDeadScore": best_dead_score,
-                "selectedState": "dead",
-                "reason": "dead_no_living",
+                "reason": "living_found",
             }
 
         return None, {
-            "bestLivingScore": best_living_score,
-            "bestDeadScore": best_dead_score,
+            "bestScore": best.final_score,
             "selectedState": "unreachable",
-            "reason": "unreachable_no_accepted_living",
+            "reason": "unreachable_no_accepted",
         }
 
     @staticmethod
@@ -862,8 +670,7 @@ class SimpleMobDetector:
         print(
             (
                 f"state_arbitration trackId={track_id} "
-                f"bestLivingScore={float(arbitration['bestLivingScore']):.4f} "
-                f"bestDeadScore={float(arbitration['bestDeadScore']):.4f} "
+                f"bestScore={float(arbitration['bestScore']):.4f} "
                 f"selectedState={arbitration['selectedState']} "
                 f"reason={arbitration['reason']} "
                 f"scales={scale_text}"
@@ -929,48 +736,8 @@ class SimpleMobDetector:
             size_score=score.size_score,
             candidate_scale=candidate_scale,
             accepted=score.accepted,
-            is_dead=False,
-            dead_score=0.0,
-            mean_opacity=1.0,
-            opacity_confirmed=False,
             rejection_reason=score.rejection_reason,
             heatmap_score=heat_score,
-        )
-
-    @staticmethod
-    def _track_candidate(
-        mob_name: str,
-        cx: int,
-        cy: int,
-        bbox: tuple[int, int, int, int],
-        score: RegionScore,
-        candidate_scale: float,
-        *,
-        is_dead: bool,
-        death_validation: DeathValidation,
-    ) -> SimpleCandidate:
-        region_score = score if score is not None else RegionScore(0, 0, 0, 0, 0, 0, 0, False, "missing_score")
-        accepted = (not is_dead) or death_validation.is_dead
-        return SimpleCandidate(
-            mob_name=mob_name,
-            center_x=cx,
-            center_y=cy,
-            bbox=bbox,
-            final_score=death_validation.confidence if is_dead else region_score.final_score,
-            body_palette_score=region_score.body_palette_score,
-            accent_score=region_score.accent_score,
-            rare_color_score=region_score.rare_color_score,
-            local_pattern_score=region_score.local_pattern_score,
-            color_purity_score=region_score.color_purity_score,
-            size_score=region_score.size_score,
-            candidate_scale=candidate_scale,
-            accepted=accepted,
-            is_dead=is_dead,
-            dead_score=death_validation.confidence if is_dead else 0.0,
-            mean_opacity=death_validation.mean_opacity,
-            opacity_confirmed=death_validation.opacity_fade_score > 0.0,
-            rejection_reason="" if is_dead else region_score.rejection_reason,
-            heatmap_score=1.0,
         )
 
     def _nms(self, candidates: list[SimpleCandidate]) -> list[SimpleCandidate]:

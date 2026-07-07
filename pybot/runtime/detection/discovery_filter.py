@@ -14,7 +14,7 @@ def filter_scan_candidates(
     ignore_x, ignore_y, ignore_w, ignore_h = player_ignore_box(roi, cell_size_px)
     filtered: list[RawDetection] = []
     for candidate in candidates:
-        if not candidate.living or candidate.dead:
+        if not candidate.living:
             continue
         if point_inside_ignore(
             candidate.x,

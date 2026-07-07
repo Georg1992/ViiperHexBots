@@ -48,7 +48,7 @@ class LocalTrackerTests(unittest.TestCase):
 
     def _living_anchor(self, detector: SimpleMobDetector):
         discovery = detector.detect(self.roi, "horn")
-        living = [c for c in discovery.accepted if not c.is_dead]
+        living = [c for c in discovery.accepted]
         self.assertGreater(len(living), 0)
         return living[0]
 
@@ -88,7 +88,7 @@ class LocalTrackerTests(unittest.TestCase):
         result = track_local(detector, self.roi, "horn", track, search_radius_px=20)
         self.assertFalse(result.found)
         self.assertGreater(len(result.miss_reason), 0)
-        self.assertNotIn(result.miss_reason, ("unreachable", "dead", "unknown"))
+        self.assertNotIn(result.miss_reason, ("unreachable", "unknown"))
 
     def test_finds_mob_within_search_radius_after_offset_seed(self) -> None:
         detector = self._detector()
@@ -107,7 +107,7 @@ class LocalTrackerTests(unittest.TestCase):
     def test_benchmark_one_three_six_tracks(self) -> None:
         detector = self._detector()
         discovery = detector.detect(self.roi, "horn")
-        living = [c for c in discovery.accepted if not c.is_dead][:6]
+        living = [c for c in discovery.accepted][:6]
         if len(living) < 3:
             self.skipTest("fixture needs at least 3 living horns")
 

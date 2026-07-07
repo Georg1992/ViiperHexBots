@@ -3,6 +3,10 @@
 Captures the game window, runs discovery every ~2s, uses local_tracker
 between discoveries to follow mobs in real time, and draws overlay dots.
 
+Each tracking iteration scores the living state at the tracked point
+via _score_point_at(). When a mob is not found, the track goes stale
+and is removed after 2 misses.
+
 Usage:
     py scripts/test_detection.py --mob horn
     py scripts/test_detection.py --hwnd 123456 --mob horn
@@ -10,6 +14,7 @@ Usage:
 
 Hotkeys:
     Q          — reset all tracks (simulates teleport)
+    S          — save frame + detection diagnostic to logs/debug_saves/
     ESC / Ctrl-C — exit
 """
 
@@ -54,7 +59,6 @@ from pybot.runtime.capture.window_roi import (
     point_inside_ignore,
 )
 from pybot.app.win32_util import enum_game_windows
-from scoring.heatmap_detector import palette_heatmap
 
 user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
@@ -132,6 +136,7 @@ class TrackedMob:
     color: int = COLOR_DOT_GREEN
     discovery_scale: float = 0.0
     attack_count: int = 0
+
 
 
 # ── Overlay ──────────────────────────────────────────────────────
@@ -442,7 +447,6 @@ def main() -> int:
     print(f"ROI: {roi.x},{roi.y} {roi.w}x{roi.h}\n")
 
     # ── Tracking state ─────────────────────────────────────────────
-    # Mirrors HuntTracks: list of TrackedMob with production miss/match logic
     tracked: list[TrackedMob] = []
     track_id_gen = 1
     last_q = False
@@ -458,17 +462,16 @@ def main() -> int:
         while not is_key_down(0x1B):  # ESC
             now = time.time()
 
-            # ── Q press → teleport: wipe tracks, skip one discovery ─
+            # ── Q press → teleport: wipe tracks ─
             q_down = is_key_down(ord('Q'))
             if q_down and not last_q:
                 tracked.clear()
-                teleport_until = time.time() + 0.5  # skip discovery for 500ms
-                overlay.update([], (roi.x, roi.y, roi.w, roi.h),
-                               "TELEPORT")
+                teleport_until = time.time() + 0.5
+                overlay.update([], (roi.x, roi.y, roi.w, roi.h), "TELEPORT")
                 print(f"[TELEPORT] scan {scan_count} — track wipe + cooldown")
             last_q = q_down
 
-            # ── S press → detect, reconcile tracks immediately, save ─
+            # ── S press → detect, reconcile, save ─
             s_down = is_key_down(ord('S'))
             if s_down and not last_s:
                 s_start = time.perf_counter()
@@ -478,7 +481,6 @@ def main() -> int:
                         save_result = detector.detect(save_frame, mob_name)
                         detect_ms = (time.perf_counter() - s_start) * 1000
 
-                        # Reconcile into tracked list immediately (same logic as discovery)
                         ignore_x, ignore_y, ignore_w, ignore_h = player_ignore_box(roi, CELL_SIZE_PX)
                         reconciles = 0
                         for c in save_result.accepted:
@@ -488,7 +490,6 @@ def main() -> int:
                             sy = c.center_y + roi.y
                             if point_inside_ignore(sx, sy, ignore_x, ignore_y, ignore_w, ignore_h):
                                 continue
-                            # Check if this matches an existing track
                             matched = None
                             for t in tracked:
                                 dx = sx - t.x
@@ -517,18 +518,17 @@ def main() -> int:
                                 ))
                             reconciles += 1
 
-                        # Update overlay immediately
-                        dots = [(t.x, t.y, t.color) for t in tracked]
                         alive = sum(1 for t in tracked if t.color == COLOR_DOT_GREEN)
-                        overlay.update(dots, (roi.x, roi.y, roi.w, roi.h),
-                                       f"Mobs:{len(tracked)} alive:{alive} scan:{scan_count}")
+                        overlay.update(
+                            [(t.x, t.y, t.color) for t in tracked],
+                            (roi.x, roi.y, roi.w, roi.h),
+                            f"Mobs:{len(tracked)} alive:{alive} scan:{scan_count}",
+                        )
 
-                        # Save frame + diagnostic JSON
                         ts = time.strftime("%Y%m%d_%H%M%S")
                         save_dir = PROJECT_ROOT / "logs" / "debug_saves"
                         save_dir.mkdir(parents=True, exist_ok=True)
-                        png_path = save_dir / f"frame_{ts}.png"
-                        cv2.imwrite(str(png_path), save_frame)
+                        cv2.imwrite(str(save_dir / f"frame_{ts}.png"), save_frame)
                         diag = {
                             "mob": mob_name,
                             "roi": [roi.x, roi.y, roi.w, roi.h],
@@ -545,9 +545,9 @@ def main() -> int:
                                 "rare": round(c.rare_color_score, 4),
                                 "heat": round(c.heatmap_score, 4),
                                 "scale": round(c.candidate_scale, 4),
-                                "dead": c.is_dead,
+
                                 "rejection": c.rejection_reason,
-                            } for c in save_result.candidates]
+                            } for c in save_result.candidates],
                         }
                         (save_dir / f"frame_{ts}.json").write_text(json.dumps(diag, indent=2), encoding="utf-8")
                         print(f"[S] {reconciles} tracked in {detect_ms:.0f}ms | {save_result.candidates} raw")
@@ -565,7 +565,7 @@ def main() -> int:
                 continue
             roi = new_roi
 
-            # ── Capture ONCE per iteration (shared by discovery + tracking) ─
+            # ── Capture ONCE per iteration ───────────────────────────
             try:
                 frame = capture_region(roi.x, roi.y, roi.w, roi.h)
             except Exception as e:
@@ -577,60 +577,29 @@ def main() -> int:
 
             now = time.time()
 
-            # ── TRACKING FIRST: every iteration for ALL tracks ─────────
-            # Tracking runs BEFORE discovery so dots update immediately.
-            # Uses a proper gate chain (body + accent + local pattern)
-            # so texture noise doesn't keep false tracks alive.
+            # ── Pre-compute HSV once (shared by all tracks) ────────────
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+            # ── TRACKING: score each track at its last known position ─────
             for t in tracked:
                 cx = t.x - roi.x
                 cy = t.y - roi.y
                 try:
-                    half = 90  # 180x180 window — mob moves ~10px in 50ms
-                    x0 = max(0, cx - half)
-                    y0 = max(0, cy - half)
-                    x1 = min(frame.shape[1], cx + half)
-                    y1 = min(frame.shape[0], cy + half)
-                    if x1 - x0 < 20 or y1 - y0 < 20:
-                        t.miss_count += 1
-                        t.color = COLOR_DOT_YELLOW
-                        continue
-                    crop = frame[y0:y1, x0:x1]
-                    crop_hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+                    scale = t.discovery_scale if t.discovery_scale > 0 else 1.0
+                    living = detector._score_point_at(
+                        frame, hsv, mob_descriptor, cx, cy,
+                        scales=[scale],
+                    )
 
-                    # Gate 1: body palette heatmap (dominant + supporting colors)
-                    body = palette_heatmap(crop_hsv, mob_descriptor.body_palette)
-                    blur = cv2.blur(body, (21, 21))
-                    _, max_val, _, max_loc = cv2.minMaxLoc(blur)
-
-                    # Gate 2: accent heatmap (rejects texture that lacks mob highlights)
-                    accent = palette_heatmap(crop_hsv, mob_descriptor.accent_colors)
-                    blur_accent = cv2.blur(accent, (15, 15))
-                    _, accent_val, _, _ = cv2.minMaxLoc(blur_accent)
-
-                    # Gate 3: local pattern (gradient edges within body heatmap)
-                    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                    grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-                    grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-                    edge = cv2.magnitude(grad_x, grad_y)
-                    if float(edge.max()) > 0:
-                        edge = edge / float(edge.max())
-                    pattern = np.maximum(accent * 0.75, body * edge)
-                    blur_pattern = cv2.blur(pattern, (15, 15))
-                    _, pattern_val, _, _ = cv2.minMaxLoc(blur_pattern)
-
-                    # Combined gate: requires all three scores to be meaningful
-                    if (max_val >= 0.12
-                            and accent_val >= 0.08
-                            and pattern_val >= 0.06):
-                        new_cx = max_loc[0] + x0 + roi.x
-                        new_cy = max_loc[1] + y0 + roi.y
-                        t.x = new_cx
-                        t.y = new_cy
+                    if living is not None and living.accepted:
+                        # Alive — update position
+                        t.x = living.center_x + roi.x
+                        t.y = living.center_y + roi.y
                         t.last_seen = now
                         t.miss_count = 0
-                        t.confidence = float(max_val)
+                        t.confidence = living.final_score
                         t.color = COLOR_DOT_GREEN
-                        t.discovery_scale = 1.0
+                        t.discovery_scale = living.candidate_scale
                     else:
                         t.miss_count += 1
                         t.color = COLOR_DOT_YELLOW
@@ -638,17 +607,17 @@ def main() -> int:
                     t.miss_count += 1
                     t.color = COLOR_DOT_YELLOW
 
-            # ── OVERLAY: show tracking positions immediately ─
-            dots = [(t.x, t.y, t.color) for t in tracked]
+            # ── OVERLAY ──────────────────────────────────────────────
             alive = sum(1 for t in tracked if t.color == COLOR_DOT_GREEN)
-            overlay.update(dots, (roi.x, roi.y, roi.w, roi.h),
-                           f"Mobs:{len(tracked)} alive:{alive} scan:{scan_count}")
+            overlay.update(
+                [(t.x, t.y, t.color) for t in tracked],
+                (roi.x, roi.y, roi.w, roi.h),
+                f"Mobs:{len(tracked)} alive:{alive} scan:{scan_count}",
+            )
 
-            # ── DISCOVERY: every iteration — uses track info to skip ───
-            # After teleport, skip discovery for 2 iterations so old mobs
-            # on the same frame don't immediately recreate tracks.
+            # ── DISCOVERY: every iteration ────────────────────────────
             if time.time() < teleport_until:
-                pass  # still in teleport cooldown
+                pass
             else:
                 try:
                     result = detector.detect(frame, mob_name)
@@ -660,13 +629,7 @@ def main() -> int:
                 scan_count += 1
 
                 ignore_x, ignore_y, ignore_w, ignore_h = player_ignore_box(roi, CELL_SIZE_PX)
-                # Each detection is checked against CURRENT tracked positions
-                # (updated by tracking above). If a detection is within the
-                # skip radius of any tracked mob, it's assumed to be the
-                # same mob and is NOT added as a new track.
                 for c in result.accepted:
-                    if c.is_dead:
-                        continue
                     sx = c.center_x + roi.x
                     sy = c.center_y + roi.y
                     if point_inside_ignore(sx, sy, ignore_x, ignore_y, ignore_w, ignore_h):
@@ -689,7 +652,6 @@ def main() -> int:
                             discovery_scale=c.candidate_scale,
                         ))
 
-                # Diagnostics: every 5th scan
                 if scan_count <= 5 or scan_count % 10 == 0:
                     reasons: dict[str, int] = {}
                     for cand in result.candidates:
@@ -704,18 +666,19 @@ def main() -> int:
                           f"| {reason_str}")
 
             # ── Remove stale tracks ─
-            removed: list[int] = []
-            for t in tracked:
-                if t.miss_count >= HUNT_TRACK_MISS_LIMIT:
-                    removed.append(t.id)
+            removed: list[int] = [
+                t.id for t in tracked if t.miss_count >= HUNT_TRACK_MISS_LIMIT
+            ]
             if removed:
                 tracked = [t for t in tracked if t.id not in set(removed)]
 
-            # ── OVERLAY: update every iteration ─
-            dots = [(t.x, t.y, t.color) for t in tracked]
+            # ── OVERLAY (final) ─
             alive = sum(1 for t in tracked if t.color == COLOR_DOT_GREEN)
-            stats = (f"Mobs:{len(tracked)} alive:{alive} scan:{scan_count}")
-            overlay.update(dots, (roi.x, roi.y, roi.w, roi.h), stats)
+            overlay.update(
+                [(t.x, t.y, t.color) for t in tracked],
+                (roi.x, roi.y, roi.w, roi.h),
+                f"Mobs:{len(tracked)} alive:{alive} scan:{scan_count}",
+            )
 
             time.sleep(0.05)  # 20 Hz poll for ESC/Q without busy-wait
 

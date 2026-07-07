@@ -58,7 +58,7 @@ class TrackIdStateTests(unittest.TestCase):
         self.assertEqual(len(updates), len(tracks))
         for request, update in zip(tracks, updates):
             self.assertEqual(update["trackId"], request["trackId"])
-            self.assertIn(update["state"], {"alive", "dead", "unreachable"})
+            self.assertIn(update["state"], {"alive", "unreachable"})
 
     def test_close_mobs_keep_distinct_track_ids(self) -> None:
         entry = next(item for item in self.manifest["images"] if len(item["watchPoints"]) >= 2)

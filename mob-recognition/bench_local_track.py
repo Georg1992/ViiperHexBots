@@ -44,7 +44,7 @@ def main() -> None:
     frame = cv2.imread(str(MOB_REC / "test-fixtures" / "game-screenshots" / "333.png"))
     roi = playfield_roi(frame)
     discovery = detector.detect(roi, "horn")
-    living = [c for c in discovery.accepted if not c.is_dead]
+    living = [c for c in discovery.accepted]
 
     def tracks(count: int) -> list[dict]:
         return [

@@ -33,8 +33,8 @@ class HuntModeStrategy(ABC):
         self._ctx = ctx
         self._input = input_backend
         self._discovery_since_reset = False
+        self._last_no_target_log_ms = 0
         self._last_no_target_blocked_log_ms = 0
-        self._last_wait_known_log_ms = 0
 
     # ── Public interface (called by HuntModeController) ──────────
 
@@ -49,8 +49,8 @@ class HuntModeStrategy(ABC):
         Subclasses may extend to reset mode-specific timers.
         """
         self._discovery_since_reset = False
+        self._last_no_target_log_ms = 0
         self._last_no_target_blocked_log_ms = 0
-        self._last_wait_known_log_ms = 0
 
     def note_discovery_scan_completed(
         self, *, living_count: int, added_count: int
@@ -79,14 +79,8 @@ class HuntModeStrategy(ABC):
             return False
 
         now = monotonic_ms()
-        if ctx.tracks.has_attackable_tracks(now):
-            self._log_no_target("wait", "attackable_tracks")
-            return False
-
-        alive_or_pending = ctx.tracks.get_alive_or_pending_count(now)
-        if alive_or_pending > 0:
-            self._log_wait_known(alive_or_pending)
-            self._log_no_target("wait", "alive_or_pending_tracks")
+        if ctx.tracks.has_alive_tracks(now):
+            self._log_no_target("wait", "alive_tracks")
             return False
 
         return self._handle_no_targets_impl()
@@ -101,26 +95,13 @@ class HuntModeStrategy(ABC):
 
     # ── Shared helpers used by concrete strategies ───────────────
 
-    def _can_consider_area_clear(self) -> bool:
-        """Check preconditions for considering the area clear."""
-        if self._ctx.vision_busy():
-            self._log_no_target_blocked("vision_busy")
-            return False
-        if self._ctx.urgent.has_pending():
-            self._log_no_target_blocked("direct_state_pending")
-            return False
-        return True
-
     def _build_no_target_context(self) -> dict[str, object]:
         ctx = self._ctx
         now = monotonic_ms()
         area = ctx.tracks.get_area_clear_candidate(now)
         return {
-            "attackable_count": ctx.tracks.get_attackable_count(now),
-            "alive_or_pending_count": ctx.tracks.get_alive_or_pending_count(now),
+            "alive_count": area.alive_count,
             "area_clear": area.clear,
-            "vision_busy": ctx.vision_busy(),
-            "direct_state_pending": ctx.urgent.has_pending(),
             "has_discovery_since_reset": self._discovery_since_reset,
         }
 
@@ -130,16 +111,21 @@ class HuntModeStrategy(ABC):
         reason: str,
         context: dict | None = None,
     ) -> None:
+        # Throttle repeated "wait" decisions to once per 500ms.
+        # Teleport/skip decisions always log since they're infrequent.
+        if decision == "wait":
+            now = monotonic_ms()
+            if now - self._last_no_target_log_ms < 500:
+                return
+            self._last_no_target_log_ms = now
+
         ctx = self._ctx
         ctx_data = context or self._build_no_target_context()
         ctx.validation.log_no_target_decision(
             decision,
             reason,
-            attackable_count=int(ctx_data["attackable_count"]),
-            alive_or_pending_count=int(ctx_data["alive_or_pending_count"]),
+            alive_count=int(ctx_data["alive_count"]),
             area_clear=bool(ctx_data["area_clear"]),
-            vision_busy=bool(ctx_data["vision_busy"]),
-            direct_state_pending=bool(ctx_data["direct_state_pending"]),
             has_discovery_since_reset=bool(
                 ctx_data["has_discovery_since_reset"]
             ),
@@ -152,16 +138,6 @@ class HuntModeStrategy(ABC):
         self._last_no_target_blocked_log_ms = now
         self._ctx.logger.behavior(f"[MODE] no-target blocked reason={reason}")
 
-    def _log_wait_known(self, alive_or_pending_count: int) -> None:
-        now = monotonic_ms()
-        if now - self._last_wait_known_log_ms < 2000:
-            return
-        self._last_wait_known_log_ms = now
-        self._ctx.logger.behavior(
-            f"[MODE] wait reason=known_tracks_not_attackable "
-            f"aliveOrPending={alive_or_pending_count}"
-        )
-
 
 class TeleportStrategy(HuntModeStrategy):
     """Teleport when area is clear of mobs."""
@@ -170,9 +146,6 @@ class TeleportStrategy(HuntModeStrategy):
         ctx = self._ctx
         context = self._build_no_target_context()
 
-        if not self._can_consider_area_clear():
-            self._log_no_target("wait", "area_not_clearable", context)
-            return False
         if not self._discovery_since_reset:
             self._log_no_target_blocked("no_discovery_yet")
             self._log_no_target("wait", "no_discovery_yet", context)
@@ -189,11 +162,17 @@ class TeleportStrategy(HuntModeStrategy):
             return False
 
         ctx.logger.behavior(
-            f"[MODE] teleport area_clear tracks={area.alive_or_pending_count}"
+            f"[MODE] teleport area_clear tracks={area.alive_count}"
         )
         self._log_no_target("teleport", "area_clear", context)
 
-        self._input.teleport_key(ctx.config.teleport_scan_code)
+        try:
+            self._input.teleport_key(ctx.config.teleport_scan_code)
+        except Exception as exc:
+            ctx.logger.behavior(
+                f"[MODE] teleport input error: {exc}"
+            )
+            return False
         hunt_overlay.increment_teleports()
         time.sleep(ctx.config.teleport_duration_ms / 1000.0)
 
@@ -219,21 +198,16 @@ class WalkStrategy(HuntModeStrategy):
         self._walk_idle_start_ms = 0
 
     def _handle_no_targets_impl(self) -> bool:
+        # The base guard already returned when any alive track exists, so here
+        # the area is empty. Walk mode never teleports — it only waits and logs.
         ctx = self._ctx
         now = monotonic_ms()
 
-        # Start the idle timer on first call
+        # Start the idle timer once, on first entry into the no-target state.
         if not self._walk_idle_start_ms:
             self._walk_idle_start_ms = now
-            ctx.logger.behavior(
-                "[MODE] walk mode — waiting for mobs to appear"
-            )
-            self._log_no_target(
-                "wait", "walk_waiting", self._build_no_target_context()
-            )
-            return False
+            ctx.logger.behavior("[MODE] walk mode — waiting for mobs to appear")
 
-        # If we haven't had any discovery since area reset, just wait
         if not self._discovery_since_reset:
             idle_seconds = (now - self._walk_idle_start_ms) // 1000
             if idle_seconds > 0 and idle_seconds % 15 == 0:
@@ -243,15 +217,6 @@ class WalkStrategy(HuntModeStrategy):
             self._log_no_target("wait", "walk_no_discovery_yet")
             return False
 
-        # Reset idle timer when we do have discovery
-        self._walk_idle_start_ms = 0
-
-        area = ctx.tracks.get_area_clear_candidate(now)
-        if area.clear:
-            ctx.logger.behavior("[MODE] area clear — waiting for respawns")
-            self._log_no_target("wait", "walk_area_clear")
-            return False
-
-        # We have pending tracks, just wait
-        self._log_no_target("wait", "walk_has_pending")
+        # Discovery has run and the area is empty — wait for mobs to path in.
+        self._log_no_target("wait", "walk_area_clear")
         return False

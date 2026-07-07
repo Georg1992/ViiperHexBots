@@ -56,8 +56,6 @@ check("discovery_worker",
     lambda: __import__("pybot.runtime.workers.discovery_worker", fromlist=["DiscoveryWorker"]))
 check("tracking_worker",
     lambda: __import__("pybot.runtime.workers.tracking_worker", fromlist=["TrackingWorker"]))
-check("confirm_state_worker",
-    lambda: __import__("pybot.runtime.workers.confirm_state_worker", fromlist=["ConfirmStateWorker"]))
 check("attack_loop",
     lambda: __import__("pybot.runtime.workers.attack_loop", fromlist=["AttackLoop"]))
 check("skill_timer_worker",
@@ -151,7 +149,7 @@ check("load_mob_catalog",
     lambda: load_mob_catalog())
 
 catalog = load_mob_catalog()
-print(f"  INFO: catalog has {len(catalog)} entries: {[e.folder_name for e in catalog]}")
+print(f"  INFO: catalog has {len(catalog)} entries: {[e.asset_name for e in catalog]}")
 
 if catalog:
     check("mob_folder_by_index(1)",

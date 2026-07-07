@@ -76,8 +76,7 @@ def candidate_to_json(candidate, screen_offset: tuple[int, int]) -> dict:
             "centerX": candidate.center_x + ox,
             "centerY": candidate.center_y + oy,
             "confidence": round(candidate.final_score, 4),
-            "living": candidate.accepted and not candidate.is_dead,
-            "dead": candidate.is_dead,
+            "living": candidate.accepted,
         }
     )
     return payload

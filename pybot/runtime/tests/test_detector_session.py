@@ -36,13 +36,13 @@ class DetectorSessionTests(unittest.TestCase):
         scan = self.detector.discover_frame(self.roi_frame, self.roi)
         self.assertTrue(scan.ok)
         self.assertGreater(scan.raw_count, 0)
-        living = [d for d in scan.detections if d.living and not d.dead]
+        living = [d for d in scan.detections if d.living]
         self.assertGreater(len(living), 0)
         self.assertGreater(scan.duration_ms, 0)
 
     def test_track_locals_returns_results(self) -> None:
         scan = self.detector.discover_frame(self.roi_frame, self.roi)
-        anchor = next(d for d in scan.detections if d.living and not d.dead)
+        anchor = next(d for d in scan.detections if d.living)
         snapshots = [
             StateTrackSnapshot(
                 track_id=1,
@@ -55,35 +55,6 @@ class DetectorSessionTests(unittest.TestCase):
         self.assertTrue(batch.ok)
         self.assertEqual(len(batch.results), 1)
         self.assertTrue(batch.results[0].found)
-        self.assertGreater(batch.duration_ms, 0)
-
-    def test_state_confirm_returns_observation(self) -> None:
-        scan = self.detector.discover_frame(self.roi_frame, self.roi)
-        anchor = next(d for d in scan.detections if d.living and not d.dead)
-        snapshot = StateTrackSnapshot(
-            track_id=1,
-            x=anchor.x,
-            y=anchor.y,
-            scale=anchor.candidate_scale,
-        )
-        batch = self.detector.state_confirm_frame(self.roi_frame, self.roi, snapshot)
-        self.assertTrue(batch.ok)
-        self.assertEqual(len(batch.observations), 1)
-        self.assertIn(batch.observations[0].state, ("alive", "dead", "unreachable"))
-        self.assertGreater(batch.duration_ms, 0)
-
-    def test_state_direct_returns_single_observation(self) -> None:
-        scan = self.detector.discover_frame(self.roi_frame, self.roi)
-        anchor = next(d for d in scan.detections if d.living and not d.dead)
-        snapshot = StateTrackSnapshot(
-            track_id=1,
-            x=anchor.x,
-            y=anchor.y,
-            scale=anchor.candidate_scale,
-        )
-        batch = self.detector.state_direct_frame(self.roi_frame, self.roi, snapshot)
-        self.assertTrue(batch.ok)
-        self.assertEqual(len(batch.observations), 1)
         self.assertGreater(batch.duration_ms, 0)
 
 

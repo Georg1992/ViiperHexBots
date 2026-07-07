@@ -1,101 +1,117 @@
-"""Discovery scan worker."""
+"""Discovery loop — own thread, finds NEW mobs only.
+
+Runs a full scan every ``discovery_interval_ms`` (or immediately when a teleport
+wakes it) and creates tracks for mobs that aren't already tracked. It never
+moves or removes existing tracks — tracking (its own thread) owns that.
+
+Correct coord hand-off: the known-object positions used for dedup are sampled
+at the instant this worker captures its frame, so detections (from that frame)
+and the positions they're compared against share one time reference even though
+tracking is concurrently moving the live tracks.
+"""
 
 from __future__ import annotations
 
-import time
+import traceback
 
+import pybot.runtime._mob_rec_path as _mob_rec_path  # noqa: F401 — sets up sys.path
 from pybot.runtime._mob_rec_path import import_hunt_track_rules
 _hunt = import_hunt_track_rules()
 DiscoveryDetection = _hunt.DiscoveryDetection
 from pybot.runtime.hunt_tracks import monotonic_ms
-from pybot.runtime.workers.worker_contexts import DiscoveryWorkerContext
 from pybot.runtime.detection.discovery_filter import filter_scan_candidates
+from pybot.runtime.workers.worker_contexts import DiscoveryWorkerContext
 from pybot.runtime import overlay as hunt_overlay
+from capture import capture_region
 
 
 class DiscoveryWorker:
+    """Single-threaded loop that scans and creates tracks for new mobs only."""
+
     def __init__(self, ctx: DiscoveryWorkerContext, hunt_mode) -> None:
         self._ctx = ctx
         self._hunt_mode = hunt_mode
+        self._scan_count = 0
 
     def run(self) -> None:
-        self._ctx.logger.behavior("[DISCOVERY] worker started")
-        self._run_scan()
-        poll_s = 0.2  # 200ms — responsive to wake signals without busy-waiting
-        interval_s = self._ctx.config.discovery_interval_ms / 1000.0
-        elapsed = 0.0
-        while True:
-            if self._ctx.is_stopped():
-                return
-            if self._ctx.discovery_wake.is_set():
-                self._ctx.discovery_wake.clear()
-                if self._ctx.should_run_workers():
-                    self._run_scan()
-                elapsed = 0.0  # Reset timer after a wake-triggered scan
-            if self._ctx.stop_event.wait(poll_s):
-                return
-            elapsed += poll_s
-            if elapsed >= interval_s:
-                if self._ctx.should_run_workers():
-                    self._run_scan()
-                elapsed = 0.0
+        ctx = self._ctx
+        ctx.logger.behavior("[DISCOVERY] worker started")
+        interval_s = ctx.config.discovery_interval_ms / 1000.0
+        try:
+            while not ctx.stop_event.is_set():
+                # Wake early when a teleport forces an immediate scan, otherwise
+                # scan once per discovery interval.
+                ctx.discovery_wake.wait(interval_s)
+                ctx.discovery_wake.clear()
+                if not ctx.should_run_workers():
+                    continue
+                self._scan()
+        except Exception:
+            ctx.logger.behavior(f"[DISCOVERY] CRASH:\n{traceback.format_exc()}")
+            raise
 
-    def _run_scan(self) -> None:
+    def _scan(self) -> None:
         ctx = self._ctx
         if not ctx.capture.is_valid():
-            self._hunt_mode.note_discovery_scan_failed("invalid_hwnd")
-            ctx.logger.behavior("[DISCOVERY] scan skipped reason=invalid_hwnd")
             return
-
         roi = ctx.capture.get_hunt_roi()
         if roi is None:
-            self._hunt_mode.note_discovery_scan_failed("invalid_roi")
-            ctx.logger.behavior("[DISCOVERY] scan skipped reason=invalid_roi")
             return
 
-        ctx.tracks.set_roi_center(roi.center_x, roi.center_y)
-        start = time.perf_counter()
-        try:
-            scan = ctx.detector.discover(roi)
-        except Exception as exc:
-            self._hunt_mode.note_discovery_scan_failed(str(exc))
-            ctx.logger.behavior(f"[DISCOVERY] scan failed reason={exc}")
+        frame = capture_region(roi.x, roi.y, roi.w, roi.h)
+        if frame is None or frame.size == 0:
+            ctx.logger.behavior("[DISCOVERY] capture returned empty frame")
             return
 
+        # Sample known positions at frame-capture time so dedup shares the
+        # frame's time reference (tracking is moving the live tracks concurrently).
+        existing_positions = ctx.tracks.positions_snapshot()
+        now_ms = monotonic_ms()
+
+        scan = ctx.detector.discover_frame(frame, roi)
         if not scan.ok:
             self._hunt_mode.note_discovery_scan_failed(scan.fail_reason)
-            ctx.logger.behavior(f"[DISCOVERY] scan failed reason={scan.fail_reason}")
             return
 
+        self._scan_count += 1
         filtered = filter_scan_candidates(scan.detections, roi, ctx.config.cell_size_px)
+        hunt_overlay.set_scan_living(len(filtered))
+
         detections = [
             DiscoveryDetection(
                 x=item.x,
                 y=item.y,
                 confidence=item.confidence,
                 candidate_scale=item.candidate_scale,
-                living=item.living,
-                dead=item.dead,
+                living=True,
             )
             for item in filtered
         ]
 
-        hunt_overlay.set_scan_living(len(filtered))
-
         summary = ctx.tracks.reconcile_detections(
             detections,
             mob_name=ctx.config.mob_name,
-            now_tick=monotonic_ms(),
+            now_tick=now_ms,
+            existing_positions=existing_positions,
         )
+
+        ctx.validation.log_discovery_scan(
+            raw_count=scan.raw_count,
+            filtered_count=len(filtered),
+            duration_ms=scan.duration_ms,
+            summary=summary,
+        )
+
         self._hunt_mode.note_discovery_scan_completed(
             living_count=len(filtered),
             added_count=summary.added_count,
         )
-        duration_ms = int((time.perf_counter() - start) * 1000)
-        ctx.validation.log_discovery_scan(
-            raw_count=scan.raw_count,
-            filtered_count=len(filtered),
-            added_count=summary.added_count,
-            duration_ms=duration_ms,
-            summary=summary,
-        )
+
+        verbose = self._scan_count <= 5 or self._scan_count % 10 == 0
+        if verbose:
+            ctx.logger.behavior(
+                f"[DISCOVERY] scan#{self._scan_count} "
+                f"raw={scan.raw_count} filtered={len(filtered)} "
+                f"added={summary.added_count} matched={summary.matched_count} "
+                f"tracks={ctx.tracks.get_track_count()}"
+            )

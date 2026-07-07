@@ -1,4 +1,4 @@
-"""Tests for moving-mob tracking: drift search geometry + discovery dedup slack."""
+"""Tests for moving-mob tracking: drift search geometry."""
 
 from __future__ import annotations
 
@@ -15,34 +15,6 @@ for path in (str(MOB_REC), str(SIMPLE)):
         sys.path.insert(0, path)
 
 from detector import SimpleMobDetector, load_simple_config  # noqa: E402
-
-
-def discovery_match_radius_px(
-    coord_age_ms: int,
-    *,
-    base_radius: int = 90,
-    state_interval_ms: int = 100,
-    slack_per_tick: int = 30,
-    pending: bool = False,
-) -> float:
-    """Mirror HuntTracks discovery match radius calculation."""
-    movement_slack = (coord_age_ms / state_interval_ms) * slack_per_tick
-    radius = base_radius + movement_slack
-    if pending:
-        radius *= 1.5
-    return radius
-
-
-def simulate_moving_track_dedup(
-    track_xy: tuple[float, float],
-    detection_xy: tuple[float, float],
-    coord_age_ms: int,
-    pending: bool = False,
-) -> bool:
-    dx = detection_xy[0] - track_xy[0]
-    dy = detection_xy[1] - track_xy[1]
-    dist = math.hypot(dx, dy)
-    return dist <= discovery_match_radius_px(coord_age_ms, pending=pending)
 
 
 def max_search_distance(cx: int, cy: int, frame_shape: tuple[int, ...], detector: SimpleMobDetector) -> float:
@@ -82,22 +54,6 @@ class MovingMobTrackingTests(unittest.TestCase):
                 shift,
                 msg=f"drift search from stale +{shift}px must reach true mob position",
             )
-
-    def test_discovery_dedup_while_mob_moves_between_state_ticks(self) -> None:
-        track_pos = (400.0, 300.0)
-        detection_pos = (435.0, 300.0)
-        self.assertTrue(simulate_moving_track_dedup(track_pos, detection_pos, coord_age_ms=100))
-
-    def test_discovery_dedup_after_one_second_scan_while_walking(self) -> None:
-        track_pos = (400.0, 300.0)
-        detection_pos = (470.0, 310.0)
-        self.assertTrue(simulate_moving_track_dedup(track_pos, detection_pos, coord_age_ms=1000))
-
-    def test_discovery_dedup_pending_track_wider_slack(self) -> None:
-        track_pos = (400.0, 300.0)
-        detection_pos = (800.0, 300.0)
-        self.assertFalse(simulate_moving_track_dedup(track_pos, detection_pos, coord_age_ms=1000, pending=False))
-        self.assertTrue(simulate_moving_track_dedup(track_pos, detection_pos, coord_age_ms=1000, pending=True))
 
 
 if __name__ == "__main__":

@@ -58,7 +58,7 @@ class StateScaleConsistencyTests(unittest.TestCase):
         detector.apply_runtime_config(calibrated)
 
         discovery = detector.detect(self.roi, "horn")
-        living = [candidate for candidate in discovery.accepted if not candidate.is_dead]
+        living = [c for c in discovery.accepted]
         self.assertGreater(len(living), 0, "fixture must contain at least one living horn")
 
         anchor = living[0]

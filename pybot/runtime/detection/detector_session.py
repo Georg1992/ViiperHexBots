@@ -15,13 +15,10 @@ from pybot.runtime.capture.window_roi import HuntRoi
 
 from capture import capture_region
 from detector import (
-    STATE_PROFILE_DIRECT,
-    STATE_PROFILE_FULL,
     SimpleMobDetector,
     load_simple_config,
 )
 from tracking.local_tracker import LocalTrackResult
-from tracking.state_recognizer import evaluate_track_state
 
 
 @dataclass(frozen=True)
@@ -31,7 +28,6 @@ class RawDetection:
     confidence: float
     candidate_scale: float
     living: bool
-    dead: bool
 
 
 @dataclass(frozen=True)
@@ -51,26 +47,6 @@ class StateTrackSnapshot:
     x: int
     y: int
     scale: float = 0.0
-
-
-@dataclass(frozen=True)
-class StateObservationResult:
-    track_id: int
-    state: str
-    confidence: float
-    x: int
-    y: int
-    candidate_scale: float = 0.0
-    observed_at_ms: int = 0
-
-
-@dataclass(frozen=True)
-class StateBatchResult:
-    ok: bool
-    fail_reason: str
-    observations: list[StateObservationResult]
-    duration_ms: int
-    coord_updates: int
 
 
 @dataclass(frozen=True)
@@ -122,8 +98,7 @@ class DetectorSession:
                 y=candidate.center_y + roi.y,
                 confidence=candidate.final_score,
                 candidate_scale=candidate.candidate_scale,
-                living=candidate.accepted and not candidate.is_dead,
-                dead=candidate.is_dead,
+                living=candidate.accepted,
             )
             for candidate in result.accepted
         ]
@@ -196,91 +171,3 @@ class DetectorSession:
             coord_updates=coord_updates,
         )
 
-    def state_confirm(
-        self,
-        roi: HuntRoi,
-        track_snapshot: StateTrackSnapshot,
-    ) -> StateBatchResult:
-        frame = capture_region(roi.x, roi.y, roi.w, roi.h)
-        return self.state_confirm_frame(frame, roi, track_snapshot)
-
-    def state_confirm_frame(
-        self,
-        frame: np.ndarray,
-        roi: HuntRoi,
-        track_snapshot: StateTrackSnapshot,
-    ) -> StateBatchResult:
-        return self._state_eval_frame(
-            frame,
-            roi,
-            track_snapshot,
-            profile=STATE_PROFILE_FULL,
-        )
-
-    def state_direct(
-        self,
-        roi: HuntRoi,
-        track_snapshot: StateTrackSnapshot,
-    ) -> StateBatchResult:
-        frame = capture_region(roi.x, roi.y, roi.w, roi.h)
-        return self.state_direct_frame(frame, roi, track_snapshot)
-
-    def state_direct_frame(
-        self,
-        frame: np.ndarray,
-        roi: HuntRoi,
-        track_snapshot: StateTrackSnapshot,
-    ) -> StateBatchResult:
-        return self._state_eval_frame(
-            frame,
-            roi,
-            track_snapshot,
-            profile=STATE_PROFILE_DIRECT,
-        )
-
-    def _state_eval_frame(
-        self,
-        frame: np.ndarray,
-        roi: HuntRoi,
-        track_snapshot: StateTrackSnapshot,
-        *,
-        profile,
-    ) -> StateBatchResult:
-        observed_at_ms = int(time.perf_counter() * 1000)
-        start = time.perf_counter()
-        with self._lock:
-            update = evaluate_track_state(
-                self._detector,
-                frame,
-                self._mob_name,
-                track_snapshot.track_id,
-                track_snapshot.x - roi.x,
-                track_snapshot.y - roi.y,
-                offset_x=roi.x,
-                offset_y=roi.y,
-                scale_hint=track_snapshot.scale if track_snapshot.scale > 0 else None,
-                profile=profile,
-            )
-        duration_ms = int((time.perf_counter() - start) * 1000)
-        observation = _update_to_observation(update, observed_at_ms=observed_at_ms)
-        coord_updates = 1 if observation.state == "alive" else 0
-        return StateBatchResult(
-            ok=True,
-            fail_reason="",
-            observations=[observation],
-            duration_ms=duration_ms,
-            coord_updates=coord_updates,
-        )
-
-
-def _update_to_observation(update: dict, *, observed_at_ms: int = 0) -> StateObservationResult:
-    candidate_scale = float(update.get("candidateScale", 0.0) or 0.0)
-    return StateObservationResult(
-        track_id=int(update["trackId"]),
-        state=str(update["state"]),
-        confidence=float(update.get("confidence", 0.0) or 0.0),
-        x=int(update.get("x", 0) or 0),
-        y=int(update.get("y", 0) or 0),
-        candidate_scale=candidate_scale,
-        observed_at_ms=observed_at_ms,
-    )

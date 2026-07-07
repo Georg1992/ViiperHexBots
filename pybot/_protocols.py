@@ -18,7 +18,6 @@ from pybot.runtime.config import HuntRuntimeConfig
 from pybot.runtime.hunt_policy import HuntPolicy
 from pybot.runtime.hunt_tracks import HuntTracks
 from pybot.runtime.logging import HuntLogger
-from pybot.runtime.urgent_state import UrgentStateQueue
 from pybot.runtime.validation_log import HuntValidationLogger
 from pybot.runtime.detection.detector_session import DetectorSession
 
@@ -52,9 +51,16 @@ class CanCapture(Protocol):
 
 
 class CanDetect(Protocol):
-    """Mob detection (vision) capability."""
+    """Mob detection (discovery) capability."""
     @property
     def detector(self) -> DetectorSession: ...
+
+
+class CanTrackLocal(Protocol):
+    """Local track-following capability — a detector dedicated to tracking so it
+    never contends with the discovery scan's lock."""
+    @property
+    def tracker(self) -> DetectorSession: ...
 
 
 class CanTrack(Protocol):
@@ -69,21 +75,10 @@ class CanValidate(Protocol):
     def validation(self) -> HuntValidationLogger: ...
 
 
-class CanUrgentState(Protocol):
-    """Urgent state queue — direct state-request scheduling."""
-    @property
-    def urgent(self) -> UrgentStateQueue: ...
-
-
 class CanPolicy(Protocol):
     """Attack-policy capability."""
     @property
     def policy(self) -> HuntPolicy: ...
-
-
-class CanVisionBusy(Protocol):
-    """Vision busy-check capability."""
-    def vision_busy(self) -> bool: ...
 
 
 class CanAreaReset(Protocol):

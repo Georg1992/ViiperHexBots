@@ -12,8 +12,6 @@ from pybot.runtime.constants import (
     CELL_SIZE_PX,
     DEFAULT_SEARCH_RANGE_CELLS,
     HUNT_DISCOVERY_INTERVAL_MS,
-    HUNT_POST_ATTACK_STATE_DELAY_MS,
-    HUNT_STATE_INTERVAL_MS,
     HUNT_TELEPORT_DURATION_MS,
 )
 from pybot.runtime.input.scan_codes import key_name_to_scan_code
@@ -44,13 +42,9 @@ class HuntRuntimeConfig:
     teleport_scan_code: int
     search_range_cells: int
     cell_size_px: int
-    state_interval_ms: int
     discovery_interval_ms: int
-    post_attack_state_delay_ms: int
     teleport_duration_ms: int
-    coord_stale_skip_ms: int | None
     validation_enabled: bool
-    validation_state_every_n: int
     control_file: Path | None
     skill_timer_button: str = ""
     skill_timer_scan_code: int = 0
@@ -77,7 +71,6 @@ def load_runtime_config(
     hwnd: int = 0,
     mob_name: str | None = None,
     hunt_mode: str | None = None,
-    coord_stale_skip_ms: int | None = None,
     validation_enabled: bool | None = None,
     control_file: Path | None = None,
     session_id: str | None = None,
@@ -103,11 +96,6 @@ def load_runtime_config(
     if resolved_control is None and session_id:
         resolved_control = PROJECT_ROOT / "logs" / "sessions" / session_id / "control.json"
 
-    stale_ms = coord_stale_skip_ms
-    if stale_ms is None and ini.has_option("Settings", "CoordStaleSkipMs"):
-        raw = ini.getint("Settings", "CoordStaleSkipMs", fallback=-1)
-        stale_ms = raw if raw >= 0 else None
-
     return HuntRuntimeConfig(
         config_path=path,
         hwnd=hwnd,
@@ -120,13 +108,9 @@ def load_runtime_config(
         teleport_scan_code=key_name_to_scan_code(teleport_button),
         search_range_cells=search_range,
         cell_size_px=CELL_SIZE_PX,
-        state_interval_ms=HUNT_STATE_INTERVAL_MS,
         discovery_interval_ms=HUNT_DISCOVERY_INTERVAL_MS,
-        post_attack_state_delay_ms=HUNT_POST_ATTACK_STATE_DELAY_MS,
         teleport_duration_ms=HUNT_TELEPORT_DURATION_MS,
-        coord_stale_skip_ms=stale_ms,
         validation_enabled=val_enabled,
-        validation_state_every_n=1,
         control_file=resolved_control,
         skill_timer_button=skill_timer_button,
         skill_timer_scan_code=key_name_to_scan_code(skill_timer_button),

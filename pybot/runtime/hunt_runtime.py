@@ -21,11 +21,9 @@ from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.input.viiper_backend import ViiperBackend
 from pybot.runtime.logging import HuntLogger
 from pybot.runtime.runtime_context import HuntRuntimeContext
-from pybot.runtime.urgent_state import UrgentStateQueue
 from pybot.runtime.validation_log import HuntValidationLogger
 from pybot.runtime.detection.detector_session import DetectorSession
 from pybot.runtime.workers.attack_loop import AttackLoop
-from pybot.runtime.workers.confirm_state_worker import ConfirmStateWorker
 from pybot.runtime.workers.discovery_worker import DiscoveryWorker
 from pybot.runtime.workers.skill_timer_worker import SkillTimerWorker
 from pybot.runtime.workers.tracking_worker import TrackingWorker
@@ -104,9 +102,11 @@ def create_runtime_deps(
         logger.set_behavior_callback(behavior_callback)
     tracks = HuntTracks()
     policy = HuntPolicy()
-    urgent = UrgentStateQueue()
     capture = HuntWindowCapture(config)
+    # Two independent detectors: discovery's full scan and tracking's local
+    # follow run on separate threads and must never contend on one detector lock.
     detector = DetectorSession(config.mob_name)
+    tracker = DetectorSession(config.mob_name)
     validation = HuntValidationLogger(
         logger,
         tracks,
@@ -120,7 +120,7 @@ def create_runtime_deps(
         policy=policy,
         capture=capture,
         detector=detector,
-        urgent=urgent,
+        tracker=tracker,
         validation=validation,
         control=control,
     )
@@ -128,14 +128,12 @@ def create_runtime_deps(
         ViiperBackend()
     )
     hunt_mode = create_hunt_mode(ctx, input_backend)
-    discovery = DiscoveryWorker(ctx, hunt_mode)
     tracking = TrackingWorker(ctx)
-    confirm = ConfirmStateWorker(ctx)
+    discovery = DiscoveryWorker(ctx, hunt_mode)
     attack = AttackLoop(ctx, hunt_mode, input_backend)
     workers: list[tuple[str, Callable[[], None]]] = [
-        ("discovery", discovery.run),
         ("tracking", tracking.run),
-        ("confirm_state", confirm.run),
+        ("discovery", discovery.run),
         ("attack", attack.run),
     ]
     if ctx.config.skill_timer_scan_code and ctx.config.skill_timer_interval_ms > 0:

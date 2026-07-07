@@ -5,30 +5,20 @@ from __future__ import annotations
 import copy
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass
 
 from pybot.runtime._mob_rec_path import import_hunt_track_rules
 _hunt = import_hunt_track_rules()
 
 DiscoveryDetection = _hunt.DiscoveryDetection
-LocalTrackObservation = _hunt.LocalTrackObservation
 MobTrack = _hunt.MobTrack
 ReconcileSummary = _hunt.ReconcileSummary
-StateObservation = _hunt.StateObservation
 apply_attack_event = _hunt.apply_attack_event
-apply_local_track_observation = _hunt.apply_local_track_observation
-apply_state_observation = _hunt.apply_state_observation
-collect_local_track_requests = _hunt.collect_local_track_requests
-collect_state_requests = _hunt.collect_state_requests
+apply_track_observation = _hunt.apply_track_observation
 is_alive = _hunt.is_alive
-is_attackable = _hunt.is_attackable
-is_pending = _hunt.is_pending
-select_state_confirm_track_id = _hunt.select_state_confirm_track_id
-was_attacked = _hunt.was_attacked
+is_track_lost = _hunt.is_track_lost
 
 from pybot.runtime.track_reconciler import TrackReconciler
-
 
 def monotonic_ms() -> int:
     return int(time.monotonic() * 1000)
@@ -46,22 +36,13 @@ class MobTrackSnapshot:
     updated_tick: int
     discovery_scale: float
     candidate_scale: float
-    pending_result_until_tick: int
-    pending_result_resolved: bool
 
 
 @dataclass(frozen=True)
 class AreaClearStatus:
     clear: bool
     reason: str
-    alive_or_pending_count: int
-    attackable_count: int
-
-
-# Average-attacks-to-kill tracking
-UNREACHABLE_MARGIN = 3
-MIN_KILL_SAMPLES = 3
-KILL_HISTORY_WINDOW = 20
+    alive_count: int
 
 
 class HuntTracks:
@@ -69,73 +50,47 @@ class HuntTracks:
         self._lock = threading.RLock()
         self._tracks: list[MobTrack] = []
         self._next_id = 1
-        self._scan_id = 0
         self._area_epoch = 0
-        self._roi_center_x = 0
-        self._roi_center_y = 0
         self._last_reconcile_summary: ReconcileSummary | None = None
-        self._kill_history: deque[int] = deque(maxlen=KILL_HISTORY_WINDOW)
 
     def reset(self) -> None:
         with self._lock:
             self._tracks = []
             self._next_id = 1
-            self._scan_id = 0
             self._last_reconcile_summary = None
-            self._kill_history.clear()
 
     def area_reset(self) -> None:
         with self._lock:
             self._area_epoch += 1
             self._tracks = []
             self._next_id = 1
-            self._scan_id = 0
             self._last_reconcile_summary = None
-            self._kill_history.clear()
 
     @property
     def area_epoch(self) -> int:
         with self._lock:
             return self._area_epoch
 
-    def set_roi_center(self, center_x: int, center_y: int) -> None:
-        with self._lock:
-            self._roi_center_x = center_x
-            self._roi_center_y = center_y
-
     def get_track_count(self) -> int:
         with self._lock:
             return len(self._tracks)
 
-    def get_alive_or_pending_count(self, now_tick: int | None = None) -> int:
-        tick = now_tick if now_tick is not None else monotonic_ms()
+    def get_alive_count(self, now_tick: int | None = None) -> int:
         with self._lock:
-            return sum(1 for track in self._tracks if is_alive(track) or is_pending(track, tick))
+            return sum(1 for track in self._tracks if is_alive(track))
 
-    def get_attackable_count(self, now_tick: int | None = None) -> int:
-        tick = now_tick if now_tick is not None else monotonic_ms()
-        with self._lock:
-            return sum(1 for track in self._tracks if is_attackable(track, tick))
-
-    def has_known_targets(self, now_tick: int | None = None) -> bool:
-        tick = now_tick if now_tick is not None else monotonic_ms()
+    def has_alive_tracks(self, now_tick: int | None = None) -> bool:
         with self._lock:
             return any(is_alive(track) for track in self._tracks)
 
-    def has_attackable_tracks(self, now_tick: int | None = None) -> bool:
-        return self.get_attackable_count(now_tick) > 0
-
     def get_area_clear_candidate(self, now_tick: int | None = None) -> AreaClearStatus:
-        tick = now_tick if now_tick is not None else monotonic_ms()
-        alive_or_pending = self.get_alive_or_pending_count(tick)
-        attackable = self.get_attackable_count(tick)
-        clear = alive_or_pending == 0
-        reason = "" if clear else "alive_or_pending_tracks"
+        with self._lock:
+            alive = sum(1 for track in self._tracks if is_alive(track))
+        clear = alive == 0
         return AreaClearStatus(
             clear=clear,
-            reason=reason,
-            alive_or_pending_count=alive_or_pending,
-            attackable_count=attackable,
+            reason="" if clear else "alive_tracks",
+            alive_count=alive,
         )
 
     def get_track_by_id(self, track_id: int) -> MobTrack | None:
@@ -145,109 +100,20 @@ class HuntTracks:
                     return track
             return None
 
-    def get_coord_age_ms(self, track_id: int, now_tick: int | None = None) -> int:
-        tick = now_tick if now_tick is not None else monotonic_ms()
-        with self._lock:
-            track = self._get_track_by_id_locked(track_id)
-            if track is None:
-                return 999_999
-            return tick - track.updated_tick
-
     def snapshot_for_track(self, track_id: int, now_tick: int | None = None) -> MobTrackSnapshot | None:
-        tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
             track = self._get_track_by_id_locked(track_id)
             if track is None:
                 return None
-            is_pending(track, tick)
             return self._to_snapshot(track)
 
     def snapshot_tracks(self, now_tick: int | None = None) -> list[MobTrackSnapshot]:
-        tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
-            for track in self._tracks:
-                is_pending(track, tick)
             return [self._to_snapshot(track) for track in self._tracks]
 
-    def snapshot_attackable(self, now_tick: int | None = None) -> list[MobTrackSnapshot]:
-        tick = now_tick if now_tick is not None else monotonic_ms()
+    def snapshot_alive(self, now_tick: int | None = None) -> list[MobTrackSnapshot]:
         with self._lock:
-            snapshots: list[MobTrackSnapshot] = []
-            for track in self._tracks:
-                if is_attackable(track, tick):
-                    snapshots.append(self._to_snapshot(track))
-            return snapshots
-
-    def collect_local_track_requests(
-        self,
-        *,
-        session_scale_hint: float = 0.0,
-        now_tick: int | None = None,
-    ) -> list[dict]:
-        tick = now_tick if now_tick is not None else monotonic_ms()
-        with self._lock:
-            for track in self._tracks:
-                is_pending(track, tick)
-            return collect_local_track_requests(
-                list(self._tracks),
-                session_scale_hint=session_scale_hint,
-            )
-
-    def select_state_confirm_track_id(self, now_tick: int | None = None) -> int:
-        tick = now_tick if now_tick is not None else monotonic_ms()
-        with self._lock:
-            for track in self._tracks:
-                is_pending(track, tick)
-            return select_state_confirm_track_id(list(self._tracks), tick)
-
-    def apply_local_track_observations(
-        self,
-        observations: list[LocalTrackObservation],
-        *,
-        now_tick: int | None = None,
-    ) -> list[int]:
-        tick = now_tick if now_tick is not None else monotonic_ms()
-        needs_confirm: list[int] = []
-        with self._lock:
-            for observation in observations:
-                track = self._get_track_by_id_locked(observation.id)
-                if track is None:
-                    continue
-                if apply_local_track_observation(track, observation, tick):
-                    needs_confirm.append(track.id)
-        return needs_confirm
-
-    def clear_local_track_miss(self, track_id: int) -> None:
-        with self._lock:
-            track = self._get_track_by_id_locked(track_id)
-            if track is not None:
-                track.local_track_miss_count = 0
-
-    def collect_state_requests(
-        self,
-        *,
-        session_scale_hint: float = 0.0,
-        now_tick: int | None = None,
-    ) -> list[dict]:
-        tick = now_tick if now_tick is not None else monotonic_ms()
-        with self._lock:
-            for track in self._tracks:
-                is_pending(track, tick)
-            return collect_state_requests(
-                list(self._tracks),
-                session_scale_hint=session_scale_hint,
-            )
-
-    def apply_state_observations(
-        self,
-        observations: list[StateObservation],
-        *,
-        now_tick: int | None = None,
-    ) -> None:
-        tick = now_tick if now_tick is not None else monotonic_ms()
-        with self._lock:
-            for observation in observations:
-                self._apply_state_observation_locked(observation, tick)
+            return [self._to_snapshot(track) for track in self._tracks if is_alive(track)]
 
     def apply_attack_event(self, track_id: int, *, now_tick: int | None = None) -> bool:
         tick = now_tick if now_tick is not None else monotonic_ms()
@@ -258,26 +124,74 @@ class HuntTracks:
             apply_attack_event(track, tick)
             return True
 
+    def positions_snapshot(self) -> list[tuple[int, int]]:
+        """(x, y) of every alive track — sample this when the discovery frame is
+        captured so dedup compares detections against same-instant positions."""
+        with self._lock:
+            return [(t.x, t.y) for t in self._tracks if is_alive(t)]
+
     def reconcile_detections(
         self,
         detections: list[DiscoveryDetection],
         *,
         mob_name: str = "",
         now_tick: int | None = None,
+        existing_positions: list[tuple[int, int]] | None = None,
     ) -> ReconcileSummary:
+        """Discovery step: create tracks for new mobs only (never updates/removes).
+
+        ``existing_positions`` are the known-object positions at frame-capture
+        time. When omitted, the current live positions are used (callers that
+        don't run tracking concurrently, e.g. tests).
+        """
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
-            self._scan_id += 1
-
+            positions = (
+                existing_positions
+                if existing_positions is not None
+                else [(t.x, t.y) for t in self._tracks if is_alive(t)]
+            )
             summary = TrackReconciler.reconcile(
                 self._tracks,
                 detections,
+                positions,
                 mob_name=mob_name,
                 now_tick=tick,
                 create_track_fn=self._create_track_locked,
             )
             self._last_reconcile_summary = summary
             return summary
+
+    def apply_tracking(
+        self,
+        results,
+        *,
+        now_tick: int | None = None,
+    ) -> list[int]:
+        """Tracking step: refresh coordinates from LocalTracker and drop lost tracks.
+
+        ``results`` is any iterable of objects exposing ``track_id``, ``found``,
+        ``x``, ``y`` and ``confidence`` (e.g. ``LocalTrackResult``). Returns the
+        IDs of tracks removed because they were missed too many times.
+        """
+        tick = now_tick if now_tick is not None else monotonic_ms()
+        with self._lock:
+            for result in results:
+                track = self._get_track_by_id_locked(result.track_id)
+                if track is None:
+                    continue
+                apply_track_observation(
+                    track,
+                    found=result.found,
+                    x=result.x,
+                    y=result.y,
+                    confidence=result.confidence,
+                    now_tick=tick,
+                )
+            lost_ids = [t.id for t in self._tracks if is_track_lost(t)]
+            if lost_ids:
+                self._remove_tracks_locked(set(lost_ids))
+            return lost_ids
 
     @property
     def last_reconcile_summary(self) -> ReconcileSummary | None:
@@ -321,61 +235,6 @@ class HuntTracks:
         self._tracks.append(track)
         return track
 
-    def record_kill(self, attack_count: int) -> None:
-        """Record a confirmed kill count for rolling average calculation."""
-        self._kill_history.append(attack_count)
-
-    @property
-    def average_attacks_till_death(self) -> float:
-        """Rolling average of attack counts at which mobs died."""
-        if not self._kill_history:
-            return 0.0
-        return sum(self._kill_history) / len(self._kill_history)
-
-    @property
-    def kill_sample_count(self) -> int:
-        return len(self._kill_history)
-
-    def _is_unreachable_suspected(self, track: MobTrack) -> bool:
-        """Check if a track has been attacked too many times vs the rolling average."""
-        avg = self.average_attacks_till_death
-        if avg <= 0 or self.kill_sample_count < MIN_KILL_SAMPLES:
-            return False
-        return (track.attack_count - avg) > UNREACHABLE_MARGIN
-
-    def _apply_state_observation_locked(
-        self,
-        observation: StateObservation,
-        now_tick: int,
-    ) -> None:
-        track = self._get_track_by_id_locked(observation.id)
-        if track is None:
-            return
-        if observation.state == "dead" and was_attacked(track):
-            self.record_kill(track.attack_count)
-            apply_state_observation(track, observation, now_tick)
-            self._remove_tracks_locked({track.id})
-            return
-
-        # If mob keeps coming back as alive after too many attacks,
-        # treat it as unreachable (stuck behind a wall, out of range, etc.)
-        if (
-            observation.state == "alive"
-            and was_attacked(track)
-            and self._is_unreachable_suspected(track)
-        ):
-            observation = StateObservation(
-                id=observation.id,
-                state="unreachable",
-                x=observation.x,
-                y=observation.y,
-                confidence=observation.confidence,
-            )
-
-        kept = apply_state_observation(track, observation, now_tick)
-        if not kept:
-            self._remove_tracks_locked({track.id})
-
     def _get_track_by_id_locked(self, track_id: int) -> MobTrack | None:
         for track in self._tracks:
             if track.id == track_id:
@@ -400,15 +259,11 @@ class HuntTracks:
             updated_tick=track.updated_tick,
             discovery_scale=track.discovery_scale,
             candidate_scale=track.candidate_scale,
-            pending_result_until_tick=track.pending_result_until_tick,
-            pending_result_resolved=track.pending_result_resolved,
         )
 
     def tracks_for_policy(self, now_tick: int | None = None) -> list[MobTrack]:
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
-            for track in self._tracks:
-                is_pending(track, tick)
             return copy.deepcopy(self._tracks)
 
     def copy_tracks_for_tests(self) -> list[MobTrack]:

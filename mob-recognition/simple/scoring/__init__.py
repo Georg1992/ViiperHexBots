@@ -1,1 +1,1 @@
-"""Region scoring, heatmap detection, and death validation modules."""
+"""Region scoring and heatmap detection modules."""

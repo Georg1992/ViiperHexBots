@@ -12,7 +12,7 @@ import shutil
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from pybot.paths import PROJECT_ROOT
@@ -47,7 +47,7 @@ class AppSessionLog:
     def session_id(self) -> str:
         """Return the session id, opening lazily if needed."""
         if self._session_id is None:
-            stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             self._session_id = stamp
         return self._session_id
 
@@ -63,7 +63,7 @@ class AppSessionLog:
         if self._opened:
             self._close_writer()
 
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._session_id = session_id or stamp
         self._session_dir = LOGS_DIR / self._session_id
         self._session_dir.mkdir(parents=True, exist_ok=True)
@@ -129,7 +129,7 @@ class AppSessionLog:
     # ── Internal ────────────────────────────────────────────────────
 
     def _enqueue(self, level: str, category: str, message: str) -> None:
-        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         line = f"[{stamp}] [{level}] [{category}] {message}\n"
         self._queue.put_nowait(line)
 
