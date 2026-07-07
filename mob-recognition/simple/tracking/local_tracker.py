@@ -190,7 +190,7 @@ def _build_local_follow_heatmap(
     descriptor: SimpleMobDescriptor,
     scale: float,
 ) -> np.ndarray:
-    body = palette_heatmap(crop_hsv, descriptor.body_colors)
+    body = palette_heatmap(crop_hsv, descriptor.body_palette)
     accent = palette_heatmap(crop_hsv, descriptor.accent_colors)
     rare = palette_heatmap(crop_hsv, descriptor.rare_colors)
     pattern = HeatmapDetector._local_pattern(crop_bgr, accent, body)

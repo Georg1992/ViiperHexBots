@@ -183,7 +183,7 @@ class TrackingIntegrationTests(unittest.TestCase):
 
         track_after = ctx.tracks.get_track_by_id(target_id)
         if track_after is not None:
-            self.assertIn(track_after.state, ("alive", "dead", "gone"))
+            self.assertIn(track_after.state, ("alive", "dead", "unreachable"))
         else:
             self.assertEqual(track_before.attack_count, 1)
 
@@ -217,7 +217,7 @@ class TrackingIntegrationTests(unittest.TestCase):
         after = ctx.tracks.get_track_by_id(1)
         assert after is not None
         self.assertEqual(after.local_track_miss_count, 0)
-        self.assertIn(after.state, ("alive", "dead", "gone"))
+        self.assertIn(after.state, ("alive", "dead", "unreachable"))
 
 
 if __name__ == "__main__":

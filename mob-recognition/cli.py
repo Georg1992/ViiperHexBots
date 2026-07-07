@@ -112,7 +112,6 @@ def build_detect_response(
     session_id: str = "",
     scale_range: tuple[float, float] | None = None,
     enforce_size_gate: bool = False,
-    accept_threshold: float = 0.0,
 ) -> dict:
     accepted_json = [candidate_to_json(candidate, screen_offset) for candidate in result.accepted]
     if pipeline == "scan":
@@ -126,7 +125,6 @@ def build_detect_response(
             "range": list(scale_range) if scale_range else None,
             "sizeGate": bool(enforce_size_gate),
         },
-        "confidenceThreshold": accept_threshold,
         "candidateCount": len(result.candidates),
         "acceptedCount": len(result.accepted),
         "elapsedS": round(result.elapsed_s, 4),
@@ -235,7 +233,6 @@ def run_detect_request(detector: SimpleMobDetector, config: dict, request: dict)
             session_id=session_id,
             scale_range=scale_range,
             enforce_size_gate=enforce_size_gate,
-            accept_threshold=float(calibrated["acceptThreshold"]),
         )
 
     raise ValueError(f"unsupported cmd: {command}")
@@ -338,7 +335,6 @@ def cmd_detect_simple(args: argparse.Namespace) -> int:
                 session_id=args.session_id or "",
                 scale_range=args.scale_range,
                 enforce_size_gate=bool(args.enforce_size_gate),
-                accept_threshold=float(config["acceptThreshold"]),
             ),
             output_path,
         )

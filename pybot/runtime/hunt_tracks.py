@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 
 from pybot.runtime._mob_rec_path import import_hunt_track_rules
@@ -57,6 +58,12 @@ class AreaClearStatus:
     attackable_count: int
 
 
+# Average-attacks-to-kill tracking
+UNREACHABLE_MARGIN = 3
+MIN_KILL_SAMPLES = 3
+KILL_HISTORY_WINDOW = 20
+
+
 class HuntTracks:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -67,6 +74,7 @@ class HuntTracks:
         self._roi_center_x = 0
         self._roi_center_y = 0
         self._last_reconcile_summary: ReconcileSummary | None = None
+        self._kill_history: deque[int] = deque(maxlen=KILL_HISTORY_WINDOW)
 
     def reset(self) -> None:
         with self._lock:
@@ -74,6 +82,7 @@ class HuntTracks:
             self._next_id = 1
             self._scan_id = 0
             self._last_reconcile_summary = None
+            self._kill_history.clear()
 
     def area_reset(self) -> None:
         with self._lock:
@@ -82,6 +91,7 @@ class HuntTracks:
             self._next_id = 1
             self._scan_id = 0
             self._last_reconcile_summary = None
+            self._kill_history.clear()
 
     @property
     def area_epoch(self) -> int:
@@ -311,6 +321,28 @@ class HuntTracks:
         self._tracks.append(track)
         return track
 
+    def record_kill(self, attack_count: int) -> None:
+        """Record a confirmed kill count for rolling average calculation."""
+        self._kill_history.append(attack_count)
+
+    @property
+    def average_attacks_till_death(self) -> float:
+        """Rolling average of attack counts at which mobs died."""
+        if not self._kill_history:
+            return 0.0
+        return sum(self._kill_history) / len(self._kill_history)
+
+    @property
+    def kill_sample_count(self) -> int:
+        return len(self._kill_history)
+
+    def _is_unreachable_suspected(self, track: MobTrack) -> bool:
+        """Check if a track has been attacked too many times vs the rolling average."""
+        avg = self.average_attacks_till_death
+        if avg <= 0 or self.kill_sample_count < MIN_KILL_SAMPLES:
+            return False
+        return (track.attack_count - avg) > UNREACHABLE_MARGIN
+
     def _apply_state_observation_locked(
         self,
         observation: StateObservation,
@@ -320,9 +352,26 @@ class HuntTracks:
         if track is None:
             return
         if observation.state == "dead" and was_attacked(track):
+            self.record_kill(track.attack_count)
             apply_state_observation(track, observation, now_tick)
             self._remove_tracks_locked({track.id})
             return
+
+        # If mob keeps coming back as alive after too many attacks,
+        # treat it as unreachable (stuck behind a wall, out of range, etc.)
+        if (
+            observation.state == "alive"
+            and was_attacked(track)
+            and self._is_unreachable_suspected(track)
+        ):
+            observation = StateObservation(
+                id=observation.id,
+                state="unreachable",
+                x=observation.x,
+                y=observation.y,
+                confidence=observation.confidence,
+            )
+
         kept = apply_state_observation(track, observation, now_tick)
         if not kept:
             self._remove_tracks_locked({track.id})

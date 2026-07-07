@@ -145,30 +145,48 @@ class AttackLoop:
             attack_count=track.attack_count,
             state=track.state,
         )
+
+        # ── Re-read fresh coordinates right before the click ───────
+        # The tracking worker may have updated the track's position
+        # since we first read it at function entry.  Re-fetch so we
+        # always click the freshest coordinate the tracker knows.
+        # If the track was removed between the entry read and this
+        # re-read (TOCTOU race with confirm worker), fall back to
+        # the original coordinates rather than aborting the attack.
+        fresh = ctx.tracks.get_track_by_id(target_id)
+        if fresh is not None:
+            click_x, click_y = fresh.x, fresh.y
+            attack_count = fresh.attack_count
+        else:
+            ctx.logger.behavior(
+                f"[HUNT] track removed before click id={target_id} using stale coords"
+            )
+            click_x, click_y = track.x, track.y
+            attack_count = track.attack_count
         ctx.validation.log_attack_engage(
             target_id,
-            track.x,
-            track.y,
-            coord_age_ms=coord_age,
-            attack_count=track.attack_count,
+            click_x,
+            click_y,
+            coord_age_ms=ctx.tracks.get_coord_age_ms(target_id, monotonic_ms()),
+            attack_count=attack_count,
         )
 
-        self._input.move_mouse(track.x, track.y)
+        self._input.move_mouse(click_x, click_y)
         self._input.skill_click(ctx.config.skill_scan_code)
 
-        if ctx.tracks.apply_attack_event(track.id, now_tick=now_tick):
-            ctx.policy.note_attack_target(track.id)
+        if ctx.tracks.apply_attack_event(target_id, now_tick=now_tick):
+            ctx.policy.note_attack_target(target_id)
             self._last_skill_attack_ms = now_tick
             hunt_overlay.increment_attacks()
             ctx.urgent.schedule_direct(
-                track.id,
-                track.x,
-                track.y,
+                target_id,
+                click_x,
+                click_y,
                 delay_ms=ctx.config.post_attack_state_delay_ms,
                 now_ms=now_tick,
             )
             ctx.logger.behavior(
-                f"[HUNT] attack id={track.id} pendingUntil="
+                f"[HUNT] attack id={target_id} pendingUntil="
                 f"{now_tick + ctx.config.post_attack_state_delay_ms}"
             )
 

@@ -115,6 +115,14 @@ class DeathValidator:
         mean_opacity, opacity_fade_score = self._opacity_fade_score(frame_bgr, hsv, descriptor, dead_bbox)
         mob_presence = max(living_score.final_score, pose_score, living_at_dead_score.final_score)
 
+        # Body palette is shared between alive and dead — use accent + pattern + purity
+        # to gauge "aliveness" (these factors drop when a mob dies)
+        living_confidence = (
+            living_score.accent_score * 0.50
+            + living_score.local_pattern_score * 0.30
+            + living_score.color_purity_score * 0.20
+        )
+
         confidence = (
             self.weights["pose"] * pose_score
             + self.weights["sizeGap"] * size_gap_score
@@ -125,7 +133,7 @@ class DeathValidator:
         return {
             "confidence": float(np.clip(confidence, 0.0, 1.0)),
             "mob_presence": float(np.clip(mob_presence, 0.0, 1.0)),
-            "living_score": living_score.final_score,
+            "living_score": float(np.clip(living_confidence, 0.0, 1.0)),
             "pose_score": pose_score,
             "size_gap_score": size_gap_score,
             "histogram_score": histogram_score,
@@ -148,12 +156,12 @@ class DeathValidator:
             return True
 
         if watch_point:
-            if gap >= 0.36 and pose >= 0.26:
+            if gap >= 0.36 and pose >= 0.14:
                 return True
             pose_living_ratio = pose / max(living, 1e-6)
-            if pose >= 0.24 and pose_living_ratio <= 0.84:
+            if pose >= 0.14 and pose_living_ratio <= 0.84:
                 return True
-            if confidence >= threshold and pose >= living and pose >= 0.22:
+            if confidence >= threshold and pose >= living and pose >= 0.14:
                 return True
             return False
 
@@ -214,7 +222,7 @@ class DeathValidator:
         if region_bgr.size == 0 or not descriptor.sprite_palette_bgr:
             return 1.0, 0.0
 
-        body_heat = palette_heatmap(region_hsv, descriptor.body_colors)
+        body_heat = palette_heatmap(region_hsv, descriptor.body_palette)
         accent_heat = palette_heatmap(region_hsv, descriptor.accent_colors)
         object_mask = np.maximum(body_heat, accent_heat) >= self.min_descriptor_color_match
         sample_count = int(object_mask.sum())

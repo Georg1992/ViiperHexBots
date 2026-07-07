@@ -10,7 +10,7 @@ from typing import Literal
 
 HUNT_ATTACK_RESULT_WINDOW_MS = 1800
 HUNT_STATE_INTERVAL_MS = 100
-HUNT_STATE_GONE_REMOVE_STREAK = 3
+HUNT_UNREACHABLE_CONFIRM_STREAK = 3
 HUNT_LOCAL_TRACK_MISS_LIMIT = 3
 HUNT_TRACK_MATCH_RADIUS = 90
 HUNT_TRACK_MISS_LIMIT = 3
@@ -20,7 +20,7 @@ HUNT_DISCOVERY_MATCH_SLACK_CAP_PX = 150
 HUNT_MAX_CONFIRM_AGE_MS = 5000
 HUNT_MAX_CONSECUTIVE_FOUND_WITHOUT_CONFIRM = 10
 
-TrackState = Literal["alive", "pending", "dead", "gone"]
+TrackState = Literal["alive", "pending", "dead", "unreachable"]
 
 
 @dataclass
@@ -68,7 +68,7 @@ class MobTrack:
     candidate_scale: float = 0.0
     discovery_miss_count: int = 0
     local_track_miss_count: int = 0
-    state_gone_count: int = 0
+    state_unreachable_count: int = 0
     suspicious_dead_count: int = 0
     area_epoch: int = 0
     last_confirm_tick: int = 0
@@ -141,7 +141,7 @@ def is_pending(track: MobTrack, now_tick: int) -> bool:
         return True
     track.state = "alive"
     track.pending_result_resolved = True
-    track.state_gone_count = 0
+    track.state_unreachable_count = 0
     return False
 
 
@@ -202,16 +202,20 @@ def apply_state_observation(track: MobTrack, observation: StateObservation, now_
         track.last_state_tick = now_tick
         return False
 
-    if observation.state == "gone":
-        if not was_attacked(track):
-            track.state_gone_count += 1
+    if observation.state == "unreachable":
+        if was_attacked(track):
+            # Mob was attacked and is now unreachable — can't kill it or left range.
+            # Mark as unreachable so the attack loop skips it.
+            track.state = "unreachable"
+            track.last_state_tick = now_tick
             return True
-        if is_pending(track, now_tick):
-            return True
-        track.state_gone_count += 1
-        if track.state_gone_count < HUNT_STATE_GONE_REMOVE_STREAK:
-            return True
-        return False
+        # Not attacked — could be a temporary tracking miss;
+        # wait for streak before marking.
+        track.state_unreachable_count += 1
+        if track.state_unreachable_count >= HUNT_UNREACHABLE_CONFIRM_STREAK:
+            track.state = "unreachable"
+            track.last_state_tick = now_tick
+        return True
 
     if observation.state == "unknown":
         return True
@@ -221,7 +225,7 @@ def apply_state_observation(track: MobTrack, observation: StateObservation, now_
         track.last_confirm_tick = now_tick
         track.consecutive_found_count = 0
         track.suspicious_dead_count = 0
-        track.state_gone_count = 0
+        track.state_unreachable_count = 0
         if observation.x > 0 and observation.y > 0:
             track.x = observation.x
             track.y = observation.y
@@ -243,7 +247,7 @@ def apply_attack_event(track: MobTrack, now_tick: int) -> None:
     track.pending_result_until_tick = now_tick + HUNT_ATTACK_RESULT_WINDOW_MS
     track.pending_result_resolved = False
     track.pending_timeout_logged = False
-    track.state_gone_count = 0
+    track.state_unreachable_count = 0
     track.local_track_miss_count = 0
     track.suspicious_dead_count = 0
     track.state = "pending"
@@ -280,11 +284,11 @@ def select_state_confirm_track_id(
     tracks: list[MobTrack],
     now_tick: int,
 ) -> int:
-    """Pick one track needing canonical dead/gone confirm.
+    """Pick one track needing canonical state confirm.
 
     Priority:
     1. Tracks in "pending" state (post-attack result window).
-    2. Tracks with too many local-track misses (suspected gone).
+    2. Tracks with too many local-track misses (suspected unreachable).
     3. Tracks that haven't had a state confirm recently (death detection gap).
     """
     pending = [track.id for track in tracks if is_pending(track, now_tick)]

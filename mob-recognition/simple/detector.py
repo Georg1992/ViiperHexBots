@@ -19,7 +19,6 @@ from scoring.region_scorer import RegionScore, SimpleRegionScorer
 
 
 REQUIRED_CONFIG_KEYS = {
-    "acceptThreshold",
     "minColorPurity",
     "minBodyPaletteScore",
     "minAccentScore",
@@ -56,7 +55,6 @@ REQUIRED_CONFIG_KEYS = {
     "playfieldLeftRatio",
     "playfieldRightRatio",
     "debugOutputDir",
-    "weights",
     "centerWeights",
     "deadValidationThreshold",
     "deadWatchPointThreshold",
@@ -69,7 +67,6 @@ REQUIRED_CONFIG_KEYS = {
 
 REQUIRED_DEAD_VALIDATION_WEIGHT_KEYS = {"pose", "sizeGap", "histogram", "opacity"}
 
-REQUIRED_WEIGHT_KEYS = {"bodyPalette", "accent", "rareColor", "localPattern", "colorPurity", "size"}
 REQUIRED_CENTER_WEIGHT_KEYS = {"bodyPalette", "accent", "rareColor", "localPattern"}
 
 STATE_DEAD_OVERRIDE_MARGIN = 0.08
@@ -161,9 +158,6 @@ def load_simple_config(path: Optional[Path] = None) -> dict:
     missing = sorted(REQUIRED_CONFIG_KEYS - set(config))
     if missing:
         raise ValueError(f"missing detector config keys: {', '.join(missing)}")
-    weight_missing = sorted(REQUIRED_WEIGHT_KEYS - set(config["weights"]))
-    if weight_missing:
-        raise ValueError(f"missing detector weight keys: {', '.join(weight_missing)}")
     center_weight_missing = sorted(REQUIRED_CENTER_WEIGHT_KEYS - set(config["centerWeights"]))
     if center_weight_missing:
         raise ValueError(f"missing center weight keys: {', '.join(center_weight_missing)}")
@@ -366,7 +360,7 @@ class SimpleMobDetector:
                     best_living is None or living_score.final_score > best_living[3].final_score
                 ):
                     best_living = (float(scale), living_bbox, living_bbox, living_score, None)
-                    if living_score.final_score >= float(self.config["acceptThreshold"]) + 0.10:
+                    if living_score.final_score >= 0.30:
                         break
                 continue
 
@@ -413,11 +407,10 @@ class SimpleMobDetector:
             ):
                 best_living = (float(scale), living_bbox, dead_bbox, living_score, validation)
 
-            # Early-exit: if a living candidate is clearly above threshold,
-            # skip remaining scales — later scales won't flip acceptance
+            # Early-exit: if body score is clearly good, skip remaining scales
             if (
                 best_living is not None
-                and best_living[3].final_score >= float(self.config["acceptThreshold"]) + 0.10
+                and best_living[3].final_score >= 0.30
             ):
                 break
 
@@ -528,10 +521,7 @@ class SimpleMobDetector:
         """Track state: death validation and living position at a known track point."""
         living, dead = self._score_point_at(frame_bgr, hsv, descriptor, cx, cy, scales=scales)
         if living is not None and living.accepted:
-            if (
-                dead is not None
-                and dead.final_score >= living.final_score + STATE_DEAD_OVERRIDE_MARGIN
-            ):
+            if dead is not None and self._death_override(dead, living):
                 return [dead]
             return [living]
         if dead is not None:
@@ -551,7 +541,7 @@ class SimpleMobDetector:
         if best is None:
             return {
                 "trackId": track_id,
-                "state": "gone",
+                "state": "unreachable",
                 "confidence": 0.0,
                 "x": cx + offset_x,
                 "y": cy + offset_y,
@@ -646,7 +636,7 @@ class SimpleMobDetector:
         scale_hint: float | None = None,
         profile: StateSearchProfile = STATE_PROFILE_FULL,
     ) -> dict:
-        """Canonical single-track state: alive, dead, or gone."""
+        """Canonical single-track state: alive, dead, or unreachable."""
         descriptor = self.ensure_descriptor(mob_name)
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         return self._evaluate_one_track(
@@ -771,6 +761,21 @@ class SimpleMobDetector:
                     points.append((nx, ny))
         return points or [(cx, cy)]
 
+    @staticmethod
+    def _death_override(dead: SimpleCandidate, living: SimpleCandidate) -> bool:
+        """Check if a dead candidate should override a living candidate.
+
+        Uses living_death_conf (accent+pattern+purity) for fair comparison
+        against death_validation.confidence, since body palette alone can't
+        distinguish alive from dead.
+        """
+        living_conf = (
+            living.accent_score * 0.50
+            + living.local_pattern_score * 0.30
+            + living.color_purity_score * 0.20
+        )
+        return dead.final_score >= float(np.clip(living_conf, 0.0, 1.0)) + STATE_DEAD_OVERRIDE_MARGIN
+
     def _select_track_state_candidate(
         self, candidates: list[SimpleCandidate]
     ) -> tuple[SimpleCandidate | None, dict[str, object]]:
@@ -785,8 +790,8 @@ class SimpleMobDetector:
             return None, {
                 "bestLivingScore": best_living_score,
                 "bestDeadScore": best_dead_score,
-                "selectedState": "gone",
-                "reason": "gone_no_candidate",
+                "selectedState": "unreachable",
+                "reason": "unreachable_no_candidate",
             }
 
         accepted_living = [
@@ -809,8 +814,7 @@ class SimpleMobDetector:
         if best_accepted_living is not None:
             if (
                 best_dead is not None
-                and best_dead.final_score
-                >= best_accepted_living.final_score + STATE_DEAD_OVERRIDE_MARGIN
+                and self._death_override(best_dead, best_accepted_living)
             ):
                 return best_dead, {
                     "bestLivingScore": best_living_score,
@@ -836,8 +840,8 @@ class SimpleMobDetector:
         return None, {
             "bestLivingScore": best_living_score,
             "bestDeadScore": best_dead_score,
-            "selectedState": "gone",
-            "reason": "gone_no_accepted_living",
+            "selectedState": "unreachable",
+            "reason": "unreachable_no_accepted_living",
         }
 
     @staticmethod

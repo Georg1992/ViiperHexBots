@@ -40,6 +40,13 @@ WM_ERASEBKGND = 0x0014
 WM_DESTROY = 0x0002
 WM_TIMER = 0x0113
 
+# Explicit argtypes for DefWindowProcW so 64-bit WPARAM/LPARAM don't overflow
+user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.DefWindowProcW.restype = wintypes.LRESULT
+
+# Colour key for transparent game-area pixels (hot pink so it's never used by game UI)
+COLOR_KEY = 0x00FF00FF  # BGR magenta
+
 COLOR_BLACK = 0x001A1A1A
 COLOR_TEXT = 0x00B8F0B8
 COLOR_STATUS = 0x00FFD966
@@ -115,6 +122,7 @@ class _OverlayState:
 
 
 _state = _OverlayState()
+_last_create_error: str = ""
 
 _HUNT_LINE_RE = re.compile(
     r"^(\[(?:HUNT|TRACK|DISCOVERY|STATE|DIRECT|MODE)\])",
@@ -167,10 +175,6 @@ def _wnd_proc(hwnd: int, msg: int, _wparam: int, _lparam: int) -> int:
         return 0
     elif msg == WM_ERASEBKGND:
         return 1
-    elif msg == WM_TIMER:
-        _reposition()
-        user32.InvalidateRect(hwnd, None, True)
-        return 0
     elif msg == WM_DESTROY:
         _state.running = False
         return 0
@@ -189,12 +193,23 @@ def _paint_overlay(hdc: int) -> None:
     cw = rect.right - rect.left
     ch = rect.bottom - rect.top
 
+    # ── Game-area transparent fill ─────────────────────────────
+    # Fill the entire window with COLOR_KEY (magenta).  The layered
+    # window uses LWA_COLORKEY so these pixels are fully transparent
+    # on screen, making the game visible through the overlay.
+    # Everything drawn AFTER this (dots, panel, text) uses other
+    # colours so it renders at the alpha set by LWA_ALPHA.
+    key_brush = gdi32.CreateSolidBrush(COLOR_KEY)
+    full_rect = wintypes.RECT(0, 0, cw, ch)
+    user32.FillRect(hdc, ctypes.byref(full_rect), key_brush)
+    gdi32.DeleteObject(key_brush)
+
     # ── Search region border ──────────────────────────────────
     if s.roi_w > 0 and s.brush_roi and s.client_w > 0:
         rx = s.roi_x - s.client_left
         ry = s.roi_y - s.client_top
         roi_rect = wintypes.RECT(rx, ry, rx + s.roi_w, ry + s.roi_h)
-        gdi32.FrameRect(hdc, ctypes.byref(roi_rect), s.brush_roi)
+        user32.FrameRect(hdc, ctypes.byref(roi_rect), s.brush_roi)
 
     # ── Draw track position dots (over the game area) ──────────
     if s.track_positions and s.client_w > 0:
@@ -221,7 +236,7 @@ def _paint_overlay(hdc: int) -> None:
         max(cw - PANEL_W, 0), 0, cw, ch
     )
     brush_bg = gdi32.CreateSolidBrush(COLOR_BLACK)
-    gdi32.FillRect(hdc, ctypes.byref(panel_rect), brush_bg)
+    user32.FillRect(hdc, ctypes.byref(panel_rect), brush_bg)
     gdi32.DeleteObject(brush_bg)
 
     # ── Status line ────────────────────────────────────────────
@@ -264,21 +279,6 @@ def _reposition() -> None:
     )
 
 
-# ── Message pump thread ──────────────────────────────────────────
-
-
-def _message_pump() -> None:
-    """Process window messages for the overlay window."""
-    msg = wintypes.MSG()
-    while _state.running:
-        ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
-        if ret <= 0:
-            break
-        user32.TranslateMessage(ctypes.byref(msg))
-        user32.DispatchMessageW(ctypes.byref(msg))
-    _state.running = False
-
-
 # ── Public API ────────────────────────────────────────────────────
 
 WINDOW_CLASS = "HuntOverlayClass"
@@ -296,12 +296,21 @@ def _create_brushes() -> tuple[int, int, int, int]:
 
 def create(game_hwnd: int) -> bool:
     """Create (or recreate) the overlay window over *game_hwnd*."""
+    global _last_create_error
+
     if _state.hwnd:
-        return True
+        # Already created — verify the window is still valid
+        if user32.IsWindow(_state.hwnd):
+            return True
+        # Stale handle from a previous session, reset
+        _state.hwnd = 0
 
     _state.game_hwnd = game_hwnd
+    _last_create_error = ""
+
     client = _get_client_rect_screen(game_hwnd)
     if client is None:
+        _last_create_error = f"get_client_rect_screen failed for hwnd={game_hwnd}"
         return False
 
     _client_left, _client_top, client_w, client_h = client
@@ -322,6 +331,7 @@ def create(game_hwnd: int) -> bool:
         0, 0, hinstance, 0,
     )
     if not hwnd:
+        _last_create_error = f"CreateWindowExW failed for size={client_w}x{client_h}"
         return False
 
     _state.hwnd = hwnd
@@ -333,20 +343,37 @@ def create(game_hwnd: int) -> bool:
         _state.brush_alive,
         _state.brush_roi,
     ) = _create_brushes()
-    # ~86% opacity for the whole layered window
-    user32.SetLayeredWindowAttributes(hwnd, 0, 220, 0x02)
+    if not _state.font_status or not _state.font_log:
+        _last_create_error = "CreateFontW failed"
+        destroy()
+        return False
+    # Layered-window attributes:
+    #   LWA_COLORKEY (0x01) — pixels matching COLOR_KEY are fully transparent
+    #   LWA_ALPHA    (0x02) — other pixels get 220/255 opacity (~86%)
+    #   Combined 0x03        — game area (magenta) invisible, panel stays semi-transparent
+    user32.SetLayeredWindowAttributes(hwnd, COLOR_KEY, 220, 0x03)
+
+    # Hide this window from screen-capture APIs (mss, BitBlt, etc.)
+    # so the bot's detection pipeline never sees the overlay
+    WDA_EXCLUDEFROMCAPTURE = 0x00000011
+    try:
+        user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+    except AttributeError:
+        # Pre-Windows 10 2004 — ignore, capture will include overlay
+        pass
+
+    _state.visible = True
     _reposition()
     user32.ShowWindow(hwnd, 8)  # SW_SHOWNA
-    _state.visible = True
-
-    # Set a 400ms timer for the overlay to auto-reposition
-    user32.SetTimer(hwnd, 1, 400, None)
-
-    if not _state.running:
-        _state.running = True
-        threading.Thread(target=_message_pump, daemon=True).start()
+    # Force an immediate initial paint
+    _invalidate()
 
     return True
+
+
+def last_error() -> str:
+    """Return the last overlay creation error message."""
+    return _last_create_error
 
 
 def _destroy_brushes() -> None:
@@ -462,6 +489,26 @@ def reset_stats() -> None:
 
 
 def _invalidate() -> None:
-    """Invalidate the overlay window to trigger a repaint."""
+    """Force an immediate repaint (synchronous, works cross-thread).
+
+    Uses ``UpdateWindow`` which sends WM_PAINT synchronously via
+    ``SendMessage`` — this works even when called from a thread that
+    didn't create the overlay window (unlike the message-queue-based
+    approach that would require pumping messages on the right thread).
+    """
     if _state.hwnd and user32.IsWindow(_state.hwnd):
         user32.InvalidateRect(_state.hwnd, None, True)
+        user32.UpdateWindow(_state.hwnd)
+
+
+def tick() -> None:
+    """Periodic upkeep: reposition overlay and repaint.
+
+    Called from the tkinter UI's ``after()`` loop (~400 ms interval).
+    Replaces the previous ``SetTimer`` + message-pump-thread approach
+    which was broken because posted messages are only delivered to the
+    thread that created the window (the main thread), not the pump thread.
+    """
+    if _state.visible:
+        _reposition()
+        _invalidate()

@@ -12,7 +12,7 @@ _hunt = import_hunt_track_rules()
 
 HUNT_ATTACK_RESULT_WINDOW_MS = _hunt.HUNT_ATTACK_RESULT_WINDOW_MS
 HUNT_LOCAL_TRACK_MISS_LIMIT = _hunt.HUNT_LOCAL_TRACK_MISS_LIMIT
-HUNT_STATE_GONE_REMOVE_STREAK = _hunt.HUNT_STATE_GONE_REMOVE_STREAK
+HUNT_UNREACHABLE_CONFIRM_STREAK = _hunt.HUNT_UNREACHABLE_CONFIRM_STREAK
 DiscoveryDetection = _hunt.DiscoveryDetection
 LocalTrackObservation = _hunt.LocalTrackObservation
 StateObservation = _hunt.StateObservation
@@ -54,15 +54,15 @@ class HuntTracksRulesTests(unittest.TestCase):
         assert track is not None
         self.assertTrue(is_attackable(track, self.now))
 
-    def test_ignored_gone_does_not_block_first_attack(self) -> None:
+    def test_ignored_unreachable_does_not_block_first_attack(self) -> None:
         track_id = self._create(874, 578)
         self.tracks.apply_state_observations(
-            [StateObservation(track_id, "gone")],
+            [StateObservation(track_id, "unreachable")],
             now_tick=self.now + 7_000,
         )
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
-        self.assertEqual(track.state_gone_count, 1)
+        self.assertEqual(track.state_unreachable_count, 1)
         self.assertEqual(track.last_state_tick, 0)
         self.assertEqual(track.state, "alive")
         self.assertTrue(is_attackable(track, self.now + 7_000))
@@ -124,7 +124,7 @@ class HuntTracksRulesTests(unittest.TestCase):
     def test_select_target_picks_unattacked_track(self) -> None:
         track_id = self._create(874, 578)
         self.tracks.apply_state_observations(
-            [StateObservation(track_id, "gone")],
+            [StateObservation(track_id, "unreachable")],
             now_tick=self.now + 1_000,
         )
         tracks = self.tracks.tracks_for_policy(self.now + 1_000)
@@ -172,60 +172,48 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(track.state, "alive")
         self.assertTrue(track.pending_result_resolved)
 
-    def test_attacked_gone_requires_streak_before_removal(self) -> None:
+    def test_attacked_unreachable_keeps_track(self) -> None:
         track_id = self._create(874, 578)
         self.tracks.apply_attack_event(track_id, now_tick=self.now + 100)
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
         track.pending_result_resolved = True
         track.state = "alive"
-        for streak in range(HUNT_STATE_GONE_REMOVE_STREAK - 1):
-            self.tracks.apply_state_observations(
-                [StateObservation(track_id, "gone")],
-                now_tick=self.now + 200 + streak,
-            )
-            self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
+        # First "unreachable" after attack should keep track, mark unreachable
         self.tracks.apply_state_observations(
-            [StateObservation(track_id, "gone")],
-            now_tick=self.now + 200 + HUNT_STATE_GONE_REMOVE_STREAK,
-        )
-        self.assertIsNone(self.tracks.get_track_by_id(track_id))
-
-    def test_attacked_gone_deferred_while_pending(self) -> None:
-        track_id = self._create(874, 578)
-        self.tracks.apply_attack_event(track_id, now_tick=self.now + 100)
-        track = self.tracks.get_track_by_id(track_id)
-        assert track is not None
-        track.state_gone_count = HUNT_STATE_GONE_REMOVE_STREAK
-        self.tracks.apply_state_observations(
-            [StateObservation(track_id, "gone")],
+            [StateObservation(track_id, "unreachable")],
             now_tick=self.now + 200,
         )
         track = self.tracks.get_track_by_id(track_id)
-        assert track is not None
-        self.assertEqual(track.state, "pending")
-        self.assertEqual(track.state_gone_count, HUNT_STATE_GONE_REMOVE_STREAK)
+        self.assertIsNotNone(track)
+        self.assertEqual(track.state, "unreachable")
 
-    def test_pending_timeout_after_gone_deferred_does_not_remove(self) -> None:
+    def test_attacked_unreachable_marks_even_when_pending(self) -> None:
+        """Attacked then unreachable marks it even during pending window."""
         track_id = self._create(874, 578)
         self.tracks.apply_attack_event(track_id, now_tick=self.now + 100)
-        for _ in range(HUNT_STATE_GONE_REMOVE_STREAK):
-            self.tracks.apply_state_observations(
-                [StateObservation(track_id, "gone")],
-                now_tick=self.now + 200,
-            )
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
-        track.pending_result_until_tick = self.now + 100
-        timeout_at = self.now + 100 + HUNT_ATTACK_RESULT_WINDOW_MS + 1
-        self.assertFalse(is_pending(track, timeout_at))
         self.tracks.apply_state_observations(
-            [StateObservation(track_id, "gone")],
+            [StateObservation(track_id, "unreachable")],
+            now_tick=self.now + 200,
+        )
+        track = self.tracks.get_track_by_id(track_id)
+        self.assertIsNotNone(track)
+        self.assertEqual(track.state, "unreachable")
+
+    def test_attacked_unreachable_marks_after_timeout_too(self) -> None:
+        """Even after pending timeout, attacked+unreachable marks unreachable."""
+        track_id = self._create(874, 578)
+        self.tracks.apply_attack_event(track_id, now_tick=self.now + 100)
+        timeout_at = self.now + 100 + HUNT_ATTACK_RESULT_WINDOW_MS + 1
+        self.tracks.apply_state_observations(
+            [StateObservation(track_id, "unreachable")],
             now_tick=timeout_at,
         )
         track = self.tracks.get_track_by_id(track_id)
-        assert track is not None
-        self.assertEqual(track.state_gone_count, 1)
+        self.assertIsNotNone(track)
+        self.assertEqual(track.state, "unreachable")
 
     def test_round_robin_includes_stale_coords(self) -> None:
         first = self.tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now)

@@ -11,3 +11,5 @@ ahk-err.txt
 query
 VIIPER/dist/
 input-bridge/embed/viiper.exe
+nul
+scripts/test_overlay.py

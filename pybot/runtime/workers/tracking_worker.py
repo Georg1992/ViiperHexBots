@@ -87,25 +87,18 @@ class TrackingWorker:
                 y=result.y,
                 miss_reason=result.miss_reason,
             )
+        detail = ",".join(
+            f"{result.track_id}:{'ok' if result.found else result.miss_reason}"
+            for result in batch.results
+        )
         ctx.validation.log_track_batch(
             track_ids=[result.track_id for result in batch.results],
             found_count=batch.found_count,
             duration_ms=batch.duration_ms,
             needs_confirm_ids=needs_confirm,
             every_n=ctx.config.validation_state_every_n,
-        )
-        detail = ",".join(
-            f"{result.track_id}:{'ok' if result.found else result.miss_reason}"
-            for result in batch.results
-        )
-        ctx.logger.behavior(
-            "[TRACK] batch "
-            f"tracks={len(batch.results)} "
-            f"found={batch.found_count} "
-            f"coordUpdates={batch.coord_updates} "
-            f"durationMs={batch.duration_ms} "
-            f"confirmQueue={len(needs_confirm)} "
-            f"results={detail}"
+            coord_updates=batch.coord_updates,
+            results_detail=detail,
         )
         # Update overlay with current track stats and positions
         now_tick = monotonic_ms()

@@ -69,7 +69,7 @@ class DetectorSessionTests(unittest.TestCase):
         batch = self.detector.state_confirm_frame(self.roi_frame, self.roi, snapshot)
         self.assertTrue(batch.ok)
         self.assertEqual(len(batch.observations), 1)
-        self.assertIn(batch.observations[0].state, ("alive", "dead", "gone"))
+        self.assertIn(batch.observations[0].state, ("alive", "dead", "unreachable"))
         self.assertGreater(batch.duration_ms, 0)
 
     def test_state_direct_returns_single_observation(self) -> None:

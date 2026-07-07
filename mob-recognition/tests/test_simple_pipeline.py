@@ -36,7 +36,7 @@ class SimplePipelineTests(unittest.TestCase):
     def test_descriptor_builds_from_spr_act(self) -> None:
         self.assertGreater(self.descriptor.avg_width, 10)
         self.assertGreater(self.descriptor.avg_height, 10)
-        self.assertGreater(len(self.descriptor.body_colors), 0)
+        self.assertGreater(len(self.descriptor.body_palette), 0)
         self.assertGreater(len(self.descriptor.accent_colors), 0)
         self.assertIsNotNone(self.descriptor.dead)
         self.assertGreater(self.descriptor.dead.size.avg_width, self.descriptor.size.avg_width)

@@ -82,13 +82,13 @@ class LocalTrackerTests(unittest.TestCase):
         wrapped = follow_track_local(detector, self.roi, "horn", track)
         self.assertEqual(direct, wrapped)
 
-    def test_miss_returns_reason_not_gone(self) -> None:
+    def test_miss_returns_reason_not_unreachable(self) -> None:
         detector = self._detector()
         track = {"trackId": 99, "x": 8, "y": 8, "scale": 0.9}
         result = track_local(detector, self.roi, "horn", track, search_radius_px=20)
         self.assertFalse(result.found)
         self.assertGreater(len(result.miss_reason), 0)
-        self.assertNotIn(result.miss_reason, ("gone", "dead", "unknown"))
+        self.assertNotIn(result.miss_reason, ("unreachable", "dead", "unknown"))
 
     def test_finds_mob_within_search_radius_after_offset_seed(self) -> None:
         detector = self._detector()

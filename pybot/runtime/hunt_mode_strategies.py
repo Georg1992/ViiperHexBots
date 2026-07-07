@@ -57,9 +57,6 @@ class HuntModeStrategy(ABC):
     ) -> None:
         """Record a successful discovery scan."""
         self._discovery_since_reset = True
-        self._ctx.logger.behavior(
-            f"[DISCOVERY] scan living={living_count} added={added_count}"
-        )
 
     def note_discovery_scan_failed(self, reason: str) -> None:
         """Record a failed discovery scan."""

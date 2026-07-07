@@ -19,7 +19,7 @@ from cli import apply_scale_calibration  # noqa: E402
 from detector import SimpleMobDetector, load_simple_config  # noqa: E402
 from hunt_track_rules import (  # noqa: E402
     HUNT_ATTACK_RESULT_WINDOW_MS,
-    HUNT_STATE_GONE_REMOVE_STREAK,
+    HUNT_UNREACHABLE_CONFIRM_STREAK,
     MobTrack,
     StateObservation,
     apply_attack_event,
@@ -49,11 +49,11 @@ class HuntTrackRulesTests(unittest.TestCase):
         self.assertTrue(is_attackable(track, now))
         self.assertEqual(attack_block_reason(track, now), "")
 
-    def test_ignored_gone_does_not_block_first_attack(self) -> None:
+    def test_ignored_unreachable_does_not_block_first_attack(self) -> None:
         now = 1_000_000
         track = MobTrack.from_discovery(1, 874, 578, 0.65, now_tick=now, discovery_scale=0.9)
-        apply_state_observation(track, StateObservation(1, "gone"), now + 7_000)
-        self.assertEqual(track.state_gone_count, 1)
+        apply_state_observation(track, StateObservation(1, "unreachable"), now + 7_000)
+        self.assertEqual(track.state_unreachable_count, 1)
         self.assertEqual(track.last_state_tick, 0)
         self.assertEqual(track.state, "alive")
         self.assertTrue(is_attackable(track, now + 7_000))
@@ -108,35 +108,29 @@ class HuntTrackRulesTests(unittest.TestCase):
         apply_attack_event(tracks[1], now + 100)
         self.assertEqual(select_target_id(tracks, now + 200, last_attack_target_id=1), 3)
 
-    def test_pending_timeout_after_gone_deferred_does_not_remove_immediately(self) -> None:
+    def test_attacked_unreachable_marks_unreachable(self) -> None:
         now = 1_000_000
         track = MobTrack.from_discovery(1, 874, 578, 0.65, now_tick=now)
         apply_attack_event(track, now + 100)
-        for _ in range(HUNT_STATE_GONE_REMOVE_STREAK):
-            apply_state_observation(track, StateObservation(1, "gone"), now + 200)
-        self.assertTrue(is_pending(track, now + 300))
-        timeout_at = now + 100 + HUNT_ATTACK_RESULT_WINDOW_MS + 1
-        self.assertFalse(is_pending(track, timeout_at))
-        kept = apply_state_observation(track, StateObservation(1, "gone"), timeout_at)
-        self.assertTrue(kept)
-        self.assertEqual(track.state_gone_count, 1)
+        # First "unreachable" after attack marks unreachable (keeps track)
+        kept = apply_state_observation(track, StateObservation(1, "unreachable"), now + 200)
+        self.assertTrue(kept, "attacked + unreachable should keep track")
+        self.assertEqual(track.state, "unreachable")
 
-    def test_attacked_gone_requires_streak_before_removal(self) -> None:
+    def test_attacked_unreachable_marks_after_alive(self) -> None:
         now = 1_000_000
         track = MobTrack.from_discovery(1, 874, 578, 0.65, now_tick=now)
         apply_attack_event(track, now + 100)
         track.pending_result_resolved = True
         track.state = "alive"
-        for tick in range(HUNT_STATE_GONE_REMOVE_STREAK - 1):
-            kept = apply_state_observation(track, StateObservation(1, "gone"), now + 200 + tick)
-            self.assertTrue(kept, f"gone streak {tick + 1} should keep track")
-            self.assertEqual(track.state_gone_count, tick + 1)
-        removed = apply_state_observation(
+        # First "unreachable" after attack marks unreachable (keeps track)
+        kept = apply_state_observation(
             track,
-            StateObservation(1, "gone"),
-            now + 200 + HUNT_STATE_GONE_REMOVE_STREAK,
+            StateObservation(1, "unreachable"),
+            now + 200,
         )
-        self.assertFalse(removed)
+        self.assertTrue(kept, "attacked + unreachable should keep track")
+        self.assertEqual(track.state, "unreachable")
 
     def test_pending_timeout_clears_pending_without_alive_state(self) -> None:
         now = 1_000_000
@@ -215,8 +209,8 @@ class HuntPipelineIntegrationTests(unittest.TestCase):
         self.assertTrue(is_attackable(track, now))
         self.assertEqual(select_target_id([track], now), 1)
 
-    def test_live_session_timeline_gone_ignored_still_attacks(self) -> None:
-        """Replays log pattern: create @19:54:30, gone ignored @19:54:37 — must stay attackable."""
+    def test_live_session_timeline_unreachable_ignored_still_attacks(self) -> None:
+        """Replays log pattern: create @19:54:30, unreachable ignored @19:54:37 — must stay attackable."""
         detector = self._detector_at_discovery_scale()
         discovery = detector.detect(self.roi, "horn")
         living = [c for c in discovery.accepted if not c.is_dead]
@@ -224,7 +218,7 @@ class HuntPipelineIntegrationTests(unittest.TestCase):
         anchor = living[0]
 
         t_create = 0
-        t_gone = 7_000
+        t_unreachable = 7_000
         track = MobTrack.from_discovery(
             1,
             anchor.center_x,
@@ -250,13 +244,13 @@ class HuntPipelineIntegrationTests(unittest.TestCase):
             t_create + 2_000,
         )
 
-        apply_state_observation(track, StateObservation(1, "gone"), t_gone)
+        apply_state_observation(track, StateObservation(1, "unreachable"), t_unreachable)
         self.assertEqual(track.state, "alive")
         self.assertTrue(
-            is_attackable(track, t_gone),
-            "ignored gone must not prevent first attack",
+            is_attackable(track, t_unreachable),
+            "ignored unreachable must not prevent first attack",
         )
-        self.assertEqual(select_target_id([track], t_gone), 1)
+        self.assertEqual(select_target_id([track], t_unreachable), 1)
 
     def test_state_alive_then_multi_tick_attackable_after_first_attack(self) -> None:
         detector = self._detector_at_discovery_scale()
@@ -292,8 +286,8 @@ class HuntPipelineIntegrationTests(unittest.TestCase):
                 )
                 state_track["x"] = obs["x"] - 0  # roi-local in test (no offset)
                 state_track["y"] = obs["y"]
-            elif obs["state"] == "gone":
-                apply_state_observation(track, StateObservation(1, "gone"), at)
+            elif obs["state"] == "unreachable":
+                apply_state_observation(track, StateObservation(1, "unreachable"), at)
 
             if track.attack_count == 0:
                 self.assertTrue(

@@ -52,15 +52,13 @@ class ConfirmStateWorker:
             ctx.logger.behavior(f"[STATE] direct failed id={request.track_id} reason={exc}")
             return True
 
-        self._apply_state_observations(batch.observations, now, old_snaps={request.track_id: old_snap})
-        ctx.tracks.clear_local_track_miss(request.track_id)
-        ctx.logger.behavior(
-            "[STATE] direct "
-            f"id={request.track_id} "
-            f"durationMs={batch.duration_ms} "
-            f"observations={len(batch.observations)} "
-            f"coordUpdates={batch.coord_updates}"
+        self._apply_state_observations(
+            batch.observations, now,
+            old_snaps={request.track_id: old_snap},
+            duration_ms=batch.duration_ms,
+            coord_updates=batch.coord_updates,
         )
+        ctx.tracks.clear_local_track_miss(request.track_id)
         return True
 
     def _run_state_confirm(self) -> bool:
@@ -94,16 +92,13 @@ class ConfirmStateWorker:
             ctx.tracks.clear_local_track_miss(track_id)
             return True
 
-        self._apply_state_observations(batch.observations, now, old_snaps={track_id: old_snap})
-        ctx.tracks.clear_local_track_miss(track_id)
-        obs_detail = ",".join(f"{obs.track_id}:{obs.state}" for obs in batch.observations)
-        ctx.logger.behavior(
-            "[STATE] confirm "
-            f"id={track_id} "
-            f"durationMs={batch.duration_ms} "
-            f"observations={len(batch.observations)} "
-            f"results={obs_detail}"
+        self._apply_state_observations(
+            batch.observations, now,
+            old_snaps={track_id: old_snap},
+            duration_ms=batch.duration_ms,
+            coord_updates=batch.coord_updates,
         )
+        ctx.tracks.clear_local_track_miss(track_id)
         return True
 
     def _scale_for_track(self, track_id: int) -> float:
@@ -122,6 +117,8 @@ class ConfirmStateWorker:
         now_tick: int,
         *,
         old_snaps: dict[int, object],
+        duration_ms: int = 0,
+        coord_updates: int = 0,
     ) -> None:
         ctx = self._ctx
         mapped = [
@@ -142,6 +139,8 @@ class ConfirmStateWorker:
                 old_snap=old_snaps.get(obs.track_id),
                 obs_x=obs.x,
                 obs_y=obs.y,
+                duration_ms=duration_ms,
+                coord_updates=coord_updates,
             )
             if obs.state == "dead":
                 hunt_overlay.increment_kills()

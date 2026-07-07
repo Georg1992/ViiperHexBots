@@ -1,5 +1,4 @@
 {
-  "acceptThreshold": 0.46,
   "minColorPurity": 0.50,
   "minBodyPaletteScore": 0.12,
   "minAccentScore": 0.18,
@@ -35,14 +34,6 @@
   "playfieldLeftRatio": 0.03,
   "playfieldRightRatio": 0.97,
   "debugOutputDir": "mob-recognition/debug/simple",
-  "weights": {
-    "bodyPalette": 0.40,
-    "accent": 0.35,
-    "rareColor": 0.10,
-    "localPattern": 0.05,
-    "colorPurity": 0.05,
-    "size": 0.05
-  },
   "centerWeights": {
     "bodyPalette": 0.40,
     "accent": 0.35,

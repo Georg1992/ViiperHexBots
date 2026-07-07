@@ -66,6 +66,13 @@ class SimpleDescriptorBuilder:
         if not dead_frames:
             raise RuntimeError(f"no death corpse frames could be rendered for {mob_name}")
 
+        # Living frames: extract dominant colors via per-frame intersection
+        dominant_color, supporting_colors = self._extract_dominant_colors(living_frames)
+
+        # Death frames: extract dominant colors via per-frame intersection (replaces k-means)
+        dead_dominant_color, dead_supporting_colors = self._extract_dominant_colors(dead_frames)
+
+        # Build full profiles (accent_colors, rare_colors, histograms via original pipeline)
         living_profile = self._build_frame_profile(living_frames)
         dead_profile = self._build_frame_profile(dead_frames)
 
@@ -73,16 +80,19 @@ class SimpleDescriptorBuilder:
             mob_name=mob_name,
             version=DESCRIPTOR_VERSION,
             size=living_profile["size"],
-            body_colors=living_profile["body_colors"],
+            dominant_color=dominant_color,
+            supporting_colors=supporting_colors,
             accent_colors=living_profile["accent_colors"],
             rare_colors=living_profile["rare_colors"],
             sprite_palette_bgr=living_profile["sprite_palette_bgr"],
             hsv_histogram=living_profile["hsv_histogram"],
             dead=DeadStateProfile(
                 size=dead_profile["size"],
-                body_colors=dead_profile["body_colors"],
+                # Use per-frame intersection (like living), not k-means
+                body_colors=[dead_dominant_color] + dead_supporting_colors,
                 accent_colors=dead_profile["accent_colors"],
                 hsv_histogram=dead_profile["hsv_histogram"],
+                sprite_palette_bgr=dead_profile["sprite_palette_bgr"],
             ),
         )
         descriptor.save(descriptor_path)
@@ -155,6 +165,104 @@ class SimpleDescriptorBuilder:
             "sprite_palette_bgr": sprite_palette_bgr,
             "hsv_histogram": hsv_hist,
         }
+
+    def _extract_dominant_colors(
+        self, frames: list[np.ndarray]
+    ) -> tuple[ColorCluster, list[ColorCluster]]:
+        """
+        Find exact pixel colors that exist in all living frames, ranked by frequency.
+
+        1. For each frame, collect the set of unique BGR colors.
+        2. Intersect across all frames to find colors present in EVERY frame.
+        3. Fall back to >= 90% threshold if no single color exists in all frames.
+        4. Sort by total pixel count across all frames.
+        5. Top = dominant_color, next up to 4 = supporting_colors.
+        """
+        per_frame_sets: list[set[tuple[int, int, int]]] = []
+        per_frame_counts: list[dict[tuple[int, int, int], int]] = []
+
+        for bgra in frames:
+            bgr = bgra[:, :, :3]
+            mask = bgra[:, :, 3] > 0
+            pixels = bgr[mask]
+            if len(pixels) == 0:
+                continue
+            unique_colors, counts = np.unique(pixels, axis=0, return_counts=True)
+            color_set = {tuple(int(v) for v in c) for c in unique_colors}
+            per_frame_sets.append(color_set)
+            per_frame_counts.append(
+                {
+                    tuple(int(v) for v in c): int(counts[i])
+                    for i, c in enumerate(unique_colors)
+                }
+            )
+
+        if not per_frame_sets:
+            raise ValueError("no frames with opaque pixels to extract dominant colors")
+
+        # Intersection across all frames
+        common_colors = per_frame_sets[0]
+        for s in per_frame_sets[1:]:
+            common_colors = common_colors & s
+            if not common_colors:
+                break
+
+        # Fallback: present in >= 90% of frames
+        if not common_colors:
+            threshold = max(1, int(len(per_frame_sets) * 0.9))
+            color_votes: dict[tuple[int, int, int], int] = {}
+            for color_set in per_frame_sets:
+                for color in color_set:
+                    color_votes[color] = color_votes.get(color, 0) + 1
+            common_colors = {c for c, v in color_votes.items() if v >= threshold}
+
+        # Ultimate fallback: aggregate top color
+        if not common_colors:
+            all_pixels = np.concatenate(
+                [bgra[:, :, :3][bgra[:, :, 3] > 0] for bgra in frames], axis=0
+            )
+            unique, counts = np.unique(all_pixels, axis=0, return_counts=True)
+            top_idx = int(np.argmax(counts))
+            top_color = tuple(int(v) for v in unique[top_idx])
+            common_colors = {top_color}
+
+        # Count total pixels for each common color across all frames
+        total_counts: dict[tuple[int, int, int], int] = {}
+        for frame_counts in per_frame_counts:
+            for color, count in frame_counts.items():
+                if color in common_colors:
+                    total_counts[color] = total_counts.get(color, 0) + count
+
+        sorted_colors = sorted(total_counts.items(), key=lambda x: x[1], reverse=True)
+        total_pixels = sum(total_counts.values())
+
+        def _bgr_to_hsv(bgr_tuple):
+            pixel = np.uint8([[list(bgr_tuple)]])
+            hsv = cv2.cvtColor(pixel, cv2.COLOR_BGR2HSV)[0, 0]
+            return tuple(float(v) for v in hsv)
+
+        dominant_bgr = sorted_colors[0][0]
+        dominant_color = ColorCluster(
+            label="dominant",
+            bgr=tuple(float(v) for v in dominant_bgr),
+            hsv=_bgr_to_hsv(dominant_bgr),
+            fraction=sorted_colors[0][1] / total_pixels if total_pixels > 0 else 0.0,
+            tolerance=(14, 40, 40),
+        )
+
+        supporting: list[ColorCluster] = []
+        for i, (bgr_color, count) in enumerate(sorted_colors[1:5], 1):
+            supporting.append(
+                ColorCluster(
+                    label=f"supporting_{i}",
+                    bgr=tuple(float(v) for v in bgr_color),
+                    hsv=_bgr_to_hsv(bgr_color),
+                    fraction=count / total_pixels if total_pixels > 0 else 0.0,
+                    tolerance=(16, 45, 45),
+                )
+            )
+
+        return dominant_color, supporting
 
     @staticmethod
     def _tight_crop(bgra: np.ndarray) -> np.ndarray:

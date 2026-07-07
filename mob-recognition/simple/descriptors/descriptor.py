@@ -36,6 +36,7 @@ class DeadStateProfile:
     body_colors: list[ColorCluster]
     accent_colors: list[ColorCluster]
     hsv_histogram: list[float]
+    sprite_palette_bgr: list[tuple[int, int, int]] | None = None
 
 
 @dataclass
@@ -43,7 +44,8 @@ class SimpleMobDescriptor:
     mob_name: str
     version: int
     size: SizeDescriptor
-    body_colors: list[ColorCluster]
+    dominant_color: ColorCluster
+    supporting_colors: list[ColorCluster]
     accent_colors: list[ColorCluster]
     rare_colors: list[ColorCluster]
     sprite_palette_bgr: list[tuple[int, int, int]]
@@ -55,17 +57,36 @@ class SimpleMobDescriptor:
         dead_data = data.get("dead")
         dead_profile = None
         if dead_data:
+            sprite_bgr = dead_data.get("spritePaletteBgr")
             dead_profile = DeadStateProfile(
                 size=SizeDescriptor.from_dict(dead_data["size"]),
                 body_colors=[ColorCluster(**item) for item in dead_data["bodyColors"]],
                 accent_colors=[ColorCluster(**item) for item in dead_data["accentColors"]],
                 hsv_histogram=[float(v) for v in dead_data["hsvHistogram"]],
+                sprite_palette_bgr=[tuple(int(v) for v in item) for item in sprite_bgr] if sprite_bgr else None,
             )
+
+        # Backward compat: if dominantColor is missing (legacy descriptor),
+        # synthesize from the first bodyColors entry
+        if "dominantColor" in data:
+            dominant_color = ColorCluster(**data["dominantColor"])
+            supporting_colors = [ColorCluster(**item) for item in data.get("supportingColors", [])]
+        elif "bodyColors" in data and data["bodyColors"]:
+            legacy = [ColorCluster(**item) for item in data["bodyColors"]]
+            dominant_color = legacy[0]
+            supporting_colors = legacy[1:]
+        else:
+            dominant_color = ColorCluster(
+                label="dominant", bgr=(0,0,0), hsv=(0,0,0), fraction=0.0, tolerance=(14,40,40)
+            )
+            supporting_colors = []
+
         return cls(
             mob_name=str(data["mobName"]),
             version=int(data["version"]),
             size=SizeDescriptor.from_dict(data["size"]),
-            body_colors=[ColorCluster(**item) for item in data["bodyColors"]],
+            dominant_color=dominant_color,
+            supporting_colors=supporting_colors,
             accent_colors=[ColorCluster(**item) for item in data["accentColors"]],
             rare_colors=[ColorCluster(**item) for item in data["rareColors"]],
             sprite_palette_bgr=[tuple(int(v) for v in item) for item in data["spritePaletteBgr"]],
@@ -83,7 +104,8 @@ class SimpleMobDescriptor:
             "mobName": data["mob_name"],
             "version": data["version"],
             "size": data["size"],
-            "bodyColors": data["body_colors"],
+            "dominantColor": data["dominant_color"],
+            "supportingColors": data["supporting_colors"],
             "accentColors": data["accent_colors"],
             "rareColors": data["rare_colors"],
             "spritePaletteBgr": data["sprite_palette_bgr"],
@@ -97,6 +119,8 @@ class SimpleMobDescriptor:
                 "accentColors": dead["accent_colors"],
                 "hsvHistogram": dead["hsv_histogram"],
             }
+            if dead.get("sprite_palette_bgr"):
+                payload["dead"]["spritePaletteBgr"] = dead["sprite_palette_bgr"]
         return payload
 
     def save(self, path: Path) -> None:
@@ -111,17 +135,27 @@ class SimpleMobDescriptor:
     def avg_height(self) -> int:
         return max(1, int(round(self.size.avg_height)))
 
+    @property
+    def body_palette(self) -> list[ColorCluster]:
+        """Convenience: dominant + supporting colors for heatmap/scoring."""
+        return [self.dominant_color] + self.supporting_colors
+
     def dead_scoring_view(self) -> "SimpleMobDescriptor":
         if self.dead is None:
             raise ValueError(f"descriptor for mob '{self.mob_name}' has no dead profile")
+        dead = self.dead
+        # Map dead body_colors into dominant + supporting layout
+        dc = dead.body_colors[0] if dead.body_colors else self.dominant_color
+        sc = dead.body_colors[1:] if len(dead.body_colors) > 1 else []
         return SimpleMobDescriptor(
             mob_name=self.mob_name,
             version=self.version,
-            size=self.dead.size,
-            body_colors=self.dead.body_colors,
-            accent_colors=self.dead.accent_colors,
+            size=dead.size,
+            dominant_color=dc,
+            supporting_colors=sc,
+            accent_colors=dead.accent_colors,
             rare_colors=self.rare_colors,
-            sprite_palette_bgr=self.sprite_palette_bgr,
-            hsv_histogram=self.dead.hsv_histogram,
+            sprite_palette_bgr=dead.sprite_palette_bgr if dead.sprite_palette_bgr else self.sprite_palette_bgr,
+            hsv_histogram=dead.hsv_histogram,
             dead=None,
         )

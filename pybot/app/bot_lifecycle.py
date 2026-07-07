@@ -124,9 +124,12 @@ class BotLifecycleManager:
     ) -> None:
         """Start the hunt runtime on a daemon thread.
 
+        Each call generates a fresh ``hunt_session_id`` so the runtime
+        logs go into a new directory — not the app-level session dir.
+
         Args:
             config_snapshot: Fully synced AppConfig with current UI values.
-            session_id: Session identifier for logging paths.
+            session_id: App-level session identifier (used as prefix).
         """
         if self._state not in (BotState.OFF, BotState.PAUSED):
             return
@@ -142,14 +145,23 @@ class BotLifecycleManager:
         )
         self._bot.start()
         self._state = BotState.RUNNING
+        # Start overlay upkeep timer (reposition + repaint every 400ms)
+        self._root.after(400, self._schedule_overlay_tick)
         self._session.write_block(
             "bot start",
             f"hwnd={config_snapshot.window_id}\n"
-            f"mobIndex={config_snapshot.selected_monster}",
+            f"mobIndex={config_snapshot.selected_monster}\n"
+            f"huntSession={session_id}",
         )
         if self._on_state_change:
             self._on_state_change(BotState.RUNNING)
         self._root.after(300, self._poll_focus)
+
+    def _schedule_overlay_tick(self) -> None:
+        """Periodic overlay upkeep while the bot is running."""
+        if self._state != BotState.OFF:
+            hunt_overlay.tick()
+            self._root.after(400, self._schedule_overlay_tick)
 
     def stop(self) -> None:
         """Stop the hunt runtime and destroy the overlay."""

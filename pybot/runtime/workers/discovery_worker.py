@@ -99,12 +99,3 @@ class DiscoveryWorker:
             duration_ms=duration_ms,
             summary=summary,
         )
-        ctx.logger.behavior(
-            "[DISCOVERY] scan "
-            f"raw={scan.raw_count} "
-            f"accepted={len(filtered)} "
-            f"added={summary.added_count} "
-            f"matched={summary.matched_count} "
-            f"removed={summary.removed_count} "
-            f"durationMs={duration_ms}"
-        )

@@ -27,11 +27,8 @@ class HuntLogger:
         self._on_behavior = on_behavior
 
         self._behavior = logging.getLogger(f"pybot.behavior.{self.session_id}")
-        self._system = logging.getLogger(f"pybot.system.{self.session_id}")
         if not self._behavior.handlers:
             self._configure_file_logger(self._behavior, self.session_dir / "behavior.log")
-        if not self._system.handlers:
-            self._configure_file_logger(self._system, self.session_dir / "system.log")
 
     @staticmethod
     def _configure_file_logger(logger: logging.Logger, path: Path) -> None:
@@ -52,5 +49,4 @@ class HuntLogger:
         if self._on_behavior is not None:
             self._on_behavior(line)
 
-    def system(self, level: str, category: str, message: str) -> None:
-        self._system.info("%s %s %s", level, category, message)
+

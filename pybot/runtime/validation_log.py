@@ -90,6 +90,8 @@ class HuntValidationLogger:
         old_snap: MobTrackSnapshot | None,
         obs_x: int,
         obs_y: int,
+        duration_ms: int = 0,
+        coord_updates: int = 0,
     ) -> None:
         track = self._tracks.get_track_by_id(track_id)
         old_state = old_snap.state if old_snap else "?"
@@ -109,6 +111,8 @@ class HuntValidationLogger:
             oldY=old_y,
             newX=new_x,
             newY=new_y,
+            durationMs=duration_ms,
+            coordUpdates=coord_updates,
         )
 
     def log_track_batch(
@@ -119,21 +123,26 @@ class HuntValidationLogger:
         duration_ms: int,
         needs_confirm_ids: list[int],
         every_n: int = 1,
+        coord_updates: int = 0,
+        results_detail: str = "",
     ) -> None:
         if not self._enabled:
             return
         self._state_tick_seq += 1
         if every_n > 1 and self._state_tick_seq % every_n != 0:
             return
-        self._emit(
-            "track_batch",
-            screenId=self._tracks.area_epoch,
-            seq=self._state_tick_seq,
-            trackIds=_join_ids(track_ids),
-            foundCount=found_count,
-            durationMs=duration_ms,
-            confirmIds=_join_ids(needs_confirm_ids),
-        )
+        fields = {
+            "screenId": self._tracks.area_epoch,
+            "seq": self._state_tick_seq,
+            "trackIds": _join_ids(track_ids),
+            "foundCount": found_count,
+            "coordUpdates": coord_updates,
+            "durationMs": duration_ms,
+            "confirmIds": _join_ids(needs_confirm_ids),
+        }
+        if results_detail:
+            fields["results"] = results_detail
+        self._emit("track_batch", **fields)
 
     def log_local_track_observation(
         self,

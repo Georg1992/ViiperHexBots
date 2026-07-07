@@ -528,8 +528,16 @@ class MainWindow:
 
         # Create hunt log overlay if enabled
         if self.overlay_var.get() and self.config.window_id:
-            hunt_overlay.create(self.config.window_id)
+            ok = hunt_overlay.create(self.config.window_id)
+            if ok:
+                self.log_pipe.log(f"[OVERLAY] created on hwnd={self.config.window_id}")
+            else:
+                err = hunt_overlay.last_error()
+                self.log_pipe.log(f"[OVERLAY] failed: {err}")
 
+        # Open the session log (lazy — creates directory + starts
+        # background writer).  No file I/O happens until this point.
+        self.session.open()
         self.lifecycle.start(
             config_snapshot=self.config,
             session_id=self.session.session_id,

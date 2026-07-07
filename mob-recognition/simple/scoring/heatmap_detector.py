@@ -69,7 +69,7 @@ class HeatmapDetector:
         descriptor: SimpleMobDescriptor,
         downscale: int = 1,
     ) -> Heatmaps:
-        body = palette_heatmap(hsv, descriptor.body_colors)
+        body = palette_heatmap(hsv, descriptor.body_palette)
         accent = palette_heatmap(hsv, descriptor.accent_colors)
         rare = palette_heatmap(hsv, descriptor.rare_colors)
         local_pattern = self._local_pattern(frame_bgr, accent, body)

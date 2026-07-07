@@ -26,7 +26,6 @@ class RegionScore:
 
 class SimpleRegionScorer:
     def __init__(self, config: dict):
-        self.threshold = float(config["acceptThreshold"])
         self.min_color_purity = float(config["minColorPurity"])
         self.min_descriptor_color_match = float(config["minDescriptorColorMatch"])
         self.max_sprite_palette_distance = float(config["maxSpritePaletteDistance"])
@@ -40,15 +39,6 @@ class SimpleRegionScorer:
         self.min_body_palette_score = float(config["minBodyPaletteScore"])
         self.min_accent_score = float(config["minAccentScore"])
         self.min_local_pattern_score = float(config["minLocalPatternScore"])
-        weights = config["weights"]
-        self.weights = {
-            "body": float(weights["bodyPalette"]),
-            "accent": float(weights["accent"]),
-            "rare": float(weights["rareColor"]),
-            "pattern": float(weights["localPattern"]),
-            "purity": float(weights["colorPurity"]),
-            "size": float(weights["size"]),
-        }
 
     def score(
         self,
@@ -64,7 +54,7 @@ class SimpleRegionScorer:
         if region_bgr.size == 0:
             return RegionScore(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False, "empty_region")
 
-        body_heat = palette_heatmap(region_hsv, descriptor.body_colors)
+        body_heat = palette_heatmap(region_hsv, descriptor.body_palette)
         accent_heat = palette_heatmap(region_hsv, descriptor.accent_colors)
         rare_heat = palette_heatmap(region_hsv, descriptor.rare_colors)
         descriptor_heat = np.maximum.reduce([body_heat, accent_heat, rare_heat])
@@ -81,50 +71,31 @@ class SimpleRegionScorer:
             sprite_palette_heat,
         )
         size = self._object_size_score(descriptor_heat, descriptor, expected_scale)
-        final = (
-            self.weights["body"] * body
-            + self.weights["accent"] * accent
-            + self.weights["rare"] * rare
-            + self.weights["pattern"] * pattern
-            + self.weights["purity"] * purity
-            + self.weights["size"] * size
-        )
-        accepted = (
-            final >= self.threshold
-            and purity >= self.min_color_purity
-            and body >= self.min_body_palette_score
-            and accent >= self.min_accent_score
-            and pattern >= self.min_local_pattern_score
-            and rare <= max(body * self.max_rare_to_body_ratio, 0.05)
-            and informative_fraction >= self.min_informative_fraction
-            and descriptor_fraction <= self.max_descriptor_pixel_fraction
-            and size >= self.min_discovery_size_score
-            and (not self.enforce_object_size_gate or size >= self.min_object_size_score)
-        )
+
+        # Binary pass/fail gates — each property is checked independently
+        gates = []
+        gates.append((body >= self.min_body_palette_score, "weak_body_palette"))
+        gates.append((accent >= self.min_accent_score, "weak_accent"))
+        gates.append((pattern >= self.min_local_pattern_score, "weak_pattern"))
+        gates.append((purity >= self.min_color_purity, "foreign_colors"))
+        gates.append((rare <= max(body * self.max_rare_to_body_ratio, 0.05), "rare_color_imbalance"))
+        gates.append((informative_fraction >= self.min_informative_fraction, "insufficient_sprite_pixels"))
+        gates.append((descriptor_fraction <= self.max_descriptor_pixel_fraction, "too_much_descriptor_color"))
+        gates.append((size >= self.min_discovery_size_score, "wrong_size"))
+        if self.enforce_object_size_gate:
+            gates.append((size >= self.min_object_size_score, "wrong_size"))
+
+        accepted = all(gate[0] for gate in gates)
         rejection_reason = ""
         if not accepted:
-            if final < self.threshold:
-                rejection_reason = "below_threshold"
-            elif purity < self.min_color_purity:
-                rejection_reason = "foreign_colors"
-            elif body < self.min_body_palette_score:
-                rejection_reason = "weak_body_palette"
-            elif accent < self.min_accent_score:
-                rejection_reason = "weak_accent"
-            elif pattern < self.min_local_pattern_score:
-                rejection_reason = "weak_pattern"
-            elif rare > max(body * self.max_rare_to_body_ratio, 0.05):
-                rejection_reason = "rare_color_imbalance"
-            elif descriptor_fraction > self.max_descriptor_pixel_fraction:
-                rejection_reason = "too_much_descriptor_color"
-            elif informative_fraction < self.min_informative_fraction:
-                rejection_reason = "insufficient_sprite_pixels"
-            elif size < self.min_discovery_size_score:
-                rejection_reason = "wrong_size"
-            elif self.enforce_object_size_gate and size < self.min_object_size_score:
-                rejection_reason = "wrong_size"
+            # Report the first failing gate
+            for gate_pass, gate_reason in gates:
+                if not gate_pass:
+                    rejection_reason = gate_reason
+                    break
+
         return RegionScore(
-            final_score=float(np.clip(final, 0.0, 1.0)),
+            final_score=float(np.clip(body, 0.0, 1.0)),
             body_palette_score=body,
             accent_score=accent,
             rare_color_score=rare,
@@ -138,7 +109,7 @@ class SimpleRegionScorer:
     @staticmethod
     def _local_pattern(region_bgr: np.ndarray, region_hsv: np.ndarray, descriptor: SimpleMobDescriptor) -> float:
         accent = palette_heatmap(region_hsv, descriptor.accent_colors)
-        body = palette_heatmap(region_hsv, descriptor.body_colors)
+        body = palette_heatmap(region_hsv, descriptor.body_palette)
         gray = cv2.cvtColor(region_bgr, cv2.COLOR_BGR2GRAY)
         grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
         grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
