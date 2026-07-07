@@ -132,7 +132,7 @@ class HeatmapDetector:
         radius = max(3, self.min_center_distance // 2)
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (radius * 2 + 1, radius * 2 + 1))
         local_max = heatmap == cv2.dilate(heatmap, kernel)
-        threshold = max(float(heatmap.max()) * 0.45, self.min_center_heat)
+        threshold = max(float(heatmap.max()) * 0.25, self.min_center_heat)
         ys, xs = np.where(local_max & (heatmap >= threshold))
         if len(xs) == 0:
             return []

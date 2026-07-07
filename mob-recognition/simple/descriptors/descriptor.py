@@ -50,6 +50,7 @@ class SimpleMobDescriptor:
     rare_colors: list[ColorCluster]
     sprite_palette_bgr: list[tuple[int, int, int]]
     hsv_histogram: list[float]
+    dominant_pixel_bgr: list[int] | None = None  # [B, G, R] of the single most common pixel across all sprite frames
     dead: DeadStateProfile | None = None
 
     @classmethod
@@ -81,6 +82,9 @@ class SimpleMobDescriptor:
             )
             supporting_colors = []
 
+        raw = data.get("dominantPixelBgr")
+        dominant_pixel_bgr = [int(v) for v in raw] if raw is not None else None
+
         return cls(
             mob_name=str(data["mobName"]),
             version=int(data["version"]),
@@ -91,6 +95,7 @@ class SimpleMobDescriptor:
             rare_colors=[ColorCluster(**item) for item in data["rareColors"]],
             sprite_palette_bgr=[tuple(int(v) for v in item) for item in data["spritePaletteBgr"]],
             hsv_histogram=[float(v) for v in data["hsvHistogram"]],
+            dominant_pixel_bgr=dominant_pixel_bgr,
             dead=dead_profile,
         )
 
@@ -110,6 +115,7 @@ class SimpleMobDescriptor:
             "rareColors": data["rare_colors"],
             "spritePaletteBgr": data["sprite_palette_bgr"],
             "hsvHistogram": data["hsv_histogram"],
+            "dominantPixelBgr": data.get("dominant_pixel_bgr"),
         }
         if data["dead"] is not None:
             dead = data["dead"]

@@ -1,0 +1,30 @@
+{
+  "mob": "horn",
+  "roi": [
+    448,
+    28,
+    1024,
+    1024
+  ],
+  "detectMs": 463.8,
+  "candidates": [
+    {
+      "center": [
+        239,
+        782
+      ],
+      "accepted": true,
+      "score": 0.6168,
+      "body": 0.6168,
+      "accent": 0.6736,
+      "purity": 0.6575,
+      "size": 0.9899,
+      "pattern": 0.5098,
+      "rare": 0.5782,
+      "heat": 0.1151,
+      "scale": 0.85,
+      "dead": false,
+      "rejection": ""
+    }
+  ]
+}

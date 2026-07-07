@@ -451,9 +451,13 @@ def reconcile_unmatched_tracks(
 ) -> list[int]:
     removed_ids: list[int] = []
     for track in tracks:
-        if not is_alive(track):
-            continue
         if track.id in matched_track_ids:
+            continue
+        if track.state == "dead":
+            continue
+        # Unreachable tracks: still count discovery misses so they eventually get cleaned up.
+        # Dead tracks (confirmed kills) are removed by _apply_state_observation_locked directly.
+        if not is_alive(track) and track.state != "unreachable":
             continue
         track.discovery_miss_count += 1
         if track.discovery_miss_count >= HUNT_TRACK_MISS_LIMIT:

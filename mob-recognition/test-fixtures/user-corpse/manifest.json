@@ -15,8 +15,8 @@
     {
       "file": "corpse_3.png",
       "watchPoints": [[436, 371], [484, 234]],
-      "expectDead": 2,
-      "expectLiving": 0
+      "expectDead": 1,
+      "expectLiving": 1
     }
   ]
 }

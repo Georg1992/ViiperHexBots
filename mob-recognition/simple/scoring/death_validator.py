@@ -156,19 +156,19 @@ class DeathValidator:
             return True
 
         if watch_point:
-            if gap >= 0.36 and pose >= 0.14:
+            if gap >= 0.30 and pose >= 0.10:
                 return True
             pose_living_ratio = pose / max(living, 1e-6)
-            if pose >= 0.14 and pose_living_ratio <= 0.84:
+            if pose >= 0.10 and pose_living_ratio <= 0.84:
                 return True
-            if confidence >= threshold and pose >= living and pose >= 0.14:
+            if confidence >= threshold and pose >= living and pose >= 0.10:
                 return True
             return False
 
         if pose >= living and confidence >= threshold:
             return True
 
-        if living >= 0.62 or pose < 0.30 or gap < 0.39:
+        if living >= 0.62 or pose < 0.20 or gap < 0.30:
             return False
 
         pose_living_ratio = pose / max(living, 1e-6)

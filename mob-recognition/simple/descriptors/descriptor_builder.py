@@ -29,7 +29,19 @@ class SimpleDescriptorBuilder:
         self.project_root = project_root
 
     def asset_dir(self, mob_name: str) -> Path:
-        return self.project_root / "assets" / "mobs" / mob_name.lower()
+        mob_name_lower = mob_name.lower()
+        base = self.project_root / "assets" / "mobs"
+        # Fast path: direct lowercase folder name (e.g. horn/horn.spr)
+        direct = base / mob_name_lower
+        if (direct / f"{mob_name_lower}.spr").is_file():
+            return direct
+        # Fallback: scan folders for one containing the matching SPR file
+        # This handles folder/file name mismatches (e.g. DesertWolf/desert_wolf.spr)
+        if base.is_dir():
+            for folder in sorted(base.iterdir()):
+                if folder.is_dir() and (folder / f"{mob_name_lower}.spr").is_file():
+                    return folder
+        return direct  # will raise FileNotFoundError in build() with clear message
 
     def output_dir(self, mob_name: str) -> Path:
         return self.project_root / "generated_descriptors" / mob_name.lower() / "simple"
@@ -66,29 +78,35 @@ class SimpleDescriptorBuilder:
         if not dead_frames:
             raise RuntimeError(f"no death corpse frames could be rendered for {mob_name}")
 
-        # Living frames: extract dominant colors via per-frame intersection
-        dominant_color, supporting_colors = self._extract_dominant_colors(living_frames)
-
-        # Death frames: extract dominant colors via per-frame intersection (replaces k-means)
-        dead_dominant_color, dead_supporting_colors = self._extract_dominant_colors(dead_frames)
-
-        # Build full profiles (accent_colors, rare_colors, histograms via original pipeline)
-        living_profile = self._build_frame_profile(living_frames)
+        # Build full profiles via k-means pipeline (accent_colors, body_colors, rare_colors, histograms)
+        # Tighten hue+sat tolerance on the dominant cluster for more selective color matching
+        living_profile = self._build_frame_profile(living_frames, dominant_tolerance=(12, 35, 55))
         dead_profile = self._build_frame_profile(dead_frames)
+
+        # Living body colors: use k-means centroids (robust across animation frames)
+        living_body_colors = living_profile["body_colors"]
+        living_dominant = living_body_colors[0] if living_body_colors else living_profile["body_colors"][0]
+        living_supporting = living_body_colors[1:] if len(living_body_colors) > 1 else []
+        # Single most common pixel color across all sprite frames (not a cluster center)
+        dominant_pixel_bgr = self._find_dominant_pixel(living_frames)
+
+        # Death body colors: use per-frame intersection (stricter — corpse has fewer frame variants)
+        dead_dominant_color, dead_supporting_colors = self._extract_dominant_colors(dead_frames)
 
         descriptor = SimpleMobDescriptor(
             mob_name=mob_name,
             version=DESCRIPTOR_VERSION,
             size=living_profile["size"],
-            dominant_color=dominant_color,
-            supporting_colors=supporting_colors,
+            dominant_color=living_dominant,
+            supporting_colors=living_supporting,
             accent_colors=living_profile["accent_colors"],
             rare_colors=living_profile["rare_colors"],
             sprite_palette_bgr=living_profile["sprite_palette_bgr"],
             hsv_histogram=living_profile["hsv_histogram"],
+            dominant_pixel_bgr=dominant_pixel_bgr,
             dead=DeadStateProfile(
                 size=dead_profile["size"],
-                # Use per-frame intersection (like living), not k-means
+                # Use per-frame intersection for corpse body colors
                 body_colors=[dead_dominant_color] + dead_supporting_colors,
                 accent_colors=dead_profile["accent_colors"],
                 hsv_histogram=dead_profile["hsv_histogram"],
@@ -111,8 +129,11 @@ class SimpleDescriptorBuilder:
             if action_index >= len(act_file.actions):
                 continue
             action = act_file.actions[action_index]
+            # Clip frame_start to available frames so we always take at least the last frame
+            total = len(action.frames)
+            start = min(frame_start, max(0, total - 1))
             for frame_index, frame_ref in enumerate(action.frames):
-                if frame_index < frame_start:
+                if frame_index < start:
                     continue
                 bgra = render_act_frame(spr_file, frame_ref)
                 cropped = self._tight_crop(bgra)
@@ -121,7 +142,7 @@ class SimpleDescriptorBuilder:
                 frames.append(cropped)
         return frames
 
-    def _build_frame_profile(self, frames: list[np.ndarray]) -> dict:
+    def _build_frame_profile(self, frames: list[np.ndarray], *, dominant_tolerance: tuple[float, float, float] | None = None) -> dict:
         widths: list[int] = []
         heights: list[int] = []
         opaque_bgr_parts: list[np.ndarray] = []
@@ -148,6 +169,16 @@ class SimpleDescriptorBuilder:
         accent_hsv = np.concatenate(accent_hsv_parts, axis=0)
 
         body_colors = self._clusters("body", opaque_bgr, opaque_hsv, count=6, tolerance=(18, 55, 55))
+        # Apply tighter tolerance to the dominant cluster only
+        if dominant_tolerance is not None and body_colors:
+            dc = body_colors[0]
+            body_colors[0] = ColorCluster(
+                label=dc.label,
+                bgr=dc.bgr,
+                hsv=dc.hsv,
+                fraction=dc.fraction,
+                tolerance=dominant_tolerance,
+            )
         accent_colors = self._clusters("accent", None, accent_hsv, count=4, tolerance=(16, 60, 65))
         rare_colors = self._rare_clusters(opaque_bgr, opaque_hsv)
         sprite_palette_bgr = self._sprite_palette(opaque_bgr)
@@ -263,6 +294,21 @@ class SimpleDescriptorBuilder:
             )
 
         return dominant_color, supporting
+
+    @staticmethod
+    def _find_dominant_pixel(frames: list[np.ndarray]) -> list[int]:
+        """Find the single most common opaque pixel BGR value across all frames."""
+        all_pixels: list[np.ndarray] = []
+        for bgra in frames:
+            mask = bgra[:, :, 3] > 0
+            if np.any(mask):
+                all_pixels.append(bgra[:, :, :3][mask])
+        if not all_pixels:
+            return [0, 0, 0]
+        stacked = np.concatenate(all_pixels, axis=0)
+        unique, counts = np.unique(stacked, axis=0, return_counts=True)
+        best_idx = int(np.argmax(counts))
+        return [int(v) for v in unique[best_idx]]
 
     @staticmethod
     def _tight_crop(bgra: np.ndarray) -> np.ndarray:

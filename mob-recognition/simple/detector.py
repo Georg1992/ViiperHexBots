@@ -63,6 +63,8 @@ REQUIRED_CONFIG_KEYS = {
     "minOpacitySpriteFraction",
     "minOpacitySamplePixels",
     "deadValidationWeights",
+    "minDominantPixelFraction",
+    "dominantPixelDistance",
 }
 
 REQUIRED_DEAD_VALIDATION_WEIGHT_KEYS = {"pose", "sizeGap", "histogram", "opacity"}
@@ -84,7 +86,7 @@ class StateSearchProfile:
 
 STATE_PROFILE_FULL = StateSearchProfile()
 STATE_PROFILE_DIRECT = StateSearchProfile(
-    drift_radius_px=0,
+    drift_radius_px=15,
     single_scale=True,
     early_exit_at_center=False,
 )
@@ -304,13 +306,22 @@ class SimpleMobDetector:
         scales = self._candidate_scales(frame_bgr.shape[1])
         living, dead = self._score_point_at(frame_bgr, hsv, descriptor, cx, cy, scales=scales, skip_death_validation=True)
         if living and living.accepted:
+            # Dominant pixel gate: discovery-only filter. Rejects candidates where
+            # too few pixels match the exact dominant sprite pixel color.
+            if descriptor.dominant_pixel_bgr is not None:
+                x, y, w, h = living.bbox
+                region = frame_bgr[y:y+h, x:x+w]
+                if region.size > 0:
+                    dominant = np.array(descriptor.dominant_pixel_bgr, dtype=np.float32).reshape(1, 1, 3)
+                    diff = region.astype(np.float32) - dominant
+                    dist = np.sqrt(np.sum(diff * diff, axis=2))
+                    frac = float(np.mean(dist <= float(self.config.get("dominantPixelDistance", 12))))
+                    min_frac = float(self.config.get("minDominantPixelFraction", 0.02))
+                    if frac < min_frac:
+                        return []
             living.heatmap_score = heat_score
             return [living]
         return []
-
-    def _passes_discovery_gate(self, candidate: SimpleCandidate) -> bool:
-        """Discovery gate: any accepted candidate passes."""
-        return True
 
     def _score_point_at(
         self,
@@ -860,10 +871,6 @@ class SimpleMobDetector:
             file=sys.stderr,
             flush=True,
         )
-
-    def _best_track_point_candidate(self, candidates: list[SimpleCandidate]) -> SimpleCandidate | None:
-        best, _ = self._select_track_state_candidate(candidates)
-        return best
 
     def _is_self_center(self, cx: int, cy: int, frame_shape: tuple[int, ...]) -> bool:
         height, width = frame_shape[:2]

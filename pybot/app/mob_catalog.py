@@ -13,32 +13,46 @@ ASSET_ROOT = PROJECT_ROOT / "assets" / "mobs"
 
 @dataclass(frozen=True)
 class MobEntry:
-    folder_name: str
-    display_name: str
+    asset_name: str       # Folder name in assets/mobs/ (e.g. "DesertWolf")
+    display_name: str     # Human-readable label (e.g. "Desert Wolf")
+    descriptor_name: str  # Lowercase stem used for descriptor lookup (e.g. "desert_wolf")
 
 
-def mob_display_name(folder_name: str) -> str:
-    display = folder_name.replace("_", " ").replace("-", " ")
+def mob_display_name(asset_name: str) -> str:
+    display = asset_name.replace("_", " ").replace("-", " ")
     if not display:
-        return folder_name
+        return asset_name
     return display[0].upper() + display[1:]
+
+
+def _scan_asset_pairs() -> list[tuple[str, str]]:
+    """Scan assets/mobs/ for folders containing SPR+ACT file pairs.
+
+    Returns list of (asset_folder_name, spr_stem) tuples, e.g.
+    ("DesertWolf", "desert_wolf").
+    The spr_stem (lowercase) is used as the descriptor name.
+    """
+    if not ASSET_ROOT.is_dir():
+        return []
+    pairs: list[tuple[str, str]] = []
+    for mob_dir in sorted(ASSET_ROOT.iterdir()):
+        if not mob_dir.is_dir():
+            continue
+        for spr_path in sorted(mob_dir.glob("*.spr")):
+            spr_stem = spr_path.stem
+            act_path = mob_dir / f"{spr_stem}.act"
+            if act_path.is_file():
+                pairs.append((mob_dir.name, spr_stem))
+                break  # one pair per folder
+    return pairs
 
 
 def ensure_descriptors(*, log_fn: "Callable[[str], None] | None" = None) -> None:
     """Auto-build descriptor JSON for any mob with SPR/ACT assets but no compiled descriptor."""
     _logger = log_fn or print
-    if not ASSET_ROOT.is_dir():
-        return
     built_any = False
-    for mob_dir in sorted(ASSET_ROOT.iterdir()):
-        if not mob_dir.is_dir():
-            continue
-        mob_name = mob_dir.name.lower()
-        spr = mob_dir / f"{mob_name}.spr"
-        act = mob_dir / f"{mob_name}.act"
-        if not spr.is_file() or not act.is_file():
-            continue
-        descriptor_path = DESCRIPTOR_ROOT / mob_name / "simple" / "descriptor.json"
+    for asset_name, spr_stem in _scan_asset_pairs():
+        descriptor_path = DESCRIPTOR_ROOT / spr_stem / "simple" / "descriptor.json"
         if descriptor_path.is_file():
             continue
         # Lazy imports — heavy dependencies only needed for builds
@@ -49,29 +63,28 @@ def ensure_descriptors(*, log_fn: "Callable[[str], None] | None" = None) -> None
                 _sys.path.insert(0, mob_rec_dir)
             from descriptors.descriptor_builder import SimpleDescriptorBuilder  # type: ignore[import-untyped]
 
-            _logger(f"[AUTO-BUILD] {mob_name}: SPR/ACT found, building descriptor...")
-            SimpleDescriptorBuilder(PROJECT_ROOT).build(mob_name, force=True)
-            _logger(f"[AUTO-BUILD] {mob_name}: descriptor ready")
+            _logger(f"[AUTO-BUILD] {asset_name}: SPR/ACT found, building descriptor ({spr_stem})...")
+            SimpleDescriptorBuilder(PROJECT_ROOT).build(spr_stem, force=True)
+            _logger(f"[AUTO-BUILD] {asset_name}: descriptor ready")
             built_any = True
         except Exception as exc:
-            _logger(f"[AUTO-BUILD] {mob_name}: build failed — {exc}")
+            _logger(f"[AUTO-BUILD] {asset_name}: build failed — {exc}")
 
-
-def load_mob_catalog(root: Path | None = None) -> list[MobEntry]:
+def load_mob_catalog() -> list[MobEntry]:
     ensure_descriptors()
-    descriptor_root = root or DESCRIPTOR_ROOT
-    if not descriptor_root.is_dir():
+    if not ASSET_ROOT.is_dir():
         return []
 
     entries: list[MobEntry] = []
-    for mob_dir in sorted(descriptor_root.iterdir()):
-        if not mob_dir.is_dir():
-            continue
-        descriptor_path = mob_dir / "simple" / "descriptor.json"
+    for asset_name, spr_stem in _scan_asset_pairs():
+        descriptor_path = DESCRIPTOR_ROOT / spr_stem / "simple" / "descriptor.json"
         if not descriptor_path.is_file():
             continue
-        folder_name = mob_dir.name
-        entries.append(MobEntry(folder_name=folder_name, display_name=mob_display_name(folder_name)))
+        entries.append(MobEntry(
+            asset_name=asset_name,
+            display_name=mob_display_name(asset_name),
+            descriptor_name=spr_stem,
+        ))
     return entries
 
 
@@ -79,4 +92,4 @@ def mob_folder_by_index(catalog: list[MobEntry], index: int) -> str:
     if not catalog:
         return "horn"
     clamped = max(1, min(index, len(catalog)))
-    return catalog[clamped - 1].folder_name
+    return catalog[clamped - 1].descriptor_name
