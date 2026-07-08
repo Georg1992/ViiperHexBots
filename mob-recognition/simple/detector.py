@@ -182,7 +182,7 @@ class SimpleMobDetector:
         self.local_track_search_radius_px = int(self.config["localTrackSearchRadiusPx"])
 
     def descriptor_path(self, mob_name: str) -> Path:
-        return self.project_root / "generated_descriptors" / mob_name.lower() / "simple" / "descriptor.json"
+        return self.project_root / "assets" / "generated_descriptors" / mob_name.lower() / "simple" / "descriptor.json"
 
     def ensure_descriptor(self, mob_name: str) -> SimpleMobDescriptor:
         mob_name = mob_name.lower()

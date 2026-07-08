@@ -46,11 +46,11 @@ Allowed shared support:
 ## Descriptor Output
 
 ```text
-generated_descriptors/<mob>/simple/
+assets/generated_descriptors/<mob>/simple/
   descriptor.json
 ```
 
-The bot runtime never reads `.spr` or `.act` files. It lists available mobs from `generated_descriptors/*/simple/descriptor.json`; adding a descriptor adds that mob to the UI on the next bot launch.
+The bot runtime never reads `.spr` or `.act` files. It lists available mobs from `assets/generated_descriptors/*/simple/descriptor.json`; adding a descriptor adds that mob to the UI on the next bot launch.
 
 ## Debug Output
 

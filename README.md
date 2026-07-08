@@ -41,7 +41,9 @@ ViiperHexBots/
   logs/                    Runtime/session logs (generated)
   scripts/                 Maintenance and descriptor-build scripts
   mob-recognition/         Python descriptor/detection pipeline
-  generated_descriptors/   Runtime mob descriptors (built from SPR/ACT assets)
+  assets/mobs/             Source SPR/ACT per mob (input)
+  assets/generated_descriptors/  Runtime mob descriptors, rebuilt on launch (generated, gitignored)
+  assets/modified_mobs/    Transformed SPR/ACT mirror, rebuilt on launch (generated, gitignored)
   VIIPER/                  Git submodule (viiper virtual HID driver)
 ```
 

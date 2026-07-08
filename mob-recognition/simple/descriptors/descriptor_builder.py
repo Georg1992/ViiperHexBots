@@ -42,7 +42,7 @@ class SimpleDescriptorBuilder:
         return direct  # will raise FileNotFoundError in build() with clear message
 
     def output_dir(self, mob_name: str) -> Path:
-        return self.project_root / "generated_descriptors" / mob_name.lower() / "simple"
+        return self.project_root / "assets" / "generated_descriptors" / mob_name.lower() / "simple"
 
     def build(self, mob_name: str, force: bool = False) -> SimpleMobDescriptor:
         mob_name = mob_name.lower()

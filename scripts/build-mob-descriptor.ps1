@@ -33,5 +33,5 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-Write-Host "Descriptor ready: generated_descriptors\$mobKey\simple\descriptor.json" -ForegroundColor Green
+Write-Host "Descriptor ready: assets\generated_descriptors\$mobKey\simple\descriptor.json" -ForegroundColor Green
 Write-Host "Restart the bot UI to load newly added descriptor mobs." -ForegroundColor Yellow
