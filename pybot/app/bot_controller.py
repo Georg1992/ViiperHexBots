@@ -11,6 +11,8 @@ from pybot.paths import SESSIONS_DIR
 from pybot.runtime.hunt_runtime import create_runtime_deps, HuntRuntime
 from pybot.runtime.overlay_ports import HuntOverlay, NullOverlay
 
+DEFAULT_STOP_JOIN_TIMEOUT_S = 3.0
+
 
 class BotController:
     def __init__(
@@ -59,11 +61,15 @@ class BotController:
         )
         self._thread.start()
 
-    def stop(self) -> None:
+    def request_stop(self) -> None:
+        """Signal the hunt runtime to stop without blocking."""
         if self._runtime is not None:
             self._runtime.stop()
+
+    def stop(self, *, join_timeout: float = DEFAULT_STOP_JOIN_TIMEOUT_S) -> None:
+        self.request_stop()
         if self._thread is not None:
-            self._thread.join(timeout=0.1)
+            self._thread.join(timeout=join_timeout)
         self._thread = None
         self._runtime = None
 
@@ -74,3 +80,7 @@ class BotController:
     def resume(self) -> None:
         if self._runtime is not None:
             self._runtime.resume()
+
+    def set_search_range_cells(self, cells: int) -> None:
+        if self._runtime is not None:
+            self._runtime.set_search_range_cells(cells)

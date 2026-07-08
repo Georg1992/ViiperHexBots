@@ -1,4 +1,4 @@
-"""Build simple runtime descriptors from ACT-composed SPR frames."""
+"""Build runtime descriptors from ACT-composed SPR frames."""
 
 from __future__ import annotations
 
@@ -11,13 +11,13 @@ from pybot.recognition.act_reader import ActReader
 from pybot.recognition.frame_renderer import render_act_frame
 from pybot.recognition.spr_reader import SprReader
 
-from pybot.recognition.simple.descriptors.descriptor import ColorCluster, SimpleMobDescriptor, SizeDescriptor
+from pybot.recognition.detector.descriptors.descriptor import ColorCluster, MobDescriptor, SizeDescriptor
 
 DESCRIPTOR_VERSION = 4
 LIVING_ACTIONS = (0, 1)
 
 
-class SimpleDescriptorBuilder:
+class DescriptorBuilder:
     def __init__(self, project_root: Path):
         self.project_root = project_root
 
@@ -37,19 +37,64 @@ class SimpleDescriptorBuilder:
         return direct  # will raise FileNotFoundError in build() with clear message
 
     def output_dir(self, mob_name: str) -> Path:
-        return self.project_root / "assets" / "generated_descriptors" / mob_name.lower() / "simple"
+        return self.project_root / "assets" / "generated_descriptors" / mob_name.lower()
 
-    def build(self, mob_name: str, force: bool = False) -> SimpleMobDescriptor:
+    def modified_output_dir(self, spr_stem: str) -> Path:
+        return (
+            self.project_root
+            / "assets"
+            / "generated_descriptors"
+            / "modified"
+            / spr_stem.lower()
+        )
+
+    def modified_asset_dir(self, asset_name: str, spr_stem: str) -> Path:
+        return self.project_root / "assets" / "modified_mobs" / asset_name
+
+    def build(self, mob_name: str, force: bool = False) -> MobDescriptor:
         mob_name = mob_name.lower()
-        output_dir = self.output_dir(mob_name)
+        return self._build_from_asset_dir(
+            mob_name,
+            self.asset_dir(mob_name),
+            spr_stem=mob_name,
+            output_dir=self.output_dir(mob_name),
+            force=force,
+        )
+
+    def build_modified(
+        self,
+        asset_name: str,
+        spr_stem: str,
+        force: bool = False,
+    ) -> MobDescriptor:
+        spr_stem = spr_stem.lower()
+        asset_dir = self.project_root / "assets" / "modified_mobs" / asset_name
+        return self._build_from_asset_dir(
+            spr_stem,
+            asset_dir,
+            spr_stem=spr_stem,
+            output_dir=self.modified_output_dir(spr_stem),
+            force=force,
+        )
+
+    def _build_from_asset_dir(
+        self,
+        mob_name: str,
+        asset_dir: Path,
+        *,
+        spr_stem: str,
+        output_dir: Path,
+        force: bool,
+    ) -> MobDescriptor:
+        output_dir.mkdir(parents=True, exist_ok=True)
         descriptor_path = output_dir / "descriptor.json"
         if descriptor_path.exists() and not force:
-            return SimpleMobDescriptor.load(descriptor_path)
+            return MobDescriptor.load(descriptor_path)
 
-        spr_path = self.asset_dir(mob_name) / f"{mob_name}.spr"
-        act_path = self.asset_dir(mob_name) / f"{mob_name}.act"
+        spr_path = asset_dir / f"{spr_stem}.spr"
+        act_path = asset_dir / f"{spr_stem}.act"
         if not spr_path.exists() or not act_path.exists():
-            raise FileNotFoundError(f"missing SPR/ACT for mob '{mob_name}' in {self.asset_dir(mob_name)}")
+            raise FileNotFoundError(f"missing SPR/ACT for mob '{mob_name}' in {asset_dir}")
 
         spr_file = SprReader(spr_path).load()
         act_file = ActReader(act_path).load()
@@ -72,7 +117,7 @@ class SimpleDescriptorBuilder:
         # Single most common pixel color across all sprite frames (not a cluster center)
         dominant_pixel_bgr = self._find_dominant_pixel(living_frames)
 
-        descriptor = SimpleMobDescriptor(
+        descriptor = MobDescriptor(
             mob_name=mob_name,
             version=DESCRIPTOR_VERSION,
             size=profile["size"],

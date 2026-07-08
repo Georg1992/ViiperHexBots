@@ -10,12 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-# Single "same object" radius. One physical mob never occupies two points
-# farther apart than this, so it governs BOTH discovery clustering (merging
-# raw detections of one mob) AND discovery dedup (deciding a detection belongs
-# to an existing track). Tracking keeps track coordinates fresh every tick, so
-# no stale-coordinate movement slack is needed here.
+# Same-object dedup radius for discovery vs existing tracks. Clustering of raw
+# detections before track creation uses discoveryClusterRadiusPx from config
+# (typically smaller) so nearby distinct mobs are not merged.
 HUNT_OBJECT_RADIUS = 70
+HUNT_DISCOVERY_CLUSTER_RADIUS = 48
 
 # Consecutive tracking misses before a track is considered gone. Tracking runs
 # every vision tick, so this is a count of local-follow failures, not wall time.
@@ -119,7 +118,7 @@ def select_target_id(
 
 def cluster_living_detections(
     detections: list[DiscoveryDetection],
-    cluster_radius: int = HUNT_OBJECT_RADIUS,
+    cluster_radius: int = HUNT_DISCOVERY_CLUSTER_RADIUS,
 ) -> list[DiscoveryDetection]:
     living = [d for d in detections if d.living]
     if not living:
@@ -152,15 +151,17 @@ def detection_matches_existing(
     x: int,
     y: int,
     positions: list[tuple[int, int]],
+    *,
+    dedup_radius: int = HUNT_OBJECT_RADIUS,
 ) -> bool:
     """True if a detection belongs to an object we already know about.
 
     ``positions`` are the (x, y) of known objects sampled at the same instant
     the discovery frame was captured, so the detection and the positions it is
-    compared against share one time reference. Within one object radius means
+    compared against share one time reference. Within *dedup_radius* means
     same object.
     """
-    radius_sq = HUNT_OBJECT_RADIUS * HUNT_OBJECT_RADIUS
+    radius_sq = dedup_radius * dedup_radius
     for px, py in positions:
         dx = x - px
         dy = y - py

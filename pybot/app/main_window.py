@@ -40,8 +40,8 @@ class MainWindow:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("Hex Bot")
-        self.root.geometry("920x710")
-        self.root.minsize(880, 680)
+        self.root.geometry("920x780")
+        self.root.minsize(880, 720)
 
         # ── Data layer ──────────────────────────────────────────────
         self.config = AppConfig().load()
@@ -133,28 +133,23 @@ class MainWindow:
         self.window_info.grid(row=2, column=0, columnspan=2, sticky="w")
         window_frame.columnconfigure(0, weight=1)
 
-        # ── Status ─────────────────────────────────────────────────
-        status_frame = ttk.LabelFrame(main, text="Status", padding=8)
-        status_frame.grid(row=1, column=2, sticky="nsew")
-        self.bot_status = ttk.Label(status_frame, text="Status: Off")
+        # ── Status & Input (compact side panel) ─────────────────────
+        status_input_frame = ttk.LabelFrame(main, text="Status & Input", padding=6)
+        status_input_frame.grid(row=1, column=2, sticky="nsew")
+        self.bot_status = ttk.Label(status_input_frame, text="Status: Off")
         self.bot_status.pack(anchor="w")
         self.status_indicator = tk.Label(
-            status_frame, text="  OFF  ", bg="#c62828", fg="white",
+            status_input_frame, text="  OFF  ", bg="#c62828", fg="white",
             font=("Segoe UI", 9, "bold"), width=10,
         )
-        self.status_indicator.pack(anchor="w", pady=8)
-
-        # ── Input ──────────────────────────────────────────────────
-        input_frame = ttk.LabelFrame(main, text="Input", padding=8)
-        input_frame.grid(row=2, column=2, sticky="nsew", pady=(8, 0))
-        self.input_status = ttk.Label(input_frame, text="Input: Starting...")
+        self.status_indicator.pack(anchor="w", pady=(4, 6))
+        self.input_status = ttk.Label(status_input_frame, text="Input: Starting...")
         self.input_status.pack(anchor="w")
         self.input_hint = ttk.Label(
-            input_frame,
+            status_input_frame,
             text="Launch the game after VIIPER is ready",
-            wraplength=220,
         )
-        self.input_hint.pack(anchor="w", pady=(4, 0))
+        self.input_hint.pack(anchor="w", pady=(2, 0))
 
         # ── Setup ──────────────────────────────────────────────────
         setup_frame = ttk.LabelFrame(main, text="Setup", padding=8)
@@ -229,7 +224,7 @@ class MainWindow:
 
         # ── Hunt Settings ───────────────────────────────────────────
         hunt_frame = ttk.LabelFrame(main, text="Hunt Settings", padding=8)
-        hunt_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        hunt_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         ttk.Label(hunt_frame, text="Search Range (9-16 cells):").grid(
             row=0, column=0, sticky="w"
         )
@@ -288,7 +283,7 @@ class MainWindow:
 
         # ── Warper ──────────────────────────────────────────────────
         warper_frame = ttk.LabelFrame(main, text="Warper Coordinates", padding=8)
-        warper_frame.grid(row=3, column=2, sticky="nsew", pady=(8, 0))
+        warper_frame.grid(row=2, column=2, sticky="nsew", pady=(8, 0))
         ttk.Button(
             warper_frame, text="Set Position", command=self.on_set_warper
         ).pack(anchor="w")
@@ -312,21 +307,30 @@ class MainWindow:
             variable=self.time_on_location,
         ).pack(fill=tk.X)
 
-        # ── Log ─────────────────────────────────────────────────────
+        # ── Log (full width, expands with window) ───────────────────
         log_frame = ttk.LabelFrame(main, text="Log", padding=8)
-        log_frame.grid(row=4, column=2, sticky="nsew", pady=(8, 0))
+        log_frame.grid(row=4, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
+        log_body = ttk.Frame(log_frame)
+        log_body.pack(fill=tk.BOTH, expand=True)
+        log_scroll = ttk.Scrollbar(log_body, orient=tk.VERTICAL)
         self.log_box = tk.Text(
-            log_frame, height=12, width=34, state=tk.DISABLED, wrap=tk.WORD
+            log_body,
+            height=10,
+            state=tk.DISABLED,
+            wrap=tk.WORD,
+            yscrollcommand=log_scroll.set,
         )
-        self.log_box.pack(fill=tk.BOTH, expand=True)
+        log_scroll.config(command=self.log_box.yview)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.overlay_var = tk.BooleanVar(value=self.config.hunt_log_overlay)
         ttk.Checkbutton(
             log_frame, text="Hunt log overlay on game", variable=self.overlay_var
         ).pack(anchor="w", pady=(6, 0))
 
-        # ── Controls ────────────────────────────────────────────────
+        # ── Controls (pinned below log, never clipped) ──────────────
         controls = ttk.Frame(main)
-        controls.grid(row=5, column=0, columnspan=3, pady=(12, 0))
+        controls.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(12, 0))
         ttk.Label(controls, text="Press F12 to quickly toggle bot").pack()
         button_row = ttk.Frame(controls)
         button_row.pack(pady=8)
@@ -350,6 +354,7 @@ class MainWindow:
 
         main.columnconfigure(0, weight=1)
         main.columnconfigure(1, weight=1)
+        main.columnconfigure(2, weight=1)
         main.rowconfigure(4, weight=1)
         self.apply_memory_ui()
         self._update_search_label()
@@ -380,6 +385,7 @@ class MainWindow:
         cells = int(float(self.search_range.get()))
         px = cells * 64
         self.search_label.configure(text=f"{cells} ({px}px)")
+        self.lifecycle.set_search_range_cells(cells)
 
     def _update_weight_label(self, *_args) -> None:
         self.weight_label.configure(text=self._weight_text())
@@ -543,7 +549,10 @@ class MainWindow:
 
         # Create hunt log overlay if enabled
         if self.overlay_var.get() and self.config.window_id:
-            ok = self._hunt_overlay.create(self.config.window_id)
+            ok = self._hunt_overlay.create(
+                self.config.window_id,
+                search_range_cells=self.config.search_range,
+            )
             if ok:
                 self.log_pipe.log(f"[OVERLAY] created on hwnd={self.config.window_id}")
             else:

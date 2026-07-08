@@ -1,4 +1,4 @@
-"""Mob recognition CLI for the simple descriptor heatmap detector."""
+"""Mob recognition CLI for the descriptor heatmap detector."""
 
 from __future__ import annotations
 
@@ -12,9 +12,9 @@ import cv2
 from pybot.paths import PROJECT_ROOT
 from pybot.recognition.act_reader import ActReader
 from pybot.recognition.capture import capture_region
-from pybot.recognition.simple.debug_renderer import save_simple_debug_bundle
-from pybot.recognition.simple.descriptors.descriptor_builder import SimpleDescriptorBuilder
-from pybot.recognition.simple.detector import SimpleMobDetector, load_simple_config
+from pybot.recognition.detector.debug_renderer import save_debug_bundle
+from pybot.recognition.detector.descriptors.descriptor_builder import DescriptorBuilder
+from pybot.recognition.detector.detector import MobDetector, load_detector_config
 from pybot.recognition.spr_reader import SprReader
 
 
@@ -90,8 +90,13 @@ def _load_frame(args: argparse.Namespace) -> tuple[object, tuple[int, int], int]
     return capture_region(x, y, w, h), (x, y), 0
 
 
-def cmd_build_simple_descriptor(args: argparse.Namespace) -> int:
-    descriptor = SimpleDescriptorBuilder(PROJECT_ROOT).build(args.mob.lower(), force=args.force)
+def cmd_build_descriptor(args: argparse.Namespace) -> int:
+    builder = DescriptorBuilder(PROJECT_ROOT)
+    if args.modified:
+        asset_name = args.asset_name or args.mob
+        descriptor = builder.build_modified(asset_name, args.mob.lower(), force=args.force)
+    else:
+        descriptor = builder.build(args.mob.lower(), force=args.force)
     print(json.dumps({"ok": True, "descriptor": descriptor.to_dict()}, indent=2))
     return 0
 
@@ -170,7 +175,7 @@ def build_state_response(
     }
 
 
-def run_detect_request(detector: SimpleMobDetector, config: dict, request: dict) -> dict:
+def run_detect_request(detector: MobDetector, config: dict, request: dict) -> dict:
     command = str(request.get("cmd", "")).lower()
     mob_name = str(request.get("mob", "")).lower()
     roi = request.get("roi")
@@ -188,7 +193,7 @@ def run_detect_request(detector: SimpleMobDetector, config: dict, request: dict)
     session_id = str(request.get("sessionId", ""))
 
     if command == "state":
-        from pybot.recognition.simple.tracking.state_recognizer import (
+        from pybot.recognition.detector.tracking.state_recognizer import (
             evaluate_track_state_direct,
             evaluate_track_states,
         )
@@ -249,8 +254,8 @@ def cmd_serve_ipc(ipc_dir: Path) -> int:
         if path.exists():
             path.unlink()
 
-    config = load_simple_config()
-    detector = SimpleMobDetector(PROJECT_ROOT, config)
+    config = load_detector_config()
+    detector = MobDetector(PROJECT_ROOT, config)
     write_json_file(ready_path, {"ok": True, "ready": True, "pipeline": "serve"})
 
     while True:
@@ -281,8 +286,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if args.ipc_dir:
         return cmd_serve_ipc(Path(args.ipc_dir))
 
-    config = load_simple_config()
-    detector = SimpleMobDetector(PROJECT_ROOT, config)
+    config = load_detector_config()
+    detector = MobDetector(PROJECT_ROOT, config)
     sys.stdout.write(json.dumps({"ok": True, "ready": True, "pipeline": "serve"}) + "\n")
     sys.stdout.flush()
     for raw_line in sys.stdin:
@@ -309,24 +314,24 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_detect_simple(args: argparse.Namespace) -> int:
+def cmd_detect(args: argparse.Namespace) -> int:
     output_path = Path(args.output) if args.output else None
     try:
         frame, screen_offset, _ = _load_frame(args)
-        config = load_simple_config(Path(args.config_simple) if args.config_simple else None)
+        config = load_detector_config(Path(args.detector_config) if args.detector_config else None)
         config = apply_scale_calibration(config, args.scale_range, args.enforce_size_gate)
-        detector = SimpleMobDetector(PROJECT_ROOT, config)
+        detector = MobDetector(PROJECT_ROOT, config)
         result = detector.detect(frame, args.mob.lower())
         accepted_json = [candidate_to_json(candidate, screen_offset) for candidate in result.accepted]
         if args.debug:
             label = Path(args.image).name if args.image else "live_capture"
             debug_root = PROJECT_ROOT / config["debugOutputDir"]
-            save_simple_debug_bundle(debug_root, label, frame, result)
+            save_debug_bundle(debug_root, label, frame, result)
         emit_json(
             build_detect_response(
                 result,
                 screen_offset,
-                pipeline="simple",
+                pipeline="heatmap",
                 session_id=args.session_id or "",
                 scale_range=args.scale_range,
                 enforce_size_gate=bool(args.enforce_size_gate),
@@ -339,7 +344,7 @@ def cmd_detect_simple(args: argparse.Namespace) -> int:
         return 1
 
 
-def cmd_fixtures_simple(args: argparse.Namespace) -> int:
+def cmd_fixtures(args: argparse.Namespace) -> int:
     from dataset_runner import main as fixtures_main
 
     argv = ["--mob", args.mob.lower()]
@@ -377,22 +382,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Simple mob recognition")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    build = sub.add_parser("build-simple-descriptor", help="build simple descriptor from SPR/ACT")
+    build = sub.add_parser("build-descriptor", help="build mob descriptor from SPR/ACT")
     build.add_argument("--mob", required=True)
     build.add_argument("--force", action="store_true")
+    build.add_argument(
+        "--modified",
+        action="store_true",
+        help="build from assets/modified_mobs instead of assets/mobs",
+    )
+    build.add_argument(
+        "--asset-name",
+        help="modified_mobs folder name when it differs from --mob (e.g. DesertWolf)",
+    )
 
-    detect = sub.add_parser("detect-simple", help="detect mobs using descriptor heatmaps")
+    detect = sub.add_parser("detect", help="detect mobs using descriptor heatmaps")
     detect.add_argument("--mob", required=True)
     detect.add_argument("--roi", type=parse_roi, help="screen x,y,width,height")
     detect.add_argument("--image", help="existing image path")
     detect.add_argument("--output", help="JSON output file for Python runtime")
     detect.add_argument("--debug", action="store_true")
-    detect.add_argument("--config-simple", help="simple config path")
+    detect.add_argument("--detector-config", help="detector config path")
     detect.add_argument("--session-id", default="", help="bot session id for logs/calibration")
     detect.add_argument("--scale-range", type=parse_scale_range, help="locked session scale range as min,max")
     detect.add_argument("--enforce-size-gate", action="store_true", help="enforce strict object size gate")
 
-    fixtures = sub.add_parser("fixtures-simple", help="run screenshot fixture suite with simple detector")
+    fixtures = sub.add_parser("fixtures", help="run screenshot fixture suite with mob detector")
     fixtures.add_argument("--mob", required=True)
     fixtures.add_argument("--fixtures", help="test-fixtures root")
     fixtures.add_argument("--debug", action="store_true")
@@ -410,12 +424,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    if args.command == "build-simple-descriptor":
-        return cmd_build_simple_descriptor(args)
-    if args.command == "detect-simple":
-        return cmd_detect_simple(args)
-    if args.command == "fixtures-simple":
-        return cmd_fixtures_simple(args)
+    if args.command == "build-descriptor":
+        return cmd_build_descriptor(args)
+    if args.command == "detect":
+        return cmd_detect(args)
+    if args.command == "fixtures":
+        return cmd_fixtures(args)
     if args.command == "inspect":
         return cmd_inspect(args)
     if args.command == "serve":

@@ -1,4 +1,4 @@
-"""Fixture runner for the simple heatmap detector."""
+"""Fixture runner for the heatmap mob detector."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from pathlib import Path
 import cv2
 
 from pybot.paths import PROJECT_ROOT, RECOGNITION_DIR
-from pybot.recognition.simple.debug_renderer import save_simple_debug_bundle, save_summary_contact_sheet
-from pybot.recognition.simple.descriptors.descriptor_builder import SimpleDescriptorBuilder
-from pybot.recognition.simple.detector import SimpleMobDetector, load_simple_config
+from pybot.recognition.detector.debug_renderer import save_debug_bundle, save_summary_contact_sheet
+from pybot.recognition.detector.descriptors.descriptor_builder import DescriptorBuilder
+from pybot.recognition.detector.detector import MobDetector, load_detector_config
 
 
 def _load_ground_truth(image_dir: Path, entry: dict) -> list[dict]:
@@ -57,15 +57,15 @@ def _match_counts(accepted, ground_truth: list[dict]) -> tuple[int, int, int]:
 
 def run_fixtures(mob_name: str, fixtures_dir: Path, *, debug: bool, rebuild_descriptor: bool) -> dict:
     if rebuild_descriptor:
-        SimpleDescriptorBuilder(PROJECT_ROOT).build(mob_name, force=True)
-    config = load_simple_config()
-    detector = SimpleMobDetector(PROJECT_ROOT, config)
+        DescriptorBuilder(PROJECT_ROOT).build(mob_name, force=True)
+    config = load_detector_config()
+    detector = MobDetector(PROJECT_ROOT, config)
     image_dir = fixtures_dir / "game-screenshots"
     manifest = json.loads((fixtures_dir / "manifest.json").read_text(encoding="utf-8"))
     debug_root = PROJECT_ROOT / config["debugOutputDir"]
     summary = {
         "mobName": mob_name,
-        "pipeline": "simple",
+        "pipeline": "heatmap",
         "images": [],
         "totals": {"tp": 0, "fp": 0, "fn": 0},
     }
@@ -99,7 +99,7 @@ def run_fixtures(mob_name: str, fixtures_dir: Path, *, debug: bool, rebuild_desc
             f"TP={tp} FP={fp} FN={fn} best={best_scores} time={row['elapsedS']}s"
         )
         if debug:
-            out_dir = save_simple_debug_bundle(debug_root, file_name, frame, result)
+            out_dir = save_debug_bundle(debug_root, file_name, frame, result)
             overlay_paths.append(out_dir / "detected_overlay.png")
     if debug:
         summary_dir = debug_root / mob_name
@@ -110,7 +110,7 @@ def run_fixtures(mob_name: str, fixtures_dir: Path, *, debug: bool, rebuild_desc
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run simple detector fixture suite")
+    parser = argparse.ArgumentParser(description="Run mob detector fixture suite")
     parser.add_argument("--mob", required=True)
     parser.add_argument("--fixtures", default=str(RECOGNITION_DIR / "test-fixtures"))
     parser.add_argument("--debug", action="store_true")

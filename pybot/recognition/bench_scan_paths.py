@@ -8,12 +8,12 @@ import time
 import cv2
 
 from pybot.paths import PROJECT_ROOT, RECOGNITION_DIR
-from pybot.recognition.simple.detector import (
+from pybot.recognition.detector.detector import (
     STATE_PROFILE_DIRECT,
-    SimpleMobDetector,
-    load_simple_config,
+    MobDetector,
+    load_detector_config,
 )
-from pybot.recognition.simple.tracking.state_recognizer import (
+from pybot.recognition.detector.tracking.state_recognizer import (
     evaluate_track_state,
     evaluate_track_states,
 )
@@ -41,8 +41,8 @@ def bench(label: str, fn, runs: int = 3) -> None:
 
 
 def main() -> None:
-    config = load_simple_config()
-    detector = SimpleMobDetector(PROJECT_ROOT, config)
+    config = load_detector_config()
+    detector = MobDetector(PROJECT_ROOT, config)
     frame = cv2.imread(str(FIXTURE))
     roi = playfield_roi(frame)
     track3 = [

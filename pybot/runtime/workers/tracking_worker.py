@@ -16,7 +16,6 @@ import traceback
 
 from pybot.runtime.constants import WORKER_POLL_INTERVAL_S
 from pybot.runtime.hunt_tracks import monotonic_ms
-from pybot.runtime.constants import WORKER_POLL_INTERVAL_S
 from pybot.runtime.detection.detector_session import StateTrackSnapshot
 from pybot.runtime.workers.worker_contexts import TrackingWorkerContext
 
@@ -34,7 +33,8 @@ class TrackingWorker:
             while not ctx.stop_event.is_set():
                 if ctx.should_run_workers():
                     self._tick()
-                ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
+                else:
+                    ctx.wait_while_stopped_or_paused(WORKER_POLL_INTERVAL_S)
         except Exception:
             ctx.logger.behavior(f"[TRACK] CRASH:\n{traceback.format_exc()}")
             raise
@@ -71,11 +71,10 @@ class TrackingWorker:
                     f"[TRACK] dropped {len(removed)} lost track(s): {removed}"
                 )
 
-        self._update_overlay(roi, now_ms)
+        self._update_overlay(now_ms)
 
-    def _update_overlay(self, roi, now_ms: int) -> None:
+    def _update_overlay(self, now_ms: int) -> None:
         ctx = self._ctx
         track_count, alive = ctx.tracks.overlay_track_state(now_ms)
         ctx.overlay.set_track_stats(track_count=track_count, alive_count=len(alive))
         ctx.overlay.set_track_positions([(t.x, t.y) for t in alive])
-        ctx.overlay.set_search_roi(roi.x, roi.y, roi.w, roi.h)

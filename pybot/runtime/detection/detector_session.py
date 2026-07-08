@@ -11,8 +11,8 @@ import numpy as np
 
 from pybot.paths import PROJECT_ROOT
 from pybot.recognition.capture import capture_region
-from pybot.recognition.simple.detector import SimpleMobDetector, load_simple_config
-from pybot.recognition.simple.tracking.local_tracker import LocalTrackResult
+from pybot.recognition.detector.detector import MobDetector, load_detector_config
+from pybot.recognition.detector.tracking.local_tracker import LocalTrackResult
 from pybot.runtime.capture.window_roi import HuntRoi
 
 
@@ -55,19 +55,24 @@ class LocalTrackBatchResult:
 
 
 class DetectorSession:
-    """One SimpleMobDetector behind an RLock — no IPC, no scale hard-lock."""
+    """One MobDetector behind an RLock — no IPC, no scale hard-lock."""
 
     def __init__(
         self,
         mob_name: str,
         project_root: Path | None = None,
         *,
-        simple_config: dict | None = None,
+        detector_config: dict | None = None,
+        use_modified_descriptor: bool = False,
     ) -> None:
         root = project_root or PROJECT_ROOT
-        config = simple_config if simple_config is not None else load_simple_config()
+        config = detector_config if detector_config is not None else load_detector_config()
         self._mob_name = mob_name.lower()
-        self._detector = SimpleMobDetector(root, config)
+        self._detector = MobDetector(
+            root,
+            config,
+            use_modified_descriptor=use_modified_descriptor,
+        )
         self._lock = threading.RLock()
 
     def is_busy(self) -> bool:

@@ -15,7 +15,7 @@ from pybot.recognition.rules import (
     is_track_lost,
     select_target_id,
 )
-from pybot.recognition.simple.detector import SimpleMobDetector, load_simple_config
+from pybot.recognition.detector.detector import MobDetector, load_detector_config
 
 __all__ = [
     "HUNT_OBJECT_RADIUS",
@@ -23,7 +23,7 @@ __all__ = [
     "DiscoveryDetection",
     "MobTrack",
     "ReconcileSummary",
-    "SimpleMobDetector",
+    "MobDetector",
     "apply_attack_event",
     "apply_track_observation",
     "capture_region",
@@ -31,6 +31,6 @@ __all__ = [
     "detection_matches_existing",
     "is_alive",
     "is_track_lost",
-    "load_simple_config",
+    "load_detector_config",
     "select_target_id",
 ]

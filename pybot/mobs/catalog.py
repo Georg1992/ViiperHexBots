@@ -10,6 +10,7 @@ from pathlib import Path
 from pybot.mobs import act_transform
 from pybot.paths import (
     DESCRIPTORS_DIR,
+    MODIFIED_DESCRIPTORS_DIR,
     MOBS_DIR,
     MODIFIED_MOBS_DIR,
     PROJECT_ROOT,
@@ -46,15 +47,43 @@ def _scan_asset_pairs() -> list[tuple[str, str]]:
     return pairs
 
 
+def descriptor_path(spr_stem: str, *, modified: bool = False) -> Path:
+    stem = spr_stem.lower()
+    if modified:
+        return MODIFIED_DESCRIPTORS_DIR / stem / "descriptor.json"
+    return DESCRIPTORS_DIR / stem / "descriptor.json"
+
+
 def _build_descriptor(asset_name: str, spr_stem: str, _logger) -> None:
-    descriptor_path = DESCRIPTORS_DIR / spr_stem / "simple" / "descriptor.json"
-    if descriptor_path.is_file():
+    descriptor_path_file = descriptor_path(spr_stem, modified=False)
+    if descriptor_path_file.is_file():
         return
-    from pybot.recognition.simple.descriptors.descriptor_builder import SimpleDescriptorBuilder
+    from pybot.recognition.detector.descriptors.descriptor_builder import DescriptorBuilder
 
     _logger(f"[AUTO-BUILD] {asset_name}: SPR/ACT found, building descriptor ({spr_stem})...")
-    SimpleDescriptorBuilder(PROJECT_ROOT).build(spr_stem, force=True)
+    DescriptorBuilder(PROJECT_ROOT).build(spr_stem, force=True)
     _logger(f"[AUTO-BUILD] {asset_name}: descriptor ready")
+
+
+def _build_modified_descriptor(asset_name: str, spr_stem: str, _logger) -> None:
+    descriptor_path_file = descriptor_path(spr_stem, modified=True)
+    if descriptor_path_file.is_file():
+        return
+    modified_spr = MODIFIED_MOBS_DIR / asset_name / f"{spr_stem}.spr"
+    modified_act = MODIFIED_MOBS_DIR / asset_name / f"{spr_stem}.act"
+    if not modified_spr.is_file() or not modified_act.is_file():
+        return
+    from pybot.recognition.detector.descriptors.descriptor_builder import DescriptorBuilder
+
+    _logger(
+        f"[AUTO-BUILD] {asset_name}: building modified descriptor ({spr_stem})..."
+    )
+    DescriptorBuilder(PROJECT_ROOT).build_modified(
+        asset_name,
+        spr_stem,
+        force=True,
+    )
+    _logger(f"[AUTO-BUILD] {asset_name}: modified descriptor ready")
 
 
 def _build_modified_mob(asset_name: str, spr_stem: str, _logger) -> None:
@@ -85,6 +114,10 @@ def ensure_mob_assets(*, log_fn: Callable[[str], None] | None = None) -> None:
             _build_modified_mob(asset_name, spr_stem, _logger)
         except Exception as exc:
             _logger(f"[MODIFY] {asset_name}: modify failed — {exc}")
+        try:
+            _build_modified_descriptor(asset_name, spr_stem, _logger)
+        except Exception as exc:
+            _logger(f"[AUTO-BUILD] {asset_name}: modified descriptor failed — {exc}")
 
 
 def load_mob_catalog(*, ensure_assets: bool = False) -> list[MobEntry]:
@@ -95,8 +128,8 @@ def load_mob_catalog(*, ensure_assets: bool = False) -> list[MobEntry]:
 
     entries: list[MobEntry] = []
     for asset_name, spr_stem in _scan_asset_pairs():
-        descriptor_path = DESCRIPTORS_DIR / spr_stem / "simple" / "descriptor.json"
-        if not descriptor_path.is_file():
+        descriptor_path_file = descriptor_path(spr_stem, modified=False)
+        if not descriptor_path_file.is_file():
             continue
         entries.append(
             MobEntry(

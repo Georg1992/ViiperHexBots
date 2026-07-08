@@ -45,9 +45,10 @@ class AreaClearStatus:
 
 
 class HuntTracks:
-    def __init__(self) -> None:
+    def __init__(self, detector_config: dict | None = None) -> None:
         self._lock = threading.RLock()
         self._tracks: list[MobTrack] = []
+        self._detector_config = detector_config
         self._next_id = 1
         self._area_epoch = 0
         self._last_reconcile_summary: ReconcileSummary | None = None
@@ -157,6 +158,7 @@ class HuntTracks:
                 mob_name=mob_name,
                 now_tick=tick,
                 create_track_fn=self._create_track_locked,
+                detector_config=self._detector_config,
             )
             self._last_reconcile_summary = summary
             return summary

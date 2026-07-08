@@ -11,10 +11,10 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from pybot.recognition.simple.descriptors.descriptor import SimpleMobDescriptor
-from pybot.recognition.simple.descriptors.descriptor_builder import DESCRIPTOR_VERSION
-from pybot.recognition.simple.scoring.heatmap_detector import HeatmapDetector, Heatmaps
-from pybot.recognition.simple.scoring.region_scorer import RegionScore, SimpleRegionScorer
+from pybot.recognition.detector.descriptors.descriptor import MobDescriptor
+from pybot.recognition.detector.descriptors.descriptor_builder import DESCRIPTOR_VERSION
+from pybot.recognition.detector.scoring.heatmap_detector import HeatmapDetector, Heatmaps
+from pybot.recognition.detector.scoring.region_scorer import RegionScore, RegionScorer
 
 
 REQUIRED_CONFIG_KEYS = {
@@ -41,8 +41,11 @@ REQUIRED_CONFIG_KEYS = {
     "topCandidateCenters",
     "minCenterDistancePx",
     "minCenterHeat",
+    "peakRelativeThreshold",
     "nmsDistancePx",
     "matchRadiusPx",
+    "discoveryClusterRadiusPx",
+    "trackDedupRadiusPx",
     "maxCandidates",
     "smallScaleMinFrameWidth",
     "selfExclusionWidthRatio",
@@ -81,7 +84,7 @@ STATE_PROFILE_DIRECT = StateSearchProfile(
 
 
 @dataclass
-class SimpleCandidate:
+class DetectionCandidate:
     mob_name: str
     center_x: int
     center_y: int
@@ -121,18 +124,18 @@ class SimpleCandidate:
 
 
 @dataclass
-class SimpleDetectionResult:
+class DetectionResult:
     mob_name: str
-    descriptor: SimpleMobDescriptor
+    descriptor: MobDescriptor
     heatmaps: Heatmaps | None
-    candidates: list[SimpleCandidate]
-    accepted: list[SimpleCandidate]
+    candidates: list[DetectionCandidate]
+    accepted: list[DetectionCandidate]
     elapsed_s: float
     timing: dict[str, float]
 
 
-def load_simple_config(path: Optional[Path] = None) -> dict:
-    config_path = path or (Path(__file__).resolve().parent / "config_simple.json")
+def load_detector_config(path: Optional[Path] = None) -> dict:
+    config_path = path or (Path(__file__).resolve().parent / "detector_config.json")
     import json
 
     config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -145,13 +148,20 @@ def load_simple_config(path: Optional[Path] = None) -> dict:
     return config
 
 
-class SimpleMobDetector:
-    def __init__(self, project_root: Path, config: Optional[dict] = None):
+class MobDetector:
+    def __init__(
+        self,
+        project_root: Path,
+        config: Optional[dict] = None,
+        *,
+        use_modified_descriptor: bool = False,
+    ):
         self.project_root = project_root
-        self.config = load_simple_config() if config is None else config
+        self.use_modified_descriptor = use_modified_descriptor
+        self.config = load_detector_config() if config is None else config
         self.heatmap_detector = HeatmapDetector(self.config)
-        self.region_scorer = SimpleRegionScorer(self.config)
-        self._descriptor_cache: dict[str, SimpleMobDescriptor] = {}
+        self.region_scorer = RegionScorer(self.config)
+        self._descriptor_cache: dict[str, MobDescriptor] = {}
         self.self_exclusion_width_ratio = float(self.config["selfExclusionWidthRatio"])
         self.self_exclusion_height_ratio = float(self.config["selfExclusionHeightRatio"])
         self.small_scale_min_frame_width = int(self.config["smallScaleMinFrameWidth"])
@@ -169,7 +179,7 @@ class SimpleMobDetector:
         scale_keys = ("scales", "centerScales")
         if any(prior.get(key) != self.config.get(key) for key in scale_keys):
             self.heatmap_detector = HeatmapDetector(self.config)
-        self.region_scorer = SimpleRegionScorer(self.config)
+        self.region_scorer = RegionScorer(self.config)
         self.self_exclusion_width_ratio = float(self.config["selfExclusionWidthRatio"])
         self.self_exclusion_height_ratio = float(self.config["selfExclusionHeightRatio"])
         self.small_scale_min_frame_width = int(self.config["smallScaleMinFrameWidth"])
@@ -182,16 +192,20 @@ class SimpleMobDetector:
         self.local_track_search_radius_px = int(self.config["localTrackSearchRadiusPx"])
 
     def descriptor_path(self, mob_name: str) -> Path:
-        return self.project_root / "assets" / "generated_descriptors" / mob_name.lower() / "simple" / "descriptor.json"
+        base = self.project_root / "assets" / "generated_descriptors"
+        stem = mob_name.lower()
+        if self.use_modified_descriptor:
+            return base / "modified" / stem / "descriptor.json"
+        return base / stem / "descriptor.json"
 
-    def ensure_descriptor(self, mob_name: str) -> SimpleMobDescriptor:
+    def ensure_descriptor(self, mob_name: str) -> MobDescriptor:
         mob_name = mob_name.lower()
         if mob_name in self._descriptor_cache:
             return self._descriptor_cache[mob_name]
         path = self.descriptor_path(mob_name)
         if not path.exists():
             raise FileNotFoundError(f"descriptor not found for mob '{mob_name}': {path}")
-        descriptor = SimpleMobDescriptor.load(path)
+        descriptor = MobDescriptor.load(path)
         if descriptor.version < DESCRIPTOR_VERSION:
             raise RuntimeError(
                 f"descriptor for mob '{mob_name}' is version {descriptor.version}; "
@@ -204,7 +218,7 @@ class SimpleMobDetector:
         self,
         frame_bgr: np.ndarray,
         mob_name: str,
-    ) -> SimpleDetectionResult:
+    ) -> DetectionResult:
         start = time.perf_counter()
         descriptor = self.ensure_descriptor(mob_name)
         hsv_start = time.perf_counter()
@@ -231,7 +245,7 @@ class SimpleMobDetector:
         centers_start = time.perf_counter()
         centers = self.heatmap_detector.top_centers(heatmaps.final_center)
         score_start = time.perf_counter()
-        candidates: list[SimpleCandidate] = []
+        candidates: list[DetectionCandidate] = []
         for cx, cy, heat_score in centers:
             candidates.extend(self._evaluate_discovery_center(frame_bgr, hsv, descriptor, cx, cy, heat_score))
         nms_start = time.perf_counter()
@@ -252,7 +266,7 @@ class SimpleMobDetector:
             "nms": time.perf_counter() - nms_start,
             "total": elapsed,
         }
-        return SimpleDetectionResult(
+        return DetectionResult(
             mob_name=mob_name.lower(),
             descriptor=descriptor,
             heatmaps=heatmaps,
@@ -266,11 +280,11 @@ class SimpleMobDetector:
         self,
         frame_bgr: np.ndarray,
         hsv: np.ndarray,
-        descriptor: SimpleMobDescriptor,
+        descriptor: MobDescriptor,
         cx: int,
         cy: int,
         heat_score: float,
-    ) -> list[SimpleCandidate]:
+    ) -> list[DetectionCandidate]:
         """Discovery scan: score one heatmap peak center. Returns accepted candidate or empty list."""
         if self._is_self_center(cx, cy, frame_bgr.shape):
             return []
@@ -301,11 +315,11 @@ class SimpleMobDetector:
         self,
         frame_bgr: np.ndarray,
         hsv: np.ndarray,
-        descriptor: SimpleMobDescriptor,
+        descriptor: MobDescriptor,
         cx: int,
         cy: int,
         scales: list[float] | None = None,
-    ) -> SimpleCandidate | None:
+    ) -> DetectionCandidate | None:
         """Score living signal at one point. Returns the best accepted candidate or None."""
         if cx < 0 or cy < 0 or cx >= frame_bgr.shape[1] or cy >= frame_bgr.shape[0]:
             return None
@@ -357,7 +371,7 @@ class SimpleMobDetector:
         self,
         frame_bgr: np.ndarray,
         hsv: np.ndarray,
-        descriptor: SimpleMobDescriptor,
+        descriptor: MobDescriptor,
         cx: int,
         cy: int,
         scale: float,
@@ -391,7 +405,7 @@ class SimpleMobDetector:
         offset_y: int = 0,
         search_radius_px: int | None = None,
     ):
-        from pybot.recognition.simple.tracking.local_tracker import track_local as run_track_local
+        from pybot.recognition.detector.tracking.local_tracker import track_local as run_track_local
 
         return run_track_local(
             self,
@@ -407,11 +421,11 @@ class SimpleMobDetector:
         self,
         frame_bgr: np.ndarray,
         hsv: np.ndarray,
-        descriptor: SimpleMobDescriptor,
+        descriptor: MobDescriptor,
         cx: int,
         cy: int,
         scales: list[float] | None = None,
-    ) -> list[SimpleCandidate]:
+    ) -> list[DetectionCandidate]:
         """Track state: living position at a known track point."""
         living = self._score_point_at(frame_bgr, hsv, descriptor, cx, cy, scales=scales)
         if living is not None and living.accepted:
@@ -423,7 +437,7 @@ class SimpleMobDetector:
         track_id: int,
         cx: int,
         cy: int,
-        best: SimpleCandidate | None,
+        best: DetectionCandidate | None,
         *,
         offset_x: int,
         offset_y: int,
@@ -449,7 +463,7 @@ class SimpleMobDetector:
         self,
         frame_bgr: np.ndarray,
         hsv: np.ndarray,
-        descriptor: SimpleMobDescriptor,
+        descriptor: MobDescriptor,
         track_id: int,
         cx: int,
         cy: int,
@@ -466,7 +480,7 @@ class SimpleMobDetector:
                 frame_bgr.shape[1],
                 float(scale_hint) if scale_hint is not None else None,
             )
-        point_candidates: list[SimpleCandidate] = []
+        point_candidates: list[DetectionCandidate] = []
         search_centers = self._track_search_centers(
             cx,
             cy,
@@ -640,8 +654,8 @@ class SimpleMobDetector:
         return points or [(cx, cy)]
 
     def _select_track_state_candidate(
-        self, candidates: list[SimpleCandidate]
-    ) -> tuple[SimpleCandidate | None, dict[str, object]]:
+        self, candidates: list[DetectionCandidate]
+    ) -> tuple[DetectionCandidate | None, dict[str, object]]:
         if not candidates:
             return None, {
                 "bestScore": 0.0,
@@ -708,7 +722,7 @@ class SimpleMobDetector:
             return neighbors
         return [min(available, key=lambda scale: abs(scale - hint))]
 
-    def _finalize_accepted(self, candidates: list[SimpleCandidate]) -> list[SimpleCandidate]:
+    def _finalize_accepted(self, candidates: list[DetectionCandidate]) -> list[DetectionCandidate]:
         candidates.sort(key=lambda c: c.final_score, reverse=True)
         return self._nms([candidate for candidate in candidates if candidate.accepted])
 
@@ -721,8 +735,8 @@ class SimpleMobDetector:
         score: RegionScore,
         heat_score: float,
         candidate_scale: float,
-    ) -> SimpleCandidate:
-        return SimpleCandidate(
+    ) -> DetectionCandidate:
+        return DetectionCandidate(
             mob_name=mob_name,
             center_x=cx,
             center_y=cy,
@@ -740,8 +754,8 @@ class SimpleMobDetector:
             heatmap_score=heat_score,
         )
 
-    def _nms(self, candidates: list[SimpleCandidate]) -> list[SimpleCandidate]:
-        kept: list[SimpleCandidate] = []
+    def _nms(self, candidates: list[DetectionCandidate]) -> list[DetectionCandidate]:
+        kept: list[DetectionCandidate] = []
         min_dist = int(self.config["nmsDistancePx"])
         min_dist_sq = min_dist * min_dist
         for candidate in sorted(candidates, key=lambda c: c.final_score, reverse=True):

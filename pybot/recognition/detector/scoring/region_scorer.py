@@ -1,4 +1,4 @@
-"""Fixed-window region scoring for the simple detector."""
+"""Fixed-window region scoring for the mob detector."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from pybot.recognition.simple.descriptors.descriptor import SimpleMobDescriptor
-from pybot.recognition.simple.scoring.heatmap_detector import palette_heatmap
+from pybot.recognition.detector.descriptors.descriptor import MobDescriptor
+from pybot.recognition.detector.scoring.heatmap_detector import palette_heatmap
 
 
 @dataclass
@@ -24,7 +24,7 @@ class RegionScore:
     rejection_reason: str
 
 
-class SimpleRegionScorer:
+class RegionScorer:
     def __init__(self, config: dict):
         self.min_color_purity = float(config["minColorPurity"])
         self.min_descriptor_color_match = float(config["minDescriptorColorMatch"])
@@ -44,7 +44,7 @@ class SimpleRegionScorer:
         self,
         frame_bgr: np.ndarray,
         hsv: np.ndarray,
-        descriptor: SimpleMobDescriptor,
+        descriptor: MobDescriptor,
         bbox: tuple[int, int, int, int],
         expected_scale: float = 1.0,
     ) -> RegionScore:
@@ -107,7 +107,7 @@ class SimpleRegionScorer:
         )
 
     @staticmethod
-    def _local_pattern(region_bgr: np.ndarray, region_hsv: np.ndarray, descriptor: SimpleMobDescriptor) -> float:
+    def _local_pattern(region_bgr: np.ndarray, region_hsv: np.ndarray, descriptor: MobDescriptor) -> float:
         accent = palette_heatmap(region_hsv, descriptor.accent_colors)
         body = palette_heatmap(region_hsv, descriptor.body_palette)
         gray = cv2.cvtColor(region_bgr, cv2.COLOR_BGR2GRAY)
@@ -117,7 +117,7 @@ class SimpleRegionScorer:
         if float(edge.max()) > 0:
             edge = edge / float(edge.max())
         pattern = np.maximum(accent * 0.75, body * edge)
-        return SimpleRegionScorer._top_match_score(pattern, 0.12)
+        return RegionScorer._top_match_score(pattern, 0.12)
 
     @staticmethod
     def _top_match_score(heatmap: np.ndarray, fraction: float) -> float:
@@ -163,7 +163,7 @@ class SimpleRegionScorer:
         informative_fraction = float(informative.sum() / max(1, descriptor_heat.size))
         return purity, informative_fraction, descriptor_fraction
 
-    def _sprite_palette_heatmap(self, region_bgr: np.ndarray, descriptor: SimpleMobDescriptor) -> np.ndarray:
+    def _sprite_palette_heatmap(self, region_bgr: np.ndarray, descriptor: MobDescriptor) -> np.ndarray:
         if not descriptor.sprite_palette_bgr:
             return np.zeros(region_bgr.shape[:2], dtype=np.float32)
 
@@ -183,7 +183,7 @@ class SimpleRegionScorer:
     def _object_size_score(
         self,
         descriptor_heat: np.ndarray,
-        descriptor: SimpleMobDescriptor,
+        descriptor: MobDescriptor,
         expected_scale: float,
     ) -> float:
         descriptor_pixels = descriptor_heat >= self.min_descriptor_color_match

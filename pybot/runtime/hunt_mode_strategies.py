@@ -174,7 +174,6 @@ class TeleportStrategy(HuntModeStrategy):
             return False
         ctx.overlay.increment_teleports()
         time.sleep(ctx.config.teleport_duration_ms / 1000.0)
-
         ctx.area_reset("post_teleport")
         self.on_area_reset()
         ctx.discovery_wake.set()

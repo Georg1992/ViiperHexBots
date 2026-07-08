@@ -10,8 +10,8 @@ import cv2
 
 from pybot.paths import PROJECT_ROOT, RECOGNITION_DIR
 from pybot.recognition.cli import apply_scale_calibration
-from pybot.recognition.simple.detector import SimpleMobDetector, load_simple_config
-from pybot.recognition.simple.tracking.local_tracker import track_local
+from pybot.recognition.detector.detector import MobDetector, load_detector_config
+from pybot.recognition.detector.tracking.local_tracker import track_local
 
 FIXTURE = RECOGNITION_DIR / "test-fixtures" / "game-screenshots" / "333.png"
 
@@ -21,9 +21,9 @@ def main() -> None:
     if frame is None:
         raise SystemExit(f"fixture missing: {FIXTURE}")
 
-    config = load_simple_config()
+    config = load_detector_config()
     calibrated = apply_scale_calibration(frame, config)
-    detector = SimpleMobDetector(PROJECT_ROOT, calibrated)
+    detector = MobDetector(PROJECT_ROOT, calibrated)
     detector.apply_runtime_config(calibrated)
 
     result = detector.detect(frame, "horn")

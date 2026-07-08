@@ -1,4 +1,4 @@
-"""Debug output for the simple heatmap detector."""
+"""Debug output for the heatmap mob detector."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from pybot.recognition.simple.detector import SimpleDetectionResult
+from pybot.recognition.detector.detector import DetectionResult
 
 
 def _heatmap_png(heatmap: np.ndarray) -> np.ndarray:
@@ -18,11 +18,11 @@ def _heatmap_png(heatmap: np.ndarray) -> np.ndarray:
     return cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
 
 
-def save_simple_debug_bundle(
+def save_debug_bundle(
     output_root: Path,
     image_name: str,
     frame_bgr: np.ndarray,
-    result: SimpleDetectionResult,
+    result: DetectionResult,
 ) -> Path:
     label = Path(image_name).stem
     out_dir = output_root / result.mob_name / label
@@ -44,7 +44,7 @@ def save_simple_debug_bundle(
     return out_dir
 
 
-def _candidate_centers(frame_bgr: np.ndarray, result: SimpleDetectionResult) -> np.ndarray:
+def _candidate_centers(frame_bgr: np.ndarray, result: DetectionResult) -> np.ndarray:
     canvas = frame_bgr.copy()
     for candidate in result.candidates:
         color = (0, 255, 0) if candidate.accepted else (0, 165, 255)
@@ -62,7 +62,7 @@ def _candidate_centers(frame_bgr: np.ndarray, result: SimpleDetectionResult) -> 
     return canvas
 
 
-def _detected_overlay(frame_bgr: np.ndarray, result: SimpleDetectionResult) -> np.ndarray:
+def _detected_overlay(frame_bgr: np.ndarray, result: DetectionResult) -> np.ndarray:
     canvas = frame_bgr.copy()
     for candidate in result.candidates:
         x, y, w, h = candidate.bbox

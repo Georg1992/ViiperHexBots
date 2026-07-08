@@ -8,8 +8,8 @@ import cv2
 
 from pybot.paths import PROJECT_ROOT, RECOGNITION_DIR
 from pybot.recognition.cli import parse_request_tracks, run_detect_request
-from pybot.recognition.simple.detector import SimpleMobDetector, load_simple_config
-from pybot.recognition.simple.tracking.state_recognizer import evaluate_track_states
+from pybot.recognition.detector.detector import MobDetector, load_detector_config
+from pybot.recognition.detector.tracking.state_recognizer import evaluate_track_states
 
 ROOT = PROJECT_ROOT
 MOB_REC = RECOGNITION_DIR
@@ -26,8 +26,8 @@ def playfield_roi(frame):
 class TrackIdStateTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.config = load_simple_config()
-        cls.detector = SimpleMobDetector(ROOT, cls.config)
+        cls.config = load_detector_config()
+        cls.detector = MobDetector(ROOT, cls.config)
         cls.fixture_dir = MOB_REC / "test-fixtures" / "user-corpse"
         cls.manifest = json.loads((cls.fixture_dir / "manifest.json").read_text(encoding="utf-8"))
 

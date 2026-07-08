@@ -5,7 +5,7 @@ Creates a full-client-area layered window over the game showing:
 - A dark right-side panel with track stats + scrolling log.
 The dots render on a transparent overlay and never appear in
 captured game frames, so detection is not affected.
-Repositions every ~400 ms via a timer thread.
+Repositions every ~100 ms via the tkinter UI timer.
 """
 
 from __future__ import annotations
@@ -16,6 +16,9 @@ import threading
 import time
 from ctypes import wintypes
 from dataclasses import dataclass, field
+
+from pybot.runtime.capture.window_roi import hunt_roi_from_client_rect
+from pybot.runtime.constants import CELL_SIZE_PX, DEFAULT_SEARCH_RANGE_CELLS
 
 # LRESULT was removed from wintypes in Python 3.14
 if not hasattr(wintypes, "LRESULT"):
@@ -57,6 +60,7 @@ COLOR_DOT_LIVING = 0x0000FF00      # green — tracked mob
 COLOR_ROI = 0x00FFE066  # light amber — visible but unobtrusive
 
 PANEL_W = 300  # right-side panel width for status/log
+SRCCOPY = 0x00CC0020
 
 
 class WNDCLASSW(ctypes.Structure):
@@ -108,8 +112,10 @@ class _OverlayState:
     roi_y: int = 0
     roi_w: int = 0
     roi_h: int = 0
+    search_range_cells: int = DEFAULT_SEARCH_RANGE_CELLS
     log_lines: list[str] = field(default_factory=list)
     running: bool = False
+    paint_dirty: bool = False
     _lock: threading.Lock = field(default_factory=threading.Lock)
     game_hwnd: int = 0
 
@@ -178,32 +184,81 @@ _WND_PROC_CALLBACK = WndProcPtr(_wnd_proc)
 
 
 def _paint_overlay(hdc: int) -> None:
+    snapshot = _snapshot_paint_state()
+    if snapshot is None:
+        return
+    hwnd, cw, ch, content = snapshot
+    if cw <= 0 or ch <= 0:
+        return
+
+    mem_dc = gdi32.CreateCompatibleDC(hdc)
+    if not mem_dc:
+        _paint_overlay_content(hdc, cw, ch, content)
+        return
+    bitmap = gdi32.CreateCompatibleBitmap(hdc, cw, ch)
+    if not bitmap:
+        gdi32.DeleteDC(mem_dc)
+        _paint_overlay_content(hdc, cw, ch, content)
+        return
+    old_bitmap = gdi32.SelectObject(mem_dc, bitmap)
+    try:
+        _paint_overlay_content(mem_dc, cw, ch, content)
+        gdi32.BitBlt(hdc, 0, 0, cw, ch, mem_dc, 0, 0, SRCCOPY)
+    finally:
+        gdi32.SelectObject(mem_dc, old_bitmap)
+        gdi32.DeleteObject(bitmap)
+        gdi32.DeleteDC(mem_dc)
+
+
+def _snapshot_paint_state() -> tuple[int, int, int, dict] | None:
     with _state._lock:
         hwnd = _state.hwnd
-        client_left = _state.client_left
-        client_top = _state.client_top
-        client_w = _state.client_w
-        roi_x = _state.roi_x
-        roi_y = _state.roi_y
-        roi_w = _state.roi_w
-        roi_h = _state.roi_h
-        brush_roi = _state.brush_roi
-        brush_living = _state.brush_living
-        track_positions = list(_state.track_positions)
-        track_count = _state.track_count
-        alive_count = _state.alive_count
-        total_attacks = _state.total_attacks
-        total_teleports = _state.total_teleports
-        font_status = _state.font_status
-        font_log = _state.font_log
-        log_lines = list(_state.log_lines)
+        if not hwnd:
+            return None
+        rect = wintypes.RECT()
+        user32.GetClientRect(hwnd, ctypes.byref(rect))
+        cw = rect.right - rect.left
+        ch = rect.bottom - rect.top
+        content = {
+            "client_left": _state.client_left,
+            "client_top": _state.client_top,
+            "client_w": _state.client_w,
+            "roi_x": _state.roi_x,
+            "roi_y": _state.roi_y,
+            "roi_w": _state.roi_w,
+            "roi_h": _state.roi_h,
+            "brush_roi": _state.brush_roi,
+            "brush_living": _state.brush_living,
+            "track_positions": list(_state.track_positions),
+            "track_count": _state.track_count,
+            "alive_count": _state.alive_count,
+            "total_attacks": _state.total_attacks,
+            "total_teleports": _state.total_teleports,
+            "font_status": _state.font_status,
+            "font_log": _state.font_log,
+            "log_lines": list(_state.log_lines),
+        }
+    return hwnd, cw, ch, content
 
-    if not hwnd:
-        return
-    rect = wintypes.RECT()
-    user32.GetClientRect(s.hwnd, ctypes.byref(rect))
-    cw = rect.right - rect.left
-    ch = rect.bottom - rect.top
+
+def _paint_overlay_content(hdc: int, cw: int, ch: int, content: dict) -> None:
+    client_left = content["client_left"]
+    client_top = content["client_top"]
+    client_w = content["client_w"]
+    roi_x = content["roi_x"]
+    roi_y = content["roi_y"]
+    roi_w = content["roi_w"]
+    roi_h = content["roi_h"]
+    brush_roi = content["brush_roi"]
+    brush_living = content["brush_living"]
+    track_positions = content["track_positions"]
+    track_count = content["track_count"]
+    alive_count = content["alive_count"]
+    total_attacks = content["total_attacks"]
+    total_teleports = content["total_teleports"]
+    font_status = content["font_status"]
+    font_log = content["font_log"]
+    log_lines = content["log_lines"]
 
     # ── Game-area transparent fill ─────────────────────────────
     # Fill the entire window with COLOR_KEY (magenta).  The layered
@@ -264,22 +319,29 @@ def _paint_overlay(hdc: int) -> None:
     gdi32.SelectObject(hdc, old_font)
 
 
-def _reposition() -> None:
+def _reposition() -> bool:
+    """Reposition overlay over the game client. Returns True if geometry changed."""
     if not _state.hwnd or not _state.visible:
-        return
+        return False
     client = _get_client_rect_screen(_state.game_hwnd)
     if client is None:
         destroy()
-        return
+        return False
     client_left, client_top, client_w, client_h = client
-    _state.client_left = client_left
-    _state.client_top = client_top
-    _state.client_w = client_w
-    # Full-game overlay — covers the entire game client
+    with _state._lock:
+        unchanged = (
+            _state.client_left == client_left
+            and _state.client_top == client_top
+            and _state.client_w == client_w
+        )
+        _state.client_left = client_left
+        _state.client_top = client_top
+        _state.client_w = client_w
     user32.SetWindowPos(
         _state.hwnd, 0, client_left, client_top, client_w, client_h,
         SWP_NOZORDER | SWP_NOACTIVATE,
     )
+    return not unchanged
 
 
 # ── Public API ────────────────────────────────────────────────────
@@ -295,13 +357,16 @@ def _create_brushes() -> tuple[int, int]:
     )
 
 
-def create(game_hwnd: int) -> bool:
+def create(game_hwnd: int, *, search_range_cells: int = DEFAULT_SEARCH_RANGE_CELLS) -> bool:
     """Create (or recreate) the overlay window over *game_hwnd*."""
     global _last_create_error
+
+    _state.search_range_cells = search_range_cells
 
     if _state.hwnd:
         # Already created — verify the window is still valid
         if user32.IsWindow(_state.hwnd):
+            _sync_hunt_search_roi()
             return True
         # Stale handle from a previous session, reset
         _state.hwnd = 0
@@ -364,8 +429,9 @@ def create(game_hwnd: int) -> bool:
     _state.visible = True
     _reposition()
     user32.ShowWindow(hwnd, 8)  # SW_SHOWNA
-    # Force an immediate initial paint
-    _invalidate()
+    _sync_hunt_search_roi()
+    _mark_dirty()
+    _flush_paint()
 
     return True
 
@@ -390,7 +456,9 @@ def destroy() -> None:
         user32.KillTimer(_state.hwnd, 1)
         user32.DestroyWindow(_state.hwnd)
     _state.hwnd = 0
+    _state.game_hwnd = 0
     _state.visible = False
+    _state.paint_dirty = False
     _state.log_lines.clear()
     _state.track_positions.clear()
     if _state.font_status:
@@ -412,15 +480,14 @@ def append_log(timestamped_line: str, raw_message: str) -> None:
         _state.log_lines.append(timestamped_line)
         if len(_state.log_lines) > 24:
             _state.log_lines.pop(0)
-    if _state.hwnd and user32.IsWindow(_state.hwnd):
-        user32.InvalidateRect(_state.hwnd, None, True)
+    _mark_dirty()
 
 
 def set_scan_living(count: int) -> None:
     """Update the 'scan living' count shown in the overlay status line."""
     with _state._lock:
         _state.last_scan_living = count
-    _invalidate()
+    _mark_dirty()
 
 
 def set_track_stats(
@@ -429,23 +496,28 @@ def set_track_stats(
 ) -> None:
     """Update track stats shown in the overlay status line."""
     with _state._lock:
+        if (
+            _state.track_count == track_count
+            and _state.alive_count == alive_count
+        ):
+            return
         _state.track_count = track_count
         _state.alive_count = alive_count
-    _invalidate()
+    _mark_dirty()
 
 
 def increment_attacks() -> None:
     """Increment the total attacks counter."""
     with _state._lock:
         _state.total_attacks += 1
-    _invalidate()
+    _mark_dirty()
 
 
 def increment_teleports() -> None:
     """Increment the total teleports counter."""
     with _state._lock:
         _state.total_teleports += 1
-    _invalidate()
+    _mark_dirty()
 
 
 def set_track_positions(
@@ -456,18 +528,55 @@ def set_track_positions(
     Each entry is ``(screen_x, screen_y)``.
     """
     with _state._lock:
+        if _state.track_positions == positions:
+            return
         _state.track_positions = positions
-    _invalidate()
+    _mark_dirty()
 
 
 def set_search_roi(x: int, y: int, w: int, h: int) -> None:
     """Set the search region rectangle to draw on the overlay."""
     with _state._lock:
+        if (
+            _state.roi_x == x
+            and _state.roi_y == y
+            and _state.roi_w == w
+            and _state.roi_h == h
+        ):
+            return
         _state.roi_x = x
         _state.roi_y = y
         _state.roi_w = w
         _state.roi_h = h
-    _invalidate()
+    _mark_dirty()
+
+
+def set_search_range_cells(cells: int) -> None:
+    """Update hunt search box size used for the overlay border."""
+    with _state._lock:
+        if _state.search_range_cells == cells:
+            return
+        _state.search_range_cells = cells
+    _sync_hunt_search_roi()
+
+
+def _sync_hunt_search_roi() -> None:
+    game_hwnd = _state.game_hwnd
+    if not game_hwnd:
+        return
+    client = _get_client_rect_screen(game_hwnd)
+    if client is None:
+        return
+    with _state._lock:
+        search_range_cells = _state.search_range_cells
+    roi = hunt_roi_from_client_rect(
+        *client,
+        search_range_cells=search_range_cells,
+        cell_size_px=CELL_SIZE_PX,
+    )
+    if roi is None:
+        return
+    set_search_roi(roi.x, roi.y, roi.w, roi.h)
 
 
 def reset_stats() -> None:
@@ -479,40 +588,45 @@ def reset_stats() -> None:
         _state.total_attacks = 0
         _state.total_teleports = 0
         _state.track_positions.clear()
-    _invalidate()
+    _mark_dirty()
 
 
-def _invalidate() -> None:
-    """Force an immediate repaint (synchronous, works cross-thread).
+def _mark_dirty() -> None:
+    with _state._lock:
+        _state.paint_dirty = True
 
-    Uses ``UpdateWindow`` which sends WM_PAINT synchronously via
-    ``SendMessage`` — this works even when called from a thread that
-    didn't create the overlay window (unlike the message-queue-based
-    approach that would require pumping messages on the right thread).
-    """
-    if _state.hwnd and user32.IsWindow(_state.hwnd):
-        user32.InvalidateRect(_state.hwnd, None, True)
-        user32.UpdateWindow(_state.hwnd)
+
+def _flush_paint() -> None:
+    """Repaint on the UI thread — never call from worker threads."""
+    with _state._lock:
+        if not _state.paint_dirty:
+            return
+        _state.paint_dirty = False
+        hwnd = _state.hwnd
+    if hwnd and user32.IsWindow(hwnd):
+        user32.InvalidateRect(hwnd, None, False)
+        user32.UpdateWindow(hwnd)
 
 
 def tick() -> None:
-    """Periodic upkeep: reposition overlay and repaint.
+    """Periodic upkeep: reposition overlay and repaint when dirty.
 
-    Called from the tkinter UI's ``after()`` loop (~400 ms interval).
-    Replaces the previous ``SetTimer`` + message-pump-thread approach
-    which was broken because posted messages are only delivered to the
-    thread that created the window (the main thread), not the pump thread.
+    Called from the tkinter UI's ``after()`` loop (~100 ms). Worker threads
+    only mark the overlay dirty; painting happens here on the main thread.
     """
-    if _state.visible:
-        _reposition()
-        _invalidate()
+    if not _state.visible:
+        return
+    _sync_hunt_search_roi()
+    if _reposition():
+        _mark_dirty()
+    _flush_paint()
 
 
 class Win32HuntOverlay:
     """Injectable hunt overlay backed by a Win32 transparent window."""
 
-    def create(self, game_hwnd: int) -> bool:
-        return create(game_hwnd)
+    def create(self, game_hwnd: int, *, search_range_cells: int = DEFAULT_SEARCH_RANGE_CELLS) -> bool:
+        return create(game_hwnd, search_range_cells=search_range_cells)
 
     def destroy(self) -> None:
         destroy()
@@ -537,6 +651,9 @@ class Win32HuntOverlay:
 
     def set_search_roi(self, x: int, y: int, w: int, h: int) -> None:
         set_search_roi(x, y, w, h)
+
+    def set_search_range_cells(self, cells: int) -> None:
+        set_search_range_cells(cells)
 
     def increment_attacks(self) -> None:
         increment_attacks()

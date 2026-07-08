@@ -27,7 +27,7 @@ class AttackLoop:
             try:
                 tick_count += 1
                 if not self._ctx.should_run_workers():
-                    self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
+                    self._ctx.wait_while_stopped_or_paused(WORKER_POLL_INTERVAL_S)
                     continue
 
                 tick = monotonic_ms()

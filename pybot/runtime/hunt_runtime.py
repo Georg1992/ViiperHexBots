@@ -23,12 +23,13 @@ from pybot.runtime.logging import HuntLogger
 from pybot.runtime.overlay_ports import HuntOverlay, NullOverlay
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.validation_log import HuntValidationLogger
-from pybot.recognition.simple.detector import load_simple_config
+from pybot.recognition.detector.detector import load_detector_config
 from pybot.runtime.detection.detector_session import DetectorSession
 from pybot.runtime.workers.attack_loop import AttackLoop
 from pybot.runtime.workers.discovery_worker import DiscoveryWorker
 from pybot.runtime.workers.skill_timer_worker import SkillTimerWorker
 from pybot.runtime.workers.tracking_worker import TrackingWorker
+from pybot.runtime.constants import WORKER_SHUTDOWN_TIMEOUT_S
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -103,14 +104,23 @@ def create_runtime_deps(
     logger = HuntLogger(session_id=sid)
     if behavior_callback:
         logger.set_behavior_callback(behavior_callback)
-    tracks = HuntTracks()
+    detector_config = load_detector_config()
+    tracks = HuntTracks(detector_config)
     policy = HuntPolicy()
     capture = HuntWindowCapture(config)
     # Two independent detectors: discovery's full scan and tracking's local
     # follow run on separate threads and must never contend on one detector lock.
-    simple_config = load_simple_config()
-    detector = DetectorSession(config.mob_name, simple_config=simple_config)
-    tracker = DetectorSession(config.mob_name, simple_config=simple_config)
+    use_modified = config.use_sprite_grf
+    detector = DetectorSession(
+        config.mob_name,
+        detector_config=detector_config,
+        use_modified_descriptor=use_modified,
+    )
+    tracker = DetectorSession(
+        config.mob_name,
+        detector_config=detector_config,
+        use_modified_descriptor=use_modified,
+    )
     validation = HuntValidationLogger(
         logger,
         tracks,
@@ -163,16 +173,35 @@ class HuntRuntime:
     def __init__(self, deps: RuntimeDependencies) -> None:
         self._ctx = deps.ctx
         self._workers = deps.workers
+        self._input_backend = deps.input_backend
+        self._worker_threads: list[threading.Thread] = []
 
 
     def stop(self) -> None:
         self._ctx.stop_event.set()
+        self._ctx.discovery_wake.set()
 
     def pause(self) -> None:
         self._ctx.pause_event.set()
+        self._ctx.logger.behavior("[PYBOT] paused")
 
     def resume(self) -> None:
         self._ctx.pause_event.clear()
+        self._ctx.discovery_wake.set()
+        self._ctx.logger.behavior("[PYBOT] resumed")
+
+    def set_search_range_cells(self, cells: int) -> None:
+        self._ctx.capture.set_search_range_cells(cells)
+
+    def _shutdown_workers(self) -> None:
+        deadline = time.monotonic() + WORKER_SHUTDOWN_TIMEOUT_S
+        pending = [thread for thread in self._worker_threads if thread.is_alive()]
+        while pending and time.monotonic() < deadline:
+            for thread in pending:
+                thread.join(timeout=0.05)
+            pending = [thread for thread in pending if thread.is_alive()]
+        self._worker_threads.clear()
+        self._input_backend.shutdown()
 
     def run(self, *, run_seconds: float = 0.0, start_paused: bool = False) -> int:
         ctx = self._ctx
@@ -211,19 +240,23 @@ class HuntRuntime:
             threading.Thread(target=fn, name=name, daemon=True)
             for name, fn in self._workers
         ]
+        self._worker_threads = threads
 
         for thread in threads:
             thread.start()
 
         deadline = time.monotonic() + run_seconds if run_seconds > 0 else 0.0
-        while not ctx.is_stopped():
-            self._poll_control()
-            if deadline and time.monotonic() >= deadline:
-                ctx.stop_event.set()
-                break
-            ctx.stop_event.wait(0.25)
+        try:
+            while not ctx.is_stopped():
+                self._poll_control()
+                if deadline and time.monotonic() >= deadline:
+                    ctx.stop_event.set()
+                    break
+                ctx.stop_event.wait(0.25)
+        finally:
+            ctx.logger.behavior("[PYBOT] hunt runtime stopped")
+            self._shutdown_workers()
 
-        ctx.logger.behavior("[PYBOT] hunt runtime stopped")
         return 0
 
     def _poll_control(self) -> None:
@@ -235,6 +268,7 @@ class HuntRuntime:
             self._ctx.logger.behavior("[PYBOT] paused")
         elif command == "resume":
             self._ctx.pause_event.clear()
+            self._ctx.discovery_wake.set()
             self._ctx.logger.behavior("[PYBOT] resumed")
 
 

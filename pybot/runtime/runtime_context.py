@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass, field
 
 from pybot.runtime.capture.hunt_capture import HuntWindowCapture
@@ -37,6 +38,18 @@ class HuntRuntimeContext:
 
     def is_stopped(self) -> bool:
         return self.stop_event.is_set()
+
+    def wait_while_stopped_or_paused(self, timeout_s: float) -> bool:
+        """Block up to *timeout_s*. Returns True if workers may run."""
+        deadline = time.monotonic() + timeout_s
+        while not self.stop_event.is_set():
+            if self.should_run_workers():
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return self.should_run_workers()
+            self.stop_event.wait(min(0.05, remaining))
+        return False
 
     def area_reset(self, reason: str = "area_reset") -> None:
         self.tracks.area_reset()

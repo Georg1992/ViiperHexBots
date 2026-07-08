@@ -1,4 +1,4 @@
-"""Serializable descriptor for the simple heatmap detector."""
+"""Serializable descriptor for the heatmap mob detector."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ class SizeDescriptor:
 
 
 @dataclass
-class SimpleMobDescriptor:
+class MobDescriptor:
     mob_name: str
     version: int
     size: SizeDescriptor
@@ -44,7 +44,7 @@ class SimpleMobDescriptor:
     dominant_pixel_bgr: list[int] | None = None  # [B, G, R] of the single most common pixel across all sprite frames
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "SimpleMobDescriptor":
+    def from_dict(cls, data: dict[str, Any]) -> "MobDescriptor":
         # Backward compat: if dominantColor is missing (legacy descriptor),
         # synthesize from the first bodyColors entry
         if "dominantColor" in data:
@@ -77,7 +77,7 @@ class SimpleMobDescriptor:
         )
 
     @classmethod
-    def load(cls, path: Path) -> "SimpleMobDescriptor":
+    def load(cls, path: Path) -> "MobDescriptor":
         return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
     def to_dict(self) -> dict[str, Any]:

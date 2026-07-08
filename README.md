@@ -40,7 +40,7 @@ Console entry points (after editable install):
 |---------|---------|
 | `viiperhex` | Desktop GUI |
 | `viiperhex-hunt` | Headless hunt runtime CLI |
-| `mob-detect` | Mob recognition CLI (`build-simple-descriptor`, `detect-simple`, …) |
+| `mob-detect` | Mob recognition CLI (`build-descriptor`, `detect`, …) |
 
 ## Tests
 
@@ -78,6 +78,8 @@ ViiperHexBots/
   assets/
     mobs/                   Source SPR/ACT per mob (input)
     generated_descriptors/  Runtime descriptors, rebuilt on launch (gitignored)
+      <mob>/         Descriptor from assets/mobs
+      modified/<mob>/ Descriptor from assets/modified_mobs
     modified_mobs/          Transformed SPR/ACT mirror (gitignored)
   clients/                  Per-server profiles (memory addresses, captcha)
   scripts/                  Descriptor build, test runners, dev tools
@@ -88,7 +90,7 @@ ViiperHexBots/
 
 ## Mob descriptors
 
-Mob sprites live in `assets/mobs/<MobName>/`. On launch the bot rebuilds descriptors into `assets/generated_descriptors/<mob>/simple/descriptor.json` and lists available mobs in the UI.
+Mob sprites live in `assets/mobs/<MobName>/`. On launch the bot rebuilds descriptors into `assets/generated_descriptors/<mob>/descriptor.json` and lists available mobs in the UI.
 
 Build a single mob descriptor manually:
 
@@ -96,7 +98,7 @@ Build a single mob descriptor manually:
 .\scripts\build-mob-descriptor.ps1 -Mob horn -Force
 ```
 
-Use `mob-detect` for CLI examples (`mob-detect detect-simple --mob horn --help`). Pipeline source lives in `pybot/recognition/`.
+Use `mob-detect` for CLI examples (`mob-detect detect --mob horn --help`). Pipeline source lives in `pybot/recognition/`.
 
 ## Dev tools
 

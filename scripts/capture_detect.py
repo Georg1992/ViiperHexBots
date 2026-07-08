@@ -19,7 +19,7 @@ import numpy as np
 
 from pybot.paths import PROJECT_ROOT
 from pybot.recognition.capture import capture_region
-from pybot.recognition.simple.detector import SimpleMobDetector, load_simple_config
+from pybot.recognition.detector.detector import MobDetector, load_detector_config
 
 
 def describe_frame(frame: np.ndarray, label: str) -> None:
@@ -44,7 +44,7 @@ def save_diagnostic(frame: np.ndarray, path: Path, result) -> None:
     print(f"  Saved: {path.name}")
 
 
-def run_detection(frame: np.ndarray, detector: SimpleMobDetector,
+def run_detection(frame: np.ndarray, detector: MobDetector,
                   mob_name: str) -> None:
     """Run full detection pipeline and print detailed results."""
     t0 = time.perf_counter()
@@ -75,8 +75,8 @@ def main() -> int:
                         help="Save annotated screenshot to this path")
     args = parser.parse_args()
 
-    config = load_simple_config()
-    detector = SimpleMobDetector(PROJECT_ROOT, config)
+    config = load_detector_config()
+    detector = MobDetector(PROJECT_ROOT, config)
     mob_name = args.mob.lower()
 
     try:

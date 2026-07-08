@@ -4,16 +4,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pybot.recognition.simple.tracking.local_tracker import LocalTrackResult, track_local
+from pybot.recognition.detector.tracking.local_tracker import LocalTrackResult, track_local
 
 if TYPE_CHECKING:
     import numpy as np
 
-    from pybot.recognition.simple.detector import SimpleMobDetector
+    from pybot.recognition.detector.detector import MobDetector
 
 
 def follow_track_local(
-    detector: SimpleMobDetector,
+    detector: MobDetector,
     frame_bgr: np.ndarray,
     mob_name: str,
     track: dict,

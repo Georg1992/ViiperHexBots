@@ -25,6 +25,7 @@ from pybot.recognition.rules import (
     detection_matches_existing,
     is_alive,
 )
+from pybot.recognition.detector.detector import load_detector_config
 
 
 class TrackReconciler:
@@ -39,6 +40,7 @@ class TrackReconciler:
         mob_name: str,
         now_tick: int,
         create_track_fn: Callable[..., MobTrack],
+        detector_config: dict | None = None,
     ) -> ReconcileSummary:
         """Create tracks for detections that don't belong to an existing object.
 
@@ -66,9 +68,21 @@ class TrackReconciler:
         matched_count = 0
         created_ids: list[int] = []
 
-        clustered = cluster_living_detections(detections)
+        config = detector_config or load_detector_config()
+        cluster_radius = int(config["discoveryClusterRadiusPx"])
+        dedup_radius = int(config["trackDedupRadiusPx"])
+
+        clustered = cluster_living_detections(
+            detections,
+            cluster_radius=cluster_radius,
+        )
         for detection in clustered:
-            if detection_matches_existing(detection.x, detection.y, known_positions):
+            if detection_matches_existing(
+                detection.x,
+                detection.y,
+                known_positions,
+                dedup_radius=dedup_radius,
+            ):
                 matched_count += 1
                 continue
 

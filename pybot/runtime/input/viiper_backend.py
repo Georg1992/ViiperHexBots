@@ -168,8 +168,12 @@ class ViiperBackend(ShadowInputBackend):
         return True
 
     def shutdown(self) -> None:
-        """Clean up device streams."""
-        self.disconnect()
+        """Release pressed keys and close device streams."""
+        with self._connect_lock:
+            if self._connected and self._kb_stream is not None:
+                self._kb_stream.write(KeyboardState(0).marshal())
+            self._modifiers = 0
+            self.disconnect()
 
     # ── Low-level helpers ─────────────────────────────────────────────
 

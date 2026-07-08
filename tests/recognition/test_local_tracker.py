@@ -10,9 +10,9 @@ import cv2
 
 from pybot.paths import PROJECT_ROOT, RECOGNITION_DIR
 from pybot.recognition.cli import apply_scale_calibration
-from pybot.recognition.simple.detector import SimpleMobDetector, load_simple_config
-from pybot.recognition.simple.tracking.local_track_recognizer import follow_track_local
-from pybot.recognition.simple.tracking.local_tracker import LocalTrackResult, track_local
+from pybot.recognition.detector.detector import MobDetector, load_detector_config
+from pybot.recognition.detector.tracking.local_track_recognizer import follow_track_local
+from pybot.recognition.detector.tracking.local_tracker import LocalTrackResult, track_local
 
 ROOT = PROJECT_ROOT
 MOB_REC = RECOGNITION_DIR
@@ -29,20 +29,20 @@ def playfield_roi(frame):
 class LocalTrackerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.base_config = load_simple_config()
+        cls.base_config = load_detector_config()
         cls.fixture_dir = MOB_REC / "test-fixtures" / "game-screenshots"
         cls.frame = cv2.imread(str(cls.fixture_dir / "333.png"), cv2.IMREAD_COLOR)
         if cls.frame is None:
             raise unittest.SkipTest("fixture 333.png missing")
         cls.roi = playfield_roi(cls.frame)
 
-    def _detector(self) -> SimpleMobDetector:
+    def _detector(self) -> MobDetector:
         calibrated = apply_scale_calibration(self.base_config, (0.82, 0.98), True)
-        detector = SimpleMobDetector(ROOT, calibrated)
+        detector = MobDetector(ROOT, calibrated)
         detector.apply_runtime_config(calibrated)
         return detector
 
-    def _living_anchor(self, detector: SimpleMobDetector):
+    def _living_anchor(self, detector: MobDetector):
         discovery = detector.detect(self.roi, "horn")
         living = [c for c in discovery.accepted]
         self.assertGreater(len(living), 0)

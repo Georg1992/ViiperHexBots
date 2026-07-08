@@ -16,6 +16,10 @@ user32 = ctypes.windll.user32
 class HuntWindowCapture:
     def __init__(self, config: HuntRuntimeConfig) -> None:
         self._config = config
+        self._search_range_cells = config.search_range_cells
+
+    def set_search_range_cells(self, cells: int) -> None:
+        self._search_range_cells = cells
 
     @property
     def hwnd(self) -> int:
@@ -53,7 +57,7 @@ class HuntWindowCapture:
             client_top,
             client_w,
             client_h,
-            search_range_cells=self._config.search_range_cells,
+            search_range_cells=self._search_range_cells,
             cell_size_px=self._config.cell_size_px,
         )
 

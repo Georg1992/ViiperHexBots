@@ -4,16 +4,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pybot.recognition.simple.detector import STATE_PROFILE_DIRECT, STATE_PROFILE_FULL, StateSearchProfile
+from pybot.recognition.detector.detector import STATE_PROFILE_DIRECT, STATE_PROFILE_FULL, StateSearchProfile
 
 if TYPE_CHECKING:
     import numpy as np
 
-    from pybot.recognition.simple.detector import SimpleMobDetector
+    from pybot.recognition.detector.detector import MobDetector
 
 
 def evaluate_track_state(
-    detector: SimpleMobDetector,
+    detector: MobDetector,
     frame_bgr: np.ndarray,
     mob_name: str,
     track_id: int,
@@ -39,7 +39,7 @@ def evaluate_track_state(
 
 
 def evaluate_track_state_direct(
-    detector: SimpleMobDetector,
+    detector: MobDetector,
     frame_bgr: np.ndarray,
     mob_name: str,
     track_id: int,
@@ -65,7 +65,7 @@ def evaluate_track_state_direct(
 
 
 def evaluate_track_states(
-    detector: SimpleMobDetector,
+    detector: MobDetector,
     frame_bgr: np.ndarray,
     mob_name: str,
     tracks: list[dict],

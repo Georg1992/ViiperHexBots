@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from pybot.recognition.simple.descriptors.descriptor import ColorCluster, SimpleMobDescriptor
+from pybot.recognition.detector.descriptors.descriptor import ColorCluster, MobDescriptor
 
 
 @dataclass
@@ -52,6 +52,7 @@ class HeatmapDetector:
         self.ui_left_ratio = float(config["playfieldLeftRatio"])
         self.ui_right_ratio = float(config["playfieldRightRatio"])
         self.min_center_heat = float(config["minCenterHeat"])
+        self.peak_relative_threshold = float(config["peakRelativeThreshold"])
         self.center_scales = [float(scale) for scale in config["centerScales"]]
         self.small_scale_min_frame_width = int(config["smallScaleMinFrameWidth"])
         weights = config["centerWeights"]
@@ -66,7 +67,7 @@ class HeatmapDetector:
         self,
         frame_bgr: np.ndarray,
         hsv: np.ndarray,
-        descriptor: SimpleMobDescriptor,
+        descriptor: MobDescriptor,
         downscale: int = 1,
     ) -> Heatmaps:
         body = palette_heatmap(hsv, descriptor.body_palette)
@@ -132,7 +133,10 @@ class HeatmapDetector:
         radius = max(3, self.min_center_distance // 2)
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (radius * 2 + 1, radius * 2 + 1))
         local_max = heatmap == cv2.dilate(heatmap, kernel)
-        threshold = max(float(heatmap.max()) * 0.25, self.min_center_heat)
+        threshold = max(
+            float(heatmap.max()) * self.peak_relative_threshold,
+            self.min_center_heat,
+        )
         ys, xs = np.where(local_max & (heatmap >= threshold))
         if len(xs) == 0:
             return []

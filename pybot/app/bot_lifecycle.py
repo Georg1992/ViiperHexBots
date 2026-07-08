@@ -7,12 +7,14 @@ state transitions without being coupled to the lifecycle logic.
 
 from __future__ import annotations
 
+import threading
+import time
 import tkinter as tk
 from collections.abc import Callable
 from enum import Enum, auto
 from tkinter import messagebox
 
-from pybot.app.bot_controller import BotController
+from pybot.app.bot_controller import BotController, DEFAULT_STOP_JOIN_TIMEOUT_S
 from pybot.app.config_store import AppConfig
 from pybot.app.overlay import Win32HuntOverlay
 from pybot.mobs.catalog import MobEntry, mob_folder_by_index
@@ -76,6 +78,8 @@ class BotLifecycleManager:
         self._bot: BotController | None = None
         self._state = BotState.OFF
         self._input_ready = False
+        self._focus_grace_until = 0.0
+        self._stop_joiner: threading.Thread | None = None
 
     # ── Properties ──────────────────────────────────────────────────
 
@@ -134,8 +138,14 @@ class BotLifecycleManager:
             config_snapshot: Fully synced AppConfig with current UI values.
             session_id: App-level session identifier (used as prefix).
         """
-        if self._state not in (BotState.OFF, BotState.PAUSED):
+        if self._state != BotState.OFF:
             return
+
+        self._await_prior_stop_joiner()
+
+        if self._bot is not None:
+            self._bot.request_stop()
+            self._bot = None
 
         mob_name = mob_folder_by_index(
             self._mob_catalog, config_snapshot.selected_monster
@@ -155,8 +165,9 @@ class BotLifecycleManager:
         )
         self._bot.start(mob_name=mob_name)
         self._state = BotState.RUNNING
-        # Start overlay upkeep timer (reposition + repaint every 400ms)
-        self._root.after(400, self._schedule_overlay_tick)
+        self._arm_focus_grace()
+        # Start overlay upkeep timer (reposition + repaint every 100ms)
+        self._root.after(100, self._schedule_overlay_tick)
         self._session.write_block(
             "bot start",
             f"hwnd={config_snapshot.window_id}\n"
@@ -171,18 +182,48 @@ class BotLifecycleManager:
         """Periodic overlay upkeep while the bot is running."""
         if self._state != BotState.OFF:
             self._hunt_overlay.tick()
-            self._root.after(400, self._schedule_overlay_tick)
+            self._root.after(100, self._schedule_overlay_tick)
+
+    def set_search_range_cells(self, cells: int) -> None:
+        """Keep hunt capture and overlay search boxes aligned with the GUI."""
+        self._hunt_overlay.set_search_range_cells(cells)
+        if self._bot is not None:
+            self._bot.set_search_range_cells(cells)
 
     def stop(self) -> None:
         """Stop the hunt runtime and destroy the overlay."""
-        if self._bot is not None:
-            self._bot.stop()
+        if self._state == BotState.OFF and self._bot is None:
+            return
+
+        bot = self._bot
+        if bot is not None:
+            bot.request_stop()
         self._bot = None
         self._state = BotState.OFF
         self._hunt_overlay.reset_stats()
         self._hunt_overlay.destroy()
         if self._on_state_change:
             self._on_state_change(BotState.OFF)
+        if bot is not None:
+            self._start_stop_joiner(bot)
+
+    def _start_stop_joiner(self, bot: BotController) -> None:
+        self._await_prior_stop_joiner()
+
+        def _join() -> None:
+            bot.stop(join_timeout=DEFAULT_STOP_JOIN_TIMEOUT_S)
+
+        self._stop_joiner = threading.Thread(
+            target=_join,
+            name="bot-stop-joiner",
+            daemon=True,
+        )
+        self._stop_joiner.start()
+
+    def _await_prior_stop_joiner(self) -> None:
+        if self._stop_joiner is not None and self._stop_joiner.is_alive():
+            self._stop_joiner.join(timeout=DEFAULT_STOP_JOIN_TIMEOUT_S)
+        self._stop_joiner = None
 
     def pause(self) -> None:
         """Pause the hunt runtime because game focus was lost."""
@@ -191,6 +232,7 @@ class BotLifecycleManager:
         if self._bot is not None:
             self._bot.pause()
         self._state = BotState.PAUSED
+        self._on_log("[STATE] Bot paused")
         self._session.write_focus_change("paused (focus lost)")
         if self._on_state_change:
             self._on_state_change(BotState.PAUSED)
@@ -202,16 +244,26 @@ class BotLifecycleManager:
         if self._bot is not None:
             self._bot.resume()
         self._state = BotState.RUNNING
+        self._arm_focus_grace()
+        self._on_log("[STATE] Bot resumed")
         self._session.write_focus_change("resumed")
         if self._on_state_change:
             self._on_state_change(BotState.RUNNING)
         self._root.after(300, self._poll_focus)
 
+    def _arm_focus_grace(self, seconds: float = 2.0) -> None:
+        """Ignore focus-loss auto-pause briefly after start/resume."""
+        self._focus_grace_until = time.monotonic() + seconds
+
     # ── Focus polling ───────────────────────────────────────────────
 
     def _poll_focus(self) -> None:
-        if self._state == BotState.RUNNING and self._config.window_id:
-            if not is_window_active(self._config.window_id):
-                self.pause()
+        if (
+            self._state == BotState.RUNNING
+            and self._config.window_id
+            and time.monotonic() >= self._focus_grace_until
+            and not is_window_active(self._config.window_id)
+        ):
+            self.pause()
         if self._state in (BotState.RUNNING, BotState.PAUSED):
             self._root.after(300, self._poll_focus)

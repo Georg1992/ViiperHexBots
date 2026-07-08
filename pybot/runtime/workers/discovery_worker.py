@@ -34,10 +34,11 @@ class DiscoveryWorker:
         interval_s = ctx.config.discovery_interval_ms / 1000.0
         try:
             while not ctx.stop_event.is_set():
-                # Wake early when a teleport forces an immediate scan, otherwise
-                # scan once per discovery interval.
-                ctx.discovery_wake.wait(interval_s)
-                ctx.discovery_wake.clear()
+                # Teleport sets discovery_wake for an immediate post-reset scan.
+                # Otherwise wait discovery_interval_ms (default 1s) between scans.
+                woke = ctx.discovery_wake.wait(interval_s)
+                if woke:
+                    ctx.discovery_wake.clear()
                 if not ctx.should_run_workers():
                     continue
                 self._scan()
@@ -47,6 +48,8 @@ class DiscoveryWorker:
 
     def _scan(self) -> None:
         ctx = self._ctx
+        if ctx.stop_event.is_set():
+            return
         if not ctx.capture.is_valid():
             return
         roi = ctx.capture.get_hunt_roi()
@@ -54,6 +57,8 @@ class DiscoveryWorker:
             return
 
         frame = ctx.capture.capture_roi(roi)
+        if ctx.stop_event.is_set():
+            return
         if frame is None or frame.size == 0:
             ctx.logger.behavior("[DISCOVERY] capture returned empty frame")
             return

@@ -37,7 +37,7 @@ class SkillTimerWorker:
 
         while not ctx.is_stopped():
             if not ctx.should_run_workers():
-                ctx.stop_event.wait(0.25)
+                ctx.wait_while_stopped_or_paused(0.25)
                 continue
 
             now = monotonic_ms()

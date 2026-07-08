@@ -39,7 +39,7 @@ import numpy as np
 
 from pybot.paths import PROJECT_ROOT
 from pybot.recognition.capture import capture_region
-from pybot.recognition.simple.detector import SimpleMobDetector, load_simple_config
+from pybot.recognition.detector.detector import MobDetector, load_detector_config
 from pybot.runtime.capture.window_roi import (
     hunt_roi_from_client_rect,
     player_ignore_box,
@@ -377,8 +377,8 @@ def main() -> int:
                         help="Screenshot path instead of live capture")
     args = parser.parse_args()
 
-    config = load_simple_config()
-    detector = SimpleMobDetector(PROJECT_ROOT, config)
+    config = load_detector_config()
+    detector = MobDetector(PROJECT_ROOT, config)
     mob_name = args.mob.lower()
 
     try:

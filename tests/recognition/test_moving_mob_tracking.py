@@ -7,12 +7,12 @@ import unittest
 from pathlib import Path
 
 from pybot.paths import PROJECT_ROOT
-from pybot.recognition.simple.detector import SimpleMobDetector, load_simple_config
+from pybot.recognition.detector.detector import MobDetector, load_detector_config
 
 ROOT = PROJECT_ROOT
 
 
-def max_search_distance(cx: int, cy: int, frame_shape: tuple[int, ...], detector: SimpleMobDetector) -> float:
+def max_search_distance(cx: int, cy: int, frame_shape: tuple[int, ...], detector: MobDetector) -> float:
     points = detector._track_search_centers(cx, cy, frame_shape)
     return max(math.hypot(px - cx, py - cy) for px, py in points)
 
@@ -20,8 +20,8 @@ def max_search_distance(cx: int, cy: int, frame_shape: tuple[int, ...], detector
 class MovingMobTrackingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.config = load_simple_config()
-        cls.detector = SimpleMobDetector(ROOT, cls.config)
+        cls.config = load_detector_config()
+        cls.detector = MobDetector(ROOT, cls.config)
         cls.drift_radius = int(cls.config["watchDriftRadiusPx"])
         cls.frame_shape = (900, 1600, 3)
 

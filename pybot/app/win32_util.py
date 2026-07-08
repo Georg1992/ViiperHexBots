@@ -183,34 +183,28 @@ def get_hunt_search_region(
     if not hwnd or not user32.IsWindow(hwnd):
         return None
 
-    search_size = search_range * cell_size
     client_rect = wintypes.RECT()
     if not user32.GetClientRect(hwnd, ctypes.byref(client_rect)):
         return None
     origin = wintypes.POINT(0, 0)
     if not user32.ClientToScreen(hwnd, ctypes.byref(origin)):
         return None
-    client_left = origin.x
-    client_top = origin.y
     client_w = client_rect.right - client_rect.left
     client_h = client_rect.bottom - client_rect.top
 
-    w = h = search_size
-    x = client_left + (client_w // 2) - (w // 2)
-    y = client_top + (client_h // 2) - (h // 2)
+    from pybot.runtime.capture.window_roi import hunt_roi_from_client_rect
 
-    if x < client_left:
-        x = client_left
-    if y < client_top:
-        y = client_top
-    if x + w > client_left + client_w:
-        x = client_left + client_w - w
-    if y + h > client_top + client_h:
-        y = client_top + client_h - h
-
-    if w <= 0 or h <= 0:
+    roi = hunt_roi_from_client_rect(
+        origin.x,
+        origin.y,
+        client_w,
+        client_h,
+        search_range_cells=search_range,
+        cell_size_px=cell_size,
+    )
+    if roi is None:
         return None
-    return x, y, w, h
+    return roi.x, roi.y, roi.w, roi.h
 
 
 def _create_colored_border_window(x: int, y: int, w: int, h: int, color: int) -> int:

@@ -8,11 +8,11 @@ from typing import TYPE_CHECKING
 import cv2
 import numpy as np
 
-from pybot.recognition.simple.descriptors.descriptor import SimpleMobDescriptor
-from pybot.recognition.simple.scoring.heatmap_detector import HeatmapDetector, palette_heatmap
+from pybot.recognition.detector.descriptors.descriptor import MobDescriptor
+from pybot.recognition.detector.scoring.heatmap_detector import HeatmapDetector, palette_heatmap
 
 if TYPE_CHECKING:
-    from pybot.recognition.simple.detector import SimpleMobDetector
+    from pybot.recognition.detector.detector import MobDetector
 
 
 @dataclass(frozen=True)
@@ -26,7 +26,7 @@ class LocalTrackResult:
 
 
 def track_local(
-    detector: SimpleMobDetector,
+    detector: MobDetector,
     frame_bgr: np.ndarray,
     mob_name: str,
     track: dict,
@@ -131,7 +131,7 @@ def track_local(
 
 
 def _resolve_local_track_scale(
-    detector: SimpleMobDetector,
+    detector: MobDetector,
     frame_width: int,
     scale_hint: float | None,
 ) -> float:
@@ -142,10 +142,10 @@ def _resolve_local_track_scale(
 
 
 def _find_local_peak(
-    detector: SimpleMobDetector,
+    detector: MobDetector,
     frame_bgr: np.ndarray,
     hsv: np.ndarray,
-    descriptor: SimpleMobDescriptor,
+    descriptor: MobDescriptor,
     cx: int,
     cy: int,
     scale: float,
@@ -187,7 +187,7 @@ def _build_local_follow_heatmap(
     heatmap_detector: HeatmapDetector,
     crop_bgr: np.ndarray,
     crop_hsv: np.ndarray,
-    descriptor: SimpleMobDescriptor,
+    descriptor: MobDescriptor,
     scale: float,
 ) -> np.ndarray:
     body = palette_heatmap(crop_hsv, descriptor.body_palette)
