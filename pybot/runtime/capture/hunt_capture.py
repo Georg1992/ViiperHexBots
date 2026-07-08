@@ -58,6 +58,6 @@ class HuntWindowCapture:
         )
 
     def capture_roi(self, roi: HuntRoi) -> np.ndarray:
-        from capture import capture_region  # noqa: WPS433 — mob-recognition
+        from pybot.recognition.capture import capture_region
 
         return capture_region(roi.x, roi.y, roi.w, roi.h)

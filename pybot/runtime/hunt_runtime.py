@@ -20,8 +20,10 @@ from pybot.runtime.hunt_tracks import HuntTracks
 from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.input.viiper_backend import ViiperBackend
 from pybot.runtime.logging import HuntLogger
+from pybot.runtime.overlay_ports import HuntOverlay, NullOverlay
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.validation_log import HuntValidationLogger
+from pybot.recognition.simple.detector import load_simple_config
 from pybot.runtime.detection.detector_session import DetectorSession
 from pybot.runtime.workers.attack_loop import AttackLoop
 from pybot.runtime.workers.discovery_worker import DiscoveryWorker
@@ -86,6 +88,7 @@ def create_runtime_deps(
     session_id: str | None = None,
     *,
     behavior_callback: Callable[[str], None] | None = None,
+    overlay: HuntOverlay | None = None,
 ) -> RuntimeDependencies:
     """Construct all hunt runtime dependencies.
     Builds every component the runtime needs (tracks, capture, detector,
@@ -105,8 +108,9 @@ def create_runtime_deps(
     capture = HuntWindowCapture(config)
     # Two independent detectors: discovery's full scan and tracking's local
     # follow run on separate threads and must never contend on one detector lock.
-    detector = DetectorSession(config.mob_name)
-    tracker = DetectorSession(config.mob_name)
+    simple_config = load_simple_config()
+    detector = DetectorSession(config.mob_name, simple_config=simple_config)
+    tracker = DetectorSession(config.mob_name, simple_config=simple_config)
     validation = HuntValidationLogger(
         logger,
         tracks,
@@ -123,6 +127,7 @@ def create_runtime_deps(
         tracker=tracker,
         validation=validation,
         control=control,
+        overlay=overlay or NullOverlay(),
     )
     input_backend: InputBackend = (
         ViiperBackend()

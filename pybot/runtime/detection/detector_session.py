@@ -1,4 +1,4 @@
-"""Direct mob-recognition access for hunt workers."""
+"""Detector session — bridges hunt workers to pybot.recognition."""
 
 from __future__ import annotations
 
@@ -9,16 +9,11 @@ from pathlib import Path
 
 import numpy as np
 
-import pybot.runtime._mob_rec_path as _mob_rec_path  # sets up sys.path for mob-recognition modules
 from pybot.paths import PROJECT_ROOT
+from pybot.recognition.capture import capture_region
+from pybot.recognition.simple.detector import SimpleMobDetector, load_simple_config
+from pybot.recognition.simple.tracking.local_tracker import LocalTrackResult
 from pybot.runtime.capture.window_roi import HuntRoi
-
-from capture import capture_region
-from detector import (
-    SimpleMobDetector,
-    load_simple_config,
-)
-from tracking.local_tracker import LocalTrackResult
 
 
 @dataclass(frozen=True)
@@ -62,12 +57,17 @@ class LocalTrackBatchResult:
 class DetectorSession:
     """One SimpleMobDetector behind an RLock — no IPC, no scale hard-lock."""
 
-    def __init__(self, mob_name: str, project_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        mob_name: str,
+        project_root: Path | None = None,
+        *,
+        simple_config: dict | None = None,
+    ) -> None:
         root = project_root or PROJECT_ROOT
-        config = load_simple_config()
+        config = simple_config if simple_config is not None else load_simple_config()
         self._mob_name = mob_name.lower()
         self._detector = SimpleMobDetector(root, config)
-        self._detector.apply_runtime_config(config)
         self._lock = threading.RLock()
 
     def is_busy(self) -> bool:
@@ -92,7 +92,7 @@ class DetectorSession:
         elapsed_s = time.perf_counter() - start
         duration_ms = int(elapsed_s * 1000)
 
-        raw = [
+        accepted = [
             RawDetection(
                 x=candidate.center_x + roi.x,
                 y=candidate.center_y + roi.y,
@@ -105,9 +105,9 @@ class DetectorSession:
         return DiscoveryScanResult(
             ok=True,
             fail_reason="",
-            raw_count=len(raw),
-            accepted_count=len(raw),
-            detections=raw,
+            raw_count=len(result.candidates),
+            accepted_count=len(accepted),
+            detections=accepted,
             duration_ms=duration_ms,
             elapsed_s=elapsed_s,
         )
@@ -170,4 +170,3 @@ class DetectorSession:
             found_count=found_count,
             coord_updates=coord_updates,
         )
-

@@ -14,15 +14,11 @@ from __future__ import annotations
 
 import traceback
 
-import pybot.runtime._mob_rec_path as _mob_rec_path  # noqa: F401 — sets up sys.path
+from pybot.runtime.constants import WORKER_POLL_INTERVAL_S
 from pybot.runtime.hunt_tracks import monotonic_ms
+from pybot.runtime.constants import WORKER_POLL_INTERVAL_S
 from pybot.runtime.detection.detector_session import StateTrackSnapshot
 from pybot.runtime.workers.worker_contexts import TrackingWorkerContext
-from pybot.runtime import overlay as hunt_overlay
-from capture import capture_region
-
-# How often we follow existing tracks.
-TRACK_INTERVAL_S = 0.05  # 20 Hz
 
 
 class TrackingWorker:
@@ -38,7 +34,7 @@ class TrackingWorker:
             while not ctx.stop_event.is_set():
                 if ctx.should_run_workers():
                     self._tick()
-                ctx.stop_event.wait(TRACK_INTERVAL_S)
+                ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
         except Exception:
             ctx.logger.behavior(f"[TRACK] CRASH:\n{traceback.format_exc()}")
             raise
@@ -51,7 +47,7 @@ class TrackingWorker:
         if roi is None:
             return
 
-        frame = capture_region(roi.x, roi.y, roi.w, roi.h)
+        frame = ctx.capture.capture_roi(roi)
         if frame is None or frame.size == 0:
             ctx.logger.behavior("[TRACK] capture returned empty frame")
             return
@@ -79,10 +75,7 @@ class TrackingWorker:
 
     def _update_overlay(self, roi, now_ms: int) -> None:
         ctx = self._ctx
-        alive = ctx.tracks.snapshot_alive(now_ms)
-        hunt_overlay.set_track_stats(
-            track_count=ctx.tracks.get_track_count(),
-            alive_count=len(alive),
-        )
-        hunt_overlay.set_track_positions([(t.x, t.y) for t in alive])
-        hunt_overlay.set_search_roi(roi.x, roi.y, roi.w, roi.h)
+        track_count, alive = ctx.tracks.overlay_track_state(now_ms)
+        ctx.overlay.set_track_stats(track_count=track_count, alive_count=len(alive))
+        ctx.overlay.set_track_positions([(t.x, t.y) for t in alive])
+        ctx.overlay.set_search_roi(roi.x, roi.y, roi.w, roi.h)

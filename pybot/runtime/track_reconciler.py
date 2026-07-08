@@ -17,15 +17,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from pybot.runtime._mob_rec_path import import_hunt_track_rules
-_hunt = import_hunt_track_rules()
-
-DiscoveryDetection = _hunt.DiscoveryDetection
-MobTrack = _hunt.MobTrack
-ReconcileSummary = _hunt.ReconcileSummary
-cluster_living_detections = _hunt.cluster_living_detections
-detection_matches_existing = _hunt.detection_matches_existing
-is_alive = _hunt.is_alive
+from pybot.recognition.rules import (
+    DiscoveryDetection,
+    MobTrack,
+    ReconcileSummary,
+    cluster_living_detections,
+    detection_matches_existing,
+    is_alive,
+)
 
 
 class TrackReconciler:

@@ -14,11 +14,12 @@ from tkinter import messagebox
 
 from pybot.app.bot_controller import BotController
 from pybot.app.config_store import AppConfig
-from pybot.app.mob_catalog import mob_folder_by_index
+from pybot.app.overlay import Win32HuntOverlay
+from pybot.mobs.catalog import MobEntry, mob_folder_by_index
 from pybot.app.session_log import AppSessionLog
 from pybot.app.viiper_manager import ViiperManager
 from pybot.app.win32_util import is_window_active
-from pybot.runtime import overlay as hunt_overlay
+from pybot.runtime.overlay_ports import NullOverlay
 
 
 class BotState(Enum):
@@ -51,10 +52,11 @@ class BotLifecycleManager:
         self,
         root: tk.Tk,
         config: AppConfig,
-        mob_catalog: list,
+        mob_catalog: list[MobEntry],
         session: AppSessionLog,
         viiper: ViiperManager,
         *,
+        hunt_overlay: Win32HuntOverlay | None = None,
         on_state_change: Callable[[BotState], None] | None = None,
         on_log: Callable[[str], None] | None = None,
         on_input_ready: Callable[[], None] | None = None,
@@ -65,6 +67,7 @@ class BotLifecycleManager:
         self._mob_catalog = mob_catalog
         self._session = session
         self._viiper = viiper
+        self._hunt_overlay = hunt_overlay or Win32HuntOverlay()
         self._on_state_change = on_state_change
         self._on_log = on_log or (lambda _: None)
         self._on_input_ready_call = on_input_ready
@@ -138,12 +141,19 @@ class BotLifecycleManager:
             self._mob_catalog, config_snapshot.selected_monster
         )
 
+        runtime_overlay = (
+            self._hunt_overlay
+            if config_snapshot.hunt_log_overlay
+            else NullOverlay()
+        )
+
         self._bot = BotController(
             app_config=config_snapshot,
             session_id=session_id,
             on_log=self._on_log,
+            overlay=runtime_overlay,
         )
-        self._bot.start()
+        self._bot.start(mob_name=mob_name)
         self._state = BotState.RUNNING
         # Start overlay upkeep timer (reposition + repaint every 400ms)
         self._root.after(400, self._schedule_overlay_tick)
@@ -160,7 +170,7 @@ class BotLifecycleManager:
     def _schedule_overlay_tick(self) -> None:
         """Periodic overlay upkeep while the bot is running."""
         if self._state != BotState.OFF:
-            hunt_overlay.tick()
+            self._hunt_overlay.tick()
             self._root.after(400, self._schedule_overlay_tick)
 
     def stop(self) -> None:
@@ -169,8 +179,8 @@ class BotLifecycleManager:
             self._bot.stop()
         self._bot = None
         self._state = BotState.OFF
-        hunt_overlay.reset_stats()
-        hunt_overlay.destroy()
+        self._hunt_overlay.reset_stats()
+        self._hunt_overlay.destroy()
         if self._on_state_change:
             self._on_state_change(BotState.OFF)
 

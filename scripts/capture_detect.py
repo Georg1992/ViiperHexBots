@@ -9,7 +9,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import sys
 import time
 from ctypes import wintypes
 from pathlib import Path
@@ -18,22 +17,9 @@ import ctypes
 import cv2
 import numpy as np
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-# ── Path setup ────────────────────────────────────────────────────
-_MOB_REC = PROJECT_ROOT / "mob-recognition"
-_MOB_SIMPLE = _MOB_REC / "simple"
-for _p in (_MOB_REC, _MOB_SIMPLE):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-_MOB_VENV = _MOB_REC / ".venv" / "Lib" / "site-packages"
-if _MOB_VENV.is_dir() and str(_MOB_VENV) not in sys.path:
-    sys.path.insert(0, str(_MOB_VENV))
-
-from capture import capture_region
-from detector import SimpleMobDetector, load_simple_config
+from pybot.paths import PROJECT_ROOT
+from pybot.recognition.capture import capture_region
+from pybot.recognition.simple.detector import SimpleMobDetector, load_simple_config
 
 
 def describe_frame(frame: np.ndarray, label: str) -> None:

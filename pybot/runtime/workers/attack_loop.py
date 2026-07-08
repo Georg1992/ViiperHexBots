@@ -4,11 +4,8 @@ from __future__ import annotations
 
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.input.input_backend import InputBackend
-from pybot.runtime import overlay as hunt_overlay
+from pybot.runtime.constants import WORKER_POLL_INTERVAL_S
 from pybot.runtime.workers.worker_contexts import AttackLoopContext
-
-
-ATTACK_INTERVAL_S = 0.05  # 20 Hz poll
 
 
 class AttackLoop:
@@ -30,18 +27,16 @@ class AttackLoop:
             try:
                 tick_count += 1
                 if not self._ctx.should_run_workers():
-                    self._ctx.stop_event.wait(ATTACK_INTERVAL_S)
+                    self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
                     continue
 
                 tick = monotonic_ms()
+                policy_tracks = self._ctx.tracks.tracks_for_policy(tick)
 
                 # Heartbeat every ~5s so we can diagnose hangs
                 if tick_count % 100 == 0:
                     cd = self._is_on_cooldown(tick)
-                    target_id = self._ctx.policy.select_target(
-                        self._ctx.tracks.tracks_for_policy(tick),
-                        tick,
-                    )
+                    target_id = self._ctx.policy.select_target(policy_tracks, tick)
                     self._ctx.logger.behavior(
                         f"[ATTACK] heartbeat tick={tick_count} "
                         f"cooldown={int(cd)} target={target_id} "
@@ -53,10 +48,7 @@ class AttackLoop:
                     self._ctx.stop_event.wait(0.025)
                     continue
 
-                target_id = self._ctx.policy.select_target(
-                    self._ctx.tracks.tracks_for_policy(tick),
-                    tick,
-                )
+                target_id = self._ctx.policy.select_target(policy_tracks, tick)
                 if target_id:
                     self._attack_one(target_id, tick)
                     self._ctx.stop_event.wait(0.025)
@@ -105,7 +97,7 @@ class AttackLoop:
         ctx.tracks.apply_attack_event(target_id, now_tick=now_tick)
         ctx.policy.note_attack_target(target_id)
         self._last_attack_ms = now_tick
-        hunt_overlay.increment_attacks()
+        ctx.overlay.increment_attacks()
 
         ctx.logger.behavior(
             f"[ATTACK] id={target_id} @{click_x},{click_y} "

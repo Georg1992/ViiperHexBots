@@ -14,15 +14,10 @@ from __future__ import annotations
 
 import traceback
 
-import pybot.runtime._mob_rec_path as _mob_rec_path  # noqa: F401 — sets up sys.path
-from pybot.runtime._mob_rec_path import import_hunt_track_rules
-_hunt = import_hunt_track_rules()
-DiscoveryDetection = _hunt.DiscoveryDetection
+from pybot.recognition.rules import DiscoveryDetection
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.detection.discovery_filter import filter_scan_candidates
 from pybot.runtime.workers.worker_contexts import DiscoveryWorkerContext
-from pybot.runtime import overlay as hunt_overlay
-from capture import capture_region
 
 
 class DiscoveryWorker:
@@ -58,7 +53,7 @@ class DiscoveryWorker:
         if roi is None:
             return
 
-        frame = capture_region(roi.x, roi.y, roi.w, roi.h)
+        frame = ctx.capture.capture_roi(roi)
         if frame is None or frame.size == 0:
             ctx.logger.behavior("[DISCOVERY] capture returned empty frame")
             return
@@ -75,7 +70,7 @@ class DiscoveryWorker:
 
         self._scan_count += 1
         filtered = filter_scan_candidates(scan.detections, roi, ctx.config.cell_size_px)
-        hunt_overlay.set_scan_living(len(filtered))
+        ctx.overlay.set_scan_living(len(filtered))
 
         detections = [
             DiscoveryDetection(

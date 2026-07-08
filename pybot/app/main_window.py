@@ -21,7 +21,8 @@ from pybot.app.config_store import (
 )
 from pybot.app.hotkey_manager import HotkeyManager
 from pybot.app.log_pipe import LogPipe
-from pybot.app.mob_catalog import load_mob_catalog
+from pybot.app.overlay import Win32HuntOverlay
+from pybot.mobs.catalog import load_mob_catalog
 from pybot.app.session_log import AppSessionLog
 from pybot.app.viiper_manager import ViiperManager
 from pybot.app.win32_util import (
@@ -29,7 +30,6 @@ from pybot.app.win32_util import (
     restore_and_activate,
     window_exists,
 )
-from pybot.runtime import overlay as hunt_overlay
 
 user32 = ctypes.windll.user32
 
@@ -45,9 +45,10 @@ class MainWindow:
 
         # ── Data layer ──────────────────────────────────────────────
         self.config = AppConfig().load()
-        self.mob_catalog = load_mob_catalog()
+        self.mob_catalog = load_mob_catalog(ensure_assets=True)
         self._check_mob_catalog()
         self.session = AppSessionLog()
+        self._hunt_overlay = Win32HuntOverlay()
 
         # ── Managers (created before UI so callbacks are ready) ─────
         self.log_pipe = LogPipe(self.root)
@@ -61,6 +62,7 @@ class MainWindow:
             mob_catalog=self.mob_catalog,
             session=self.session,
             viiper=self.viiper,
+            hunt_overlay=self._hunt_overlay,
             on_state_change=self._on_bot_state_changed,
             on_log=self.log_pipe.log,
             on_input_ready=self._enable_after_viiper,
@@ -243,8 +245,20 @@ class MainWindow:
         self.search_scale.grid(row=0, column=1, sticky="ew", padx=8)
         self.search_label = ttk.Label(hunt_frame, text=str(self.config.search_range))
         self.search_label.grid(row=0, column=2)
-        ttk.Label(hunt_frame, text="Items To Kafra when weight is:").grid(
+        ttk.Label(hunt_frame, text="Hunt mode:").grid(
             row=1, column=0, sticky="w", pady=(8, 0)
+        )
+        self.hunt_mode_var = tk.StringVar(value=self.config.hunt_mode)
+        self.hunt_mode_combo = ttk.Combobox(
+            hunt_frame,
+            textvariable=self.hunt_mode_var,
+            values=("teleport", "walk"),
+            state="readonly",
+            width=12,
+        )
+        self.hunt_mode_combo.grid(row=1, column=1, sticky="w", padx=8, pady=(8, 0))
+        ttk.Label(hunt_frame, text="Items To Kafra when weight is:").grid(
+            row=2, column=0, sticky="w", pady=(8, 0)
         )
         self.weight_modifier = tk.IntVar(value=self.config.weight_modifier)
         self.weight_scale = ttk.Scale(
@@ -255,20 +269,20 @@ class MainWindow:
             variable=self.weight_modifier,
             command=self._update_weight_label,
         )
-        self.weight_scale.grid(row=1, column=1, sticky="ew", padx=8, pady=(8, 0))
+        self.weight_scale.grid(row=2, column=1, sticky="ew", padx=8, pady=(8, 0))
         self.weight_label = ttk.Label(hunt_frame, text=self._weight_text())
-        self.weight_label.grid(row=1, column=2, pady=(8, 0))
+        self.weight_label.grid(row=2, column=2, pady=(8, 0))
         self.fly_wings_var = tk.BooleanVar(value=self.config.take_fly_wings)
         ttk.Checkbutton(
             hunt_frame, text="Take Fly Wings", variable=self.fly_wings_var
-        ).grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ).grid(row=3, column=0, sticky="w", pady=(8, 0))
         self.fly_wings_amount = ttk.Entry(hunt_frame, width=6)
         self.fly_wings_amount.insert(0, str(self.config.fly_wings_amount))
-        self.fly_wings_amount.grid(row=2, column=1, sticky="w", pady=(8, 0))
+        self.fly_wings_amount.grid(row=3, column=1, sticky="w", pady=(8, 0))
         self.captcha_var = tk.BooleanVar(value=self.config.detect_captcha)
         ttk.Checkbutton(
             hunt_frame, text="Detect Captcha", variable=self.captcha_var
-        ).grid(row=2, column=2, sticky="w", pady=(8, 0))
+        ).grid(row=3, column=2, sticky="w", pady=(8, 0))
 
         hunt_frame.columnconfigure(1, weight=1)
 
@@ -456,6 +470,7 @@ class MainWindow:
         self.config.client_profile = self.client_combo.get()
         self.config.use_memory_reading = self.memory_var.get()
         self.config.selected_monster = self.mob_var.get()
+        self.config.hunt_mode = self.hunt_mode_var.get()
         self.config.search_range = int(float(self.search_range.get()))
         self.config.weight_modifier = int(float(self.weight_modifier.get()))
         self.config.time_on_location = int(float(self.time_on_location.get()))
@@ -528,11 +543,11 @@ class MainWindow:
 
         # Create hunt log overlay if enabled
         if self.overlay_var.get() and self.config.window_id:
-            ok = hunt_overlay.create(self.config.window_id)
+            ok = self._hunt_overlay.create(self.config.window_id)
             if ok:
                 self.log_pipe.log(f"[OVERLAY] created on hwnd={self.config.window_id}")
             else:
-                err = hunt_overlay.last_error()
+                err = self._hunt_overlay.last_error()
                 self.log_pipe.log(f"[OVERLAY] failed: {err}")
 
         # Open the session log (lazy — creates directory + starts
@@ -592,7 +607,7 @@ class MainWindow:
     def _maybe_pipe_to_overlay(self, message: str) -> None:
         """Forward log lines to the hunt overlay when the bot is active."""
         if self.lifecycle.state != BotState.OFF:
-            hunt_overlay.append_log(message, message)
+            self._hunt_overlay.append_log(message, message)
 
 
 

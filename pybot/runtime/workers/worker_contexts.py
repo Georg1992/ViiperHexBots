@@ -17,6 +17,7 @@ from pybot._protocols import (
     CanCapture,
     CanDetect,
     CanLog,
+    CanOverlay,
     CanPolicy,
     CanStop,
     CanTrack,
@@ -32,7 +33,7 @@ from pybot._protocols import (
 class HuntModeControllerContext(CanStop, CanLog, HasConfig,
                                 CanTrack, CanValidate,
                                 CanWakeDiscovery,
-                                CanAreaReset, Protocol):
+                                CanAreaReset, CanOverlay, Protocol):
     """Hunt runtime subset consumed by HuntModeController."""
     pass
 
@@ -42,21 +43,23 @@ class HuntModeControllerContext(CanStop, CanLog, HasConfig,
 
 
 class TrackingWorkerContext(CanStop, CanLog,
-                            CanCapture, CanTrackLocal, CanTrack, Protocol):
+                            CanCapture, CanTrackLocal, CanTrack,
+                            CanOverlay, Protocol):
     """Hunt runtime subset consumed by TrackingWorker."""
     pass
 
 
 class DiscoveryWorkerContext(CanStop, CanLog, HasConfig,
                              CanCapture, CanDetect, CanTrack,
-                             CanValidate, CanWakeDiscovery, Protocol):
+                             CanValidate, CanWakeDiscovery, CanOverlay,
+                             Protocol):
     """Hunt runtime subset consumed by DiscoveryWorker."""
     pass
 
 
 class AttackLoopContext(CanStop, CanLog, HasConfig,
                         CanTrack, CanValidate,
-                        CanPolicy, Protocol):
+                        CanPolicy, CanOverlay, Protocol):
     """Hunt runtime subset consumed by AttackLoop."""
     pass
 

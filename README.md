@@ -18,15 +18,29 @@ git submodule update --init --recursive
 .\build.ps1
 ```
 
-This produces `VIIPER/dist/viiper.exe`.
+This produces `VIIPER/dist/viiper.exe` and installs the Python package in editable mode (`pip install -e ".[dev]"`).
+
+Manual install only:
+
+```powershell
+pip install -e ".[dev]"
+```
 
 ## Run
 
 1. Install usbip-win2 and reboot if you have not already.
-2. Run `build.ps1` once to build `viiper.exe`.
-3. Launch `run.bat` to start the Python GUI.
+2. Run `build.ps1` once to build `viiper.exe` and install the Python package.
+3. Launch `run.bat`, `run.pyw`, or the `viiperhex` console command.
 
 The Python bot launches `viiper.exe` directly, sets up virtual keyboard/mouse devices via the VIIPER TCP API, and sends binary input reports over device streams — no Go bridge needed.
+
+Console entry points (after editable install):
+
+| Command | Purpose |
+|---------|---------|
+| `viiperhex` | Desktop GUI |
+| `viiperhex-hunt` | Headless hunt runtime CLI |
+| `mob-detect` | Mob recognition CLI (`build-simple-descriptor`, `detect-simple`, …) |
 
 ## Tests
 
@@ -34,7 +48,13 @@ The Python bot launches `viiper.exe` directly, sets up virtual keyboard/mouse de
 .\scripts\run_all_hunt_tests.ps1
 ```
 
-Runs runtime unit tests (`pybot/runtime/tests`, `pybot/app/tests`) and mob-recognition pytest suite. Recognition tests only:
+Or directly after `pip install -e ".[dev]"`:
+
+```powershell
+pytest
+```
+
+Runs runtime tests (`tests/runtime`), app tests (`tests/app`), recognition tests (`tests/recognition`), and architecture checks (`tests/architecture`). Recognition tests only:
 
 ```powershell
 .\scripts\run_recognition_tests.ps1
@@ -44,20 +64,24 @@ Runs runtime unit tests (`pybot/runtime/tests`, `pybot/app/tests`) and mob-recog
 
 ```
 ViiperHexBots/
+  pyproject.toml            Python package metadata, deps, pytest config
   run.bat / run.pyw         Launchers
   build.ps1                 Build script for viiper.exe
   config.ini                Local runtime settings
   pybot/
     app/                    Desktop GUI (tkinter)
     runtime/                Hunt engine (workers, tracks, capture, input)
+    recognition/            SPR/ACT descriptor + heatmap detection pipeline
+    mobs/                   Mob catalog and descriptor build helpers
+    config/                 Unified settings schema and INI store
     viiper/                 Pure Python VIIPER TCP client
-  mob-recognition/          SPR/ACT descriptor + heatmap detection pipeline
   assets/
     mobs/                   Source SPR/ACT per mob (input)
     generated_descriptors/  Runtime descriptors, rebuilt on launch (gitignored)
     modified_mobs/          Transformed SPR/ACT mirror (gitignored)
   clients/                  Per-server profiles (memory addresses, captcha)
   scripts/                  Descriptor build, test runners, dev tools
+  tests/                    Pytest suite (runtime, recognition, app, architecture)
   logs/                     Session logs and debug output (generated)
   VIIPER/                   Git submodule (virtual HID driver)
 ```
@@ -72,7 +96,7 @@ Build a single mob descriptor manually:
 .\scripts\build-mob-descriptor.ps1 -Mob horn -Force
 ```
 
-See `mob-recognition/README.md` for the detection pipeline and CLI commands.
+Use `mob-detect` for CLI examples (`mob-detect detect-simple --mob horn --help`). Pipeline source lives in `pybot/recognition/`.
 
 ## Dev tools
 
@@ -81,7 +105,7 @@ See `mob-recognition/README.md` for the detection pipeline and CLI commands.
 | `scripts/smoke_test.py` | Import/init check before GUI launch |
 | `scripts/test_detection.py` | Live detection overlay on game window |
 | `scripts/capture_detect.py` | One-shot screenshot + detect |
-| `mob-recognition/bench_*.py` | Manual detection benchmarks |
+| `pybot/recognition/bench_*.py` | Manual detection benchmarks |
 
 ## Logs
 

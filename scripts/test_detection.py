@@ -37,22 +37,9 @@ if not hasattr(wintypes, "LRESULT"):
 import cv2
 import numpy as np
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-# ── Path setup ────────────────────────────────────────────────────
-_MOB_REC = PROJECT_ROOT / "mob-recognition"
-_MOB_SIMPLE = _MOB_REC / "simple"
-for _p in (_MOB_REC, _MOB_SIMPLE):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-_MOB_VENV = _MOB_REC / ".venv" / "Lib" / "site-packages"
-if _MOB_VENV.is_dir() and str(_MOB_VENV) not in sys.path:
-    sys.path.insert(0, str(_MOB_VENV))
-
-from capture import capture_region
-from detector import SimpleMobDetector, load_simple_config
+from pybot.paths import PROJECT_ROOT
+from pybot.recognition.capture import capture_region
+from pybot.recognition.simple.detector import SimpleMobDetector, load_simple_config
 from pybot.runtime.capture.window_roi import (
     hunt_roi_from_client_rect,
     player_ignore_box,
@@ -115,7 +102,7 @@ class PAINTSTRUCT(ctypes.Structure):
     ]
 
 
-# ── Production constants (mirrored from hunt_track_rules.py) ────
+# ── Production constants (from pybot.recognition.rules / pybot.runtime.constants) ────
 HUNT_TRACK_MISS_LIMIT = 2
 MIN_NEW_TRACK_SCORE = 0.25  # skip weak texture noise
 SKIP_NEAR_TRACKED_PX = 60  # discovery skips new detections near existing tracks

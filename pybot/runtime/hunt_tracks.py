@@ -7,16 +7,15 @@ import threading
 import time
 from dataclasses import dataclass
 
-from pybot.runtime._mob_rec_path import import_hunt_track_rules
-_hunt = import_hunt_track_rules()
-
-DiscoveryDetection = _hunt.DiscoveryDetection
-MobTrack = _hunt.MobTrack
-ReconcileSummary = _hunt.ReconcileSummary
-apply_attack_event = _hunt.apply_attack_event
-apply_track_observation = _hunt.apply_track_observation
-is_alive = _hunt.is_alive
-is_track_lost = _hunt.is_track_lost
+from pybot.recognition.rules import (
+    DiscoveryDetection,
+    MobTrack,
+    ReconcileSummary,
+    apply_attack_event,
+    apply_track_observation,
+    is_alive,
+    is_track_lost,
+)
 
 from pybot.runtime.track_reconciler import TrackReconciler
 
@@ -261,10 +260,11 @@ class HuntTracks:
             candidate_scale=track.candidate_scale,
         )
 
+    def overlay_track_state(self, now_tick: int | None = None) -> tuple[int, list[MobTrackSnapshot]]:
+        with self._lock:
+            alive = [self._to_snapshot(track) for track in self._tracks if is_alive(track)]
+            return len(self._tracks), alive
+
     def tracks_for_policy(self, now_tick: int | None = None) -> list[MobTrack]:
-        tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
             return copy.deepcopy(self._tracks)
-
-    def copy_tracks_for_tests(self) -> list[MobTrack]:
-        return self.tracks_for_policy()

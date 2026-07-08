@@ -15,9 +15,9 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from pybot.paths import PROJECT_ROOT
+from pybot.paths import SESSIONS_DIR
 
-LOGS_DIR = PROJECT_ROOT / "logs" / "sessions"
+LOGS_DIR = SESSIONS_DIR
 
 
 class AppSessionLog:

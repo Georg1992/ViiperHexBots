@@ -13,7 +13,6 @@ from abc import ABC, abstractmethod
 
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.input.input_backend import InputBackend
-from pybot.runtime import overlay as hunt_overlay
 from pybot.runtime.workers.worker_contexts import HuntModeControllerContext
 
 
@@ -173,7 +172,7 @@ class TeleportStrategy(HuntModeStrategy):
                 f"[MODE] teleport input error: {exc}"
             )
             return False
-        hunt_overlay.increment_teleports()
+        ctx.overlay.increment_teleports()
         time.sleep(ctx.config.teleport_duration_ms / 1000.0)
 
         ctx.area_reset("post_teleport")

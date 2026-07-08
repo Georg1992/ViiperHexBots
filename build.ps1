@@ -13,6 +13,10 @@ if (-not (Test-Path $viiperOut)) {
     Pop-Location
 }
 
+Write-Host "Installing Python package (editable)..." -ForegroundColor Cyan
+python -m pip install -e ".[dev]" -q
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 Write-Host ""
 Write-Host "Done. Double-click run.pyw or run run.bat to start the Python bot." -ForegroundColor Green
 Write-Host "  $viiperOut" -ForegroundColor Yellow

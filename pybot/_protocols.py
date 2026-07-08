@@ -20,6 +20,7 @@ from pybot.runtime.hunt_tracks import HuntTracks
 from pybot.runtime.logging import HuntLogger
 from pybot.runtime.validation_log import HuntValidationLogger
 from pybot.runtime.detection.detector_session import DetectorSession
+from pybot.runtime.overlay_ports import HuntOverlay
 
 
 class CanStop(Protocol):
@@ -90,3 +91,9 @@ class CanWakeDiscovery(Protocol):
     """Discovery-wake signalling event."""
     @property
     def discovery_wake(self) -> threading.Event: ...
+
+
+class CanOverlay(Protocol):
+    """Hunt overlay output (stats, positions, counters)."""
+    @property
+    def overlay(self) -> HuntOverlay: ...

@@ -4,12 +4,14 @@ viiper-input.exe.bak
 logs/sessions/
 logs/debug_saves/
 logs/detect_debug/
-mob-recognition/debug/
+pybot/recognition/debug/
 assets/generated_descriptors/
 assets/modified_mobs/
+generated_descriptors/
 __pycache__/
 .pytest_cache/
 *.pyc
+*.egg-info/
 NUL.tmp
 ahk-err.txt
 query

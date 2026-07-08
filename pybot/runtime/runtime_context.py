@@ -13,6 +13,7 @@ from pybot.runtime.hunt_tracks import HuntTracks
 from pybot.runtime.logging import HuntLogger
 from pybot.runtime.validation_log import HuntValidationLogger
 from pybot.runtime.detection.detector_session import DetectorSession
+from pybot.runtime.overlay_ports import HuntOverlay, NullOverlay
 
 
 @dataclass
@@ -26,6 +27,7 @@ class HuntRuntimeContext:
     tracker: DetectorSession
     validation: HuntValidationLogger
     control: RuntimeControl
+    overlay: HuntOverlay = field(default_factory=NullOverlay)
     stop_event: threading.Event = field(default_factory=threading.Event)
     pause_event: threading.Event = field(default_factory=threading.Event)
     discovery_wake: threading.Event = field(default_factory=threading.Event)

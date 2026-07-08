@@ -3,10 +3,6 @@
 Catches ctypes/wintypes/import errors BEFORE the user sees them in the GUI.
 """
 import sys
-from pathlib import Path
-
-root = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(root))
 
 errors = []
 def check(label, fn):
@@ -24,10 +20,7 @@ check("win32_util (with WINDOWPLACEMENT)",
     lambda: __import__("pybot.app.win32_util", fromlist=["WINDOWPLACEMENT"]))
 
 check("overlay (with WNDCLASSW, PAINTSTRUCT, lpfnWndProc cast)",
-    lambda: __import__("pybot.runtime.overlay", fromlist=["create"]))
-
-check("memory_reader (with SIZE_T shim)",
-    lambda: __import__("pybot.runtime.memory_reader", fromlist=["MemoryReader"]))
+    lambda: __import__("pybot.app.overlay.win32_overlay", fromlist=["create"]))
 
 check("config",
     lambda: __import__("pybot.runtime.config", fromlist=["load_runtime_config"]))
@@ -45,7 +38,7 @@ check("config_store",
     lambda: __import__("pybot.app.config_store", fromlist=["AppConfig"]))
 
 check("mob_catalog",
-    lambda: __import__("pybot.app.mob_catalog", fromlist=["load_mob_catalog"]))
+    lambda: __import__("pybot.mobs.catalog", fromlist=["load_mob_catalog"]))
 
 check("main_window",
     lambda: __import__("pybot.app.main_window", fromlist=["MainWindow"]))
@@ -93,7 +86,7 @@ print("\n=== Phase 2: Struct instantiation ===")
 import ctypes
 from ctypes import wintypes
 
-from pybot.runtime.overlay import WNDCLASSW, PAINTSTRUCT
+from pybot.app.overlay.win32_overlay import WNDCLASSW, PAINTSTRUCT
 from pybot.app.win32_util import WINDOWPLACEMENT
 
 check("WINDOWPLACEMENT()",
@@ -106,7 +99,7 @@ check("WNDCLASSW() + lpfnWndProc assignment",
     lambda: setattr(WNDCLASSW(), "lpfnWndProc", ctypes.cast(0, ctypes.c_void_p)))
 
 def _test_wndclass_callback():
-    from pybot.runtime.overlay import _WND_PROC_CALLBACK
+    from pybot.app.overlay.win32_overlay import _WND_PROC_CALLBACK
     cls = WNDCLASSW()
     cls.lpfnWndProc = ctypes.cast(_WND_PROC_CALLBACK, ctypes.c_void_p)
 
@@ -144,7 +137,7 @@ print(f"  INFO: found {len(windows)} windows")
 
 # ── Phase 5: Mob catalog ────────────────────────────────────────
 print("\n=== Phase 5: Mob catalog ===")
-from pybot.app.mob_catalog import load_mob_catalog, mob_folder_by_index
+from pybot.mobs.catalog import load_mob_catalog, mob_folder_by_index
 check("load_mob_catalog",
     lambda: load_mob_catalog())
 

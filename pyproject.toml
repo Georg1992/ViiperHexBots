@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "viiperhexbots"
+version = "0.1.0"
+description = "Ragnarok Online hunt bot using VIIPER virtual HID input"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "opencv-python>=4.8.0",
+    "numpy>=1.24.0",
+    "mss>=9.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+viiperhex = "pybot.app.main_window:main"
+viiperhex-hunt = "pybot.runtime.hunt_runtime:main"
+mob-detect = "pybot.entrypoints.mob_detect:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pybot*"]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests/runtime",
+    "tests/app",
+    "tests/recognition",
+    "tests/architecture",
+]
+addopts = "-q --tb=short"

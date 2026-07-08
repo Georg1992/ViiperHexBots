@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from pybot.runtime._mob_rec_path import import_hunt_track_rules
-_hunt = import_hunt_track_rules()
-MobTrack = _hunt.MobTrack
-select_target_id = _hunt.select_target_id
+from pybot.recognition.rules import MobTrack, select_target_id
 
 
 class HuntPolicy:
