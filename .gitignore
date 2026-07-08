@@ -2,6 +2,8 @@ viiper-input.exe
 viiper-input.exe.new
 viiper-input.exe.bak
 logs/sessions/
+logs/debug_saves/
+logs/detect_debug/
 mob-recognition/debug/
 assets/generated_descriptors/
 assets/modified_mobs/
