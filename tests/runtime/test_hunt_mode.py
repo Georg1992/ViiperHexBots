@@ -67,17 +67,61 @@ class HuntModeTests(unittest.TestCase):
         self.assertEqual(self.tracks.get_track_count(), 0)
 
     def test_shadow_teleport_on_area_clear(self) -> None:
-        self.mode.note_discovery_scan_completed(living_count=0, added_count=0)
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=self.tracks.area_epoch,
+        )
         teleported = self.mode.on_no_attackable_targets()
         self.assertTrue(teleported)
         self.assertEqual(self.tracks.get_track_count(), 0)
         self.assertEqual(self.tracks.area_epoch, 1)
 
+    def test_blocks_teleport_until_post_teleport_discovery(self) -> None:
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=self.tracks.area_epoch,
+        )
+        self.assertTrue(self.mode.on_no_attackable_targets())
+
+        self.assertFalse(self.mode.discovery_since_reset)
+        teleported = self.mode.on_no_attackable_targets()
+        self.assertFalse(teleported)
+
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=self.tracks.area_epoch,
+        )
+        self.assertTrue(self.mode.discovery_since_reset)
+        self.assertTrue(self.mode.on_no_attackable_targets())
+
+    def test_ignores_stale_discovery_after_area_reset(self) -> None:
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=0,
+        )
+        self.tracks.area_reset()
+        self.mode.on_area_reset()
+
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=0,
+        )
+        self.assertFalse(self.mode.discovery_since_reset)
+
     def test_attacks_when_alive_tracks_exist_does_not_teleport(self) -> None:
         now = monotonic_ms()
         track = self.tracks.create_track("horn", 100, 200, 0.7, 0.9, now_tick=now)
         self.tracks.apply_attack_event(track.id, now_tick=now + 10)
-        self.mode.note_discovery_scan_completed(living_count=1, added_count=1)
+        self.mode.note_discovery_scan_completed(
+            living_count=1,
+            added_count=1,
+            area_epoch=self.tracks.area_epoch,
+        )
         teleported = self.mode.on_no_attackable_targets()
         # Track is still alive after attack (no pending state), so no teleport
         self.assertFalse(teleported)

@@ -39,10 +39,12 @@ class HuntModeController:
         self._strategy.on_area_reset()
 
     def note_discovery_scan_completed(
-        self, *, living_count: int, added_count: int
+        self, *, living_count: int, added_count: int, area_epoch: int
     ) -> None:
         self._strategy.note_discovery_scan_completed(
-            living_count=living_count, added_count=added_count
+            living_count=living_count,
+            added_count=added_count,
+            area_epoch=area_epoch,
         )
 
     def note_discovery_scan_failed(self, reason: str) -> None:

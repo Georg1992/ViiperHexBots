@@ -31,7 +31,7 @@ class HuntModeStrategy(ABC):
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
-        self._discovery_since_reset = False
+        self._discovery_area_epoch: int | None = None
         self._last_no_target_log_ms = 0
         self._last_no_target_blocked_log_ms = 0
 
@@ -39,23 +39,30 @@ class HuntModeStrategy(ABC):
 
     @property
     def discovery_since_reset(self) -> bool:
-        """True after at least one discovery scan has completed in this area."""
-        return self._discovery_since_reset
+        """True after discovery has completed for the current area epoch."""
+        return self._discovery_area_epoch == self._ctx.tracks.area_epoch
 
     def on_area_reset(self) -> None:
         """Reset per-area state (discovery flag, log throttles).
 
         Subclasses may extend to reset mode-specific timers.
         """
-        self._discovery_since_reset = False
+        self._discovery_area_epoch = None
         self._last_no_target_log_ms = 0
         self._last_no_target_blocked_log_ms = 0
 
     def note_discovery_scan_completed(
-        self, *, living_count: int, added_count: int
+        self,
+        *,
+        living_count: int,
+        added_count: int,
+        area_epoch: int,
     ) -> None:
-        """Record a successful discovery scan."""
-        self._discovery_since_reset = True
+        """Record a successful discovery scan for *area_epoch*."""
+        del living_count, added_count
+        if area_epoch != self._ctx.tracks.area_epoch:
+            return
+        self._discovery_area_epoch = area_epoch
 
     def note_discovery_scan_failed(self, reason: str) -> None:
         """Record a failed discovery scan."""
@@ -101,7 +108,7 @@ class HuntModeStrategy(ABC):
         return {
             "alive_count": area.alive_count,
             "area_clear": area.clear,
-            "has_discovery_since_reset": self._discovery_since_reset,
+            "has_discovery_since_reset": self.discovery_since_reset,
         }
 
     def _log_no_target(
@@ -145,7 +152,7 @@ class TeleportStrategy(HuntModeStrategy):
         ctx = self._ctx
         context = self._build_no_target_context()
 
-        if not self._discovery_since_reset:
+        if not self.discovery_since_reset:
             self._log_no_target_blocked("no_discovery_yet")
             self._log_no_target("wait", "no_discovery_yet", context)
             return False
@@ -206,7 +213,7 @@ class WalkStrategy(HuntModeStrategy):
             self._walk_idle_start_ms = now
             ctx.logger.behavior("[MODE] walk mode — waiting for mobs to appear")
 
-        if not self._discovery_since_reset:
+        if not self.discovery_since_reset:
             idle_seconds = (now - self._walk_idle_start_ms) // 1000
             if idle_seconds > 0 and idle_seconds % 15 == 0:
                 ctx.logger.behavior(

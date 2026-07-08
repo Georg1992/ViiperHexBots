@@ -55,6 +55,7 @@ class HeatmapDetector:
         self.peak_relative_threshold = float(config["peakRelativeThreshold"])
         self.center_scales = [float(scale) for scale in config["centerScales"]]
         self.small_scale_min_frame_width = int(config["smallScaleMinFrameWidth"])
+        self.small_scale_cutoff = float(config["smallScaleCutoff"])
         weights = config["centerWeights"]
         self.center_weights = {
             "body": float(weights["bodyPalette"]),
@@ -166,7 +167,7 @@ class HeatmapDetector:
         return [
             scale
             for scale in self.center_scales
-            if scale >= 0.75 or frame_width >= self.small_scale_min_frame_width
+            if scale >= self.small_scale_cutoff or frame_width >= self.small_scale_min_frame_width
         ]
 
     def _ui_mask(self, shape: tuple[int, int]) -> np.ndarray:

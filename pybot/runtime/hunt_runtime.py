@@ -245,6 +245,8 @@ class HuntRuntime:
         for thread in threads:
             thread.start()
 
+        ctx.discovery_wake.set()
+
         deadline = time.monotonic() + run_seconds if run_seconds > 0 else 0.0
         try:
             while not ctx.is_stopped():

@@ -48,8 +48,7 @@ REQUIRED_CONFIG_KEYS = {
     "trackDedupRadiusPx",
     "maxCandidates",
     "smallScaleMinFrameWidth",
-    "selfExclusionWidthRatio",
-    "selfExclusionHeightRatio",
+    "smallScaleCutoff",
     "centerScales",
     "scales",
     "playfieldTopRatio",
@@ -162,9 +161,8 @@ class MobDetector:
         self.heatmap_detector = HeatmapDetector(self.config)
         self.region_scorer = RegionScorer(self.config)
         self._descriptor_cache: dict[str, MobDescriptor] = {}
-        self.self_exclusion_width_ratio = float(self.config["selfExclusionWidthRatio"])
-        self.self_exclusion_height_ratio = float(self.config["selfExclusionHeightRatio"])
         self.small_scale_min_frame_width = int(self.config["smallScaleMinFrameWidth"])
+        self.small_scale_cutoff = float(self.config["smallScaleCutoff"])
         self.min_discovery_heatmap_score = float(self.config["minDiscoveryHeatmapScore"])
 
         self.discovery_heatmap_downscale = int(self.config["discoveryHeatmapDownscale"])
@@ -180,9 +178,8 @@ class MobDetector:
         if any(prior.get(key) != self.config.get(key) for key in scale_keys):
             self.heatmap_detector = HeatmapDetector(self.config)
         self.region_scorer = RegionScorer(self.config)
-        self.self_exclusion_width_ratio = float(self.config["selfExclusionWidthRatio"])
-        self.self_exclusion_height_ratio = float(self.config["selfExclusionHeightRatio"])
         self.small_scale_min_frame_width = int(self.config["smallScaleMinFrameWidth"])
+        self.small_scale_cutoff = float(self.config["smallScaleCutoff"])
         self.min_discovery_heatmap_score = float(self.config["minDiscoveryHeatmapScore"])
 
         self.discovery_heatmap_downscale = int(self.config["discoveryHeatmapDownscale"])
@@ -286,8 +283,6 @@ class MobDetector:
         heat_score: float,
     ) -> list[DetectionCandidate]:
         """Discovery scan: score one heatmap peak center. Returns accepted candidate or empty list."""
-        if self._is_self_center(cx, cy, frame_bgr.shape):
-            return []
         if heat_score < self.min_discovery_heatmap_score:
             return []
 
@@ -693,17 +688,11 @@ class MobDetector:
             flush=True,
         )
 
-    def _is_self_center(self, cx: int, cy: int, frame_shape: tuple[int, ...]) -> bool:
-        height, width = frame_shape[:2]
-        half_width = width * self.self_exclusion_width_ratio * 0.5
-        half_height = height * self.self_exclusion_height_ratio * 0.5
-        return abs(cx - width / 2) <= half_width and abs(cy - height / 2) <= half_height
-
     def _candidate_scales(self, frame_width: int) -> list[float]:
         scales = [
             float(scale)
             for scale in self.config["scales"]
-            if float(scale) >= 0.75 or frame_width >= self.small_scale_min_frame_width
+            if float(scale) >= self.small_scale_cutoff or frame_width >= self.small_scale_min_frame_width
         ]
         if scales:
             return scales

@@ -67,10 +67,14 @@ class DiscoveryWorker:
         # frame's time reference (tracking is moving the live tracks concurrently).
         existing_positions = ctx.tracks.positions_snapshot()
         now_ms = monotonic_ms()
+        area_epoch = ctx.tracks.area_epoch
 
         scan = ctx.detector.discover_frame(frame, roi)
         if not scan.ok:
             self._hunt_mode.note_discovery_scan_failed(scan.fail_reason)
+            return
+
+        if ctx.tracks.area_epoch != area_epoch:
             return
 
         self._scan_count += 1
@@ -105,6 +109,7 @@ class DiscoveryWorker:
         self._hunt_mode.note_discovery_scan_completed(
             living_count=len(filtered),
             added_count=summary.added_count,
+            area_epoch=area_epoch,
         )
 
         verbose = self._scan_count <= 5 or self._scan_count % 10 == 0
