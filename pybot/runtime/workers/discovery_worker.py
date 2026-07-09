@@ -65,8 +65,8 @@ class DiscoveryWorker:
 
         # Sample known positions at frame-capture time so dedup shares the
         # frame's time reference (tracking is moving the live tracks concurrently).
-        existing_positions = ctx.tracks.positions_snapshot()
         now_ms = monotonic_ms()
+        existing_positions = ctx.tracks.positions_snapshot(now_ms)
         area_epoch = ctx.tracks.area_epoch
 
         scan = ctx.detector.discover_frame(frame, roi)

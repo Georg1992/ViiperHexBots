@@ -35,6 +35,7 @@ class AppSettings:
     hunt_log_overlay: bool = True
     hunt_validation_log: bool = True
     use_sprite_grf: bool = False
+    death_detection_enabled: bool = True
 
     warper_x: str = ""
     warper_y: str = ""

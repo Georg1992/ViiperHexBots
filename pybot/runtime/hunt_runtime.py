@@ -120,6 +120,7 @@ def create_runtime_deps(
         config.mob_name,
         detector_config=detector_config,
         use_modified_descriptor=use_modified,
+        death_detection_enabled=config.death_detection_enabled,
     )
     validation = HuntValidationLogger(
         logger,

@@ -46,6 +46,7 @@ class HuntRuntimeConfig:
     open_storage_button: str = ""
     open_storage_scan_code: int = 0
     use_sprite_grf: bool = False
+    death_detection_enabled: bool = True
 
 
 def resolve_mob_name(
@@ -111,6 +112,7 @@ def hunt_runtime_config_from_settings(
         open_storage_button=settings.open_storage_button,
         open_storage_scan_code=key_name_to_scan_code(settings.open_storage_button),
         use_sprite_grf=settings.use_sprite_grf,
+        death_detection_enabled=settings.death_detection_enabled,
     )
 
 

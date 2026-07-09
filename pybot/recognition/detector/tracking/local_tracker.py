@@ -1,4 +1,9 @@
-"""Local coordinate follower for already-discovered tracks (not discovery, not death)."""
+"""Local coordinate follower for already-discovered tracks.
+
+When death detection is enabled the tracker scores at the heatmap peak (not a
+stale center), skips opacity probes while the mob is moving, and only marks
+death from in-place opacity decay on stationary hits.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +15,11 @@ import numpy as np
 
 from pybot.recognition.detector.descriptors.descriptor import MobDescriptor
 from pybot.recognition.detector.scoring.heatmap_detector import HeatmapDetector, palette_heatmap
+from pybot.recognition.detector.tracking.opacity_probe import (
+    evaluate_opacity_death,
+    measure_opacity_score,
+)
+from pybot.recognition.rules import death_movement_thresholds, evaluate_track_moving
 
 if TYPE_CHECKING:
     from pybot.recognition.detector.detector import MobDetector
@@ -23,6 +33,10 @@ class LocalTrackResult:
     y: int
     confidence: float
     miss_reason: str
+    dead: bool = False
+    opacity_baseline: float = 0.0
+    opacity_baseline_samples: int = 0
+    opacity_decay_streak: int = 0
 
 
 def track_local(
@@ -34,12 +48,17 @@ def track_local(
     offset_x: int = 0,
     offset_y: int = 0,
     search_radius_px: int | None = None,
+    death_detection_enabled: bool = False,
 ) -> LocalTrackResult:
-    """Follow one known track near its last center. Living-only; no dead/gone output."""
+    """Follow one known track near its last center."""
     track_id = int(track["trackId"])
     cx = int(track["x"])
     cy = int(track["y"])
     scale_hint = track.get("scale")
+    opacity_baseline = float(track.get("opacityBaseline", 0.0))
+    opacity_baseline_samples = int(track.get("opacityBaselineSamples", 0))
+    opacity_decay_streak = int(track.get("opacityDecayStreak", 0))
+    was_moving = bool(track.get("moving", False))
     radius = (
         int(search_radius_px)
         if search_radius_px is not None
@@ -65,15 +84,26 @@ def track_local(
         cy,
         scale,
     )
-    if center_score is not None and center_score.accepted and center_bbox is not None:
-        bx, by, bw, bh = center_bbox
-        return LocalTrackResult(
+    if (
+        not death_detection_enabled
+        and center_score is not None
+        and center_score.accepted
+        and center_bbox is not None
+    ):
+        return _finalize_track_hit(
+            detector,
+            frame_bgr,
+            hsv,
+            descriptor,
             track_id=track_id,
-            found=True,
-            x=bx + bw // 2 + offset_x,
-            y=by + bh // 2 + offset_y,
-            confidence=round(center_score.final_score, 4),
-            miss_reason="",
+            bbox=center_bbox,
+            score=center_score,
+            offset_x=offset_x,
+            offset_y=offset_y,
+            probe_opacity_death=False,
+            opacity_baseline=opacity_baseline,
+            opacity_baseline_samples=opacity_baseline_samples,
+            opacity_decay_streak=opacity_decay_streak,
         )
 
     peak = _find_local_peak(
@@ -90,16 +120,17 @@ def track_local(
         reason = "no_peak"
         if center_score is not None and not center_score.accepted:
             reason = center_score.rejection_reason or "below_threshold"
-        return LocalTrackResult(
+        return _miss_result(
             track_id=track_id,
-            found=False,
             x=screen_cx,
             y=screen_cy,
-            confidence=0.0,
-            miss_reason=reason,
+            reason=reason,
+            opacity_baseline=opacity_baseline,
+            opacity_baseline_samples=opacity_baseline_samples,
+            opacity_decay_streak=opacity_decay_streak,
         )
 
-    peak_x, peak_y, heat_score = peak
+    peak_x, peak_y, _heat_score = peak
     peak_score, peak_bbox = detector._score_living_only_at(
         frame_bgr,
         hsv,
@@ -110,23 +141,135 @@ def track_local(
     )
     if peak_score is None or not peak_score.accepted or peak_bbox is None:
         reason = peak_score.rejection_reason if peak_score is not None else "no_bbox"
-        return LocalTrackResult(
+        return _miss_result(
             track_id=track_id,
-            found=False,
             x=screen_cx,
             y=screen_cy,
+            reason=reason or "below_threshold",
             confidence=round(peak_score.final_score, 4) if peak_score is not None else 0.0,
-            miss_reason=reason or "below_threshold",
+            opacity_baseline=opacity_baseline,
+            opacity_baseline_samples=opacity_baseline_samples,
+            opacity_decay_streak=opacity_decay_streak,
         )
 
-    bx, by, bw, bh = peak_bbox
+    probe_opacity_death = False
+    if death_detection_enabled:
+        move_px, stop_px = death_movement_thresholds(detector.config)
+        peak_dist_sq = (peak_x - cx) ** 2 + (peak_y - cy) ** 2
+        moving = evaluate_track_moving(
+            was_moving=was_moving,
+            displacement_sq=peak_dist_sq,
+            move_threshold_px=move_px,
+            stop_threshold_px=stop_px,
+        )
+        if moving:
+            opacity_decay_streak = 0
+        else:
+            probe_opacity_death = True
+
+    return _finalize_track_hit(
+        detector,
+        frame_bgr,
+        hsv,
+        descriptor,
+        track_id=track_id,
+        bbox=peak_bbox,
+        score=peak_score,
+        offset_x=offset_x,
+        offset_y=offset_y,
+        probe_opacity_death=probe_opacity_death,
+        opacity_baseline=opacity_baseline,
+        opacity_baseline_samples=opacity_baseline_samples,
+        opacity_decay_streak=opacity_decay_streak,
+    )
+
+
+def _miss_result(
+    *,
+    track_id: int,
+    x: int,
+    y: int,
+    reason: str,
+    confidence: float = 0.0,
+    opacity_baseline: float = 0.0,
+    opacity_baseline_samples: int = 0,
+    opacity_decay_streak: int = 0,
+) -> LocalTrackResult:
+    return LocalTrackResult(
+        track_id=track_id,
+        found=False,
+        x=x,
+        y=y,
+        confidence=confidence,
+        miss_reason=reason,
+        opacity_baseline=opacity_baseline,
+        opacity_baseline_samples=opacity_baseline_samples,
+        opacity_decay_streak=opacity_decay_streak,
+    )
+
+
+def _finalize_track_hit(
+    detector: MobDetector,
+    frame_bgr: np.ndarray,
+    hsv: np.ndarray,
+    descriptor: MobDescriptor,
+    *,
+    track_id: int,
+    bbox: tuple[int, int, int, int],
+    score,
+    offset_x: int,
+    offset_y: int,
+    probe_opacity_death: bool,
+    opacity_baseline: float,
+    opacity_baseline_samples: int,
+    opacity_decay_streak: int,
+) -> LocalTrackResult:
+    bx, by, bw, bh = bbox
+    x = bx + bw // 2 + offset_x
+    y = by + bh // 2 + offset_y
+    confidence = round(score.final_score, 4)
+
+    if probe_opacity_death:
+        opacity_score = measure_opacity_score(
+            frame_bgr,
+            hsv,
+            descriptor,
+            bbox,
+            detector.region_scorer,
+        )
+        opacity_baseline, opacity_baseline_samples, opacity_decay_streak, dead = (
+            evaluate_opacity_death(
+                opacity_score=opacity_score,
+                baseline=opacity_baseline,
+                baseline_samples=opacity_baseline_samples,
+                decay_streak=opacity_decay_streak,
+                config=detector.config,
+            )
+        )
+        if dead:
+            return LocalTrackResult(
+                track_id=track_id,
+                found=False,
+                x=x,
+                y=y,
+                confidence=confidence,
+                miss_reason="opacity_decay",
+                dead=True,
+                opacity_baseline=opacity_baseline,
+                opacity_baseline_samples=opacity_baseline_samples,
+                opacity_decay_streak=opacity_decay_streak,
+            )
+
     return LocalTrackResult(
         track_id=track_id,
         found=True,
-        x=bx + bw // 2 + offset_x,
-        y=by + bh // 2 + offset_y,
-        confidence=round(peak_score.final_score, 4),
+        x=x,
+        y=y,
+        confidence=confidence,
         miss_reason="",
+        opacity_baseline=opacity_baseline,
+        opacity_baseline_samples=opacity_baseline_samples,
+        opacity_decay_streak=opacity_decay_streak,
     )
 
 

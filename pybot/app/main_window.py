@@ -193,6 +193,14 @@ class MainWindow:
             variable=self.sprite_grf_var,
         )
         self.sprite_grf_check.grid(row=mob_row, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        mob_row += 1
+        self.death_detection_var = tk.BooleanVar(value=self.config.death_detection_enabled)
+        self.death_detection_check = ttk.Checkbutton(
+            setup_frame,
+            text="Death detection (opacity decay during tracking)",
+            variable=self.death_detection_var,
+        )
+        self.death_detection_check.grid(row=mob_row, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         # ── Keybindings ─────────────────────────────────────────────
         keys_frame = ttk.LabelFrame(main, text="Keybindings", padding=8)
@@ -484,6 +492,7 @@ class MainWindow:
         self.config.detect_captcha = self.captcha_var.get()
         self.config.hunt_log_overlay = self.overlay_var.get()
         self.config.use_sprite_grf = self.sprite_grf_var.get()
+        self.config.death_detection_enabled = self.death_detection_var.get()
         self.config.skill_button = self.skill_button.get().strip()
         raw = self.skill_delay.get().strip()
         self.config.skill_delay = int(raw) if raw else 0

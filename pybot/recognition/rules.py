@@ -1,8 +1,10 @@
 """Reference model of the hunt track pipeline.
 
-Used by tests to lock the pipeline contract. Single track state (``alive``):
-discovery creates tracks, tracking refreshes coordinates and expires lost
-tracks, attack rotates through them.
+Used by tests to lock the pipeline contract. Tracks stay ``alive`` until
+tracking removes them (lost after consecutive misses, or dead via opacity
+decay when death detection is enabled). Discovery creates tracks; tracking
+refreshes coordinates, movement/death state, and expires tracks; attack
+rotates through alive targets.
 """
 
 from __future__ import annotations
@@ -60,6 +62,10 @@ class MobTrack:
     candidate_scale: float = 0.0
     lost_count: int = 0
     area_epoch: int = 0
+    opacity_baseline: float = 0.0
+    opacity_baseline_samples: int = 0
+    opacity_decay_streak: int = 0
+    moving: bool = False
 
     @classmethod
     def from_discovery(
@@ -189,6 +195,59 @@ def apply_track_observation(
             track.confidence = confidence
     else:
         track.lost_count += 1
+
+
+def apply_opacity_observation(
+    track: MobTrack,
+    *,
+    opacity_baseline: float,
+    opacity_baseline_samples: int,
+    opacity_decay_streak: int,
+) -> None:
+    track.opacity_baseline = opacity_baseline
+    track.opacity_baseline_samples = opacity_baseline_samples
+    track.opacity_decay_streak = opacity_decay_streak
+
+
+def evaluate_track_moving(
+    *,
+    was_moving: bool,
+    displacement_sq: int,
+    move_threshold_px: int,
+    stop_threshold_px: int,
+) -> bool:
+    """Hysteresis movement state from frame-to-frame displacement."""
+    enter_sq = move_threshold_px * move_threshold_px
+    stop_sq = stop_threshold_px * stop_threshold_px
+    if was_moving:
+        return displacement_sq > stop_sq
+    return displacement_sq > enter_sq
+
+
+def death_movement_thresholds(config: dict) -> tuple[int, int]:
+    """Pixel thresholds for entering and leaving the track ``moving`` state."""
+    return (
+        int(config["deathOpacityMoveThresholdPx"]),
+        int(config["deathOpacityStopThresholdPx"]),
+    )
+
+
+def apply_movement_observation(
+    track: MobTrack,
+    *,
+    x: int,
+    y: int,
+    move_threshold_px: int,
+    stop_threshold_px: int,
+) -> None:
+    dx = x - track.x
+    dy = y - track.y
+    track.moving = evaluate_track_moving(
+        was_moving=track.moving,
+        displacement_sq=(dx * dx) + (dy * dy),
+        move_threshold_px=move_threshold_px,
+        stop_threshold_px=stop_threshold_px,
+    )
 
 
 def is_track_lost(track: MobTrack) -> bool:

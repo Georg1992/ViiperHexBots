@@ -6,6 +6,7 @@ import threading
 import unittest
 from types import SimpleNamespace
 
+from pybot.recognition.detector.detector import load_detector_config
 from pybot.recognition.rules import DiscoveryDetection
 from pybot.runtime.constants import HUNT_TRACK_LOST_LIMIT
 from pybot.runtime.hunt_policy import HuntPolicy
@@ -20,6 +21,20 @@ def _miss(track_id: int) -> SimpleNamespace:
     return SimpleNamespace(track_id=track_id, found=False, x=0, y=0, confidence=0.0)
 
 
+def _dead(track_id: int, x: int = 0, y: int = 0) -> SimpleNamespace:
+    return SimpleNamespace(
+        track_id=track_id,
+        found=False,
+        x=x,
+        y=y,
+        confidence=0.8,
+        dead=True,
+        opacity_baseline=0.6,
+        opacity_baseline_samples=4,
+        opacity_decay_streak=0,
+    )
+
+
 def det(x: int, y: int, confidence: float = 0.71, scale: float = 0.9) -> DiscoveryDetection:
     return DiscoveryDetection(
         x=x,
@@ -32,7 +47,7 @@ def det(x: int, y: int, confidence: float = 0.71, scale: float = 0.9) -> Discove
 
 class HuntTracksRulesTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tracks = HuntTracks()
+        self.tracks = HuntTracks(load_detector_config())
         self.policy = HuntPolicy()
         self.now = 1_000_000
 
@@ -104,11 +119,51 @@ class HuntTracksRulesTests(unittest.TestCase):
 
     def test_tracking_miss_removes_track(self) -> None:
         track_id = self._create(874, 578)
-        removed: list[int] = []
+        lost_ids: list[int] = []
         for i in range(HUNT_TRACK_LOST_LIMIT):
-            removed = self.tracks.apply_tracking([_miss(track_id)], now_tick=self.now + i)
-        self.assertIn(track_id, removed)
+            _, lost_ids = self.tracks.apply_tracking([_miss(track_id)], now_tick=self.now + i)
+        self.assertIn(track_id, lost_ids)
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
+
+    def test_tracking_death_removes_track_immediately(self) -> None:
+        track_id = self._create(874, 578)
+        dead_ids, lost_ids = self.tracks.apply_tracking(
+            [_dead(track_id, 874, 578)],
+            now_tick=self.now + 1,
+        )
+        self.assertEqual(dead_ids, [track_id])
+        self.assertEqual(lost_ids, [])
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
+
+    def test_death_site_blocks_discovery_rediscovery(self) -> None:
+        track_id = self._create(874, 578)
+        self.tracks.apply_tracking([_dead(track_id, 874, 578)], now_tick=self.now + 1)
+        summary = self.tracks.reconcile_detections(
+            [det(874, 578, 0.75, 0.9)],
+            mob_name="horn",
+            now_tick=self.now + 100,
+        )
+        self.assertEqual(summary.added_count, 0)
+        self.assertEqual(summary.matched_count, 1)
+        self.assertEqual(self.tracks.get_track_count(), 0)
+
+    def test_death_site_expires_after_cooldown(self) -> None:
+        config = {**load_detector_config(), "deathRediscoveryCooldownMs": 1000}
+        tracks = HuntTracks(config)
+        track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
+        tracks.apply_tracking([_dead(track_id, 874, 578)], now_tick=self.now + 1)
+        blocked = tracks.reconcile_detections(
+            [det(874, 578)],
+            mob_name="horn",
+            now_tick=self.now + 500,
+        )
+        self.assertEqual(blocked.added_count, 0)
+        allowed = tracks.reconcile_detections(
+            [det(874, 578)],
+            mob_name="horn",
+            now_tick=self.now + 2000,
+        )
+        self.assertEqual(allowed.added_count, 1)
 
     def test_tracking_hit_resets_miss_streak(self) -> None:
         track_id = self._create(874, 578)

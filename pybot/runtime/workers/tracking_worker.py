@@ -6,14 +6,16 @@ detector dedicated to tracking so it never blocks on the discovery scan's
 lock), writing fresh coordinates into the shared HuntTracks store. That store
 is the hand-off point: discovery reads those coordinates when it dedups.
 
-Tracking owns position + liveness. A track missed for too many consecutive
-ticks is dropped here (discovery never removes tracks).
+Tracking owns position, movement state, and liveness. Tracks are removed here
+when opacity death is confirmed, after too many consecutive misses, or never
+by discovery.
 """
 
 from __future__ import annotations
 
 import traceback
 
+from pybot.recognition.rules import is_alive
 from pybot.runtime.constants import WORKER_POLL_INTERVAL_S
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.detection.detector_session import StateTrackSnapshot
@@ -55,20 +57,29 @@ class TrackingWorker:
         now_ms = monotonic_ms()
         snapshots = [
             StateTrackSnapshot(
-                track_id=snap.id,
-                x=snap.x,
-                y=snap.y,
-                scale=snap.discovery_scale if snap.discovery_scale > 0 else 1.0,
+                track_id=track.id,
+                x=track.x,
+                y=track.y,
+                scale=track.discovery_scale if track.discovery_scale > 0 else 1.0,
+                opacity_baseline=track.opacity_baseline,
+                opacity_baseline_samples=track.opacity_baseline_samples,
+                opacity_decay_streak=track.opacity_decay_streak,
+                moving=track.moving,
             )
-            for snap in ctx.tracks.snapshot_alive(now_ms)
+            for track in ctx.tracks.tracks_for_policy(now_ms)
+            if is_alive(track)
         ]
 
         if snapshots:
             batch = ctx.tracker.track_locals_frame(frame, roi, snapshots)
-            removed = ctx.tracks.apply_tracking(batch.results, now_tick=now_ms)
-            if removed:
+            dead_ids, lost_ids = ctx.tracks.apply_tracking(batch.results, now_tick=now_ms)
+            if dead_ids:
                 ctx.logger.behavior(
-                    f"[TRACK] dropped {len(removed)} lost track(s): {removed}"
+                    f"[TRACK] dropped {len(dead_ids)} dead track(s): {dead_ids}"
+                )
+            if lost_ids:
+                ctx.logger.behavior(
+                    f"[TRACK] dropped {len(lost_ids)} lost track(s): {lost_ids}"
                 )
 
         self._update_overlay(now_ms)

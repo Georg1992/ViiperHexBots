@@ -43,5 +43,12 @@
     "accent": 0.35,
     "rareColor": 0.10,
     "localPattern": 0.15
-  }
+  },
+  "deathOpacityBaselineSamples": 4,
+  "deathOpacityMinBaseline": 0.20,
+  "deathOpacityDecayRatio": 0.90,
+  "deathOpacityConfirmTicks": 3,
+  "deathRediscoveryCooldownMs": 4000,
+  "deathOpacityMoveThresholdPx": 12,
+  "deathOpacityStopThresholdPx": 6
 }

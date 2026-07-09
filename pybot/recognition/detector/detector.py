@@ -59,6 +59,13 @@ REQUIRED_CONFIG_KEYS = {
     "centerWeights",
     "minDominantPixelFraction",
     "dominantPixelDistance",
+    "deathOpacityBaselineSamples",
+    "deathOpacityMinBaseline",
+    "deathOpacityDecayRatio",
+    "deathOpacityConfirmTicks",
+    "deathRediscoveryCooldownMs",
+    "deathOpacityMoveThresholdPx",
+    "deathOpacityStopThresholdPx",
 }
 
 REQUIRED_CENTER_WEIGHT_KEYS = {"bodyPalette", "accent", "rareColor", "localPattern"}
@@ -399,6 +406,7 @@ class MobDetector:
         offset_x: int = 0,
         offset_y: int = 0,
         search_radius_px: int | None = None,
+        death_detection_enabled: bool = False,
     ):
         from pybot.recognition.detector.tracking.local_tracker import track_local as run_track_local
 
@@ -410,6 +418,7 @@ class MobDetector:
             offset_x=offset_x,
             offset_y=offset_y,
             search_radius_px=search_radius_px,
+            death_detection_enabled=death_detection_enabled,
         )
 
     def _evaluate_track_point(

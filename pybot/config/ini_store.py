@@ -53,6 +53,7 @@ def load_settings(path: Path | None = None) -> AppSettings:
         hunt_log_overlay=parser.getint("Settings", "HuntLogOverlay", fallback=1) == 1,
         hunt_validation_log=parser.getint("Settings", "HuntValidationLog", fallback=1) == 1,
         use_sprite_grf=parser.getint("Settings", "UseSpriteGrf", fallback=0) == 1,
+        death_detection_enabled=parser.getint("Settings", "DeathDetectionEnabled", fallback=1) == 1,
         warper_x=warper_x,
         warper_y=warper_y,
         warper_location=parser.getint("Warper", "warperLocation", fallback=0),
@@ -101,6 +102,7 @@ def save_settings(settings: AppSettings) -> None:
     parser["Settings"]["HuntLogOverlay"] = "1" if settings.hunt_log_overlay else "0"
     parser["Settings"]["HuntValidationLog"] = "1" if settings.hunt_validation_log else "0"
     parser["Settings"]["UseSpriteGrf"] = "1" if settings.use_sprite_grf else "0"
+    parser["Settings"]["DeathDetectionEnabled"] = "1" if settings.death_detection_enabled else "0"
 
     _ensure_section(parser, "Warper")
     if settings.warper_coords_set:

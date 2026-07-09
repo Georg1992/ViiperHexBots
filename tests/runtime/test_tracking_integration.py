@@ -232,7 +232,8 @@ class TrackingIntegrationTests(unittest.TestCase):
 
         batch = detector.track_locals_frame(self.roi_frame, self.roi, snapshots)
         now = monotonic_ms() + 50
-        removed = ctx.tracks.apply_tracking(batch.results, now_tick=now)
+        dead_ids, lost_ids = ctx.tracks.apply_tracking(batch.results, now_tick=now)
+        removed = dead_ids + lost_ids
 
         # Static fixture: at least one track is re-found and stays alive, and no
         # found track is dropped.

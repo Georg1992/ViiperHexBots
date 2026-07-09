@@ -38,10 +38,16 @@ class DiscoveryScanResult:
 
 @dataclass(frozen=True)
 class StateTrackSnapshot:
+    """Track inputs for one local-follow pass (screen coordinates)."""
+
     track_id: int
     x: int
     y: int
     scale: float = 0.0
+    opacity_baseline: float = 0.0
+    opacity_baseline_samples: int = 0
+    opacity_decay_streak: int = 0
+    moving: bool = False
 
 
 @dataclass(frozen=True)
@@ -64,10 +70,12 @@ class DetectorSession:
         *,
         detector_config: dict | None = None,
         use_modified_descriptor: bool = False,
+        death_detection_enabled: bool = True,
     ) -> None:
         root = project_root or PROJECT_ROOT
         config = detector_config if detector_config is not None else load_detector_config()
         self._mob_name = mob_name.lower()
+        self._death_detection_enabled = death_detection_enabled
         self._detector = MobDetector(
             root,
             config,
@@ -151,6 +159,10 @@ class DetectorSession:
                 }
                 if snapshot.scale > 0:
                     track["scale"] = snapshot.scale
+                track["opacityBaseline"] = snapshot.opacity_baseline
+                track["opacityBaselineSamples"] = snapshot.opacity_baseline_samples
+                track["opacityDecayStreak"] = snapshot.opacity_decay_streak
+                track["moving"] = snapshot.moving
                 results.append(
                     self._detector.track_local(
                         frame,
@@ -158,6 +170,7 @@ class DetectorSession:
                         track,
                         offset_x=roi.x,
                         offset_y=roi.y,
+                        death_detection_enabled=self._death_detection_enabled,
                     )
                 )
         duration_ms = int((time.perf_counter() - start) * 1000)

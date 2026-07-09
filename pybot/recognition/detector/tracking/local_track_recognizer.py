@@ -1,4 +1,4 @@
-"""Local track coordinate follower — not discovery, not state/death confirm."""
+"""Thin wrapper around ``track_local`` for the recognition CLI and tests."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ def follow_track_local(
     offset_x: int = 0,
     offset_y: int = 0,
     search_radius_px: int | None = None,
+    death_detection_enabled: bool = False,
 ) -> LocalTrackResult:
     return track_local(
         detector,
@@ -30,4 +31,5 @@ def follow_track_local(
         offset_x=offset_x,
         offset_y=offset_y,
         search_radius_px=search_radius_px,
+        death_detection_enabled=death_detection_enabled,
     )

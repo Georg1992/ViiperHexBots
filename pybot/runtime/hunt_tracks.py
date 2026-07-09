@@ -12,12 +12,17 @@ from pybot.recognition.rules import (
     MobTrack,
     ReconcileSummary,
     apply_attack_event,
+    apply_movement_observation,
+    apply_opacity_observation,
     apply_track_observation,
+    death_movement_thresholds,
     is_alive,
     is_track_lost,
 )
 
 from pybot.runtime.track_reconciler import TrackReconciler
+from pybot.recognition.detector.detector import load_detector_config
+
 
 def monotonic_ms() -> int:
     return int(time.monotonic() * 1000)
@@ -48,16 +53,18 @@ class HuntTracks:
     def __init__(self, detector_config: dict | None = None) -> None:
         self._lock = threading.RLock()
         self._tracks: list[MobTrack] = []
-        self._detector_config = detector_config
+        self._detector_config_ref = detector_config
         self._next_id = 1
         self._area_epoch = 0
         self._last_reconcile_summary: ReconcileSummary | None = None
+        self._death_sites: list[tuple[int, int, int]] = []
 
     def reset(self) -> None:
         with self._lock:
             self._tracks = []
             self._next_id = 1
             self._last_reconcile_summary = None
+            self._death_sites = []
 
     def area_reset(self) -> None:
         with self._lock:
@@ -65,6 +72,7 @@ class HuntTracks:
             self._tracks = []
             self._next_id = 1
             self._last_reconcile_summary = None
+            self._death_sites = []
 
     @property
     def area_epoch(self) -> int:
@@ -124,11 +132,15 @@ class HuntTracks:
             apply_attack_event(track, tick)
             return True
 
-    def positions_snapshot(self) -> list[tuple[int, int]]:
-        """(x, y) of every alive track — sample this when the discovery frame is
-        captured so dedup compares detections against same-instant positions."""
+    def positions_snapshot(self, now_tick: int | None = None) -> list[tuple[int, int]]:
+        """Positions discovery should treat as already known (alive tracks + recent deaths).
+
+        Sample this when the discovery frame is captured so dedup compares detections
+        against same-instant positions.
+        """
+        tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
-            return [(t.x, t.y) for t in self._tracks if is_alive(t)]
+            return self._dedup_positions_locked(tick)
 
     def reconcile_detections(
         self,
@@ -149,7 +161,7 @@ class HuntTracks:
             positions = (
                 existing_positions
                 if existing_positions is not None
-                else [(t.x, t.y) for t in self._tracks if is_alive(t)]
+                else self._dedup_positions_locked(tick)
             )
             summary = TrackReconciler.reconcile(
                 self._tracks,
@@ -158,7 +170,7 @@ class HuntTracks:
                 mob_name=mob_name,
                 now_tick=tick,
                 create_track_fn=self._create_track_locked,
-                detector_config=self._detector_config,
+                detector_config=self._detector_config_ref,
             )
             self._last_reconcile_summary = summary
             return summary
@@ -168,19 +180,33 @@ class HuntTracks:
         results,
         *,
         now_tick: int | None = None,
-    ) -> list[int]:
-        """Tracking step: refresh coordinates from LocalTracker and drop lost tracks.
+    ) -> tuple[list[int], list[int]]:
+        """Tracking step: refresh coordinates from LocalTracker and drop lost/dead tracks.
 
         ``results`` is any iterable of objects exposing ``track_id``, ``found``,
-        ``x``, ``y`` and ``confidence`` (e.g. ``LocalTrackResult``). Returns the
-        IDs of tracks removed because they were missed too many times.
+        ``x``, ``y`` and ``confidence`` (e.g. ``LocalTrackResult``). Returns
+        ``(dead_ids, lost_ids)`` for tracks removed this tick.
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
+        dead_ids: list[int] = []
         with self._lock:
             for result in results:
                 track = self._get_track_by_id_locked(result.track_id)
                 if track is None:
                     continue
+                if getattr(result, "dead", False):
+                    self._record_death_site_locked(track.x, track.y, tick)
+                    dead_ids.append(result.track_id)
+                    continue
+                if result.found:
+                    move_px, stop_px = death_movement_thresholds(self._detector_config())
+                    apply_movement_observation(
+                        track,
+                        x=result.x,
+                        y=result.y,
+                        move_threshold_px=move_px,
+                        stop_threshold_px=stop_px,
+                    )
                 apply_track_observation(
                     track,
                     found=result.found,
@@ -189,10 +215,20 @@ class HuntTracks:
                     confidence=result.confidence,
                     now_tick=tick,
                 )
-            lost_ids = [t.id for t in self._tracks if is_track_lost(t)]
-            if lost_ids:
-                self._remove_tracks_locked(set(lost_ids))
-            return lost_ids
+                # LocalTrackResult carries opacity state; test stubs (_hit) omit it.
+                if result.found and hasattr(result, "opacity_baseline"):
+                    apply_opacity_observation(
+                        track,
+                        opacity_baseline=result.opacity_baseline,
+                        opacity_baseline_samples=result.opacity_baseline_samples,
+                        opacity_decay_streak=result.opacity_decay_streak,
+                    )
+            remove_ids = set(dead_ids)
+            lost_ids = [t.id for t in self._tracks if t.id not in remove_ids and is_track_lost(t)]
+            remove_ids.update(lost_ids)
+            if remove_ids:
+                self._remove_tracks_locked(remove_ids)
+            return dead_ids, lost_ids
 
     @property
     def last_reconcile_summary(self) -> ReconcileSummary | None:
@@ -246,6 +282,30 @@ class HuntTracks:
         if not remove_ids:
             return
         self._tracks = [track for track in self._tracks if track.id not in remove_ids]
+
+    def _detector_config(self) -> dict:
+        return self._detector_config_ref if self._detector_config_ref is not None else load_detector_config()
+
+    def _death_rediscovery_cooldown_ms(self) -> int:
+        return int(self._detector_config()["deathRediscoveryCooldownMs"])
+
+    def _prune_death_sites_locked(self, now_tick: int) -> None:
+        cooldown = self._death_rediscovery_cooldown_ms()
+        self._death_sites = [
+            (x, y, removed_tick)
+            for x, y, removed_tick in self._death_sites
+            if now_tick - removed_tick <= cooldown
+        ]
+
+    def _record_death_site_locked(self, x: int, y: int, removed_tick: int) -> None:
+        self._prune_death_sites_locked(removed_tick)
+        self._death_sites.append((x, y, removed_tick))
+
+    def _dedup_positions_locked(self, now_tick: int) -> list[tuple[int, int]]:
+        self._prune_death_sites_locked(now_tick)
+        positions = [(t.x, t.y) for t in self._tracks if is_alive(t)]
+        positions.extend((x, y) for x, y, _removed_tick in self._death_sites)
+        return positions
 
     @staticmethod
     def _to_snapshot(track: MobTrack) -> MobTrackSnapshot:
