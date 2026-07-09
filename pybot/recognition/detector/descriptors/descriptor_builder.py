@@ -11,12 +11,36 @@ from pybot.recognition.act_reader import ActReader
 from pybot.recognition.frame_renderer import render_act_frame
 from pybot.recognition.spr_reader import SprReader
 
-from pybot.recognition.detector.descriptors.descriptor import ColorCluster, MobDescriptor, SizeDescriptor
+from pybot.recognition.detector.descriptors.descriptor import (
+    ColorCluster,
+    ColorStat,
+    LayoutGrid,
+    MobDescriptor,
+    OccupancyStats,
+    SilhouetteMask,
+    SizeDescriptor,
+    SizeStats,
+)
+from pybot.recognition.detector.descriptors.layout_utils import (
+    frame_alpha_occupancy_grid,
+    frame_cluster_grid,
+    frame_palette_coverage_grid,
+    frame_silhouette,
+)
 
-DESCRIPTOR_VERSION = 6
-LIVING_ACTIONS = (0, 1)
+DESCRIPTOR_VERSION = 8
+# RO mobs: actions 0-7 are stand/walk for four facing directions (pairs 0+1, 2+3, ...).
+LIVING_FACING_ACTION_LIMIT = 8
+MATCH_PALETTE_MAX_COLORS = 48
 MIN_DISTINCTIVE_SATURATION = 40.0
 MIN_DISTINCTIVE_VALUE = 30.0
+LAYOUT_GRID_SIZE = 5
+SILHOUETTE_WIDTH = 16
+SILHOUETTE_HEIGHT = 16
+STABLE_FRAME_RATIO = 0.80
+STABLE_CELL_OCCUPANCY = 0.08
+STABLE_SILHOUETTE_VALUE = 0.20
+MATCH_DISTANCE = 20.0
 
 
 class DescriptorBuilder:
@@ -100,18 +124,17 @@ class DescriptorBuilder:
 
         spr_file = SprReader(spr_path).load()
         act_file = ActReader(act_path).load()
-        living_frames = self._collect_frames(
-            spr_file,
-            act_file,
-            LIVING_ACTIONS,
-            frame_start=0,
-        )
-        if not living_frames:
+        facing_pairs = self._living_facing_pairs(len(act_file.actions))
+        if not facing_pairs:
+            raise RuntimeError(f"no stand/walk actions found for {mob_name}")
+        primary_frames = self._collect_frames(spr_file, act_file, facing_pairs[0], frame_start=0)
+        all_facing_frames = self._collect_facing_frames(spr_file, act_file, facing_pairs)
+        if not primary_frames:
             raise RuntimeError(f"no stand/walk frames could be rendered for {mob_name}")
 
-        # Build full profile via k-means pipeline (accent_colors, body_colors, rare_colors, histograms)
-        # Tighten hue+sat tolerance on the dominant cluster for more selective color matching
-        profile = self._build_frame_profile(living_frames, dominant_tolerance=(12, 35, 55))
+        # Color clusters come from the primary facing so they stay selective.
+        profile = self._build_frame_profile(primary_frames, dominant_tolerance=(12, 35, 55))
+        profile["size"] = self._size_descriptor(all_facing_frames)
 
         profile_body_colors = self._distinctive_clusters(profile["body_colors"])
         if not profile_body_colors:
@@ -121,9 +144,20 @@ class DescriptorBuilder:
         profile_accent_colors = self._distinctive_clusters(profile["accent_colors"])
         if not profile_accent_colors:
             raise RuntimeError(f"no distinctive accent colors for {mob_name}")
-        match_palette_bgr = self._match_palette(living_frames)
-        dominant_pixel_bgr = self._find_dominant_pixel(living_frames)
-        accent_pixel_bgr = self._find_accent_pixel(living_frames)
+        match_palette_bgr = self._match_palette_union(spr_file, act_file, facing_pairs)
+        dominant_pixels_bgr, accent_pixels_bgr = self._collect_structural_pixels(
+            spr_file,
+            act_file,
+            facing_pairs,
+        )
+        dominant_pixel_bgr = dominant_pixels_bgr[0] if dominant_pixels_bgr else None
+        accent_pixel_bgr = accent_pixels_bgr[0] if accent_pixels_bgr else None
+        all_clusters = [profile_dominant, *profile_supporting, *profile_accent_colors, *self._distinctive_clusters(profile["rare_colors"])]
+        size_stats = self._build_size_stats(all_facing_frames)
+        occupancy_stats = self._build_occupancy_stats(all_facing_frames)
+        color_stats = self._build_color_stats(all_facing_frames, all_clusters)
+        layout_grid = self._build_layout_grid(all_facing_frames, all_clusters, match_palette_bgr)
+        silhouette_mask = self._build_silhouette_mask(all_facing_frames)
 
         descriptor = MobDescriptor(
             mob_name=mob_name,
@@ -138,9 +172,107 @@ class DescriptorBuilder:
             hsv_histogram=profile["hsv_histogram"],
             dominant_pixel_bgr=dominant_pixel_bgr,
             accent_pixel_bgr=accent_pixel_bgr,
+            dominant_pixels_bgr=dominant_pixels_bgr,
+            accent_pixels_bgr=accent_pixels_bgr,
+            size_stats=size_stats,
+            occupancy_stats=occupancy_stats,
+            color_stats=color_stats,
+            layout_grid=layout_grid,
+            silhouette_mask=silhouette_mask,
         )
         descriptor.save(descriptor_path)
         return descriptor
+
+    @staticmethod
+    def _living_facing_pairs(action_count: int) -> tuple[tuple[int, int], ...]:
+        """Stand/walk pairs for each facing direction in the first action row."""
+        limit = min(action_count, LIVING_FACING_ACTION_LIMIT)
+        if limit <= 0:
+            return ()
+        if limit == 1:
+            return ((0, 0),)
+        pairs: list[tuple[int, int]] = []
+        for start in range(0, limit - 1, 2):
+            pairs.append((start, start + 1))
+        return tuple(pairs)
+
+    def _collect_facing_frames(
+        self,
+        spr_file,
+        act_file,
+        facing_pairs: tuple[tuple[int, int], ...],
+    ) -> list[np.ndarray]:
+        frames: list[np.ndarray] = []
+        for pair in facing_pairs:
+            frames.extend(self._collect_frames(spr_file, act_file, pair, frame_start=0))
+        return frames
+
+    def _match_palette_union(
+        self,
+        spr_file,
+        act_file,
+        facing_pairs: tuple[tuple[int, int], ...],
+    ) -> list[tuple[int, int, int]]:
+        seen: set[tuple[int, int, int]] = set()
+        palette: list[tuple[int, int, int]] = []
+        for pair in facing_pairs:
+            frames = self._collect_frames(spr_file, act_file, pair, frame_start=0)
+            if not frames:
+                continue
+            for color in self._match_palette(frames):
+                if color in seen:
+                    continue
+                seen.add(color)
+                palette.append(color)
+                if len(palette) >= MATCH_PALETTE_MAX_COLORS:
+                    return palette
+        return palette
+
+    def _collect_structural_pixels(
+        self,
+        spr_file,
+        act_file,
+        facing_pairs: tuple[tuple[int, int], ...],
+    ) -> tuple[list[list[int]], list[list[int]]]:
+        dominants: list[list[int]] = []
+        accents: list[list[int]] = []
+        for pair in facing_pairs:
+            frames = self._collect_frames(spr_file, act_file, pair, frame_start=0)
+            if not frames:
+                continue
+            dominant = self._find_dominant_pixel(frames)
+            accent = self._find_accent_pixel(frames)
+            if accent is None:
+                continue
+            if any(
+                self._pixel_distance(dominant, existing) < 14.0
+                for existing in dominants
+            ):
+                continue
+            dominants.append(dominant)
+            accents.append(accent)
+        return dominants, accents
+
+    @staticmethod
+    def _pixel_distance(left: list[int], right: list[int]) -> float:
+        delta = np.asarray(left, dtype=np.float32) - np.asarray(right, dtype=np.float32)
+        return float(np.linalg.norm(delta))
+
+    @staticmethod
+    def _size_descriptor(frames: list[np.ndarray]) -> SizeDescriptor:
+        widths: list[int] = []
+        heights: list[int] = []
+        for bgra in frames:
+            widths.append(int(bgra.shape[1]))
+            heights.append(int(bgra.shape[0]))
+        return SizeDescriptor(
+            avg_width=float(np.mean(widths)),
+            avg_height=float(np.mean(heights)),
+            min_width=float(min(widths)),
+            max_width=float(max(widths)),
+            min_height=float(min(heights)),
+            max_height=float(max(heights)),
+        )
 
     def _collect_frames(
         self,
@@ -504,3 +636,144 @@ class DescriptorBuilder:
         hist = cv2.calcHist([strip], [0, 1], None, [24, 16], [0, 180, 0, 256])
         cv2.normalize(hist, hist)
         return hist.reshape(-1).astype(float).tolist()
+
+    def _build_size_stats(self, frames: list[np.ndarray]) -> SizeStats:
+        widths = [float(frame.shape[1]) for frame in frames]
+        heights = [float(frame.shape[0]) for frame in frames]
+        aspects = [width / max(height, 1.0) for width, height in zip(widths, heights)]
+        return SizeStats(
+            min_width=float(min(widths)),
+            max_width=float(max(widths)),
+            avg_width=float(np.mean(widths)),
+            std_width=float(np.std(widths)),
+            min_height=float(min(heights)),
+            max_height=float(max(heights)),
+            avg_height=float(np.mean(heights)),
+            std_height=float(np.std(heights)),
+            min_aspect=float(min(aspects)),
+            max_aspect=float(max(aspects)),
+            avg_aspect=float(np.mean(aspects)),
+        )
+
+    def _build_occupancy_stats(self, frames: list[np.ndarray]) -> OccupancyStats:
+        opaque_counts: list[int] = []
+        densities: list[float] = []
+        for bgra in frames:
+            alpha = bgra[:, :, 3] > 0
+            opaque = int(np.sum(alpha))
+            area = max(1, int(bgra.shape[0] * bgra.shape[1]))
+            opaque_counts.append(opaque)
+            densities.append(float(opaque / area))
+        return OccupancyStats(
+            min_opaque_pixels=int(min(opaque_counts)),
+            max_opaque_pixels=int(max(opaque_counts)),
+            avg_opaque_pixels=float(np.mean(opaque_counts)),
+            min_density=float(min(densities)),
+            max_density=float(max(densities)),
+            avg_density=float(np.mean(densities)),
+        )
+
+    def _build_color_stats(
+        self,
+        frames: list[np.ndarray],
+        clusters: list[ColorCluster],
+    ) -> list[ColorStat]:
+        if not frames or not clusters:
+            return []
+        frame_total = len(frames)
+        stats: list[ColorStat] = []
+        for cluster in clusters:
+            fractions: list[float] = []
+            present_frames = 0
+            for bgra in frames:
+                alpha = bgra[:, :, 3] > 0
+                if not np.any(alpha):
+                    fractions.append(0.0)
+                    continue
+                hsv = cv2.cvtColor(bgra[:, :, :3], cv2.COLOR_BGR2HSV).astype(np.float32)
+                center = np.asarray(cluster.hsv, dtype=np.float32)
+                tol = np.asarray(cluster.tolerance, dtype=np.float32)
+                pixels = hsv[alpha]
+                hue_diff = np.abs(pixels[:, 0] - center[0])
+                hue_diff = np.minimum(hue_diff, 180.0 - hue_diff)
+                sat_diff = np.abs(pixels[:, 1] - center[1])
+                val_diff = np.abs(pixels[:, 2] - center[2])
+                matched = (
+                    (hue_diff <= tol[0]) & (sat_diff <= tol[1]) & (val_diff <= tol[2])
+                )
+                fraction = float(np.mean(matched)) if matched.size else 0.0
+                fractions.append(fraction)
+                if fraction >= 0.01:
+                    present_frames += 1
+            frame_presence = present_frames / max(frame_total, 1)
+            stats.append(
+                ColorStat(
+                    label=cluster.label,
+                    bgr=cluster.bgr,
+                    hsv=cluster.hsv,
+                    frame_presence=float(frame_presence),
+                    avg_fraction=float(np.mean(fractions)),
+                    min_fraction=float(min(fractions)),
+                    max_fraction=float(max(fractions)),
+                    is_stable=frame_presence >= STABLE_FRAME_RATIO,
+                    is_distinctive=self._is_distinctive_cluster(cluster),
+                    tolerance=cluster.tolerance,
+                )
+            )
+        return stats
+
+    def _build_layout_grid(
+        self,
+        frames: list[np.ndarray],
+        clusters: list[ColorCluster],
+        match_palette_bgr: list[tuple[int, int, int]],
+    ) -> LayoutGrid:
+        grid_size = LAYOUT_GRID_SIZE
+        occupancy_frames: list[np.ndarray] = []
+        coverage_frames: list[np.ndarray] = []
+        cluster_frames: list[np.ndarray] = []
+        for bgra in frames:
+            alpha = bgra[:, :, 3]
+            bgr = bgra[:, :, :3]
+            occupancy_frames.append(frame_alpha_occupancy_grid(alpha, grid_size))
+            coverage_frames.append(
+                frame_palette_coverage_grid(bgr, alpha, match_palette_bgr, grid_size, MATCH_DISTANCE)
+            )
+            cluster_frames.append(frame_cluster_grid(bgr, alpha, clusters, grid_size))
+        avg_occupancy = np.mean(np.stack(occupancy_frames, axis=0), axis=0).reshape(-1).tolist()
+        palette_coverage = np.mean(np.stack(coverage_frames, axis=0), axis=0).reshape(-1).tolist()
+        stable_occupied = [
+            float(value) >= STABLE_CELL_OCCUPANCY for value in avg_occupancy
+        ]
+        dominant_cluster_ids: list[int] = []
+        stacked_clusters = np.stack(cluster_frames, axis=0)
+        for cell in range(grid_size * grid_size):
+            gy, gx = divmod(cell, grid_size)
+            values = stacked_clusters[:, gy, gx]
+            valid = values[values >= 0]
+            if valid.size == 0:
+                dominant_cluster_ids.append(-1)
+                continue
+            counts = np.bincount(valid.astype(np.int32))
+            dominant_cluster_ids.append(int(np.argmax(counts)))
+        return LayoutGrid(
+            grid_size=grid_size,
+            avg_occupancy=avg_occupancy,
+            stable_occupied=stable_occupied,
+            dominant_cluster_ids=dominant_cluster_ids,
+            palette_coverage=palette_coverage,
+        )
+
+    def _build_silhouette_mask(self, frames: list[np.ndarray]) -> SilhouetteMask:
+        masks = [
+            frame_silhouette(bgra[:, :, 3], SILHOUETTE_WIDTH, SILHOUETTE_HEIGHT)
+            for bgra in frames
+        ]
+        avg_mask = np.mean(np.stack(masks, axis=0), axis=0).reshape(-1).tolist()
+        stable_mask = [float(value) >= STABLE_SILHOUETTE_VALUE for value in avg_mask]
+        return SilhouetteMask(
+            width=SILHOUETTE_WIDTH,
+            height=SILHOUETTE_HEIGHT,
+            avg_mask=avg_mask,
+            stable_mask=stable_mask,
+        )

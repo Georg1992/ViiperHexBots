@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,10 +25,38 @@ class MobFixtureSuite:
     folder: str
     mob_name: str
     pattern: re.Pattern[str]
+    expected_fixture_count: int = 8
+    expected_normal_count: int = 4
+    expected_gray_count: int = 4
 
     @property
     def image_dir(self) -> Path:
         return SCREENSHOTS_DIR / self.folder
+
+    def manifest(self) -> dict:
+        path = self.image_dir / "manifest.json"
+        if not path.is_file():
+            return {}
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    @classmethod
+    def from_manifest(
+        cls,
+        *,
+        folder: str,
+        mob_name: str,
+        pattern: re.Pattern[str],
+    ) -> "MobFixtureSuite":
+        suite = cls(folder=folder, mob_name=mob_name, pattern=pattern)
+        manifest = suite.manifest()
+        return cls(
+            folder=folder,
+            mob_name=mob_name,
+            pattern=pattern,
+            expected_fixture_count=int(manifest.get("fixtureCount", 8)),
+            expected_normal_count=int(manifest.get("normalFixtureCount", 4)),
+            expected_gray_count=int(manifest.get("grayFixtureCount", 4)),
+        )
 
     def images(self) -> list[MobFixtureImage]:
         if not self.image_dir.is_dir():
@@ -49,20 +78,25 @@ class MobFixtureSuite:
 
 
 MOB_FIXTURE_SUITES: tuple[MobFixtureSuite, ...] = (
-    MobFixtureSuite(
+    MobFixtureSuite.from_manifest(
         folder="Horn",
         mob_name="horn",
         pattern=re.compile(r"^(\d+)Horn(?:_Gray\d*)?\.png$", re.IGNORECASE),
     ),
-    MobFixtureSuite(
+    MobFixtureSuite.from_manifest(
         folder="TharaFrog",
         mob_name="thara_frog",
         pattern=re.compile(r"^(\d+)Tharas?(?:_Gray)?\.png$", re.IGNORECASE),
     ),
-    MobFixtureSuite(
+    MobFixtureSuite.from_manifest(
         folder="Alligator",
         mob_name="alligator",
         pattern=re.compile(r"^(\d+)Alligator(?:_Gray)?\.png$", re.IGNORECASE),
+    ),
+    MobFixtureSuite.from_manifest(
+        folder="Noxious",
+        mob_name="noxious",
+        pattern=re.compile(r"^(\d+)Noxious(?:_Gray)?\.png$", re.IGNORECASE),
     ),
 )
 

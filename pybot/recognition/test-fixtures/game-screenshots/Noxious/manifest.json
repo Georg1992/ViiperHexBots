@@ -1,0 +1,10 @@
+{
+  "mob": "noxious",
+  "folder": "Noxious",
+  "description": "Noxious detection fixtures. Leading digit is mob count. *_Gray* = gray world textures.",
+  "strictAcceptCount": true,
+  "fixtureCount": 6,
+  "normalFixtureCount": 3,
+  "grayFixtureCount": 3,
+  "filenamePattern": "^(\\d+)Noxious(?:_Gray)?\\.png$"
+}

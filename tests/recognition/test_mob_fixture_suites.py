@@ -1,4 +1,4 @@
-"""Mob screenshot fixture regression tests (Horn, TharaFrog, Alligator)."""
+"""Mob screenshot fixture regression tests (Horn, TharaFrog, Alligator, Noxious)."""
 
 from __future__ import annotations
 
@@ -16,18 +16,26 @@ class MobFixtureSuiteTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.detector = MobDetector(PROJECT_ROOT, load_detector_config())
 
-    def test_each_suite_has_eight_fixtures(self) -> None:
+    def test_each_suite_has_expected_fixtures(self) -> None:
         for suite in MOB_FIXTURE_SUITES:
             images = suite.images()
             self.assertEqual(
                 len(images),
-                8,
-                f"{suite.folder}: expected 8 PNG fixtures, found {len(images)}",
+                suite.expected_fixture_count,
+                f"{suite.folder}: expected {suite.expected_fixture_count} PNG fixtures, found {len(images)}",
             )
             normal = [image for image in images if not image.gray_world]
             gray = [image for image in images if image.gray_world]
-            self.assertEqual(len(normal), 4, f"{suite.folder}: expected 4 normal-world fixtures")
-            self.assertEqual(len(gray), 4, f"{suite.folder}: expected 4 gray-world fixtures")
+            self.assertEqual(
+                len(normal),
+                suite.expected_normal_count,
+                f"{suite.folder}: expected {suite.expected_normal_count} normal-world fixtures",
+            )
+            self.assertEqual(
+                len(gray),
+                suite.expected_gray_count,
+                f"{suite.folder}: expected {suite.expected_gray_count} gray-world fixtures",
+            )
 
     def test_fixture_accept_counts(self) -> None:
         for suite in MOB_FIXTURE_SUITES:

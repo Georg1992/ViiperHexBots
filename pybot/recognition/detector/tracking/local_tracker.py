@@ -405,20 +405,27 @@ def _build_local_follow_heatmap(
     color_signal = np.maximum(body * 0.55, accent * 0.45)
 
     body_sprite = accent_sprite = None
-    has_structural = (
-        descriptor.dominant_pixel_bgr is not None and descriptor.accent_pixel_bgr is not None
-    )
-    if has_structural:
-        body_sprite = sprite_palette_heatmap(
-            crop_bgr,
-            [tuple(descriptor.dominant_pixel_bgr)],
-            heatmap_detector.max_sprite_palette_distance,
-        )
-        accent_sprite = sprite_palette_heatmap(
-            crop_bgr,
-            [tuple(descriptor.accent_pixel_bgr)],
-            heatmap_detector.accent_structural_distance,
-        )
+    structural_pairs = descriptor.structural_pixel_pairs()
+    if structural_pairs:
+        body_sprite = np.zeros(crop_bgr.shape[:2], dtype=np.float32)
+        accent_sprite = np.zeros(crop_bgr.shape[:2], dtype=np.float32)
+        for dominant, accent in structural_pairs:
+            body_sprite = np.maximum(
+                body_sprite,
+                sprite_palette_heatmap(
+                    crop_bgr,
+                    [tuple(dominant)],
+                    heatmap_detector.max_sprite_palette_distance,
+                ),
+            )
+            accent_sprite = np.maximum(
+                accent_sprite,
+                sprite_palette_heatmap(
+                    crop_bgr,
+                    [tuple(accent)],
+                    heatmap_detector.accent_structural_distance,
+                ),
+            )
 
     final = np.zeros(crop_bgr.shape[:2], dtype=np.float32)
     scales = heatmap_detector._center_scales(crop_bgr.shape[1])

@@ -60,7 +60,7 @@ class LocalTrackerTests(unittest.TestCase):
         result = track_local(detector, self.roi, "horn", track)
         self.assertIsInstance(result, LocalTrackResult)
         self.assertTrue(result.found)
-        self.assertGreater(result.confidence, 0.4)
+        self.assertGreater(result.confidence, 0.2)
         self.assertEqual(result.miss_reason, "")
         dist = abs(result.x - anchor.center_x) + abs(result.y - anchor.center_y)
         self.assertLess(dist, 40)

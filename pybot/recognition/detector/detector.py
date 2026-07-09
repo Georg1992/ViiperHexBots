@@ -256,10 +256,17 @@ class MobDetector:
         accepted = self._finalize_accepted(candidates)
         accepted_ids = {id(candidate) for candidate in accepted}
         final_candidates = []
+        no_centers_found = len(sprite_centers) + len(structural_centers) == 0
         for candidate in candidates:
             if candidate.accepted and id(candidate) not in accepted_ids:
                 candidate.accepted = False
                 candidate.rejection_reason = "nms_suppressed"
+            # Classify failures: discovery_fail (no heatmap peaks) vs validation_fail.
+            if not candidate.accepted:
+                if no_centers_found:
+                    candidate.rejection_reason = f"discovery_fail:{candidate.rejection_reason}"
+                elif not candidate.rejection_reason.startswith("discovery_fail:"):
+                    candidate.rejection_reason = f"validation_fail:{candidate.rejection_reason}"
             final_candidates.append(candidate)
         elapsed = time.perf_counter() - start
         timing = {
@@ -364,19 +371,37 @@ class MobDetector:
             return False
 
         distance = float(self.config["structuralPixelDistance"])
+        accent_distance = float(self.config["accentStructuralPixelDistance"])
+        min_dom = float(self.config["minDominantPixelFraction"])
+        min_acc = float(self.config["minAccentPixelFraction"])
+
+        # Use v8 per-facing structural pixel pairs when available.
+        pairs = descriptor.structural_pixel_pairs()
+        if pairs:
+            for dominant, accent in pairs:
+                dominant_np = np.array(dominant, dtype=np.float32).reshape(1, 1, 3)
+                dominant_dist = np.sqrt(np.sum((region.astype(np.float32) - dominant_np) ** 2, axis=2))
+                if float(np.mean(dominant_dist <= distance)) < min_dom:
+                    continue
+                accent_np = np.array(accent, dtype=np.float32).reshape(1, 1, 3)
+                accent_dist = np.sqrt(np.sum((region.astype(np.float32) - accent_np) ** 2, axis=2))
+                if float(np.mean(accent_dist <= accent_distance)) >= min_acc:
+                    return True
+            return False
+
+        # Fallback: legacy singular pixel checks.
         if descriptor.dominant_pixel_bgr is not None:
             dominant = np.array(descriptor.dominant_pixel_bgr, dtype=np.float32).reshape(1, 1, 3)
             dominant_dist = np.sqrt(np.sum((region.astype(np.float32) - dominant) ** 2, axis=2))
             dominant_fraction = float(np.mean(dominant_dist <= distance))
-            if dominant_fraction < float(self.config["minDominantPixelFraction"]):
+            if dominant_fraction < min_dom:
                 return False
 
         if descriptor.accent_pixel_bgr is not None:
             accent = np.array(descriptor.accent_pixel_bgr, dtype=np.float32).reshape(1, 1, 3)
-            accent_distance = float(self.config["accentStructuralPixelDistance"])
             accent_dist = np.sqrt(np.sum((region.astype(np.float32) - accent) ** 2, axis=2))
             accent_fraction = float(np.mean(accent_dist <= accent_distance))
-            if accent_fraction < float(self.config["minAccentPixelFraction"]):
+            if accent_fraction < min_acc:
                 return False
 
         return True

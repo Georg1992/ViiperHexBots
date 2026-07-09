@@ -65,14 +65,15 @@ def _apply_layer_transform(sprite: np.ndarray, layer: ActSpriteLayer) -> np.ndar
     if width != src.shape[1] or height != src.shape[0]:
         src = cv2.resize(src, (width, height), interpolation=cv2.INTER_NEAREST)
 
-    tint_b, tint_g, tint_r, tint_a = layer.color_tint
-    if (tint_b, tint_g, tint_r, tint_a) != (255, 255, 255, 255):
-        tinted = src.astype(np.float32)
-        tinted[:, :, 0] *= tint_b / 255.0
-        tinted[:, :, 1] *= tint_g / 255.0
-        tinted[:, :, 2] *= tint_r / 255.0
-        tinted[:, :, 3] *= tint_a / 255.0
-        src = np.clip(tinted, 0, 255).astype(np.uint8)
+    tint_r, tint_g, tint_b, tint_a = layer.color_tint
+    if (tint_r, tint_g, tint_b, tint_a) in {(255, 255, 255, 255), (255, 0, 0, 255)}:
+        return src
+    tinted = src.astype(np.float32)
+    tinted[:, :, 0] *= tint_b / 255.0
+    tinted[:, :, 1] *= tint_g / 255.0
+    tinted[:, :, 2] *= tint_r / 255.0
+    tinted[:, :, 3] *= tint_a / 255.0
+    src = np.clip(tinted, 0, 255).astype(np.uint8)
 
     return src
 
