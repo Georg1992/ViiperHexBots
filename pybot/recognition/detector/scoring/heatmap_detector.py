@@ -17,7 +17,9 @@ class Heatmaps:
     rare_color: np.ndarray
     local_pattern: np.ndarray
     final_center: np.ndarray
+    structural_center: np.ndarray
     ui_mask: np.ndarray
+    playfield_offset: tuple[int, int] = (0, 0)
 
 
 def _cluster_match(hsv: np.ndarray, cluster: ColorCluster) -> np.ndarray:
@@ -43,6 +45,28 @@ def palette_heatmap(hsv: np.ndarray, clusters: list[ColorCluster]) -> np.ndarray
     return heat
 
 
+def sprite_palette_heatmap(
+    frame_bgr: np.ndarray,
+    palette_bgr: list[tuple[int, int, int]],
+    max_distance: float,
+) -> np.ndarray:
+    if not palette_bgr:
+        return np.zeros(frame_bgr.shape[:2], dtype=np.float32)
+
+    pixels = frame_bgr.reshape(-1, 3).astype(np.float32)
+    palette = np.asarray(palette_bgr, dtype=np.float32)
+    min_dist_sq = np.full(pixels.shape[0], np.inf, dtype=np.float32)
+    for start in range(0, len(palette), 128):
+        chunk = palette[start : start + 128]
+        diff = pixels[:, None, :] - chunk[None, :, :]
+        dist_sq = np.sum(diff * diff, axis=2)
+        min_dist_sq = np.minimum(min_dist_sq, dist_sq.min(axis=1))
+
+    max_dist = max(max_distance, 1.0)
+    heat = 1.0 - (np.sqrt(min_dist_sq) / max_dist)
+    return np.clip(heat, 0.0, 1.0).reshape(frame_bgr.shape[:2]).astype(np.float32)
+
+
 class HeatmapDetector:
     def __init__(self, config: dict):
         self.max_centers = int(config["topCandidateCenters"])
@@ -56,76 +80,114 @@ class HeatmapDetector:
         self.center_scales = [float(scale) for scale in config["centerScales"]]
         self.small_scale_min_frame_width = int(config["smallScaleMinFrameWidth"])
         self.small_scale_cutoff = float(config["smallScaleCutoff"])
-        weights = config["centerWeights"]
-        self.center_weights = {
-            "body": float(weights["bodyPalette"]),
-            "accent": float(weights["accent"]),
-            "rare": float(weights["rareColor"]),
-            "pattern": float(weights["localPattern"]),
-        }
+        self.max_sprite_palette_distance = float(config["maxSpritePaletteDistance"])
+        self.accent_structural_distance = float(config["accentStructuralPixelDistance"])
+        self.structural_discovery_min_score = float(config["structuralDiscoveryMinScore"])
+
+    def playfield_bounds(self, shape: tuple[int, int]) -> tuple[int, int, int, int]:
+        h, w = shape
+        return (
+            int(h * self.ui_top_ratio),
+            int(h * self.ui_bottom_ratio),
+            int(w * self.ui_left_ratio),
+            int(w * self.ui_right_ratio),
+        )
 
     def build_heatmaps(
         self,
         frame_bgr: np.ndarray,
-        hsv: np.ndarray,
+        hsv: np.ndarray | None,
         descriptor: MobDescriptor,
         downscale: int = 1,
+        *,
+        discovery_only: bool = True,
     ) -> Heatmaps:
-        body = palette_heatmap(hsv, descriptor.body_palette)
-        accent = palette_heatmap(hsv, descriptor.accent_colors)
-        rare = palette_heatmap(hsv, descriptor.rare_colors)
-        local_pattern = self._local_pattern(frame_bgr, accent, body)
-        final = np.zeros(body.shape, dtype=np.float32)
-        blur_body = body
-        blur_accent = accent
-        blur_rare = rare
-        blur_pattern = local_pattern
+        y1, y2, x1, x2 = self.playfield_bounds(frame_bgr.shape[:2])
+        crop_bgr = frame_bgr[y1:y2, x1:x2]
+        crop_shape = crop_bgr.shape[:2]
+
+        if discovery_only:
+            body = accent = rare = local_pattern = np.zeros(crop_shape, dtype=np.float32)
+        else:
+            if hsv is None:
+                raise ValueError("hsv is required when discovery_only is False")
+            crop_hsv = hsv[y1:y2, x1:x2]
+            body = palette_heatmap(crop_hsv, descriptor.body_palette)
+            accent = palette_heatmap(crop_hsv, descriptor.accent_colors)
+            rare = palette_heatmap(crop_hsv, descriptor.rare_colors)
+            local_pattern = self._local_pattern(crop_bgr, accent, body)
+
+        work_bgr = crop_bgr
         if downscale > 1:
-            blur_body = cv2.resize(body, None, fx=1.0 / downscale, fy=1.0 / downscale, interpolation=cv2.INTER_AREA)
-            blur_accent = cv2.resize(accent, None, fx=1.0 / downscale, fy=1.0 / downscale, interpolation=cv2.INTER_AREA)
-            blur_rare = cv2.resize(rare, None, fx=1.0 / downscale, fy=1.0 / downscale, interpolation=cv2.INTER_AREA)
-            blur_pattern = cv2.resize(
-                local_pattern,
+            work_bgr = cv2.resize(
+                crop_bgr,
                 None,
                 fx=1.0 / downscale,
                 fy=1.0 / downscale,
                 interpolation=cv2.INTER_AREA,
             )
-        for scale in self._center_scales(blur_body.shape[1]):
+
+        sprite = sprite_palette_heatmap(
+            work_bgr,
+            descriptor.match_palette_bgr,
+            self.max_sprite_palette_distance,
+        )
+        body_sprite: np.ndarray | None = None
+        accent_sprite: np.ndarray | None = None
+        has_structural = (
+            descriptor.dominant_pixel_bgr is not None and descriptor.accent_pixel_bgr is not None
+        )
+        if has_structural:
+            body_sprite = sprite_palette_heatmap(
+                work_bgr,
+                [tuple(descriptor.dominant_pixel_bgr)],
+                self.max_sprite_palette_distance,
+            )
+            accent_sprite = sprite_palette_heatmap(
+                work_bgr,
+                [tuple(descriptor.accent_pixel_bgr)],
+                self.accent_structural_distance,
+            )
+
+        final = np.zeros(crop_shape, dtype=np.float32)
+        structural_final = np.zeros(crop_shape, dtype=np.float32)
+        for scale in self._center_scales(work_bgr.shape[1]):
             window = (
-                max(3, int(round(descriptor.avg_width * scale)) | 1),
-                max(3, int(round(descriptor.avg_height * scale)) | 1),
+                max(3, int(round(descriptor.avg_width * scale / downscale)) | 1),
+                max(3, int(round(descriptor.avg_height * scale / downscale)) | 1),
             )
-            scale_window = (
-                max(3, int(round(window[0] / downscale)) | 1),
-                max(3, int(round(window[1] / downscale)) | 1),
-            )
-            center_body = cv2.blur(blur_body, scale_window)
-            center_accent = cv2.blur(blur_accent, scale_window)
-            center_rare = cv2.blur(blur_rare, scale_window)
-            center_pattern = cv2.blur(blur_pattern, scale_window)
-            scale_center = (
-                center_body * self.center_weights["body"]
-                + center_accent * self.center_weights["accent"]
-                + center_rare * self.center_weights["rare"]
-                + center_pattern * self.center_weights["pattern"]
-            ).astype(np.float32)
+            sprite_heat = cv2.blur(sprite, window)
             if downscale > 1:
-                scale_center = cv2.resize(
-                    scale_center,
-                    (body.shape[1], body.shape[0]),
+                sprite_heat = cv2.resize(
+                    sprite_heat,
+                    (crop_shape[1], crop_shape[0]),
                     interpolation=cv2.INTER_LINEAR,
                 )
-            final = np.maximum(final, scale_center)
-        ui_mask = self._ui_mask(frame_bgr.shape[:2])
+            final = np.maximum(final, sprite_heat.astype(np.float32))
+            if body_sprite is not None and accent_sprite is not None:
+                body_heat = cv2.blur(body_sprite, window)
+                accent_heat = cv2.blur(accent_sprite, window)
+                structural_heat = np.sqrt(body_heat * accent_heat).astype(np.float32)
+                if downscale > 1:
+                    structural_heat = cv2.resize(
+                        structural_heat,
+                        (crop_shape[1], crop_shape[0]),
+                        interpolation=cv2.INTER_LINEAR,
+                    )
+                structural_final = np.maximum(structural_final, structural_heat.astype(np.float32))
+
+        ui_mask = self._ui_mask(crop_shape)
         final[ui_mask == 0] = 0.0
+        structural_final[ui_mask == 0] = 0.0
         return Heatmaps(
             body_palette=body,
             accent=accent,
             rare_color=rare,
             local_pattern=local_pattern,
             final_center=final,
+            structural_center=structural_final,
             ui_mask=ui_mask,
+            playfield_offset=(x1, y1),
         )
 
     def top_centers(self, heatmap: np.ndarray) -> list[tuple[int, int, float]]:
@@ -173,9 +235,5 @@ class HeatmapDetector:
     def _ui_mask(self, shape: tuple[int, int]) -> np.ndarray:
         h, w = shape
         mask = np.zeros((h, w), dtype=np.uint8)
-        y1 = int(h * self.ui_top_ratio)
-        y2 = int(h * self.ui_bottom_ratio)
-        x1 = int(w * self.ui_left_ratio)
-        x2 = int(w * self.ui_right_ratio)
-        mask[y1:y2, x1:x2] = 255
+        mask[:, :] = 255
         return mask

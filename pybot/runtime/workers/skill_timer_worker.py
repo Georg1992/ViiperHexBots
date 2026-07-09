@@ -36,17 +36,18 @@ class SkillTimerWorker:
         )
 
         while not ctx.is_stopped():
-            if not ctx.should_run_workers():
-                ctx.wait_while_stopped_or_paused(0.25)
-                continue
+            try:
+                if not ctx.should_run_workers():
+                    ctx.wait_while_stopped_or_paused(0.25)
+                    continue
 
-            now = monotonic_ms()
-            if now - self._last_press_ms >= interval_ms:
-                self._input.skill_click(timer_scan_code)
-                ctx.logger.behavior(
-                    f"[TIMER] skill timer press scanCode={timer_scan_code}"
-                )
-                self._last_press_ms = now
+                now = monotonic_ms()
+                if now - self._last_press_ms >= interval_ms:
+                    self._input.skill_click(timer_scan_code)
+                    self._last_press_ms = now
 
-            remaining = interval_ms - (now - self._last_press_ms)
-            ctx.stop_event.wait(max(0.25, remaining / 1000.0))
+                remaining = interval_ms - (now - self._last_press_ms)
+                ctx.stop_event.wait(max(0.25, remaining / 1000.0))
+            except Exception:
+                import traceback
+                ctx.logger.behavior(f"[TIMER] tick error:\n{traceback.format_exc()}")

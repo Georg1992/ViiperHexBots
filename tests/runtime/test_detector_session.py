@@ -7,11 +7,12 @@ import unittest
 import cv2
 
 from pybot.paths import PROJECT_ROOT, RECOGNITION_FIXTURES_DIR
+from pybot.recognition.fixtures import default_horn_fixture
 from pybot.runtime.capture.window_roi import HuntRoi
 from pybot.runtime.detection.detector_session import DetectorSession, StateTrackSnapshot
 
 ROOT = PROJECT_ROOT
-FIXTURE = RECOGNITION_FIXTURES_DIR / "game-screenshots" / "333.png"
+FIXTURE = default_horn_fixture()
 
 
 def playfield_roi(frame):
@@ -27,7 +28,7 @@ class DetectorSessionTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.frame = cv2.imread(str(FIXTURE), cv2.IMREAD_COLOR)
         if cls.frame is None:
-            raise unittest.SkipTest("fixture 333.png missing")
+            raise unittest.SkipTest("fixture Horn/3Horn.png missing")
         cls.roi_frame = playfield_roi(cls.frame)
         cls.roi = HuntRoi(x=0, y=0, w=cls.roi_frame.shape[1], h=cls.roi_frame.shape[0])
         cls.detector = DetectorSession("horn", project_root=ROOT)

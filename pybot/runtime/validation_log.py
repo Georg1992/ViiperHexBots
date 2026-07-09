@@ -58,6 +58,8 @@ class HuntValidationLogger:
         area_clear: bool,
         has_discovery_since_reset: bool,
     ) -> None:
+        if decision == "wait":
+            return
         self._emit(
             "no_target",
             screenId=self._tracks.area_epoch,

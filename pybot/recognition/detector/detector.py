@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,12 +21,10 @@ REQUIRED_CONFIG_KEYS = {
     "minBodyPaletteScore",
     "minAccentScore",
     "minLocalPatternScore",
+    "minHistogramCorrelation",
     "minDiscoveryHeatmapScore",
-
     "discoveryHeatmapDownscale",
     "discoveryHeatmapDownscaleMinSide",
-    "watchDriftRadiusPx",
-    "watchDriftStepPx",
     "localTrackSearchRadiusPx",
     "minDescriptorColorMatch",
     "maxSpritePaletteDistance",
@@ -57,8 +54,12 @@ REQUIRED_CONFIG_KEYS = {
     "playfieldRightRatio",
     "debugOutputDir",
     "centerWeights",
+    "structuralPixelDistance",
+    "accentStructuralPixelDistance",
+    "structuralDiscoveryMinScore",
+    "minStructuralAcceptScore",
     "minDominantPixelFraction",
-    "dominantPixelDistance",
+    "minAccentPixelFraction",
     "deathOpacityBaselineSamples",
     "deathOpacityMinBaseline",
     "deathOpacityDecayRatio",
@@ -66,27 +67,12 @@ REQUIRED_CONFIG_KEYS = {
     "deathRediscoveryCooldownMs",
     "deathOpacityMoveThresholdPx",
     "deathOpacityStopThresholdPx",
+    "deathOpacityMinTrackAgeMs",
+    "defaultAverageAttacksTillDeath",
+    "attacksTillDeathHistoryWindow",
 }
 
 REQUIRED_CENTER_WEIGHT_KEYS = {"bodyPalette", "accent", "rareColor", "localPattern"}
-
-
-@dataclass(frozen=True)
-class StateSearchProfile:
-    """Search geometry for canonical state evaluation."""
-
-    drift_radius_px: int | None = None
-    drift_step_px: int | None = None
-    single_scale: bool = False
-    early_exit_at_center: bool = True
-
-
-STATE_PROFILE_FULL = StateSearchProfile()
-STATE_PROFILE_DIRECT = StateSearchProfile(
-    drift_radius_px=15,
-    single_scale=True,
-    early_exit_at_center=False,
-)
 
 
 @dataclass
@@ -171,12 +157,11 @@ class MobDetector:
         self.small_scale_min_frame_width = int(self.config["smallScaleMinFrameWidth"])
         self.small_scale_cutoff = float(self.config["smallScaleCutoff"])
         self.min_discovery_heatmap_score = float(self.config["minDiscoveryHeatmapScore"])
-
         self.discovery_heatmap_downscale = int(self.config["discoveryHeatmapDownscale"])
         self.discovery_heatmap_downscale_min_side = int(self.config["discoveryHeatmapDownscaleMinSide"])
-        self.watch_drift_radius_px = int(self.config["watchDriftRadiusPx"])
-        self.watch_drift_step_px = int(self.config["watchDriftStepPx"])
         self.local_track_search_radius_px = int(self.config["localTrackSearchRadiusPx"])
+        self.structural_discovery_min_score = float(self.config["structuralDiscoveryMinScore"])
+        self.min_structural_accept_score = float(self.config["minStructuralAcceptScore"])
 
     def apply_runtime_config(self, config: dict) -> None:
         prior = self.config
@@ -188,12 +173,11 @@ class MobDetector:
         self.small_scale_min_frame_width = int(self.config["smallScaleMinFrameWidth"])
         self.small_scale_cutoff = float(self.config["smallScaleCutoff"])
         self.min_discovery_heatmap_score = float(self.config["minDiscoveryHeatmapScore"])
-
         self.discovery_heatmap_downscale = int(self.config["discoveryHeatmapDownscale"])
         self.discovery_heatmap_downscale_min_side = int(self.config["discoveryHeatmapDownscaleMinSide"])
-        self.watch_drift_radius_px = int(self.config["watchDriftRadiusPx"])
-        self.watch_drift_step_px = int(self.config["watchDriftStepPx"])
         self.local_track_search_radius_px = int(self.config["localTrackSearchRadiusPx"])
+        self.structural_discovery_min_score = float(self.config["structuralDiscoveryMinScore"])
+        self.min_structural_accept_score = float(self.config["minStructuralAcceptScore"])
 
     def descriptor_path(self, mob_name: str) -> Path:
         base = self.project_root / "assets" / "generated_descriptors"
@@ -230,28 +214,44 @@ class MobDetector:
 
         heatmap_start = time.perf_counter()
         frame_height, frame_width = frame_bgr.shape[:2]
-        min_side = min(frame_width, frame_height)
-        downscale = self.discovery_heatmap_downscale
-        if (
-            downscale > 1
-            and (
-                min_side < self.discovery_heatmap_downscale_min_side
-                or abs(frame_width - frame_height) > 64
-            )
-        ):
-            downscale = 1
+        downscale = 1
+        if self.discovery_heatmap_downscale > 1 and min(frame_width, frame_height) >= 1600:
+            downscale = self.discovery_heatmap_downscale
         heatmaps = self.heatmap_detector.build_heatmaps(
             frame_bgr,
-            hsv,
+            None,
             descriptor,
             downscale=downscale,
+            discovery_only=True,
         )
         centers_start = time.perf_counter()
-        centers = self.heatmap_detector.top_centers(heatmaps.final_center)
+        sprite_centers, structural_centers = self._discovery_centers(heatmaps)
         score_start = time.perf_counter()
         candidates: list[DetectionCandidate] = []
-        for cx, cy, heat_score in centers:
-            candidates.extend(self._evaluate_discovery_center(frame_bgr, hsv, descriptor, cx, cy, heat_score))
+        for cx, cy, heat_score in sprite_centers:
+            candidates.extend(
+                self._evaluate_discovery_center(
+                    frame_bgr,
+                    hsv,
+                    descriptor,
+                    cx,
+                    cy,
+                    heat_score,
+                    min_heatmap_score=self.min_discovery_heatmap_score,
+                )
+            )
+        for cx, cy, heat_score in structural_centers:
+            candidates.extend(
+                self._evaluate_discovery_center(
+                    frame_bgr,
+                    hsv,
+                    descriptor,
+                    cx,
+                    cy,
+                    heat_score,
+                    min_heatmap_score=self.structural_discovery_min_score,
+                )
+            )
         nms_start = time.perf_counter()
         accepted = self._finalize_accepted(candidates)
         accepted_ids = {id(candidate) for candidate in accepted}
@@ -280,6 +280,49 @@ class MobDetector:
             timing=timing,
         )
 
+    def _discovery_centers(
+        self,
+        heatmaps: Heatmaps,
+    ) -> tuple[list[tuple[int, int, float]], list[tuple[int, int, float]]]:
+        offset_x, offset_y = heatmaps.playfield_offset
+        sprite_centers = self._offset_centers(
+            self.heatmap_detector.top_centers(heatmaps.final_center),
+            offset_x,
+            offset_y,
+        )
+        if float(heatmaps.structural_center.max()) <= 0.0:
+            return sprite_centers, []
+
+        saved_min_heat = self.heatmap_detector.min_center_heat
+        saved_peak_threshold = self.heatmap_detector.peak_relative_threshold
+        self.heatmap_detector.min_center_heat = self.structural_discovery_min_score
+        self.heatmap_detector.peak_relative_threshold = 0.10
+        structural_centers = self._offset_centers(
+            self.heatmap_detector.top_centers(heatmaps.structural_center),
+            offset_x,
+            offset_y,
+        )
+        self.heatmap_detector.min_center_heat = saved_min_heat
+        self.heatmap_detector.peak_relative_threshold = saved_peak_threshold
+
+        min_dist_sq = self.heatmap_detector.min_center_distance ** 2
+        extra_structural: list[tuple[int, int, float]] = []
+        for cx, cy, score in structural_centers:
+            if all((cx - px) ** 2 + (cy - py) ** 2 >= min_dist_sq for px, py, _ in sprite_centers):
+                extra_structural.append((cx, cy, score))
+        extra_structural.sort(key=lambda item: item[2], reverse=True)
+        return sprite_centers, extra_structural[: self.heatmap_detector.max_centers]
+
+    @staticmethod
+    def _offset_centers(
+        centers: list[tuple[int, int, float]],
+        offset_x: int,
+        offset_y: int,
+    ) -> list[tuple[int, int, float]]:
+        if offset_x == 0 and offset_y == 0:
+            return centers
+        return [(cx + offset_x, cy + offset_y, heat) for cx, cy, heat in centers]
+
     def _evaluate_discovery_center(
         self,
         frame_bgr: np.ndarray,
@@ -288,30 +331,55 @@ class MobDetector:
         cx: int,
         cy: int,
         heat_score: float,
+        min_heatmap_score: float | None = None,
     ) -> list[DetectionCandidate]:
         """Discovery scan: score one heatmap peak center. Returns accepted candidate or empty list."""
-        if heat_score < self.min_discovery_heatmap_score:
+        threshold = self.min_discovery_heatmap_score if min_heatmap_score is None else min_heatmap_score
+        if heat_score < threshold:
             return []
 
         scales = self._candidate_scales(frame_bgr.shape[1])
         living = self._score_point_at(frame_bgr, hsv, descriptor, cx, cy, scales=scales)
         if living and living.accepted:
-            # Dominant pixel gate: discovery-only filter. Rejects candidates where
-            # too few pixels match the exact dominant sprite pixel color.
-            if descriptor.dominant_pixel_bgr is not None:
-                x, y, w, h = living.bbox
-                region = frame_bgr[y:y+h, x:x+w]
-                if region.size > 0:
-                    dominant = np.array(descriptor.dominant_pixel_bgr, dtype=np.float32).reshape(1, 1, 3)
-                    diff = region.astype(np.float32) - dominant
-                    dist = np.sqrt(np.sum(diff * diff, axis=2))
-                    frac = float(np.mean(dist <= float(self.config.get("dominantPixelDistance", 12))))
-                    min_frac = float(self.config.get("minDominantPixelFraction", 0.02))
-                    if frac < min_frac:
-                        return []
+            if (
+                threshold == self.structural_discovery_min_score
+                and living.final_score < self.min_structural_accept_score
+            ):
+                return []
+            if not self._passes_structural_pixel_gate(frame_bgr, descriptor, living.bbox):
+                return []
             living.heatmap_score = heat_score
             return [living]
         return []
+
+    def _passes_structural_pixel_gate(
+        self,
+        frame_bgr: np.ndarray,
+        descriptor: MobDescriptor,
+        bbox: tuple[int, int, int, int],
+    ) -> bool:
+        x, y, w, h = bbox
+        region = frame_bgr[y : y + h, x : x + w]
+        if region.size == 0:
+            return False
+
+        distance = float(self.config["structuralPixelDistance"])
+        if descriptor.dominant_pixel_bgr is not None:
+            dominant = np.array(descriptor.dominant_pixel_bgr, dtype=np.float32).reshape(1, 1, 3)
+            dominant_dist = np.sqrt(np.sum((region.astype(np.float32) - dominant) ** 2, axis=2))
+            dominant_fraction = float(np.mean(dominant_dist <= distance))
+            if dominant_fraction < float(self.config["minDominantPixelFraction"]):
+                return False
+
+        if descriptor.accent_pixel_bgr is not None:
+            accent = np.array(descriptor.accent_pixel_bgr, dtype=np.float32).reshape(1, 1, 3)
+            accent_distance = float(self.config["accentStructuralPixelDistance"])
+            accent_dist = np.sqrt(np.sum((region.astype(np.float32) - accent) ** 2, axis=2))
+            accent_fraction = float(np.mean(accent_dist <= accent_distance))
+            if accent_fraction < float(self.config["minAccentPixelFraction"]):
+                return False
+
+        return True
 
     def _score_point_at(
         self,
@@ -421,199 +489,12 @@ class MobDetector:
             death_detection_enabled=death_detection_enabled,
         )
 
-    def _evaluate_track_point(
-        self,
-        frame_bgr: np.ndarray,
-        hsv: np.ndarray,
-        descriptor: MobDescriptor,
-        cx: int,
-        cy: int,
-        scales: list[float] | None = None,
-    ) -> list[DetectionCandidate]:
-        """Track state: living position at a known track point."""
-        living = self._score_point_at(frame_bgr, hsv, descriptor, cx, cy, scales=scales)
-        if living is not None and living.accepted:
-            return [living]
-        return []
-
-    def _state_update_from_candidate(
-        self,
-        track_id: int,
-        cx: int,
-        cy: int,
-        best: DetectionCandidate | None,
-        *,
-        offset_x: int,
-        offset_y: int,
-    ) -> dict:
-        if best is None:
-            return {
-                "trackId": track_id,
-                "state": "unreachable",
-                "confidence": 0.0,
-                "x": cx + offset_x,
-                "y": cy + offset_y,
-            }
-        return {
-            "trackId": track_id,
-            "state": "alive",
-            "confidence": round(best.final_score, 4),
-            "x": best.center_x + offset_x,
-            "y": best.center_y + offset_y,
-            "candidateScale": round(best.candidate_scale, 4),
-        }
-
-    def _evaluate_one_track(
-        self,
-        frame_bgr: np.ndarray,
-        hsv: np.ndarray,
-        descriptor: MobDescriptor,
-        track_id: int,
-        cx: int,
-        cy: int,
-        *,
-        offset_x: int = 0,
-        offset_y: int = 0,
-        scale_hint: float | None = None,
-        profile: StateSearchProfile = STATE_PROFILE_FULL,
-    ) -> dict:
-        if profile.single_scale:
-            track_scales = [self._direct_track_scale(frame_bgr.shape[1], scale_hint=scale_hint)]
-        else:
-            track_scales = self._scales_for_track(
-                frame_bgr.shape[1],
-                float(scale_hint) if scale_hint is not None else None,
-            )
-        point_candidates: list[DetectionCandidate] = []
-        search_centers = self._track_search_centers(
-            cx,
-            cy,
-            frame_bgr.shape,
-            radius_px=profile.drift_radius_px,
-            step_px=profile.drift_step_px,
-        )
-        for index, (center_x, center_y) in enumerate(search_centers):
-            point_candidates.extend(
-                self._evaluate_track_point(
-                    frame_bgr,
-                    hsv,
-                    descriptor,
-                    center_x,
-                    center_y,
-                    scales=track_scales,
-                )
-            )
-            if profile.early_exit_at_center and index == 0:
-                center_best, _ = self._select_track_state_candidate(point_candidates)
-                if center_best is not None and center_best.accepted:
-                    break
-        best, arbitration = self._select_track_state_candidate(point_candidates)
-        arbitration["scales"] = track_scales
-        self._log_state_arbitration(track_id, arbitration)
-        return self._state_update_from_candidate(
-            track_id,
-            cx,
-            cy,
-            best,
-            offset_x=offset_x,
-            offset_y=offset_y,
-        )
-
-    def evaluate_track_state(
-        self,
-        frame_bgr: np.ndarray,
-        mob_name: str,
-        track_id: int,
-        cx: int,
-        cy: int,
-        *,
-        offset_x: int = 0,
-        offset_y: int = 0,
-        scale_hint: float | None = None,
-        profile: StateSearchProfile = STATE_PROFILE_FULL,
-    ) -> dict:
-        """Canonical single-track state: alive or unreachable."""
-        descriptor = self.ensure_descriptor(mob_name)
-        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        return self._evaluate_one_track(
-            frame_bgr,
-            hsv,
-            descriptor,
-            track_id,
-            cx,
-            cy,
-            offset_x=offset_x,
-            offset_y=offset_y,
-            scale_hint=scale_hint,
-            profile=profile,
-        )
-
-    def evaluate_track_states(
-        self,
-        frame_bgr: np.ndarray,
-        mob_name: str,
-        tracks: list[dict],
-        *,
-        offset_x: int = 0,
-        offset_y: int = 0,
-        profile: StateSearchProfile = STATE_PROFILE_FULL,
-    ) -> list[dict]:
-        """Evaluate known tracks by id (ROI-local x,y). Returns trackUpdates with screen coordinates."""
-        if not tracks:
-            return []
-
-        descriptor = self.ensure_descriptor(mob_name)
-        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        updates: list[dict] = []
-        for track in tracks:
-            scale_hint = track.get("scale")
-            updates.append(
-                self._evaluate_one_track(
-                    frame_bgr,
-                    hsv,
-                    descriptor,
-                    int(track["trackId"]),
-                    int(track["x"]),
-                    int(track["y"]),
-                    offset_x=offset_x,
-                    offset_y=offset_y,
-                    scale_hint=float(scale_hint) if scale_hint is not None else None,
-                    profile=profile,
-                )
-            )
-        return updates
-
     def _direct_track_scale(self, frame_width: int, scale_hint: float | None = None) -> float:
         if scale_hint is not None:
             track_scales = self._scales_for_track(frame_width, float(scale_hint))
             return track_scales[len(track_scales) // 2]
         track_scales = self._candidate_scales(frame_width)
         return track_scales[len(track_scales) // 2]
-
-    def evaluate_track_state_direct(
-        self,
-        frame_bgr: np.ndarray,
-        mob_name: str,
-        track_id: int,
-        cx: int,
-        cy: int,
-        *,
-        offset_x: int = 0,
-        offset_y: int = 0,
-        scale_hint: float | None = None,
-    ) -> dict:
-        """Post-attack / urgent state: lightweight search profile."""
-        return self.evaluate_track_state(
-            frame_bgr,
-            mob_name,
-            track_id,
-            cx,
-            cy,
-            offset_x=offset_x,
-            offset_y=offset_y,
-            scale_hint=scale_hint,
-            profile=STATE_PROFILE_DIRECT,
-        )
 
     @staticmethod
     def _bbox_for_size(
@@ -631,71 +512,6 @@ class MobDetector:
         if x < 0 or y < 0 or x + w > frame_w or y + h > frame_h:
             return None
         return x, y, w, h
-
-    def _track_search_centers(
-        self,
-        cx: int,
-        cy: int,
-        frame_shape: tuple[int, ...],
-        *,
-        radius_px: int | None = None,
-        step_px: int | None = None,
-    ) -> list[tuple[int, int]]:
-        radius = self.watch_drift_radius_px if radius_px is None else radius_px
-        step = self.watch_drift_step_px if step_px is None else step_px
-        step = max(8, step)
-        if radius <= 0:
-            return [(cx, cy)]
-
-        frame_h, frame_w = frame_shape[:2]
-        points: list[tuple[int, int]] = []
-        for dx in range(-radius, radius + 1, step):
-            for dy in range(-radius, radius + 1, step):
-                nx = cx + dx
-                ny = cy + dy
-                if 0 <= nx < frame_w and 0 <= ny < frame_h:
-                    points.append((nx, ny))
-        return points or [(cx, cy)]
-
-    def _select_track_state_candidate(
-        self, candidates: list[DetectionCandidate]
-    ) -> tuple[DetectionCandidate | None, dict[str, object]]:
-        if not candidates:
-            return None, {
-                "bestScore": 0.0,
-                "selectedState": "unreachable",
-                "reason": "unreachable_no_candidate",
-            }
-
-        best = max(candidates, key=lambda c: c.final_score)
-        if best.accepted:
-            return best, {
-                "bestScore": best.final_score,
-                "selectedState": "alive",
-                "reason": "living_found",
-            }
-
-        return None, {
-            "bestScore": best.final_score,
-            "selectedState": "unreachable",
-            "reason": "unreachable_no_accepted",
-        }
-
-    @staticmethod
-    def _log_state_arbitration(track_id: int, arbitration: dict[str, object]) -> None:
-        scales = arbitration.get("scales", [])
-        scale_text = ",".join(f"{float(value):.3f}" for value in scales) if scales else "-"
-        print(
-            (
-                f"state_arbitration trackId={track_id} "
-                f"bestScore={float(arbitration['bestScore']):.4f} "
-                f"selectedState={arbitration['selectedState']} "
-                f"reason={arbitration['reason']} "
-                f"scales={scale_text}"
-            ),
-            file=sys.stderr,
-            flush=True,
-        )
 
     def _candidate_scales(self, frame_width: int) -> list[float]:
         scales = [
@@ -721,8 +537,9 @@ class MobDetector:
         return [min(available, key=lambda scale: abs(scale - hint))]
 
     def _finalize_accepted(self, candidates: list[DetectionCandidate]) -> list[DetectionCandidate]:
-        candidates.sort(key=lambda c: c.final_score, reverse=True)
-        return self._nms([candidate for candidate in candidates if candidate.accepted])
+        accepted = [candidate for candidate in candidates if candidate.accepted]
+        accepted.sort(key=lambda candidate: candidate.final_score, reverse=True)
+        return self._nms(accepted)
 
     @staticmethod
     def _living_candidate(

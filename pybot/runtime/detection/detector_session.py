@@ -48,6 +48,9 @@ class StateTrackSnapshot:
     opacity_baseline_samples: int = 0
     opacity_decay_streak: int = 0
     moving: bool = False
+    attack_count: int = 0
+    created_tick: int = 0
+    now_tick: int = 0
 
 
 @dataclass(frozen=True)
@@ -96,9 +99,29 @@ class DetectorSession:
 
     def discover(self, roi: HuntRoi) -> DiscoveryScanResult:
         frame = capture_region(roi.x, roi.y, roi.w, roi.h)
+        if frame is None:
+            return DiscoveryScanResult(
+                ok=False,
+                fail_reason="capture_failed",
+                raw_count=0,
+                accepted_count=0,
+                detections=[],
+                duration_ms=0,
+                elapsed_s=0.0,
+            )
         return self.discover_frame(frame, roi)
 
-    def discover_frame(self, frame: np.ndarray, roi: HuntRoi) -> DiscoveryScanResult:
+    def discover_frame(self, frame: np.ndarray | None, roi: HuntRoi) -> DiscoveryScanResult:
+        if frame is None or frame.size == 0:
+            return DiscoveryScanResult(
+                ok=False,
+                fail_reason="capture_failed",
+                raw_count=0,
+                accepted_count=0,
+                detections=[],
+                duration_ms=0,
+                elapsed_s=0.0,
+            )
         start = time.perf_counter()
         with self._lock:
             result = self._detector.detect(frame, self._mob_name)
@@ -131,14 +154,32 @@ class DetectorSession:
         track_snapshots: list[StateTrackSnapshot],
     ) -> LocalTrackBatchResult:
         frame = capture_region(roi.x, roi.y, roi.w, roi.h)
+        if frame is None:
+            return LocalTrackBatchResult(
+                ok=False,
+                fail_reason="capture_failed",
+                results=[],
+                duration_ms=0,
+                found_count=0,
+                coord_updates=0,
+            )
         return self.track_locals_frame(frame, roi, track_snapshots)
 
     def track_locals_frame(
         self,
-        frame: np.ndarray,
+        frame: np.ndarray | None,
         roi: HuntRoi,
         track_snapshots: list[StateTrackSnapshot],
     ) -> LocalTrackBatchResult:
+        if frame is None or frame.size == 0:
+            return LocalTrackBatchResult(
+                ok=False,
+                fail_reason="capture_failed",
+                results=[],
+                duration_ms=0,
+                found_count=0,
+                coord_updates=0,
+            )
         if not track_snapshots:
             return LocalTrackBatchResult(
                 ok=True,
@@ -163,6 +204,9 @@ class DetectorSession:
                 track["opacityBaselineSamples"] = snapshot.opacity_baseline_samples
                 track["opacityDecayStreak"] = snapshot.opacity_decay_streak
                 track["moving"] = snapshot.moving
+                track["attackCount"] = snapshot.attack_count
+                track["createdTick"] = snapshot.created_tick
+                track["nowTick"] = snapshot.now_tick
                 results.append(
                     self._detector.track_local(
                         frame,

@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import unittest
-from pathlib import Path
 
 import cv2
 
 from pybot.paths import PROJECT_ROOT, RECOGNITION_DIR
 from pybot.recognition.cli import apply_scale_calibration
+from pybot.recognition.fixtures import default_horn_fixture
 from pybot.recognition.rules import MobTrack, select_target_id
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
-from pybot.recognition.detector.tracking.state_recognizer import evaluate_track_states
+from pybot.recognition.detector.tracking.local_tracker import track_local
 
 ROOT = PROJECT_ROOT
 MOB_REC = RECOGNITION_DIR
@@ -26,15 +26,15 @@ def playfield_roi(frame):
 
 
 class HuntPipelineIntegrationTests(unittest.TestCase):
-    """Discovery + state vision + track rules — reproduces live-session failure modes."""
+    """Discovery + local tracking + track rules."""
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.base_config = load_detector_config()
         cls.fixture_dir = MOB_REC / "test-fixtures" / "game-screenshots"
-        cls.frame = cv2.imread(str(cls.fixture_dir / "333.png"), cv2.IMREAD_COLOR)
+        cls.frame = cv2.imread(str(default_horn_fixture()), cv2.IMREAD_COLOR)
         if cls.frame is None:
-            raise unittest.SkipTest("fixture 333.png missing")
+            raise unittest.SkipTest("fixture Horn/3Horn.png missing")
         cls.roi = playfield_roi(cls.frame)
 
     def _detector_at_discovery_scale(self) -> MobDetector:
@@ -62,8 +62,7 @@ class HuntPipelineIntegrationTests(unittest.TestCase):
         self.assertEqual(track.state, "alive")
         self.assertEqual(select_target_id([track], now), 1)
 
-    def test_live_session_timeline_unreachable_ignored_still_attacks(self) -> None:
-        """Replays log pattern: create @19:54:30, unreachable ignored @19:54:37 — must stay attackable."""
+    def test_local_tracking_keeps_track_attackable(self) -> None:
         detector = self._detector_at_discovery_scale()
         discovery = detector.detect(self.roi, "horn")
         living = [c for c in discovery.accepted]
@@ -79,20 +78,18 @@ class HuntPipelineIntegrationTests(unittest.TestCase):
             now_tick=t_create,
             discovery_scale=anchor.candidate_scale,
         )
-
-        state_req = {
+        track_req = {
             "trackId": 1,
             "x": track.x,
             "y": track.y,
             "scale": track.discovery_scale,
         }
-        updates = evaluate_track_states(detector, self.roi, "horn", [state_req])
-        self.assertEqual(len(updates), 1)
-
-        self.assertEqual(track.state, "alive", "must stay alive after state eval")
+        result = track_local(detector, self.roi, "horn", track_req)
+        self.assertTrue(result.found)
+        self.assertEqual(track.state, "alive")
         self.assertEqual(select_target_id([track], t_create), 1)
 
-    def test_state_alive_then_multi_tick_attackable(self) -> None:
+    def test_local_tracking_multi_tick_attackable(self) -> None:
         detector = self._detector_at_discovery_scale()
         discovery = detector.detect(self.roi, "horn")
         living = [c for c in discovery.accepted]
@@ -107,7 +104,7 @@ class HuntPipelineIntegrationTests(unittest.TestCase):
             now_tick=now,
             discovery_scale=anchor.candidate_scale,
         )
-        state_track = {
+        track_req = {
             "trackId": 1,
             "x": track.x,
             "y": track.y,
@@ -116,18 +113,11 @@ class HuntPipelineIntegrationTests(unittest.TestCase):
 
         for tick in range(5):
             at = now + tick * 2_000
-            updates = evaluate_track_states(detector, self.roi, "horn", [state_track])
-            obs = updates[0]
-            if obs["state"] == "alive":
-                state_track["x"] = obs["x"]
-                state_track["y"] = obs["y"]
-
-            self.assertEqual(
-                track.state, "alive",
-                f"tick={tick} state={obs['state']} must stay attackable before first attack",
-            )
-
-        self.assertEqual(select_target_id([track], now + 20_000), 1)
+            result = track_local(detector, self.roi, "horn", track_req)
+            self.assertTrue(result.found, f"tick={tick} local follow must keep mob visible")
+            track_req["x"] = result.x
+            track_req["y"] = result.y
+            self.assertEqual(select_target_id([track], at), 1)
 
 
 if __name__ == "__main__":

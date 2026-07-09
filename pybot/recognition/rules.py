@@ -1,10 +1,14 @@
 """Reference model of the hunt track pipeline.
 
-Used by tests to lock the pipeline contract. Tracks stay ``alive`` until
-tracking removes them (lost after consecutive misses, or dead via opacity
-decay when death detection is enabled). Discovery creates tracks; tracking
-refreshes coordinates, movement/death state, and expires tracks; attack
-rotates through alive targets.
+Used by tests to lock the pipeline contract.
+
+Ownership:
+- **Discovery** creates tracks only (initial x/y, scale, mob_name). It never
+  updates coordinates or liveness on existing tracks.
+- **Tracking** owns position, movement, opacity on visible hits (baseline + death),
+  lost_count, unreachable removal, and death/lost removal for existing tracks.
+- **Attack** records attack_count / last_attack_tick only; it reads position
+  snapshots for clicks but must not mutate tracking fields or remove tracks.
 """
 
 from __future__ import annotations
@@ -15,12 +19,12 @@ from typing import Literal
 # Same-object dedup radius for discovery vs existing tracks. Clustering of raw
 # detections before track creation uses discoveryClusterRadiusPx from config
 # (typically smaller) so nearby distinct mobs are not merged.
-HUNT_OBJECT_RADIUS = 70
+HUNT_OBJECT_RADIUS = 90
 HUNT_DISCOVERY_CLUSTER_RADIUS = 48
 
-# Consecutive tracking misses before a track is considered gone. Tracking runs
-# every vision tick, so this is a count of local-follow failures, not wall time.
-HUNT_TRACK_LOST_LIMIT = 8
+# Consecutive local-follow misses before a track is dropped as lost. Tracking
+# ticks every WORKER_POLL_INTERVAL_S; default 40 misses ≈ 2s at 50ms.
+HUNT_TRACK_LOST_LIMIT = 40
 
 TrackState = Literal["alive"]
 
@@ -52,6 +56,7 @@ class MobTrack:
     y: int
     confidence: float = 0.0
     attack_count: int = 0
+    attack_count_baseline: int = 0
     state: TrackState = "alive"
     mob_name: str = ""
     created_tick: int = 0
@@ -66,6 +71,8 @@ class MobTrack:
     opacity_baseline_samples: int = 0
     opacity_decay_streak: int = 0
     moving: bool = False
+    attack_anchor_x: int = 0
+    attack_anchor_y: int = 0
 
     @classmethod
     def from_discovery(
@@ -92,6 +99,8 @@ class MobTrack:
             discovery_scale=discovery_scale,
             candidate_scale=discovery_scale,
             area_epoch=area_epoch,
+            attack_anchor_x=x,
+            attack_anchor_y=y,
         )
 
 
@@ -99,20 +108,52 @@ def is_alive(track: MobTrack) -> bool:
     return track.state == "alive"
 
 
+def mob_attack_anchor_key(x: int, y: int, *, cell_px: int) -> tuple[int, int]:
+    """Snap a mob position to a stable cell for per-mob attack accounting."""
+    return (x // cell_px * cell_px, y // cell_px * cell_px)
+
+
 def apply_attack_event(track: MobTrack, now_tick: int) -> None:
-    """Record an attack on this track."""
+    """Record one attack directed at this mob track (attack-owned fields only)."""
     track.attack_count += 1
     track.last_attack_tick = now_tick
-    track.updated_tick = now_tick
+    track.lost_count = 0
+
+
+def is_track_unreachable_by_attacks(track: MobTrack, max_attacks: int) -> bool:
+    """True when this track exceeded the attack budget without being killed."""
+    return track.attack_count >= max_attacks
+
+
+def max_attacks_per_mob_before_unreachable(
+    *,
+    average_attacks_till_death: float,
+    skill_delay_ms: int,
+    attack_window_ms: int = 3000,
+) -> int:
+    """Unreachable budget: attacks that fit in 3s at current delay, plus session average."""
+    delay_ms = max(skill_delay_ms, 1)
+    attacks_in_window = attack_window_ms / delay_ms
+    return max(1, round(attacks_in_window + average_attacks_till_death))
 
 
 def select_target_id(
     tracks: list[MobTrack],
     now_tick: int,
     last_attack_target_id: int = 0,
+    *,
+    max_attacks: int | None = None,
 ) -> int:
-    """Round-robin through all alive tracks."""
-    alive_ids = sorted(track.id for track in tracks if track.state == "alive")
+    """Round-robin through alive tracks that are still within the attack budget."""
+    alive_ids = sorted(
+        track.id
+        for track in tracks
+        if is_alive(track)
+        and (
+            max_attacks is None
+            or not is_track_unreachable_by_attacks(track, max_attacks)
+        )
+    )
     if not alive_ids:
         return 0
     if last_attack_target_id not in alive_ids:
@@ -250,5 +291,9 @@ def apply_movement_observation(
     )
 
 
-def is_track_lost(track: MobTrack) -> bool:
-    return track.lost_count >= HUNT_TRACK_LOST_LIMIT
+def is_track_lost(track: MobTrack, *, miss_limit: int = HUNT_TRACK_LOST_LIMIT) -> bool:
+    return track.lost_count >= miss_limit
+
+
+def track_lost_miss_limit(config: dict) -> int:
+    return int(config.get("trackLostMissLimit", HUNT_TRACK_LOST_LIMIT))

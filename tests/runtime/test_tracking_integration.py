@@ -10,6 +10,7 @@ import numpy as np
 
 from pybot.runtime.capture.window_roi import HuntRoi
 from pybot.paths import PROJECT_ROOT, RECOGNITION_FIXTURES_DIR
+from pybot.recognition.fixtures import default_horn_fixture
 from pybot.recognition.rules import DiscoveryDetection
 from pybot.runtime.config import HuntRuntimeConfig
 from pybot.runtime.control import RuntimeControl
@@ -23,7 +24,7 @@ from pybot.runtime.validation_log import HuntValidationLogger
 from pybot.runtime.detection.detector_session import DetectorSession
 from pybot.runtime.workers.attack_loop import AttackLoop
 
-FIXTURE = RECOGNITION_FIXTURES_DIR / "game-screenshots" / "333.png"
+FIXTURE = default_horn_fixture()
 
 
 def playfield_roi(frame: np.ndarray) -> np.ndarray:
@@ -105,7 +106,7 @@ class TrackingIntegrationTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         frame = cv2.imread(str(FIXTURE), cv2.IMREAD_COLOR)
         if frame is None:
-            raise unittest.SkipTest("fixture 333.png missing")
+            raise unittest.SkipTest("fixture Horn/3Horn.png missing")
         cls.roi_frame = playfield_roi(frame)
         cls.roi = HuntRoi(x=0, y=0, w=cls.roi_frame.shape[1], h=cls.roi_frame.shape[0])
 
@@ -232,8 +233,8 @@ class TrackingIntegrationTests(unittest.TestCase):
 
         batch = detector.track_locals_frame(self.roi_frame, self.roi, snapshots)
         now = monotonic_ms() + 50
-        dead_ids, lost_ids = ctx.tracks.apply_tracking(batch.results, now_tick=now)
-        removed = dead_ids + lost_ids
+        dead_ids, lost_ids, unreachable_ids = ctx.tracks.apply_tracking(batch.results, now_tick=now)
+        removed = dead_ids + lost_ids + unreachable_ids
 
         # Static fixture: at least one track is re-found and stays alive, and no
         # found track is dropped.

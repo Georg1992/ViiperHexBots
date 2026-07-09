@@ -451,22 +451,26 @@ def _destroy_brushes() -> None:
 
 def destroy() -> None:
     """Destroy the overlay window and release GDI resources."""
-    _state.running = False
-    if _state.hwnd and user32.IsWindow(_state.hwnd):
-        user32.KillTimer(_state.hwnd, 1)
-        user32.DestroyWindow(_state.hwnd)
-    _state.hwnd = 0
-    _state.game_hwnd = 0
-    _state.visible = False
-    _state.paint_dirty = False
-    _state.log_lines.clear()
-    _state.track_positions.clear()
-    if _state.font_status:
-        gdi32.DeleteObject(_state.font_status)
+    with _state._lock:
+        _state.running = False
+        hwnd = _state.hwnd
+        font_status = _state.font_status
+        font_log = _state.font_log
+        _state.hwnd = 0
+        _state.game_hwnd = 0
+        _state.visible = False
+        _state.paint_dirty = False
+        _state.log_lines.clear()
+        _state.track_positions.clear()
         _state.font_status = 0
-    if _state.font_log:
-        gdi32.DeleteObject(_state.font_log)
         _state.font_log = 0
+    if hwnd and user32.IsWindow(hwnd):
+        user32.KillTimer(hwnd, 1)
+        user32.DestroyWindow(hwnd)
+    if font_status:
+        gdi32.DeleteObject(font_status)
+    if font_log:
+        gdi32.DeleteObject(font_log)
     _destroy_brushes()
 
 

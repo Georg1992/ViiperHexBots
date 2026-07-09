@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 import cv2
@@ -12,47 +13,34 @@ from pybot.paths import PROJECT_ROOT, RECOGNITION_DIR
 from pybot.recognition.detector.debug_renderer import save_debug_bundle, save_summary_contact_sheet
 from pybot.recognition.detector.descriptors.descriptor_builder import DescriptorBuilder
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
+from pybot.recognition.fixtures import MOB_FIXTURE_SUITES, MobFixtureImage, MobFixtureSuite
 
 
-def _load_ground_truth(image_dir: Path, entry: dict) -> list[dict]:
-    file_name = entry["file"]
-    json_path = image_dir / f"{Path(file_name).stem}.json"
-    if json_path.exists():
-        data = json.loads(json_path.read_text(encoding="utf-8"))
-        return data["horns"]
-    if int(entry["expectHorns"]) == 0:
-        return []
-    raise FileNotFoundError(f"missing ground truth JSON for positive fixture: {json_path}")
-
-
-def _manifest_entries(fixtures_dir: Path) -> list[dict]:
+def _manifest_entries(fixtures_dir: Path, mob_name: str) -> list[MobFixtureImage]:
+    mob_name = mob_name.lower()
+    for suite in MOB_FIXTURE_SUITES:
+        if suite.mob_name == mob_name:
+            return suite.images()
     manifest_path = fixtures_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return []
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    return list(data["images"])
-
-
-def _match_counts(accepted, ground_truth: list[dict]) -> tuple[int, int, int]:
-    matched_candidates: set[int] = set()
-    tp = 0
-    for gt in ground_truth:
-        gx, gy = int(gt["centerX"]), int(gt["centerY"])
-        radius = int(gt["radius"])
-        radius_sq = radius * radius
-        best_idx = None
-        best_score = -1.0
-        for idx, candidate in enumerate(accepted):
-            if idx in matched_candidates:
-                continue
-            dist_sq = (candidate.center_x - gx) ** 2 + (candidate.center_y - gy) ** 2
-            if dist_sq <= radius_sq and candidate.final_score > best_score:
-                best_idx = idx
-                best_score = candidate.final_score
-        if best_idx is not None:
-            matched_candidates.add(best_idx)
-            tp += 1
-    fp = len(accepted) - tp
-    fn = len(ground_truth) - tp
-    return tp, fp, fn
+    pattern = re.compile(str(data["filenamePattern"]), re.IGNORECASE)
+    image_dir = fixtures_dir / str(data.get("folder", data.get("imageDir", ".")))
+    entries: list[MobFixtureImage] = []
+    for path in sorted(image_dir.glob("*.png")):
+        match = pattern.match(path.name)
+        if match is None:
+            continue
+        entries.append(
+            MobFixtureImage(
+                file_name=path.name,
+                path=path,
+                expected_count=int(match.group(1)),
+                gray_world="_Gray" in path.stem,
+            )
+        )
+    return entries
 
 
 def run_fixtures(mob_name: str, fixtures_dir: Path, *, debug: bool, rebuild_descriptor: bool) -> dict:
@@ -60,46 +48,51 @@ def run_fixtures(mob_name: str, fixtures_dir: Path, *, debug: bool, rebuild_desc
         DescriptorBuilder(PROJECT_ROOT).build(mob_name, force=True)
     config = load_detector_config()
     detector = MobDetector(PROJECT_ROOT, config)
-    image_dir = fixtures_dir / "game-screenshots"
-    manifest = json.loads((fixtures_dir / "manifest.json").read_text(encoding="utf-8"))
     debug_root = PROJECT_ROOT / config["debugOutputDir"]
     summary = {
         "mobName": mob_name,
         "pipeline": "heatmap",
         "images": [],
-        "totals": {"tp": 0, "fp": 0, "fn": 0},
+        "totals": {"expected": 0, "accepted": 0, "matches": 0, "misses": 0, "extras": 0},
     }
     overlay_paths: list[Path] = []
-    for entry in _manifest_entries(fixtures_dir):
-        file_name = entry["file"]
-        image_path = image_dir / file_name
-        frame = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    for image in _manifest_entries(fixtures_dir, mob_name):
+        frame = cv2.imread(str(image.path), cv2.IMREAD_COLOR)
         if frame is None:
             continue
         result = detector.detect(frame, mob_name)
-        gt = _load_ground_truth(image_dir, entry)
-        tp, fp, fn = _match_counts(result.accepted, gt)
-        summary["totals"]["tp"] += tp
-        summary["totals"]["fp"] += fp
-        summary["totals"]["fn"] += fn
-        best_scores = [round(c.final_score, 4) for c in sorted(result.candidates, key=lambda c: c.final_score, reverse=True)[:5]]
+        accepted = len(result.accepted)
+        expected = image.expected_count
+        matches = min(expected, accepted)
+        misses = max(0, expected - accepted)
+        extras = max(0, accepted - expected)
+        summary["totals"]["expected"] += expected
+        summary["totals"]["accepted"] += accepted
+        summary["totals"]["matches"] += matches
+        summary["totals"]["misses"] += misses
+        summary["totals"]["extras"] += extras
+        best_scores = [
+            round(candidate.final_score, 4)
+            for candidate in sorted(result.candidates, key=lambda item: item.final_score, reverse=True)[:5]
+        ]
         row = {
-            "file": file_name,
-            "expected": len(gt),
-            "accepted": len(result.accepted),
-            "tp": tp,
-            "fp": fp,
-            "fn": fn,
+            "file": image.file_name,
+            "grayWorld": image.gray_world,
+            "expected": expected,
+            "accepted": accepted,
+            "matches": matches,
+            "misses": misses,
+            "extras": extras,
             "bestScores": best_scores,
             "elapsedS": round(result.elapsed_s, 4),
         }
         summary["images"].append(row)
         print(
-            f"{file_name}: expected={row['expected']} accepted={row['accepted']} "
-            f"TP={tp} FP={fp} FN={fn} best={best_scores} time={row['elapsedS']}s"
+            f"{image.file_name}: expected={expected} accepted={accepted} "
+            f"misses={misses} extras={extras} best={best_scores} time={row['elapsedS']}s"
         )
         if debug:
-            out_dir = save_debug_bundle(debug_root, file_name, frame, result)
+            out_dir = save_debug_bundle(debug_root, image.file_name, frame, result)
             overlay_paths.append(out_dir / "detected_overlay.png")
     if debug:
         summary_dir = debug_root / mob_name

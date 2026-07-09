@@ -10,8 +10,8 @@ import cv2
 
 from pybot.paths import PROJECT_ROOT, RECOGNITION_DIR
 from pybot.recognition.cli import apply_scale_calibration
+from pybot.recognition.fixtures import default_horn_fixture
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
-from pybot.recognition.detector.tracking.local_track_recognizer import follow_track_local
 from pybot.recognition.detector.tracking.local_tracker import LocalTrackResult, track_local
 
 ROOT = PROJECT_ROOT
@@ -31,9 +31,9 @@ class LocalTrackerTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.base_config = load_detector_config()
         cls.fixture_dir = MOB_REC / "test-fixtures" / "game-screenshots"
-        cls.frame = cv2.imread(str(cls.fixture_dir / "333.png"), cv2.IMREAD_COLOR)
+        cls.frame = cv2.imread(str(default_horn_fixture()), cv2.IMREAD_COLOR)
         if cls.frame is None:
-            raise unittest.SkipTest("fixture 333.png missing")
+            raise unittest.SkipTest("fixture Horn/3Horn.png missing")
         cls.roi = playfield_roi(cls.frame)
 
     def _detector(self) -> MobDetector:
@@ -65,19 +65,6 @@ class LocalTrackerTests(unittest.TestCase):
         dist = abs(result.x - anchor.center_x) + abs(result.y - anchor.center_y)
         self.assertLess(dist, 40)
 
-    def test_recognizer_wrapper_matches_detector(self) -> None:
-        detector = self._detector()
-        anchor = self._living_anchor(detector)
-        track = {
-            "trackId": 2,
-            "x": anchor.center_x,
-            "y": anchor.center_y,
-            "scale": anchor.candidate_scale,
-        }
-        direct = track_local(detector, self.roi, "horn", track)
-        wrapped = follow_track_local(detector, self.roi, "horn", track)
-        self.assertEqual(direct, wrapped)
-
     def test_miss_returns_reason_not_unreachable(self) -> None:
         detector = self._detector()
         track = {"trackId": 99, "x": 8, "y": 8, "scale": 0.9}
@@ -99,6 +86,25 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertTrue(result.found)
         dist = abs(result.x - anchor.center_x) + abs(result.y - anchor.center_y)
         self.assertLess(dist, 50)
+
+    def test_finds_mob_with_death_detection_at_center(self) -> None:
+        detector = self._detector()
+        anchor = self._living_anchor(detector)
+        track = {
+            "trackId": 4,
+            "x": anchor.center_x,
+            "y": anchor.center_y,
+            "scale": anchor.candidate_scale,
+        }
+        result = track_local(
+            detector,
+            self.roi,
+            "horn",
+            track,
+            death_detection_enabled=True,
+        )
+        self.assertTrue(result.found)
+        self.assertFalse(result.dead)
 
     def test_benchmark_one_three_six_tracks(self) -> None:
         detector = self._detector()

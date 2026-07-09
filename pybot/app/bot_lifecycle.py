@@ -1,12 +1,12 @@
 """Bot lifecycle manager — orchestrates start/stop/pause/resume.
 
-Owns the BotController instance, the focus-polling loop, and the VIIPER
-initialisation sequence.  Emits callbacks so the UI layer can react to
-state transitions without being coupled to the lifecycle logic.
+Heavy hunt startup runs on a background thread.  Cross-thread UI work is
+queued and drained on the Tk main thread (never ``root.after`` from workers).
 """
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 import tkinter as tk
@@ -20,35 +20,24 @@ from pybot.app.overlay import Win32HuntOverlay
 from pybot.mobs.catalog import MobEntry, mob_folder_by_index
 from pybot.app.session_log import AppSessionLog
 from pybot.app.viiper_manager import ViiperManager
-from pybot.app.win32_util import is_window_active
+from pybot.app.win32_util import is_window_active, restore_and_activate
 from pybot.runtime.overlay_ports import NullOverlay
+
+_MAIN_DISPATCH_MS = 50
+_MAX_DISPATCH_PER_TICK = 20
 
 
 class BotState(Enum):
     """Bot lifecycle states visible to the UI layer."""
 
     OFF = auto()
+    STARTING = auto()
     RUNNING = auto()
     PAUSED = auto()
 
 
 class BotLifecycleManager:
-    """Manages the bot runtime from VIIPER init through hunt thread lifecycle.
-
-    Async initialisation
-        ``init_viiper()`` runs on a background thread.  On success it
-        sets *input_ready* to ``True`` and fires *on_input_ready*.
-
-    Bot thread lifecycle
-        ``start(config, session_id)`` / ``stop()`` /
-        ``pause()`` / ``resume()`` manage the :class:`BotController`
-        thread and emit *on_state_change* after each transition.
-
-    Focus polling
-        While running, a 300 ms timer checks whether the game window
-        is still active.  When focus is lost, ``pause()`` is called
-        automatically.
-    """
+    """Manages the bot runtime from VIIPER init through hunt thread lifecycle."""
 
     def __init__(
         self,
@@ -80,93 +69,184 @@ class BotLifecycleManager:
         self._input_ready = False
         self._focus_grace_until = 0.0
         self._stop_joiner: threading.Thread | None = None
-
-    # ── Properties ──────────────────────────────────────────────────
+        self._start_thread: threading.Thread | None = None
+        self._start_cancelled = False
+        self._start_generation = 0
+        self._main_queue: queue.Queue[Callable[[], None]] = queue.Queue()
+        self._root.after(_MAIN_DISPATCH_MS, self._drain_main_queue)
 
     @property
     def state(self) -> BotState:
-        """Current bot state (OFF / RUNNING / PAUSED)."""
         return self._state
 
     @property
     def input_ready(self) -> bool:
-        """``True`` once VIIPER has been started successfully."""
         return self._input_ready
 
     @property
     def window_id(self) -> int:
-        """Convenience access to the configured game window HWND."""
         return self._config.window_id
 
-    # ── VIIPER initialisation (call on a background thread) ─────────
+    def _post_to_main(self, callback: Callable[[], None]) -> None:
+        self._main_queue.put_nowait(callback)
+
+    def _drain_main_queue(self) -> None:
+        processed = 0
+        try:
+            while processed < _MAX_DISPATCH_PER_TICK:
+                callback = self._main_queue.get_nowait()
+                try:
+                    callback()
+                except Exception as exc:
+                    self._on_log(f"[STATE] UI callback error: {exc}")
+                processed += 1
+        except queue.Empty:
+            pass
+        finally:
+            self._root.after(_MAIN_DISPATCH_MS, self._drain_main_queue)
 
     def init_viiper(self) -> None:
-        """Start the VIIPER server.
-
-        Call this on a background thread (e.g. ``threading.Thread(
-        target=lifecycle.init_viiper, daemon=True).start()``).
-        On success, *input_ready* becomes ``True`` and the
-        *on_input_ready* callback fires on the main thread.
-        """
         try:
             self._viiper.start()
         except (FileNotFoundError, RuntimeError) as exc:
-            self._root.after(
-                0,
+            self._post_to_main(
                 lambda: messagebox.showerror("ViiperHexBots", str(exc)),
             )
             if self._on_exit_requested_call:
-                self._root.after(0, self._on_exit_requested_call)
+                self._post_to_main(self._on_exit_requested_call)
             return
-        self._input_ready = True
-        if self._on_input_ready_call:
-            self._root.after(0, self._on_input_ready_call)
 
-    # ── Bot lifecycle ───────────────────────────────────────────────
+        def _mark_input_ready() -> None:
+            self._input_ready = True
+            if self._on_input_ready_call:
+                self._on_input_ready_call()
+
+        self._post_to_main(_mark_input_ready)
+
+    def await_shutdown(self, timeout: float = DEFAULT_STOP_JOIN_TIMEOUT_S + 1.0) -> None:
+        """Block until async start/stop threads finish (for app exit)."""
+        self._start_cancelled = True
+        if self._start_thread is not None and self._start_thread.is_alive():
+            self._start_thread.join(timeout=timeout)
+        if self._stop_joiner is not None and self._stop_joiner.is_alive():
+            self._stop_joiner.join(timeout=timeout)
 
     def start(
         self,
         config_snapshot: AppConfig,
         session_id: str,
+    ) -> bool:
+        """Begin async hunt startup. Returns True when accepted."""
+        if self._state not in (BotState.OFF,):
+            return False
+        if self._start_thread is not None and self._start_thread.is_alive():
+            return False
+
+        self._start_cancelled = False
+        self._start_generation += 1
+        generation = self._start_generation
+        self._state = BotState.STARTING
+        self._post_to_main(
+            lambda: self._on_state_change(BotState.STARTING)
+            if self._on_state_change
+            else None
+        )
+
+        def _run_start() -> None:
+            try:
+                self._await_prior_stop_joiner()
+                if self._start_cancelled:
+                    return
+
+                restore_and_activate(config_snapshot.window_id)
+                self._session.open(session_id=session_id)
+                if self._start_cancelled:
+                    return
+
+                mob_name = mob_folder_by_index(
+                    self._mob_catalog, config_snapshot.selected_monster
+                )
+                runtime_overlay = (
+                    self._hunt_overlay
+                    if config_snapshot.hunt_log_overlay
+                    else NullOverlay()
+                )
+                bot = BotController(
+                    app_config=config_snapshot,
+                    session_id=session_id,
+                    on_log=self._on_log,
+                    overlay=runtime_overlay,
+                )
+                if self._start_cancelled:
+                    return
+
+                bot.start(mob_name=mob_name)
+                self._post_to_main(
+                    lambda: self._finish_start(
+                        bot,
+                        config_snapshot=config_snapshot,
+                        session_id=session_id,
+                        generation=generation,
+                    ),
+                )
+            except Exception as exc:
+                self._post_to_main(
+                    lambda err=exc: self._fail_start(err, generation=generation),
+                )
+
+        self._start_thread = threading.Thread(
+            target=_run_start,
+            name="bot-start",
+            daemon=True,
+        )
+        self._start_thread.start()
+        return True
+
+    def _finish_start(
+        self,
+        bot: BotController,
+        *,
+        config_snapshot: AppConfig,
+        session_id: str,
+        generation: int,
     ) -> None:
-        """Start the hunt runtime on a daemon thread.
-
-        Each call generates a fresh ``hunt_session_id`` so the runtime
-        logs go into a new directory — not the app-level session dir.
-
-        Args:
-            config_snapshot: Fully synced AppConfig with current UI values.
-            session_id: App-level session identifier (used as prefix).
-        """
-        if self._state != BotState.OFF:
+        if generation != self._start_generation:
+            if bot.running:
+                bot.request_stop()
+                self._start_stop_joiner(bot, destroy_overlay=False)
             return
 
-        self._await_prior_stop_joiner()
+        if self._start_cancelled or self._state != BotState.STARTING:
+            if bot.running:
+                bot.request_stop()
+                self._start_stop_joiner(bot)
+            if self._state == BotState.STARTING:
+                self._state = BotState.OFF
+                if self._on_state_change:
+                    self._on_state_change(BotState.OFF)
+            return
 
-        if self._bot is not None:
-            self._bot.request_stop()
-            self._bot = None
+        if not bot.running:
+            self._on_log("[STATE] Bot start failed — hunt thread did not start")
+            self._state = BotState.OFF
+            if self._on_state_change:
+                self._on_state_change(BotState.OFF)
+            return
 
-        mob_name = mob_folder_by_index(
-            self._mob_catalog, config_snapshot.selected_monster
-        )
-
-        runtime_overlay = (
-            self._hunt_overlay
-            if config_snapshot.hunt_log_overlay
-            else NullOverlay()
-        )
-
-        self._bot = BotController(
-            app_config=config_snapshot,
-            session_id=session_id,
-            on_log=self._on_log,
-            overlay=runtime_overlay,
-        )
-        self._bot.start(mob_name=mob_name)
+        self._bot = bot
         self._state = BotState.RUNNING
         self._arm_focus_grace()
-        # Start overlay upkeep timer (reposition + repaint every 100ms)
+
+        if config_snapshot.hunt_log_overlay and config_snapshot.window_id:
+            ok = self._hunt_overlay.create(
+                config_snapshot.window_id,
+                search_range_cells=config_snapshot.search_range,
+            )
+            if ok:
+                self._on_log(f"[OVERLAY] created on hwnd={config_snapshot.window_id}")
+            else:
+                self._on_log(f"[OVERLAY] failed: {self._hunt_overlay.last_error()}")
+
         self._root.after(100, self._schedule_overlay_tick)
         self._session.write_block(
             "bot start",
@@ -177,41 +257,52 @@ class BotLifecycleManager:
         if self._on_state_change:
             self._on_state_change(BotState.RUNNING)
         self._root.after(300, self._poll_focus)
+        self._on_log("[STATE] Hunt runtime started")
 
-    def _schedule_overlay_tick(self) -> None:
-        """Periodic overlay upkeep while the bot is running."""
-        if self._state != BotState.OFF:
-            self._hunt_overlay.tick()
-            self._root.after(100, self._schedule_overlay_tick)
-
-    def set_search_range_cells(self, cells: int) -> None:
-        """Keep hunt capture and overlay search boxes aligned with the GUI."""
-        self._hunt_overlay.set_search_range_cells(cells)
-        if self._bot is not None:
-            self._bot.set_search_range_cells(cells)
+    def _fail_start(self, exc: Exception, *, generation: int) -> None:
+        if generation != self._start_generation:
+            return
+        if self._state != BotState.STARTING:
+            return
+        self._on_log(f"[STATE] Bot start failed: {exc}")
+        self._state = BotState.OFF
+        if self._on_state_change:
+            self._on_state_change(BotState.OFF)
 
     def stop(self) -> None:
-        """Stop the hunt runtime and destroy the overlay."""
         if self._state == BotState.OFF and self._bot is None:
             return
+
+        if self._state == BotState.STARTING:
+            self._start_cancelled = True
 
         bot = self._bot
         if bot is not None:
             bot.request_stop()
+
         self._bot = None
         self._state = BotState.OFF
         self._hunt_overlay.reset_stats()
-        self._hunt_overlay.destroy()
+        if bot is None:
+            self._hunt_overlay.destroy()
         if self._on_state_change:
             self._on_state_change(BotState.OFF)
         if bot is not None:
             self._start_stop_joiner(bot)
 
-    def _start_stop_joiner(self, bot: BotController) -> None:
-        self._await_prior_stop_joiner()
+    def _destroy_hunt_overlay(self) -> None:
+        self._hunt_overlay.destroy()
 
+    def _start_stop_joiner(
+        self,
+        bot: BotController,
+        *,
+        destroy_overlay: bool = True,
+    ) -> None:
         def _join() -> None:
             bot.stop(join_timeout=DEFAULT_STOP_JOIN_TIMEOUT_S)
+            if destroy_overlay:
+                self._post_to_main(self._destroy_hunt_overlay)
 
         self._stop_joiner = threading.Thread(
             target=_join,
@@ -226,7 +317,6 @@ class BotLifecycleManager:
         self._stop_joiner = None
 
     def pause(self) -> None:
-        """Pause the hunt runtime because game focus was lost."""
         if self._state != BotState.RUNNING:
             return
         if self._bot is not None:
@@ -238,7 +328,6 @@ class BotLifecycleManager:
             self._on_state_change(BotState.PAUSED)
 
     def resume(self) -> None:
-        """Resume the hunt runtime after focus is regained."""
         if self._state != BotState.PAUSED:
             return
         if self._bot is not None:
@@ -251,11 +340,18 @@ class BotLifecycleManager:
             self._on_state_change(BotState.RUNNING)
         self._root.after(300, self._poll_focus)
 
+    def set_search_range_cells(self, cells: int) -> None:
+        self._hunt_overlay.set_search_range_cells(cells)
+        if self._bot is not None:
+            self._bot.set_search_range_cells(cells)
+
     def _arm_focus_grace(self, seconds: float = 2.0) -> None:
-        """Ignore focus-loss auto-pause briefly after start/resume."""
         self._focus_grace_until = time.monotonic() + seconds
 
-    # ── Focus polling ───────────────────────────────────────────────
+    def _schedule_overlay_tick(self) -> None:
+        if self._state != BotState.OFF:
+            self._hunt_overlay.tick()
+            self._root.after(100, self._schedule_overlay_tick)
 
     def _poll_focus(self) -> None:
         if (

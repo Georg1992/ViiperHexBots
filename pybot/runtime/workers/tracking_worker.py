@@ -6,8 +6,9 @@ detector dedicated to tracking so it never blocks on the discovery scan's
 lock), writing fresh coordinates into the shared HuntTracks store. That store
 is the hand-off point: discovery reads those coordinates when it dedups.
 
-Tracking owns position, movement state, and liveness. Tracks are removed here
-when opacity death is confirmed, after too many consecutive misses, or never
+Tracking owns position, movement state, all opacity probes, unreachable
+removal, and liveness. Tracks are removed here when opacity death is confirmed,
+after too many consecutive misses, when the attack budget is exceeded, or never
 by discovery.
 """
 
@@ -16,7 +17,7 @@ from __future__ import annotations
 import traceback
 
 from pybot.recognition.rules import is_alive
-from pybot.runtime.constants import WORKER_POLL_INTERVAL_S
+from pybot.runtime.constants import LOG_REPEAT_INTERVAL_MS, WORKER_POLL_INTERVAL_S
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.detection.detector_session import StateTrackSnapshot
 from pybot.runtime.workers.worker_contexts import TrackingWorkerContext
@@ -27,19 +28,20 @@ class TrackingWorker:
 
     def __init__(self, ctx: TrackingWorkerContext) -> None:
         self._ctx = ctx
+        self._last_empty_frame_log_ms = 0
 
     def run(self) -> None:
         ctx = self._ctx
         ctx.logger.behavior("[TRACK] worker started")
-        try:
-            while not ctx.stop_event.is_set():
+        while not ctx.stop_event.is_set():
+            try:
                 if ctx.should_run_workers():
                     self._tick()
+                    ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
                 else:
                     ctx.wait_while_stopped_or_paused(WORKER_POLL_INTERVAL_S)
-        except Exception:
-            ctx.logger.behavior(f"[TRACK] CRASH:\n{traceback.format_exc()}")
-            raise
+            except Exception:
+                ctx.logger.behavior(f"[TRACK] tick error:\n{traceback.format_exc()}")
 
     def _tick(self) -> None:
         ctx = self._ctx
@@ -51,7 +53,10 @@ class TrackingWorker:
 
         frame = ctx.capture.capture_roi(roi)
         if frame is None or frame.size == 0:
-            ctx.logger.behavior("[TRACK] capture returned empty frame")
+            now_ms = monotonic_ms()
+            if now_ms - self._last_empty_frame_log_ms >= LOG_REPEAT_INTERVAL_MS:
+                self._last_empty_frame_log_ms = now_ms
+                ctx.logger.behavior("[TRACK] capture returned empty frame")
             return
 
         now_ms = monotonic_ms()
@@ -65,22 +70,36 @@ class TrackingWorker:
                 opacity_baseline_samples=track.opacity_baseline_samples,
                 opacity_decay_streak=track.opacity_decay_streak,
                 moving=track.moving,
+                attack_count=track.attack_count,
+                created_tick=track.created_tick,
+                now_tick=now_ms,
             )
             for track in ctx.tracks.tracks_for_policy(now_ms)
             if is_alive(track)
         ]
 
+        results = []
         if snapshots:
             batch = ctx.tracker.track_locals_frame(frame, roi, snapshots)
-            dead_ids, lost_ids = ctx.tracks.apply_tracking(batch.results, now_tick=now_ms)
-            if dead_ids:
-                ctx.logger.behavior(
-                    f"[TRACK] dropped {len(dead_ids)} dead track(s): {dead_ids}"
-                )
-            if lost_ids:
-                ctx.logger.behavior(
-                    f"[TRACK] dropped {len(lost_ids)} lost track(s): {lost_ids}"
-                )
+            results = batch.results
+
+        dead_ids, lost_ids, unreachable_ids = ctx.tracks.apply_tracking(
+            results,
+            now_tick=now_ms,
+        )
+        if dead_ids:
+            ctx.logger.behavior(
+                f"[TRACK] dropped {len(dead_ids)} dead track(s): {dead_ids}"
+            )
+        if lost_ids:
+            ctx.logger.behavior(
+                f"[TRACK] dropped {len(lost_ids)} lost track(s): {lost_ids}"
+            )
+        if unreachable_ids:
+            ctx.logger.behavior(
+                f"[TRACK] dropped {len(unreachable_ids)} unreachable track(s): "
+                f"{unreachable_ids}"
+            )
 
         self._update_overlay(now_ms)
 

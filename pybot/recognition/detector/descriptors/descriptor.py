@@ -40,8 +40,10 @@ class MobDescriptor:
     accent_colors: list[ColorCluster]
     rare_colors: list[ColorCluster]
     sprite_palette_bgr: list[tuple[int, int, int]]
+    match_palette_bgr: list[tuple[int, int, int]]
     hsv_histogram: list[float]
-    dominant_pixel_bgr: list[int] | None = None  # [B, G, R] of the single most common pixel across all sprite frames
+    dominant_pixel_bgr: list[int] | None = None
+    accent_pixel_bgr: list[int] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MobDescriptor":
@@ -60,8 +62,16 @@ class MobDescriptor:
             )
             supporting_colors = []
 
-        raw = data.get("dominantPixelBgr")
-        dominant_pixel_bgr = [int(v) for v in raw] if raw is not None else None
+        raw_match = data.get("matchPaletteBgr")
+        if raw_match is not None:
+            match_palette_bgr = [tuple(int(v) for v in item) for item in raw_match]
+        else:
+            match_palette_bgr = [tuple(int(v) for v in item) for item in data["spritePaletteBgr"]]
+
+        raw_dominant = data.get("dominantPixelBgr")
+        dominant_pixel_bgr = [int(v) for v in raw_dominant] if raw_dominant is not None else None
+        raw_accent = data.get("accentPixelBgr")
+        accent_pixel_bgr = [int(v) for v in raw_accent] if raw_accent is not None else None
 
         return cls(
             mob_name=str(data["mobName"]),
@@ -72,8 +82,10 @@ class MobDescriptor:
             accent_colors=[ColorCluster(**item) for item in data["accentColors"]],
             rare_colors=[ColorCluster(**item) for item in data["rareColors"]],
             sprite_palette_bgr=[tuple(int(v) for v in item) for item in data["spritePaletteBgr"]],
+            match_palette_bgr=match_palette_bgr,
             hsv_histogram=[float(v) for v in data["hsvHistogram"]],
             dominant_pixel_bgr=dominant_pixel_bgr,
+            accent_pixel_bgr=accent_pixel_bgr,
         )
 
     @classmethod
@@ -91,8 +103,10 @@ class MobDescriptor:
             "accentColors": data["accent_colors"],
             "rareColors": data["rare_colors"],
             "spritePaletteBgr": data["sprite_palette_bgr"],
+            "matchPaletteBgr": data["match_palette_bgr"],
             "hsvHistogram": data["hsv_histogram"],
             "dominantPixelBgr": data.get("dominant_pixel_bgr"),
+            "accentPixelBgr": data.get("accent_pixel_bgr"),
         }
 
     def save(self, path: Path) -> None:

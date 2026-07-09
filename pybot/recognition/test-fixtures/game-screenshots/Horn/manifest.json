@@ -1,0 +1,7 @@
+{
+  "mob": "horn",
+  "folder": "Horn",
+  "description": "Horn detection fixtures. Leading digit is mob count. *_Gray* = gray world textures.",
+  "strictAcceptCount": true,
+  "filenamePattern": "^(\\d+)Horn(?:_Gray\\d*)?\\.png$"
+}

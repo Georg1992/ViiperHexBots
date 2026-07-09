@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import threading
 from ctypes import wintypes
 
 import numpy as np
@@ -17,9 +18,11 @@ class HuntWindowCapture:
     def __init__(self, config: HuntRuntimeConfig) -> None:
         self._config = config
         self._search_range_cells = config.search_range_cells
+        self._range_lock = threading.Lock()
 
     def set_search_range_cells(self, cells: int) -> None:
-        self._search_range_cells = cells
+        with self._range_lock:
+            self._search_range_cells = cells
 
     @property
     def hwnd(self) -> int:
@@ -52,16 +55,18 @@ class HuntWindowCapture:
         if client is None:
             return None
         client_left, client_top, client_w, client_h = client
+        with self._range_lock:
+            search_range_cells = self._search_range_cells
         return hunt_roi_from_client_rect(
             client_left,
             client_top,
             client_w,
             client_h,
-            search_range_cells=self._search_range_cells,
+            search_range_cells=search_range_cells,
             cell_size_px=self._config.cell_size_px,
         )
 
-    def capture_roi(self, roi: HuntRoi) -> np.ndarray:
+    def capture_roi(self, roi: HuntRoi) -> np.ndarray | None:
         from pybot.recognition.capture import capture_region
 
         return capture_region(roi.x, roi.y, roi.w, roi.h)

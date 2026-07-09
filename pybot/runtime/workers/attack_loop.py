@@ -22,26 +22,17 @@ class AttackLoop:
 
     def run(self) -> None:
         self._ctx.logger.behavior("[ATTACK] loop started")
-        tick_count = 0
         while not self._ctx.is_stopped():
             try:
-                tick_count += 1
                 if not self._ctx.should_run_workers():
                     self._ctx.wait_while_stopped_or_paused(WORKER_POLL_INTERVAL_S)
                     continue
 
                 tick = monotonic_ms()
                 policy_tracks = self._ctx.tracks.tracks_for_policy(tick)
-
-                # Heartbeat every ~5s so we can diagnose hangs
-                if tick_count % 100 == 0:
-                    cd = self._is_on_cooldown(tick)
-                    target_id = self._ctx.policy.select_target(policy_tracks, tick)
-                    self._ctx.logger.behavior(
-                        f"[ATTACK] heartbeat tick={tick_count} "
-                        f"cooldown={int(cd)} target={target_id} "
-                        f"tracks={self._ctx.tracks.get_track_count()}"
-                    )
+                self._ctx.policy.set_max_attacks(
+                    self._ctx.tracks.max_attacks_per_mob_before_unreachable
+                )
 
                 # Respect skill delay after each attack
                 if self._is_on_cooldown(tick):
@@ -61,7 +52,7 @@ class AttackLoop:
                 self._ctx.logger.behavior(
                     f"[ATTACK] CRASH:\n{traceback.format_exc()}"
                 )
-                raise
+                break
 
     def _is_on_cooldown(self, now_tick: int) -> bool:
         if not self._last_attack_ms:
@@ -81,6 +72,8 @@ class AttackLoop:
 
         click_x, click_y = snap.x, snap.y
 
+        ctx.tracks.mark_attack_pending(target_id)
+
         # Move mouse and click skill – wrap in try/except so input
         # failures (Viiper connection, game window, etc.) don't kill
         # the entire attack loop thread.
@@ -94,12 +87,22 @@ class AttackLoop:
             return
 
         # Record attack and start cooldown
-        ctx.tracks.apply_attack_event(target_id, now_tick=now_tick)
+        still_tracked = ctx.tracks.apply_attack_event(target_id, now_tick=now_tick)
         ctx.policy.note_attack_target(target_id)
         self._last_attack_ms = now_tick
         ctx.overlay.increment_attacks()
 
-        ctx.logger.behavior(
-            f"[ATTACK] id={target_id} @{click_x},{click_y} "
-            f"attacks={snap.attack_count + 1}"
-        )
+        if still_tracked:
+            ctx.logger.behavior(
+                f"[ATTACK] id={target_id} @{click_x},{click_y} "
+                f"mob_attacks={snap.attack_count + 1}"
+            )
+        else:
+            limit = ctx.tracks.max_attacks_per_mob_before_unreachable
+            avg = ctx.tracks.average_attacks_till_death
+            ctx.logger.behavior(
+                f"[ATTACK] id={target_id} @{click_x},{click_y} "
+                f"unreachable after {snap.attack_count + 1} attacks "
+                f"(max={limit} avg={avg:.1f} delay={ctx.config.skill_delay_ms}ms) "
+                f"— tracking will drop on next tick"
+            )

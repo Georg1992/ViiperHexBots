@@ -23,7 +23,6 @@ class AppSettings:
     use_memory_reading: bool = False
 
     selected_monster: int = 1
-    mob_recognition_debug: int = 0
 
     search_range: int = 16
     hunt_mode: str = "teleport"

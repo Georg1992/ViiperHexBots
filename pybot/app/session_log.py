@@ -84,13 +84,13 @@ class AppSessionLog:
 
     def write_system(self, level: str, category: str, message: str) -> None:
         """Queue a system log line (non-blocking, returns immediately)."""
-        if not self._opened:
+        if not self._opened or self._closed:
             return
         self._enqueue(level, category, message)
 
     def write_block(self, title: str, content: str) -> None:
         """Queue a structured log block (non-blocking)."""
-        if not self._opened or self._system_log is None:
+        if not self._opened or self._closed or self._system_log is None:
             return
         lines = [f"\n--- {title} ---\n"]
         for raw_line in content.splitlines():
@@ -116,9 +116,9 @@ class AppSessionLog:
     def _close_writer(self) -> None:
         """Flush pending writes and stop the background writer thread."""
         if self._writer_thread is not None and self._writer_thread.is_alive():
-            # Sentinal already queued by end(); wait for it to drain
+            self._queue.put_nowait(None)
             self._writer_thread.join(timeout=2.0)
-            self._writer_thread = None
+        self._writer_thread = None
         # Drain any leftover items so next open() starts clean
         while not self._queue.empty():
             try:

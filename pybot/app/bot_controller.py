@@ -72,6 +72,9 @@ class BotController:
             self._thread.join(timeout=join_timeout)
         self._thread = None
         self._runtime = None
+        control_file = SESSIONS_DIR / self._session_id / "control.json"
+        if control_file.is_file():
+            control_file.unlink(missing_ok=True)
 
     def pause(self) -> None:
         if self._runtime is not None:

@@ -13,8 +13,10 @@ from pybot.recognition.spr_reader import SprReader
 
 from pybot.recognition.detector.descriptors.descriptor import ColorCluster, MobDescriptor, SizeDescriptor
 
-DESCRIPTOR_VERSION = 4
+DESCRIPTOR_VERSION = 6
 LIVING_ACTIONS = (0, 1)
+MIN_DISTINCTIVE_SATURATION = 40.0
+MIN_DISTINCTIVE_VALUE = 30.0
 
 
 class DescriptorBuilder:
@@ -111,11 +113,17 @@ class DescriptorBuilder:
         # Tighten hue+sat tolerance on the dominant cluster for more selective color matching
         profile = self._build_frame_profile(living_frames, dominant_tolerance=(12, 35, 55))
 
-        profile_body_colors = profile["body_colors"]
-        profile_dominant = profile_body_colors[0] if profile_body_colors else profile["body_colors"][0]
-        profile_supporting = profile_body_colors[1:] if len(profile_body_colors) > 1 else []
-        # Single most common pixel color across all sprite frames (not a cluster center)
+        profile_body_colors = self._distinctive_clusters(profile["body_colors"])
+        if not profile_body_colors:
+            raise RuntimeError(f"no distinctive body colors for {mob_name}")
+        profile_dominant = profile_body_colors[0]
+        profile_supporting = profile_body_colors[1:]
+        profile_accent_colors = self._distinctive_clusters(profile["accent_colors"])
+        if not profile_accent_colors:
+            raise RuntimeError(f"no distinctive accent colors for {mob_name}")
+        match_palette_bgr = self._match_palette(living_frames)
         dominant_pixel_bgr = self._find_dominant_pixel(living_frames)
+        accent_pixel_bgr = self._find_accent_pixel(living_frames)
 
         descriptor = MobDescriptor(
             mob_name=mob_name,
@@ -123,11 +131,13 @@ class DescriptorBuilder:
             size=profile["size"],
             dominant_color=profile_dominant,
             supporting_colors=profile_supporting,
-            accent_colors=profile["accent_colors"],
-            rare_colors=profile["rare_colors"],
+            accent_colors=profile_accent_colors,
+            rare_colors=self._distinctive_clusters(profile["rare_colors"]),
             sprite_palette_bgr=profile["sprite_palette_bgr"],
+            match_palette_bgr=match_palette_bgr,
             hsv_histogram=profile["hsv_histogram"],
             dominant_pixel_bgr=dominant_pixel_bgr,
+            accent_pixel_bgr=accent_pixel_bgr,
         )
         descriptor.save(descriptor_path)
         return descriptor
@@ -326,6 +336,22 @@ class DescriptorBuilder:
         best_idx = int(np.argmax(counts))
         return [int(v) for v in unique[best_idx]]
 
+    def _find_accent_pixel(self, frames: list[np.ndarray]) -> list[int] | None:
+        accent_pixels: list[np.ndarray] = []
+        for bgra in frames:
+            bgr = bgra[:, :, :3]
+            hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+            mask = (bgra[:, :, 3] > 0).astype(np.uint8) * 255
+            accent_mask = self._accent_mask(bgr, hsv, mask)
+            if np.any(accent_mask > 0):
+                accent_pixels.append(bgr[accent_mask > 0])
+        if not accent_pixels:
+            return None
+        stacked = np.concatenate(accent_pixels, axis=0)
+        unique, counts = np.unique(stacked, axis=0, return_counts=True)
+        best_idx = int(np.argmax(counts))
+        return [int(v) for v in unique[best_idx]]
+
     @staticmethod
     def _tight_crop(bgra: np.ndarray) -> np.ndarray:
         alpha = bgra[:, :, 3]
@@ -345,7 +371,77 @@ class DescriptorBuilder:
         v_threshold = float(np.percentile(v[opaque], 72))
         c_threshold = max(5.0, float(np.percentile(contrast[opaque], 60)))
         accent = opaque & (v >= v_threshold) & (contrast >= c_threshold)
+        saturation = hsv[:, :, 1].astype(np.float32)
+        accent &= saturation >= MIN_DISTINCTIVE_SATURATION
         return accent.astype(np.uint8) * 255
+
+    @staticmethod
+    def _is_distinctive_bgr(bgr: tuple[int, int, int]) -> bool:
+        pixel = np.uint8([[list(bgr)]])
+        _hue, saturation, value = cv2.cvtColor(pixel, cv2.COLOR_BGR2HSV)[0, 0]
+        if float(saturation) < MIN_DISTINCTIVE_SATURATION:
+            return False
+        if float(value) < MIN_DISTINCTIVE_VALUE:
+            return False
+        if float(value) > 245.0 and float(saturation) < 30.0:
+            return False
+        return True
+    @staticmethod
+    def _is_distinctive_cluster(cluster: ColorCluster) -> bool:
+        return DescriptorBuilder._is_distinctive_bgr(
+            tuple(int(v) for v in cluster.bgr),
+        )
+
+    @classmethod
+    def _distinctive_clusters(cls, clusters: list[ColorCluster]) -> list[ColorCluster]:
+        return [cluster for cluster in clusters if cls._is_distinctive_cluster(cluster)]
+
+    def _match_palette(self, frames: list[np.ndarray]) -> list[tuple[int, int, int]]:
+        per_frame_sets: list[set[tuple[int, int, int]]] = []
+        per_frame_counts: list[dict[tuple[int, int, int], int]] = []
+
+        for bgra in frames:
+            mask = bgra[:, :, 3] > 0
+            pixels = bgra[:, :, :3][mask]
+            if len(pixels) == 0:
+                continue
+            unique_colors, counts = np.unique(pixels, axis=0, return_counts=True)
+            color_set = {tuple(int(v) for v in color) for color in unique_colors}
+            per_frame_sets.append(color_set)
+            per_frame_counts.append(
+                {
+                    tuple(int(v) for v in color): int(counts[index])
+                    for index, color in enumerate(unique_colors)
+                }
+            )
+
+        if not per_frame_sets:
+            raise ValueError("no frames with opaque pixels to build match palette")
+
+        threshold = max(1, int(len(per_frame_sets) * 0.9))
+        color_votes: dict[tuple[int, int, int], int] = {}
+        for color_set in per_frame_sets:
+            for color in color_set:
+                color_votes[color] = color_votes.get(color, 0) + 1
+        stable_colors = {color for color, votes in color_votes.items() if votes >= threshold}
+
+        total_counts: dict[tuple[int, int, int], int] = {}
+        for frame_counts in per_frame_counts:
+            for color, count in frame_counts.items():
+                if color in stable_colors:
+                    total_counts[color] = total_counts.get(color, 0) + count
+
+        ranked = sorted(total_counts.items(), key=lambda item: item[1], reverse=True)
+        total_pixels = sum(count for _color, count in ranked)
+        min_fraction = 0.02
+        distinctive = [
+            color
+            for color, count in ranked
+            if self._is_distinctive_bgr(color) and (count / max(total_pixels, 1)) >= min_fraction
+        ]
+        if distinctive:
+            return distinctive[:12]
+        return [color for color, _count in ranked[:12]]
 
     @staticmethod
     def _clusters(

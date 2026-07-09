@@ -1,0 +1,7 @@
+{
+  "mob": "thara_frog",
+  "folder": "TharaFrog",
+  "description": "Thara Frog detection fixtures. Leading digit is mob count. *_Gray* = gray world textures.",
+  "strictAcceptCount": true,
+  "filenamePattern": "^(\\d+)Tharas?(?:_Gray)?\\.png$"
+}

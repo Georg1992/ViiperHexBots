@@ -8,9 +8,10 @@ modifying the controller.
 
 from __future__ import annotations
 
-import time
+import threading
 from abc import ABC, abstractmethod
 
+from pybot.runtime.constants import LOG_REPEAT_INTERVAL_MS
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.workers.worker_contexts import HuntModeControllerContext
@@ -21,7 +22,7 @@ class HuntModeStrategy(ABC):
 
     Concrete strategies implement ``_handle_no_targets_impl()`` with
     mode-specific behaviour.  The base class handles the common guard
-    logic (pause/stop checks, attackable tracks, alive-or-pending).
+    logic (pause/stop checks, attackable tracks).
     """
 
     def __init__(
@@ -32,24 +33,33 @@ class HuntModeStrategy(ABC):
         self._ctx = ctx
         self._input = input_backend
         self._discovery_area_epoch: int | None = None
-        self._last_no_target_log_ms = 0
         self._last_no_target_blocked_log_ms = 0
+        self._last_no_target_wait_reason: str | None = None
+        self._last_discovery_fail_reason = ""
+        self._last_discovery_fail_log_ms = 0
+        self._lock = threading.Lock()
 
     # ── Public interface (called by HuntModeController) ──────────
 
     @property
     def discovery_since_reset(self) -> bool:
         """True after discovery has completed for the current area epoch."""
-        return self._discovery_area_epoch == self._ctx.tracks.area_epoch
+        with self._lock:
+            return self._discovery_area_epoch == self._ctx.tracks.area_epoch
 
     def on_area_reset(self) -> None:
         """Reset per-area state (discovery flag, log throttles).
 
         Subclasses may extend to reset mode-specific timers.
         """
-        self._discovery_area_epoch = None
-        self._last_no_target_log_ms = 0
-        self._last_no_target_blocked_log_ms = 0
+        with self._lock:
+            self._discovery_area_epoch = None
+            self._last_no_target_blocked_log_ms = 0
+            self._last_no_target_wait_reason = None
+        self._on_area_reset_unlocked()
+
+    def _on_area_reset_unlocked(self) -> None:
+        """Hook for subclasses after shared state is cleared under lock."""
 
     def note_discovery_scan_completed(
         self,
@@ -60,21 +70,31 @@ class HuntModeStrategy(ABC):
     ) -> None:
         """Record a successful discovery scan for *area_epoch*."""
         del living_count, added_count
-        if area_epoch != self._ctx.tracks.area_epoch:
-            return
-        self._discovery_area_epoch = area_epoch
+        with self._lock:
+            if area_epoch != self._ctx.tracks.area_epoch:
+                return
+            self._discovery_area_epoch = area_epoch
 
     def note_discovery_scan_failed(self, reason: str) -> None:
         """Record a failed discovery scan."""
-        if reason:
-            self._ctx.logger.behavior(f"[DISCOVERY] scan failed reason={reason}")
+        if not reason:
+            return
+        now = monotonic_ms()
+        with self._lock:
+            if (
+                reason == self._last_discovery_fail_reason
+                and now - self._last_discovery_fail_log_ms < LOG_REPEAT_INTERVAL_MS
+            ):
+                return
+            self._last_discovery_fail_reason = reason
+            self._last_discovery_fail_log_ms = now
+        self._ctx.logger.behavior(f"[DISCOVERY] scan failed reason={reason}")
 
     def on_no_attackable_targets(self) -> bool:
         """Handle the case when no attackable targets exist.
 
-        Performs common guard checks (pause/stop, attackable tracks,
-        alive-or-pending) then dispatches to the mode-specific
-        implementation.
+        Performs common guard checks (pause/stop, alive tracks)
+        then dispatches to the mode-specific implementation.
 
         Returns:
             True if the bot took a mode-specific action (teleport, etc.).
@@ -117,13 +137,14 @@ class HuntModeStrategy(ABC):
         reason: str,
         context: dict | None = None,
     ) -> None:
-        # Throttle repeated "wait" decisions to once per 500ms.
+        # Repeated idle "wait" lines are logged once per reason until area reset.
         # Teleport/skip decisions always log since they're infrequent.
         if decision == "wait":
-            now = monotonic_ms()
-            if now - self._last_no_target_log_ms < 500:
-                return
-            self._last_no_target_log_ms = now
+            with self._lock:
+                if reason == self._last_no_target_wait_reason:
+                    return
+                self._last_no_target_wait_reason = reason
+            self._ctx.logger.behavior(f"[MODE] waiting reason={reason}")
 
         ctx = self._ctx
         ctx_data = context or self._build_no_target_context()
@@ -139,7 +160,7 @@ class HuntModeStrategy(ABC):
 
     def _log_no_target_blocked(self, reason: str) -> None:
         now = monotonic_ms()
-        if now - self._last_no_target_blocked_log_ms < 2000:
+        if now - self._last_no_target_blocked_log_ms < LOG_REPEAT_INTERVAL_MS:
             return
         self._last_no_target_blocked_log_ms = now
         self._ctx.logger.behavior(f"[MODE] no-target blocked reason={reason}")
@@ -180,7 +201,8 @@ class TeleportStrategy(HuntModeStrategy):
             )
             return False
         ctx.overlay.increment_teleports()
-        time.sleep(ctx.config.teleport_duration_ms / 1000.0)
+        if not ctx.wait_unless_stopped(ctx.config.teleport_duration_ms / 1000.0):
+            return False
         ctx.area_reset("post_teleport")
         self.on_area_reset()
         ctx.discovery_wake.set()
@@ -198,8 +220,7 @@ class WalkStrategy(HuntModeStrategy):
         super().__init__(ctx, input_backend)
         self._walk_idle_start_ms = 0
 
-    def on_area_reset(self) -> None:
-        super().on_area_reset()
+    def _on_area_reset_unlocked(self) -> None:
         self._walk_idle_start_ms = 0
 
     def _handle_no_targets_impl(self) -> bool:
@@ -209,12 +230,14 @@ class WalkStrategy(HuntModeStrategy):
         now = monotonic_ms()
 
         # Start the idle timer once, on first entry into the no-target state.
-        if not self._walk_idle_start_ms:
-            self._walk_idle_start_ms = now
-            ctx.logger.behavior("[MODE] walk mode — waiting for mobs to appear")
+        with self._lock:
+            if not self._walk_idle_start_ms:
+                self._walk_idle_start_ms = now
+                ctx.logger.behavior("[MODE] walk mode — waiting for mobs to appear")
+            walk_idle_start_ms = self._walk_idle_start_ms
 
         if not self.discovery_since_reset:
-            idle_seconds = (now - self._walk_idle_start_ms) // 1000
+            idle_seconds = (now - walk_idle_start_ms) // 1000
             if idle_seconds > 0 and idle_seconds % 15 == 0:
                 ctx.logger.behavior(
                     f"[MODE] walk waiting for first discovery elapsed={idle_seconds}s"

@@ -19,6 +19,7 @@ from collections.abc import Callable
 from tkinter import ttk
 
 _DRAIN_INTERVAL_MS = 50
+_MAX_ITEMS_PER_DRAIN = 30
 
 
 class LogPipe:
@@ -78,13 +79,15 @@ class LogPipe:
     # ── Internal dispatch (runs on main thread via root.after) ──────
 
     def _drain(self) -> None:
+        processed = 0
         try:
-            while True:
+            while processed < _MAX_ITEMS_PER_DRAIN:
                 item = self._queue.get_nowait()
                 if item[0] == "log":
                     self._do_log(item[1])
                 else:
                     self._do_status(item[1], item[2])
+                processed += 1
         except queue.Empty:
             pass
         finally:

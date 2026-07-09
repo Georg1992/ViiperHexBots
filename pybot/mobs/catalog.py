@@ -15,6 +15,8 @@ from pybot.paths import (
     MODIFIED_MOBS_DIR,
     PROJECT_ROOT,
 )
+from pybot.recognition.detector.descriptors.descriptor import MobDescriptor
+from pybot.recognition.detector.descriptors.descriptor_builder import DESCRIPTOR_VERSION
 
 
 @dataclass(frozen=True)
@@ -54,20 +56,33 @@ def descriptor_path(spr_stem: str, *, modified: bool = False) -> Path:
     return DESCRIPTORS_DIR / stem / "descriptor.json"
 
 
+def _descriptor_needs_rebuild(descriptor_path_file: Path) -> bool:
+    if not descriptor_path_file.is_file():
+        return True
+    descriptor = MobDescriptor.load(descriptor_path_file)
+    return descriptor.version < DESCRIPTOR_VERSION
+
+
 def _build_descriptor(asset_name: str, spr_stem: str, _logger) -> None:
     descriptor_path_file = descriptor_path(spr_stem, modified=False)
-    if descriptor_path_file.is_file():
+    if not _descriptor_needs_rebuild(descriptor_path_file):
         return
     from pybot.recognition.detector.descriptors.descriptor_builder import DescriptorBuilder
 
-    _logger(f"[AUTO-BUILD] {asset_name}: SPR/ACT found, building descriptor ({spr_stem})...")
+    if descriptor_path_file.is_file():
+        _logger(
+            f"[AUTO-BUILD] {asset_name}: rebuilding stale descriptor "
+            f"({spr_stem}, version < {DESCRIPTOR_VERSION})..."
+        )
+    else:
+        _logger(f"[AUTO-BUILD] {asset_name}: SPR/ACT found, building descriptor ({spr_stem})...")
     DescriptorBuilder(PROJECT_ROOT).build(spr_stem, force=True)
     _logger(f"[AUTO-BUILD] {asset_name}: descriptor ready")
 
 
 def _build_modified_descriptor(asset_name: str, spr_stem: str, _logger) -> None:
     descriptor_path_file = descriptor_path(spr_stem, modified=True)
-    if descriptor_path_file.is_file():
+    if not _descriptor_needs_rebuild(descriptor_path_file):
         return
     modified_spr = MODIFIED_MOBS_DIR / asset_name / f"{spr_stem}.spr"
     modified_act = MODIFIED_MOBS_DIR / asset_name / f"{spr_stem}.act"
@@ -75,9 +90,15 @@ def _build_modified_descriptor(asset_name: str, spr_stem: str, _logger) -> None:
         return
     from pybot.recognition.detector.descriptors.descriptor_builder import DescriptorBuilder
 
-    _logger(
-        f"[AUTO-BUILD] {asset_name}: building modified descriptor ({spr_stem})..."
-    )
+    if descriptor_path_file.is_file():
+        _logger(
+            f"[AUTO-BUILD] {asset_name}: rebuilding stale modified descriptor "
+            f"({spr_stem}, version < {DESCRIPTOR_VERSION})..."
+        )
+    else:
+        _logger(
+            f"[AUTO-BUILD] {asset_name}: building modified descriptor ({spr_stem})..."
+        )
     DescriptorBuilder(PROJECT_ROOT).build_modified(
         asset_name,
         spr_stem,

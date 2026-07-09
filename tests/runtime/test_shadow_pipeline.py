@@ -11,6 +11,7 @@ import numpy as np
 
 from pybot.runtime.capture.window_roi import HuntRoi
 from pybot.paths import PROJECT_ROOT, RECOGNITION_FIXTURES_DIR
+from pybot.recognition.fixtures import default_horn_fixture
 from pybot.runtime.config import HuntRuntimeConfig
 from pybot.runtime.control import RuntimeControl
 from pybot.runtime.hunt_mode import create_hunt_mode
@@ -22,7 +23,7 @@ from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.validation_log import HuntValidationLogger
 from pybot.runtime.detection.detector_session import DetectorSession
 
-FIXTURE = RECOGNITION_FIXTURES_DIR / "game-screenshots" / "333.png"
+FIXTURE = default_horn_fixture()
 
 
 def playfield_roi(frame: np.ndarray) -> np.ndarray:
@@ -78,7 +79,7 @@ class ShadowPipelineTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         frame = cv2.imread(str(FIXTURE), cv2.IMREAD_COLOR)
         if frame is None:
-            raise unittest.SkipTest("fixture 333.png missing")
+            raise unittest.SkipTest("fixture Horn/3Horn.png missing")
         cls.roi_frame = playfield_roi(frame)
         cls.roi = HuntRoi(x=0, y=0, w=cls.roi_frame.shape[1], h=cls.roi_frame.shape[0])
 

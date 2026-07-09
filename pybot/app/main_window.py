@@ -14,6 +14,7 @@ from ctypes import wintypes
 from tkinter import messagebox, ttk
 
 from pybot.app.bot_lifecycle import BotLifecycleManager, BotState
+from pybot.app.bot_controller import DEFAULT_STOP_JOIN_TIMEOUT_S
 from pybot.app.config_store import (
     AppConfig,
     client_supports_memory,
@@ -22,7 +23,7 @@ from pybot.app.config_store import (
 from pybot.app.hotkey_manager import HotkeyManager
 from pybot.app.log_pipe import LogPipe
 from pybot.app.overlay import Win32HuntOverlay
-from pybot.mobs.catalog import load_mob_catalog
+from pybot.mobs.catalog import ensure_mob_assets, load_mob_catalog
 from pybot.app.session_log import AppSessionLog
 from pybot.app.viiper_manager import ViiperManager
 from pybot.app.win32_util import (
@@ -45,7 +46,7 @@ class MainWindow:
 
         # ── Data layer ──────────────────────────────────────────────
         self.config = AppConfig().load()
-        self.mob_catalog = load_mob_catalog(ensure_assets=True)
+        self.mob_catalog = load_mob_catalog(ensure_assets=False)
         self._check_mob_catalog()
         self.session = AppSessionLog()
         self._hunt_overlay = Win32HuntOverlay()
@@ -89,9 +90,14 @@ class MainWindow:
         self.log_pipe.set_status_widgets(self.input_status, self.input_hint)
         self.log_pipe.set_overlay_callback(self._maybe_pipe_to_overlay)
 
-        # Async VIIPER init
+        # Async VIIPER init + mob descriptor prep (never block the UI thread)
         self.log_pipe.log("ViiperHexBots started (Python)")
         self.log_pipe.log("Starting VIIPER before game launch...")
+        threading.Thread(
+            target=lambda: ensure_mob_assets(log_fn=self.log_pipe.log),
+            daemon=True,
+            name="mob-asset-prep",
+        ).start()
         threading.Thread(target=self.lifecycle.init_viiper, daemon=True).start()
 
     # ── Pre-flight ──────────────────────────────────────────────────
@@ -512,7 +518,11 @@ class MainWindow:
 
     def toggle_bot(self) -> None:
         """Called by F12 hotkey or Start/Stop button."""
-        if self.lifecycle.state in (BotState.RUNNING, BotState.PAUSED):
+        if self.lifecycle.state in (
+            BotState.RUNNING,
+            BotState.PAUSED,
+            BotState.STARTING,
+        ):
             self.stop_bot()
         else:
             self.start_bot()
@@ -554,28 +564,17 @@ class MainWindow:
 
         self._sync_config_from_ui()
         self.config.save()
-        restore_and_activate(self.config.window_id)
 
-        # Create hunt log overlay if enabled
-        if self.overlay_var.get() and self.config.window_id:
-            ok = self._hunt_overlay.create(
-                self.config.window_id,
-                search_range_cells=self.config.search_range,
-            )
-            if ok:
-                self.log_pipe.log(f"[OVERLAY] created on hwnd={self.config.window_id}")
-            else:
-                err = self._hunt_overlay.last_error()
-                self.log_pipe.log(f"[OVERLAY] failed: {err}")
-
-        # Open the session log (lazy — creates directory + starts
-        # background writer).  No file I/O happens until this point.
-        self.session.open()
-        self.lifecycle.start(
+        if not self.lifecycle.start(
             config_snapshot=self.config,
             session_id=self.session.session_id,
-        )
-        self.log_pipe.log("Python hunt runtime started")
+        ):
+            messagebox.showerror(
+                "Error",
+                "Bot is already starting or running.",
+            )
+            return
+        self.log_pipe.log("Starting hunt runtime...")
 
     def stop_bot(self) -> None:
         """Stop the bot (delegates to lifecycle)."""
@@ -611,6 +610,12 @@ class MainWindow:
             self.bot_status.configure(text="Status: ON")
             self.status_indicator.configure(text="  ON  ", bg="#2e7d32")
             self._lock_ui(True)
+        elif state == BotState.STARTING:
+            self.bot_button.configure(text="Stop Bot")
+            self.continue_button.configure(state=tk.DISABLED)
+            self.bot_status.configure(text="Status: Starting...")
+            self.status_indicator.configure(text=" START ", bg="#1565c0")
+            self._lock_ui(True)
         elif state == BotState.PAUSED:
             self.bot_status.configure(text="Status: PAUSED (TAB)")
             self.status_indicator.configure(text=" PAUSED ", bg="#f9a825")
@@ -626,9 +631,6 @@ class MainWindow:
         """Forward log lines to the hunt overlay when the bot is active."""
         if self.lifecycle.state != BotState.OFF:
             self._hunt_overlay.append_log(message, message)
-
-
-
     def _lock_ui(self, locked: bool) -> None:
         """Enable/disable configuration widgets when bot is running."""
         state = tk.DISABLED if locked else tk.NORMAL
@@ -663,6 +665,7 @@ class MainWindow:
         """Clean shutdown of bot, VIIPER, hotkey, and session."""
         if self.lifecycle.state != BotState.OFF:
             self.stop_bot()
+        self.lifecycle.await_shutdown(timeout=DEFAULT_STOP_JOIN_TIMEOUT_S + 1.0)
         self.log_pipe.log("Closing bot and stopping VIIPER...")
         self.viiper.shutdown()
         self.session.end("user exit")

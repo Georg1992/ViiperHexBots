@@ -42,7 +42,6 @@ def load_settings(path: Path | None = None) -> AppSettings:
         client_profile=parser.get("Client", "Profile", fallback="Generic"),
         use_memory_reading=parser.getint("Client", "UseMemoryReading", fallback=0) == 1,
         selected_monster=parser.getint("MonsterSettings", "SelectedMonster", fallback=1),
-        mob_recognition_debug=parser.getint("MobRecognition", "Debug", fallback=0),
         search_range=parser.getint("Settings", "SearchRange", fallback=16),
         hunt_mode=parser.get("Settings", "HuntMode", fallback="teleport"),
         time_on_location=parser.getint("Settings", "TimeOnLocation", fallback=20),
@@ -87,9 +86,6 @@ def save_settings(settings: AppSettings) -> None:
 
     _ensure_section(parser, "MonsterSettings")
     parser["MonsterSettings"]["SelectedMonster"] = str(settings.selected_monster)
-
-    _ensure_section(parser, "MobRecognition")
-    parser["MobRecognition"]["Debug"] = str(settings.mob_recognition_debug)
 
     _ensure_section(parser, "Settings")
     parser["Settings"]["SearchRange"] = str(settings.search_range)

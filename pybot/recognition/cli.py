@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -138,43 +139,6 @@ def parse_request_scale_range(value) -> tuple[float, float] | None:
     return None
 
 
-def parse_request_tracks(value) -> list[dict]:
-    if not value:
-        return []
-    tracks: list[dict] = []
-    for entry in value:
-        if not isinstance(entry, dict):
-            continue
-        if "trackId" not in entry or "x" not in entry or "y" not in entry:
-            continue
-        tracks.append(
-            {
-                "trackId": int(entry["trackId"]),
-                "x": int(entry["x"]),
-                "y": int(entry["y"]),
-            }
-        )
-        if "scale" in entry:
-            tracks[-1]["scale"] = float(entry["scale"])
-    return tracks
-
-
-def build_state_response(
-    track_updates: list[dict],
-    *,
-    session_id: str = "",
-    elapsed_s: float = 0.0,
-) -> dict:
-    return {
-        "ok": True,
-        "pipeline": "state",
-        "sessionId": session_id,
-        "trackUpdateCount": len(track_updates),
-        "elapsedS": round(elapsed_s, 4),
-        "trackUpdates": track_updates,
-    }
-
-
 def run_detect_request(detector: MobDetector, config: dict, request: dict) -> dict:
     command = str(request.get("cmd", "")).lower()
     mob_name = str(request.get("mob", "")).lower()
@@ -191,38 +155,6 @@ def run_detect_request(detector: MobDetector, config: dict, request: dict) -> di
 
     frame = capture_region(x, y, w, h)
     session_id = str(request.get("sessionId", ""))
-
-    if command == "state":
-        from pybot.recognition.detector.tracking.state_recognizer import (
-            evaluate_track_state_direct,
-            evaluate_track_states,
-        )
-
-        tracks = parse_request_tracks(request.get("tracks"))
-        mode = str(request.get("mode", "")).lower()
-        start = time.perf_counter()
-        if mode == "direct":
-            if len(tracks) != 1:
-                raise ValueError("direct state requires exactly one track")
-            track = tracks[0]
-            scale_hint = track.get("scale")
-            track_updates = [
-                evaluate_track_state_direct(
-                    detector,
-                    frame,
-                    mob_name,
-                    int(track["trackId"]),
-                    int(track["x"]),
-                    int(track["y"]),
-                    offset_x=x,
-                    offset_y=y,
-                    scale_hint=scale_hint,
-                )
-            ]
-        else:
-            track_updates = evaluate_track_states(detector, frame, mob_name, tracks, offset_x=x, offset_y=y)
-        elapsed = time.perf_counter() - start
-        return build_state_response(track_updates, session_id=session_id, elapsed_s=elapsed)
 
     if command == "scan":
         result = detector.detect(frame, mob_name)
@@ -416,7 +348,7 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("--spr", required=True)
     inspect.add_argument("--act", required=True)
 
-    serve = sub.add_parser("serve", help="persistent detector server for scan/state commands")
+    serve = sub.add_parser("serve", help="persistent detector server for scan commands")
     serve.add_argument("--ipc-dir", help="file IPC directory for hidden parent process communication")
     return parser
 

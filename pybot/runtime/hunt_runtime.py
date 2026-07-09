@@ -23,6 +23,7 @@ from pybot.runtime.logging import HuntLogger
 from pybot.runtime.overlay_ports import HuntOverlay, NullOverlay
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.validation_log import HuntValidationLogger
+from pybot.recognition.capture import reset_capture_session
 from pybot.recognition.detector.detector import load_detector_config
 from pybot.runtime.detection.detector_session import DetectorSession
 from pybot.runtime.workers.attack_loop import AttackLoop
@@ -101,11 +102,14 @@ def create_runtime_deps(
         behavior_callback: Optional callback for behavior log messages.
     """
     sid = session_id or time.strftime("%Y%m%d_%H%M%S")
-    logger = HuntLogger(session_id=sid)
+    logger = HuntLogger(
+        session_id=sid,
+        echo_stdout=behavior_callback is None,
+    )
     if behavior_callback:
         logger.set_behavior_callback(behavior_callback)
     detector_config = load_detector_config()
-    tracks = HuntTracks(detector_config)
+    tracks = HuntTracks(detector_config, skill_delay_ms=config.skill_delay_ms)
     policy = HuntPolicy()
     capture = HuntWindowCapture(config)
     # Two independent detectors: discovery's full scan and tracking's local
@@ -115,6 +119,7 @@ def create_runtime_deps(
         config.mob_name,
         detector_config=detector_config,
         use_modified_descriptor=use_modified,
+        death_detection_enabled=False,
     )
     tracker = DetectorSession(
         config.mob_name,
@@ -183,11 +188,11 @@ class HuntRuntime:
         self._ctx.discovery_wake.set()
 
     def pause(self) -> None:
-        self._ctx.pause_event.set()
+        self._ctx.mark_paused()
         self._ctx.logger.behavior("[PYBOT] paused")
 
     def resume(self) -> None:
-        self._ctx.pause_event.clear()
+        self._ctx.mark_running()
         self._ctx.discovery_wake.set()
         self._ctx.logger.behavior("[PYBOT] resumed")
 
@@ -201,17 +206,25 @@ class HuntRuntime:
             for thread in pending:
                 thread.join(timeout=0.05)
             pending = [thread for thread in pending if thread.is_alive()]
+        if pending:
+            names = ", ".join(thread.name for thread in pending)
+            self._ctx.logger.behavior(
+                f"[PYBOT] shutdown timeout; workers still alive: {names}"
+            )
         self._worker_threads.clear()
         self._input_backend.shutdown()
 
     def run(self, *, run_seconds: float = 0.0, start_paused: bool = False) -> int:
         ctx = self._ctx
         if start_paused:
-            ctx.pause_event.set()
+            ctx.mark_paused()
+        else:
+            ctx.mark_running()
 
         def _handle_stop(signum: int, _frame: object) -> None:
             ctx.logger.behavior(f"[PYBOT] stop signal={signum}")
             ctx.stop_event.set()
+            ctx.discovery_wake.set()
 
         # Signal handlers only work in the main thread; when running inside
         # BotController's daemon thread they raise ValueError on Windows.
@@ -228,6 +241,7 @@ class HuntRuntime:
 
         roi = ctx.capture.get_hunt_roi()
         roi_text = f"{roi.x},{roi.y} {roi.w}x{roi.h}" if roi else "unavailable"
+        reset_capture_session()
         ctx.logger.behavior(
             f"[PYBOT] hunt runtime start mob={ctx.config.mob_name} hwnd={ctx.config.hwnd} "
             f"mode={ctx.config.hunt_mode} roi={roi_text}"
@@ -259,6 +273,7 @@ class HuntRuntime:
         finally:
             ctx.logger.behavior("[PYBOT] hunt runtime stopped")
             self._shutdown_workers()
+            reset_capture_session()
 
         return 0
 
@@ -267,10 +282,10 @@ class HuntRuntime:
         if command == "stop":
             self._ctx.stop_event.set()
         elif command == "pause":
-            self._ctx.pause_event.set()
+            self._ctx.mark_paused()
             self._ctx.logger.behavior("[PYBOT] paused")
         elif command == "resume":
-            self._ctx.pause_event.clear()
+            self._ctx.mark_running()
             self._ctx.discovery_wake.set()
             self._ctx.logger.behavior("[PYBOT] resumed")
 

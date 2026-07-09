@@ -49,6 +49,7 @@ class ViiperBackend(ShadowInputBackend):
         self._mouse_button_left = 0  # button index for left click
         self._connected = False
         self._connect_lock = threading.Lock()
+        self._operation_lock = threading.Lock()
 
         # Track modifier key state (Ctrl, Shift, Alt, Win)
         self._modifiers: int = 0
@@ -117,8 +118,9 @@ class ViiperBackend(ShadowInputBackend):
         Uses Win32 ``SetCursorPos`` directly since VIIPER mouse only
         supports relative movement (deltas), not absolute positioning.
         """
-        user32.SetCursorPos(int(x), int(y))
-        time.sleep(0.005)
+        with self._operation_lock:
+            user32.SetCursorPos(int(x), int(y))
+            time.sleep(0.005)
         return True
 
     def skill_click(self, scan_code: int) -> bool:
@@ -133,19 +135,17 @@ class ViiperBackend(ShadowInputBackend):
         if scan_code <= 0:
             return False
 
-        self._ensure_connected()
+        with self._operation_lock:
+            self._ensure_connected()
 
-        # Press skill key
-        self._key_press(scan_code, down=True)
-        time.sleep(0.02)
+            self._key_press(scan_code, down=True)
+            time.sleep(0.02)
 
-        # Left click
-        self._mouse_click(down=True)
-        time.sleep(0.02)
-        self._mouse_click(down=False)
+            self._mouse_click(down=True)
+            time.sleep(0.02)
+            self._mouse_click(down=False)
 
-        # Release skill key
-        self._key_press(scan_code, down=False)
+            self._key_press(scan_code, down=False)
         return True
 
     def teleport_key(self, scan_code: int) -> bool:
@@ -160,20 +160,22 @@ class ViiperBackend(ShadowInputBackend):
         if scan_code <= 0:
             return False
 
-        self._ensure_connected()
+        with self._operation_lock:
+            self._ensure_connected()
 
-        self._key_press(scan_code, down=True)
-        time.sleep(0.05)
-        self._key_press(scan_code, down=False)
+            self._key_press(scan_code, down=True)
+            time.sleep(0.05)
+            self._key_press(scan_code, down=False)
         return True
 
     def shutdown(self) -> None:
         """Release pressed keys and close device streams."""
-        with self._connect_lock:
-            if self._connected and self._kb_stream is not None:
-                self._kb_stream.write(KeyboardState(0).marshal())
-            self._modifiers = 0
-            self.disconnect()
+        with self._operation_lock:
+            with self._connect_lock:
+                if self._connected and self._kb_stream is not None:
+                    self._kb_stream.write(KeyboardState(0).marshal())
+                self._modifiers = 0
+                self.disconnect()
 
     # ── Low-level helpers ─────────────────────────────────────────────
 

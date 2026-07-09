@@ -4,37 +4,45 @@ from __future__ import annotations
 
 import unittest
 
-from pybot.recognition.detector.tracking.opacity_probe import evaluate_opacity_death
+from pybot.recognition.detector.tracking.opacity_probe import (
+    calibrate_opacity_baseline,
+    evaluate_opacity_death,
+    is_opacity_calibrated,
+)
 
 
 class OpacityDeathProbeTests(unittest.TestCase):
     def _config(self) -> dict:
         return {
-            "deathOpacityBaselineSamples": 4,
+            "deathOpacityBaselineSamples": 2,
             "deathOpacityMinBaseline": 0.20,
             "deathOpacityDecayRatio": 0.90,
-            "deathOpacityConfirmTicks": 3,
+            "deathOpacityConfirmTicks": 2,
         }
 
     def test_baseline_calibration_blocks_death(self) -> None:
         baseline = 0.0
         samples = 0
-        streak = 0
-        for score in (0.55, 0.58, 0.60, 0.57):
-            baseline, samples, streak, dead = evaluate_opacity_death(
+        for score in (0.55, 0.58):
+            baseline, samples = calibrate_opacity_baseline(
                 opacity_score=score,
                 baseline=baseline,
                 baseline_samples=samples,
-                decay_streak=streak,
                 config=self._config(),
             )
-            self.assertFalse(dead)
-        self.assertEqual(samples, 4)
-        self.assertGreaterEqual(baseline, 0.57)
+        self.assertEqual(samples, 2)
+        self.assertGreaterEqual(baseline, 0.58)
+        self.assertTrue(
+            is_opacity_calibrated(
+                baseline=baseline,
+                baseline_samples=samples,
+                config=self._config(),
+            )
+        )
 
     def test_decay_requires_consecutive_ticks(self) -> None:
         baseline = 0.60
-        samples = 4
+        samples = 2
         streak = 0
         config = self._config()
 
@@ -58,7 +66,7 @@ class OpacityDeathProbeTests(unittest.TestCase):
         self.assertFalse(dead)
         self.assertEqual(streak, 0)
 
-        for score in (0.18, 0.17, 0.16):
+        for score in (0.18, 0.17):
             baseline, samples, streak, dead = evaluate_opacity_death(
                 opacity_score=score,
                 baseline=baseline,
@@ -71,7 +79,7 @@ class OpacityDeathProbeTests(unittest.TestCase):
 
     def test_ten_percent_drop_triggers_decay_streak(self) -> None:
         baseline = 0.60
-        samples = 4
+        samples = 2
         streak = 0
         config = self._config()
 
@@ -87,7 +95,7 @@ class OpacityDeathProbeTests(unittest.TestCase):
 
     def test_fifteen_percent_drop_triggers_decay_streak(self) -> None:
         baseline = 0.60
-        samples = 4
+        samples = 2
         streak = 0
         config = self._config()
 
@@ -103,7 +111,7 @@ class OpacityDeathProbeTests(unittest.TestCase):
 
     def test_small_drop_does_not_trigger_decay(self) -> None:
         baseline = 0.60
-        samples = 4
+        samples = 2
         streak = 0
         config = self._config()
 

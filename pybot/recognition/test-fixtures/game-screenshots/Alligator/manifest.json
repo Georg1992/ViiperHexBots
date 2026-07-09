@@ -1,0 +1,7 @@
+{
+  "mob": "alligator",
+  "folder": "Alligator",
+  "description": "Alligator detection fixtures. Leading digit is mob count. *_Gray* = gray world textures.",
+  "strictAcceptCount": true,
+  "filenamePattern": "^(\\d+)Alligator(?:_Gray)?\\.png$"
+}
