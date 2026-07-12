@@ -145,28 +145,23 @@ def layout_similarity(
 
 
 def silhouette_similarity(candidate: np.ndarray, reference: np.ndarray, stable_mask: np.ndarray) -> float:
-    """Binary IoU on cells that are ≥50% occupied in the reference or candidate.
+    """Binary IoU over the union of reference and candidate occupancy.
 
-    Unlike the old float-IoU (which averaged fractional occupancy and was overly
-    permissive), this converts both masks to binary at a 0.5 threshold so that
-    a cell either counts as "part of the mob" or not.  The comparison is then
-    intersection-over-union on the stable cells, giving a much more honest
-    measure of shape match.
+    Compares on the full 16×16 grid where either shape is occupied. Candidate
+    pixels outside the reference silhouette expand the union and lower the score,
+    so viewport-filling blobs cannot score highly against a tight mob ref.
     """
     if reference.size == 0 or not np.any(stable_mask):
         return 1.0
-    ref_bin = (reference >= 0.5).astype(np.float32)
+
+    stable = stable_mask.reshape(reference.shape)
+    ref_bin = ((reference >= 0.5) & stable).astype(np.float32)
     cand_bin = (candidate >= 0.5).astype(np.float32)
-    ref_flat = ref_bin.reshape(-1)[stable_mask.reshape(-1)]
-    cand_flat = cand_bin.reshape(-1)[stable_mask.reshape(-1)]
-    if ref_flat.size == 0:
-        return 1.0
-    overlap = np.minimum(cand_flat, ref_flat)
-    union = np.maximum(cand_flat, ref_flat)
-    union_sum = float(np.sum(union))
-    if union_sum <= 0.0:
+    intersection = float(np.sum(ref_bin * cand_bin))
+    union = float(np.sum(np.maximum(ref_bin, cand_bin)))
+    if union <= 0.0:
         return 0.0
-    return float(np.clip(np.sum(overlap) / union_sum, 0.0, 1.0))
+    return float(np.clip(intersection / union, 0.0, 1.0))
 
 
 def best_silhouette_similarity(

@@ -123,6 +123,24 @@ def render_silhouette_grid(mask_avg: list[float], mask_stable: list[bool],
     return canvas
 
 
+def _candidate_pixels_outside_ref(
+    check: SilhouetteCheck,
+    descriptor: MobDescriptor,
+) -> int | None:
+    if check.candidate_mask is None:
+        return None
+    gate_masks = descriptor.silhouette_masks or []
+    if not gate_masks or check.matched_mask_index >= len(gate_masks):
+        return None
+    mask = gate_masks[check.matched_mask_index]
+    cand = np.array(check.candidate_mask, dtype=np.float32).reshape(16, 16)
+    ref = np.array(mask.avg_mask, dtype=np.float32).reshape(16, 16)
+    stable = np.array(mask.stable_mask, dtype=bool).reshape(16, 16)
+    ref_bin = (ref >= 0.5) & stable
+    cand_bin = cand >= 0.5
+    return int(np.sum(cand_bin & ~ref_bin))
+
+
 def allocate_silhouette_panel(
     descriptor: MobDescriptor,
     silhouette_checks: list[SilhouetteCheck],
@@ -169,7 +187,9 @@ def allocate_silhouette_panel(
         if check.mask_similarities:
             score_bits = "/".join(f"{score:.2f}" for score in check.mask_similarities)
             ref_tag = f"{ref_tag} [{score_bits}]"
-        label = f"BLB{idx}: {heat_score:.3f}  sim={sim:.2f}  {status}  {ref_tag}"
+        extra_px = _candidate_pixels_outside_ref(check, descriptor)
+        extra_tag = f"  out={extra_px}" if extra_px is not None else ""
+        label = f"BLB{idx}: {heat_score:.3f}  sim={sim:.2f}  {status}  {ref_tag}{extra_tag}"
         cv2.putText(panel, label, (10, y_offset + 12),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, border_color, 1)
         y_offset += 18
