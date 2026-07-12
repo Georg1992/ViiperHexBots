@@ -39,7 +39,7 @@
   "minStructuralAcceptScore": 0.40,
   "minDominantPixelFraction": 0.013,
   "minAccentPixelFraction": 0.01,
-  "minSilhouetteSimilarity": 0.45,
+  "minSilhouetteSimilarity": 0.50,
   "partialBlobDimFloor": 0.68,
   "partialBlobMinAreaRatio": 0.75,
   "minBlobDimRatio": 0.50,
