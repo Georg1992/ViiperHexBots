@@ -82,6 +82,9 @@ class HeatmapDetector:
         hsv: np.ndarray,
         descriptor: MobDescriptor,
         downscale: int = 1,
+        *,
+        exclude_palette_bgr: list[tuple[int, int, int]] | None = None,
+        texture_mask: np.ndarray | None = None,
     ) -> np.ndarray:
         """Build sprite palette heatmap with selectivity and edge-density boosts.
 
@@ -106,8 +109,29 @@ class HeatmapDetector:
             )
 
         # --- 1. Pure sprite-palette-distance heatmap ---
-        sprite = sprite_palette_heatmap(work_bgr, descriptor.match_palette_bgr,
-                                        self.max_sprite_palette_distance)
+        sprite = sprite_palette_heatmap(
+            work_bgr,
+            descriptor.match_palette_bgr,
+            self.max_sprite_palette_distance,
+        )
+
+        if exclude_palette_bgr:
+            background_heat = sprite_palette_heatmap(
+                work_bgr,
+                exclude_palette_bgr,
+                self.max_sprite_palette_distance,
+            )
+            sprite = np.where(background_heat >= np.float32(0.55), np.float32(0.0), sprite)
+
+        if texture_mask is not None:
+            work_mask = texture_mask
+            if downscale > 1:
+                work_mask = cv2.resize(
+                    texture_mask,
+                    (work_bgr.shape[1], work_bgr.shape[0]),
+                    interpolation=cv2.INTER_AREA,
+                )
+            sprite *= work_mask.astype(np.float32)
 
         # --- 2. Selectivity: body × accent → suppress non-mob colour combos ---
         accent = palette_heatmap(work_hsv, descriptor.accent_colors)

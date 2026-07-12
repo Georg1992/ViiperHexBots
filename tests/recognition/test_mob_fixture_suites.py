@@ -1,4 +1,4 @@
-"""Mob screenshot fixture regression tests (Horn, TharaFrog, Alligator, Noxious)."""
+"""Mob screenshot fixture regression tests (Horn, TharaFrog, Alligator, Noxious, Creamy)."""
 
 from __future__ import annotations
 
@@ -48,9 +48,6 @@ class MobFixtureSuiteTests(unittest.TestCase):
                 self._assert_image_count(suite, image)
 
     def _assert_image_count(self, suite: MobFixtureSuite, image: MobFixtureImage) -> None:
-        if suite.mob_name == "alligator" and not image.gray_world:
-            self.skipTest("normal-color alligator fixtures are out of scope for now")
-
         frame = cv2.imread(str(image.path), cv2.IMREAD_COLOR)
         self.assertIsNotNone(frame, f"missing or unreadable fixture: {image.path}")
 

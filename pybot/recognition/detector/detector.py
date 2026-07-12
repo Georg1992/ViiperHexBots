@@ -20,7 +20,21 @@ from pybot.recognition.detector.descriptors.layout_utils import (
     best_silhouette_similarity,
     candidate_silhouette,
 )
-from pybot.recognition.detector.scoring.heatmap_detector import HeatmapDetector, palette_heatmap, sprite_palette_heatmap
+from pybot.recognition.detector.scoring.background_normalizer import (
+    dominant_background_colors,
+    texture_deviation_mask,
+)
+from pybot.recognition.detector.scoring.heatmap_detector import (
+    HeatmapDetector,
+    palette_heatmap,
+    sprite_palette_heatmap,
+)
+from pybot.recognition.detector.scoring.noise_analyzer import analyze_heatmap_noise
+from pybot.recognition.detector.scoring.noisy_silhouette import (
+    NOISY_MIN_SILHOUETTE_SIMILARITY,
+    _mask_plausible,
+    extract_heatmap_outline_mask,
+)
 
 
 REQUIRED_CONFIG_KEYS = {
@@ -50,6 +64,9 @@ REQUIRED_CONFIG_KEYS = {
     "minBlobAccentPixelScore",
     "minBlobDimRatio",
     "maxBlobDimRatio",
+    "noisyHeatmapHotFracMin",
+    "noisyHeatmapRawHeatThreshold",
+    "backgroundGridCellPx",
     # death-detection keys (still used by local_tracker / opacity_probe)
     "deathOpacityBaselineSamples",
     "deathOpacityMinBaseline",
@@ -115,6 +132,9 @@ class DetectionResult:
     timing: dict[str, float]
     sprite_heatmap: np.ndarray
     silhouette_checks: list[SilhouetteCheck]
+    noisy_heatmap: bool = False
+    background_corrected: bool = False
+    heatmap_hot_frac: float = 0.0
 
 
 def load_detector_config(path: Optional[Path] = None) -> dict:
@@ -199,8 +219,29 @@ class MobDetector:
         if self.discovery_heatmap_downscale > 1 and min(fw, fh) >= self.discovery_heatmap_downscale_min_side:
             downscale = self.discovery_heatmap_downscale
 
+        noise = analyze_heatmap_noise(
+            frame_bgr,
+            descriptor,
+            max_sprite_palette_distance=float(self.config["maxSpritePaletteDistance"]),
+            hot_frac_min=float(self.config["noisyHeatmapHotFracMin"]),
+            raw_heat_threshold=float(self.config["noisyHeatmapRawHeatThreshold"]),
+        )
+        exclude_palette_bgr: list[tuple[int, int, int]] | None = None
+        texture_mask: np.ndarray | None = None
+        background_corrected = False
+        if noise.is_noisy:
+            cell_px = int(self.config["backgroundGridCellPx"])
+            exclude_palette_bgr = dominant_background_colors(frame_bgr, cell_px)
+            texture_mask = texture_deviation_mask(frame_bgr, cell_px)
+            background_corrected = True
+
         sprite_heatmap = self.heatmap_detector.build_sprite_heatmap(
-            frame_bgr, hsv, descriptor, downscale=downscale,
+            frame_bgr,
+            hsv,
+            descriptor,
+            downscale=downscale,
+            exclude_palette_bgr=exclude_palette_bgr,
+            texture_mask=texture_mask,
         )
         accent_heatmap = palette_heatmap(hsv, descriptor.accent_colors)
 
@@ -233,7 +274,13 @@ class MobDetector:
             bbox = (bx, by, bw, bh)
 
             passed, similarity, candidate, matched_idx, scores = self._evaluate_silhouette_gate(
-                frame_bgr, descriptor, bbox, comp_bbox=comp_bbox,
+                frame_bgr,
+                descriptor,
+                bbox,
+                comp_bbox=comp_bbox,
+                noisy_heatmap=noise.is_noisy,
+                sprite_heatmap=sprite_heatmap if noise.is_noisy else None,
+                exclude_palette_bgr=exclude_palette_bgr,
             )
             candidate_mask = (
                 candidate.reshape(-1).tolist() if candidate is not None else None
@@ -296,6 +343,9 @@ class MobDetector:
             timing=timing,
             sprite_heatmap=sprite_heatmap,
             silhouette_checks=silhouette_checks,
+            noisy_heatmap=noise.is_noisy,
+            background_corrected=background_corrected,
+            heatmap_hot_frac=noise.hot_frac,
         )
 
     # ------------------------------------------------------------------
@@ -429,6 +479,9 @@ class MobDetector:
         bbox: tuple[int, int, int, int],
         *,
         comp_bbox: tuple[int, int, int, int] | None = None,
+        noisy_heatmap: bool = False,
+        sprite_heatmap: np.ndarray | None = None,
+        exclude_palette_bgr: list[tuple[int, int, int]] | None = None,
     ) -> tuple[bool, float, np.ndarray | None, int, list[float]]:
         refs = self._descriptor_silhouette_references(descriptor)
         if not refs or not descriptor.match_palette_bgr:
@@ -471,6 +524,77 @@ class MobDetector:
         if search_region.size == 0:
             return False, 0.0, None, 0, []
 
+        local_bbox_left = ref_cx - ref_w // 2 - search_x
+        local_bbox_top = ref_cy - ref_h // 2 - search_y
+
+        if (
+            noisy_heatmap
+            and sprite_heatmap is not None
+            and exclude_palette_bgr
+        ):
+            heatmap_crop = sprite_heatmap[
+                search_y : search_y + search_h,
+                search_x : search_x + search_w,
+            ]
+            outline = extract_heatmap_outline_mask(
+                search_region,
+                heatmap_crop,
+                local_ref_left=local_bbox_left,
+                local_ref_top=local_bbox_top,
+                local_ref_width=ref_w,
+                local_ref_height=ref_h,
+                exclude_palette_bgr=exclude_palette_bgr,
+                max_sprite_palette_distance=float(self.config["maxSpritePaletteDistance"]),
+            )
+            if outline is None:
+                return False, 0.0, None, 0, []
+
+            mob_region, comp_mask = outline
+            if not _mask_plausible(
+                comp_mask,
+                avg_width=descriptor.avg_width,
+                avg_height=descriptor.avg_height,
+            ):
+                return False, 0.0, None, 0, []
+
+            target_w = max(8, int(round(descriptor.avg_width)))
+            target_h = max(8, int(round(descriptor.avg_height)))
+            if mob_region.shape[1] != target_w or mob_region.shape[0] != target_h:
+                mob_region = cv2.resize(
+                    mob_region,
+                    (target_w, target_h),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+                comp_mask = cv2.resize(
+                    comp_mask.astype(np.uint8),
+                    (target_w, target_h),
+                    interpolation=cv2.INTER_NEAREST,
+                ).astype(bool)
+
+            silhouette_distance = float(self.config["maxSilhouettePaletteDistance"])
+            candidate = candidate_silhouette(
+                mob_region,
+                np.asarray(descriptor.match_palette_bgr, dtype=np.float32),
+                silhouette_distance,
+                gate_mask.width,
+                gate_mask.height,
+                occupancy_mask=comp_mask,
+            )
+            similarity, matched_idx, scores = best_silhouette_similarity(candidate, refs)
+            if similarity < NOISY_MIN_SILHOUETTE_SIMILARITY:
+                if comp_bbox is not None and comp_bbox[2] * comp_bbox[3] >= 500:
+                    return self._evaluate_silhouette_gate(
+                        frame_bgr,
+                        descriptor,
+                        bbox,
+                        comp_bbox=None,
+                        noisy_heatmap=noisy_heatmap,
+                        sprite_heatmap=sprite_heatmap,
+                        exclude_palette_bgr=exclude_palette_bgr,
+                    )
+                return False, float(similarity), candidate, matched_idx, scores
+            return True, float(similarity), candidate, matched_idx, scores
+
         palette_heat = sprite_palette_heatmap(
             search_region, descriptor.match_palette_bgr,
             float(self.config["maxSpritePaletteDistance"]),
@@ -481,9 +605,6 @@ class MobDetector:
 
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         binary = cv2.dilate(binary, kernel, iterations=1)
-
-        local_bbox_left = ref_cx - ref_w // 2 - search_x
-        local_bbox_top = ref_cy - ref_h // 2 - search_y
 
         _nl, labels, stats, _centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
         if _nl <= 1:

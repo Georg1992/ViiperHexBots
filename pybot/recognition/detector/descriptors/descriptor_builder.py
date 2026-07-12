@@ -25,7 +25,7 @@ from pybot.recognition.detector.descriptors.layout_utils import (
     frame_silhouette,
 )
 
-DESCRIPTOR_VERSION = 15
+DESCRIPTOR_VERSION = 16
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -155,7 +155,7 @@ class DescriptorBuilder:
         if not profile_accent_colors:
             raise RuntimeError(f"no distinctive accent colors for {mob_name}")
         distinctive_rare = self._distinctive_clusters(profile["rare_colors"])
-        match_palette_bgr = self._match_palette(all_facing_frames)
+        match_palette_bgr, match_palette_weights = self._match_palette(all_facing_frames)
         dominant_pixels_bgr, accent_pixels_bgr = self._collect_structural_pixels(
             spr_file,
             act_file,
@@ -181,6 +181,7 @@ class DescriptorBuilder:
             accent_colors=profile_accent_colors,
             rare_colors=distinctive_rare,
             match_palette_bgr=match_palette_bgr,
+            match_palette_weights=match_palette_weights,
             hsv_histogram=profile["hsv_histogram"],
             dominant_pixel_bgr=dominant_pixel_bgr,
             accent_pixel_bgr=accent_pixel_bgr,
@@ -304,7 +305,7 @@ class DescriptorBuilder:
     def _collect_palette_pixel_data(
         frames: list[np.ndarray],
     ) -> tuple[np.ndarray, np.ndarray, dict[tuple[int, int, int], int]]:
-        """Return sorted unique BGR colors, count order, and accent pixel masses."""
+        """Return unique BGR colors sorted by mass, per-color counts, accent masses."""
         pixel_chunks: list[np.ndarray] = []
         accent_counts: dict[tuple[int, int, int], int] = {}
 
@@ -331,7 +332,7 @@ class DescriptorBuilder:
         all_pixels = np.concatenate(pixel_chunks, axis=0)
         unique_colors, counts = np.unique(all_pixels, axis=0, return_counts=True)
         order = np.argsort(counts)[::-1]
-        return unique_colors[order], order, accent_counts
+        return unique_colors[order], counts[order], accent_counts
 
     @classmethod
     def _append_palette_colors(
@@ -350,30 +351,53 @@ class DescriptorBuilder:
             palette.append(bgr)
             palette_set.add(bgr)
 
-    def _match_palette(self, frames: list[np.ndarray]) -> list[tuple[int, int, int]]:
+    def _match_palette(
+        self,
+        frames: list[np.ndarray],
+    ) -> tuple[list[tuple[int, int, int]], list[float]]:
         """Build match palette from unique sprite fill colors plus accents and shades.
 
         Structural colors are ranked by opaque pixel mass with HSV shade dedup.
         Up to MATCH_PALETTE_MAX_ACCENT_COLORS accent-region colors are appended,
         then remaining slots are filled with the next-most-frequent shade variants.
+        Each entry carries a weight proportional to opaque sprite pixel mass.
         """
-        sorted_unique, _order, accent_counts = self._collect_palette_pixel_data(frames)
+        sorted_unique, counts, accent_counts = self._collect_palette_pixel_data(frames)
         dedup_local = self._deduplicate_palette_indices(sorted_unique)
 
+        mass_by_color: dict[tuple[int, int, int], float] = {}
+        for color, count in zip(sorted_unique, counts):
+            key = tuple(int(v) for v in color)
+            mass_by_color[key] = float(count)
+        for color, count in accent_counts.items():
+            mass_by_color[color] = mass_by_color.get(color, 0.0) + float(count)
+
         palette: list[tuple[int, int, int]] = []
+        raw_weights: list[float] = []
+
+        def append_weighted(candidates: list[tuple[int, int, int]], *, limit: int) -> None:
+            palette_set = set(palette)
+            for bgr in candidates:
+                if len(palette) >= limit:
+                    return
+                if self._is_scene_matching_speck(bgr) or bgr in palette_set:
+                    continue
+                palette.append(bgr)
+                raw_weights.append(mass_by_color.get(bgr, 1.0))
+                palette_set.add(bgr)
+
         structural = [
             tuple(int(v) for v in sorted_unique[local_idx])
             for local_idx in dedup_local
         ]
-        self._append_palette_colors(palette, structural, limit=MATCH_PALETTE_MAX_COLORS)
+        append_weighted(structural, limit=MATCH_PALETTE_MAX_COLORS)
 
         accent_budget = min(
             MATCH_PALETTE_MAX_ACCENT_COLORS,
             MATCH_PALETTE_MAX_COLORS - len(palette),
         )
         if accent_budget > 0:
-            self._append_palette_colors(
-                palette,
+            append_weighted(
                 self._rank_accent_colors(accent_counts)[:accent_budget],
                 limit=len(palette) + accent_budget,
             )
@@ -382,12 +406,14 @@ class DescriptorBuilder:
             tuple(int(v) for v in sorted_unique[idx])
             for idx in range(len(sorted_unique))
         ]
-        self._append_palette_colors(palette, shade_candidates, limit=MATCH_PALETTE_MAX_COLORS)
+        append_weighted(shade_candidates, limit=MATCH_PALETTE_MAX_COLORS)
 
         if not palette:
             raise ValueError("no match palette colors after deduplication")
 
-        return palette
+        peak = max(raw_weights)
+        weights = [weight / peak for weight in raw_weights]
+        return palette, weights
 
     def _collect_structural_pixels(
         self,

@@ -95,6 +95,42 @@ def heatmap_to_color(heatmap: np.ndarray) -> np.ndarray:
     return cv2.applyColorMap(vis, cv2.COLORMAP_JET)
 
 
+def annotate_heatmap_pane(pane_heat: np.ndarray, result: DetectionResult) -> None:
+    """Label the heatmap pane and highlight when the noisy fallback path is active."""
+    if result.noisy_heatmap:
+        banner_h = 36
+        cv2.rectangle(pane_heat, (0, 0), (pane_heat.shape[1], banner_h), (0, 200, 255), -1)
+        cv2.putText(
+            pane_heat,
+            f"NOISY FALLBACK  hot={result.heatmap_hot_frac:.3f}",
+            (10, 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 0),
+            2,
+        )
+        cv2.putText(
+            pane_heat,
+            "texture mask + bg exclude + outline silhouette",
+            (10, 52),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (255, 255, 255),
+            1,
+        )
+        return
+
+    cv2.putText(
+        pane_heat,
+        "HEATMAP",
+        (10, 25),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (255, 255, 255),
+        2,
+    )
+
+
 def render_silhouette_grid(mask_avg: list[float], mask_stable: list[bool],
                            size: int) -> np.ndarray:
     """Render a 16×16 silhouette as a size×size RGB image.
@@ -281,9 +317,10 @@ def draw_detection_overlay(
     n_sil = len(silhouette_checks)
     n_sil_pass = sum(1 for c in silhouette_checks if c.passed)
     n_acc = len(result.accepted)
+    bg_tag = "  NOISY FALLBACK" if result.noisy_heatmap else ""
     cv2.putText(
         overlay,
-        f"Sil:{n_sil} Pass:{n_sil_pass} Acc:{n_acc}  {result.elapsed_s * 1000:.0f}ms",
+        f"Sil:{n_sil} Pass:{n_sil_pass} Acc:{n_acc}  {result.elapsed_s * 1000:.0f}ms{bg_tag}",
         (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
     )
     cv2.putText(
@@ -322,8 +359,7 @@ def main():
             result = detector.detect(frame, mob_name)
 
             pane_heat = heatmap_to_color(result.sprite_heatmap)
-            cv2.putText(pane_heat, "HEATMAP", (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+            annotate_heatmap_pane(pane_heat, result)
 
             pane_overlay = draw_detection_overlay(frame, result)
             cv2.putText(pane_overlay, "DETECTION", (10, 75),

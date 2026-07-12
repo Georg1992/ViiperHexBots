@@ -92,6 +92,7 @@ class MobDescriptor:
     accent_colors: list[ColorCluster]
     rare_colors: list[ColorCluster]
     match_palette_bgr: list[tuple[int, int, int]]
+    match_palette_weights: list[float]
     hsv_histogram: list[float]
     dominant_pixel_bgr: list[int] | None = None
     accent_pixel_bgr: list[int] | None = None
@@ -178,6 +179,12 @@ class MobDescriptor:
             else:
                 match_palette_bgr = []
 
+        raw_weights = data.get("matchPaletteWeights")
+        if raw_weights is not None:
+            match_palette_weights = [float(v) for v in raw_weights]
+        else:
+            match_palette_weights = [1.0] * len(match_palette_bgr)
+
         raw_dominant = data.get("dominantPixelBgr")
         dominant_pixel_bgr = [int(v) for v in raw_dominant] if raw_dominant is not None else None
         raw_accent = data.get("accentPixelBgr")
@@ -218,6 +225,7 @@ class MobDescriptor:
             accent_colors=[ColorCluster(**item) for item in data["accentColors"]],
             rare_colors=[ColorCluster(**item) for item in data["rareColors"]],
             match_palette_bgr=match_palette_bgr,
+            match_palette_weights=match_palette_weights,
             hsv_histogram=[float(v) for v in data["hsvHistogram"]],
             dominant_pixel_bgr=dominant_pixel_bgr,
             accent_pixel_bgr=accent_pixel_bgr,
@@ -243,6 +251,7 @@ class MobDescriptor:
             "accentColors": data["accent_colors"],
             "rareColors": data["rare_colors"],
             "matchPaletteBgr": data["match_palette_bgr"],
+            "matchPaletteWeights": data["match_palette_weights"],
             "hsvHistogram": data["hsv_histogram"],
             "dominantPixelBgr": data.get("dominant_pixel_bgr"),
             "accentPixelBgr": data.get("accent_pixel_bgr"),
