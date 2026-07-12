@@ -115,16 +115,28 @@ def candidate_silhouette(
     max_distance: float,
     width: int,
     height: int,
+    *,
+    occupancy_mask: np.ndarray | None = None,
 ) -> np.ndarray:
-    pixels = region_bgr.reshape(-1, 3).astype(np.float32)
+    """Build a 16×16 occupancy grid from palette-matched pixels in a crop.
+
+    Uses Euclidean BGR distance (same metric family as the discovery heatmap).
+    Callers may pass a wider ``max_distance`` than the heatmap stage so weak
+    low-contrast body pixels are retained without loosening blob discovery.
+    """
+    region = region_bgr
+    if occupancy_mask is not None:
+        region = region_bgr.copy()
+        region[~occupancy_mask.reshape(region.shape[:2])] = 0
+
+    pixels = region.reshape(-1, 3).astype(np.float32)
     min_dist_sq = np.full(pixels.shape[0], np.inf, dtype=np.float32)
     for start in range(0, len(palette_bgr), 64):
         chunk = palette_bgr[start : start + 64]
         diff = pixels[:, None, :] - chunk[None, :, :]
         dist_sq = np.sum(diff * diff, axis=2)
         min_dist_sq = np.minimum(min_dist_sq, dist_sq.min(axis=1))
-    match = (min_dist_sq <= max_distance * max_distance).reshape(region_bgr.shape[:2])
-    # frame_silhouette expects uint8 alpha (0-255), convert from bool.
+    match = (min_dist_sq <= max_distance * max_distance).reshape(region.shape[:2])
     match_uint8 = (match.astype(np.uint8)) * 255
     return frame_silhouette(match_uint8, width, height)
 

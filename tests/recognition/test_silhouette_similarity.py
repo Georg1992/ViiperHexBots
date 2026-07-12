@@ -6,7 +6,10 @@ import unittest
 
 import numpy as np
 
-from pybot.recognition.detector.descriptors.layout_utils import silhouette_similarity
+from pybot.recognition.detector.descriptors.layout_utils import (
+    candidate_silhouette,
+    silhouette_similarity,
+)
 
 
 class SilhouetteSimilarityTests(unittest.TestCase):
@@ -46,6 +49,22 @@ class SilhouetteSimilarityTests(unittest.TestCase):
         self.assertGreater(tight_score, bloated_score)
         self.assertGreaterEqual(tight_score, 0.99)
         self.assertLess(bloated_score, 0.75)
+
+    def test_occupancy_mask_excludes_pixels_outside_component(self) -> None:
+        region = np.zeros((8, 8, 3), dtype=np.uint8)
+        region[2:6, 2:6] = (0, 200, 0)
+        region[0, :] = (0, 200, 0)
+        palette = np.asarray([(0, 200, 0)], dtype=np.float32)
+        mask = np.zeros((8, 8), dtype=bool)
+        mask[2:6, 2:6] = True
+
+        unrestricted = candidate_silhouette(region, palette, 20.0, 4, 4)
+        restricted = candidate_silhouette(
+            region, palette, 20.0, 4, 4, occupancy_mask=mask,
+        )
+
+        self.assertGreater(float((restricted >= 0.5).sum()), 0.0)
+        self.assertLess(float((restricted >= 0.5).sum()), float((unrestricted >= 0.5).sum()))
 
     def test_sparse_match_passes_while_outside_fill_fails_at_half(self) -> None:
         """Regression: low-contrast legit extraction vs viewport-filling false positive."""

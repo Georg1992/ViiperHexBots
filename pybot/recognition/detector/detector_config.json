@@ -5,6 +5,7 @@
   "minLocalPatternScore": 0.10,
   "minDescriptorColorMatch": 0.20,
   "maxSpritePaletteDistance": 20.0,
+  "maxSilhouettePaletteDistance": 26.0,
   "minSpritePaletteMatch": 0.22,
   "minInformativePixelFraction": 0.06,
   "maxDescriptorPixelFraction": 0.36,

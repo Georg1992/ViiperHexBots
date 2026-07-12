@@ -28,6 +28,7 @@ REQUIRED_CONFIG_KEYS = {
     "discoveryHeatmapDownscale",
     "discoveryHeatmapDownscaleMinSide",
     "maxSpritePaletteDistance",
+    "maxSilhouettePaletteDistance",
     "minSpritePaletteMatch",
     "minSilhouetteSimilarity",
     "topCandidateCenters",
@@ -477,6 +478,7 @@ class MobDetector:
         if comp_w < 4 or comp_h < 4:
             return False, 0.0, None, 0, []
 
+        comp_mask = labels[comp_top : comp_top + comp_h, comp_left : comp_left + comp_w] == best_label
         mob_region = search_region[comp_top : comp_top + comp_h, comp_left : comp_left + comp_w]
         if mob_region.size == 0:
             return False, 0.0, None, 0, []
@@ -485,12 +487,19 @@ class MobDetector:
         target_h = max(8, int(round(descriptor.avg_height)))
         if mob_region.shape[1] != target_w or mob_region.shape[0] != target_h:
             mob_region = cv2.resize(mob_region, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+            comp_mask = cv2.resize(
+                comp_mask.astype(np.uint8),
+                (target_w, target_h),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
 
+        silhouette_distance = float(self.config["maxSilhouettePaletteDistance"])
         candidate = candidate_silhouette(
             mob_region,
             np.asarray(descriptor.match_palette_bgr, dtype=np.float32),
-            float(self.config["maxSpritePaletteDistance"]),
+            silhouette_distance,
             gate_mask.width, gate_mask.height,
+            occupancy_mask=comp_mask,
         )
         similarity, matched_idx, scores = best_silhouette_similarity(candidate, refs)
 
@@ -541,7 +550,7 @@ class MobDetector:
         pal = np.asarray(descriptor.match_palette_bgr, dtype=np.float32)
         cand = candidate_silhouette(
             region, pal,
-            float(self.config["maxSpritePaletteDistance"]),
+            float(self.config["maxSilhouettePaletteDistance"]),
             gate_mask.width, gate_mask.height,
         )
         sim, _, _ = best_silhouette_similarity(cand, refs)
