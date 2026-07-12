@@ -39,8 +39,9 @@ REQUIRED_CONFIG_KEYS = {
     "smallScaleCutoff",
     "centerScales",
     "localTrackSearchRadiusPx",
-    "partialBlobDimFloor",
-    "partialBlobMinAreaRatio",
+    "minBlobFullScaleDimRatio",
+    "minBlobAreaRatio",
+    "minBlobSliverDimRatio",
     "minBlobDimRatio",
     "maxBlobDimRatio",
     # death-detection keys (still used by local_tracker / opacity_probe)
@@ -210,14 +211,16 @@ class MobDetector:
         qualifying = [
             (cx, cy, h, bb)
             for cx, cy, h, bb in blobs
-            if h >= self.min_discovery_heatmap_score and bb[2] * bb[3] >= 300
+            if self._passes_blob_heat_filter(h, bb)
         ]
         multi_blob_frame = len(qualifying) > 1
 
         for cx, cy, heat_score, comp_bbox in qualifying:
             bx, by, bw, bh = comp_bbox
 
-            if not self._passes_blob_prefilters(descriptor, comp_bbox, multi_blob_frame=multi_blob_frame):
+            if not self._passes_blob_size_filter(
+                descriptor, comp_bbox, multi_blob_frame=multi_blob_frame,
+            ):
                 continue
 
             bbox = (bx, by, bw, bh)
@@ -292,17 +295,32 @@ class MobDetector:
     #  Blob pre-filters (descriptor-absolute, before silhouette gate)
     # ------------------------------------------------------------------
 
-    def _passes_blob_prefilters(
+    def _passes_blob_heat_filter(
+        self,
+        heat_score: float,
+        comp_bbox: tuple[int, int, int, int],
+    ) -> bool:
+        """Reject heatmap blobs whose peak score or pixel footprint is too weak."""
+        _bx, _by, bw, bh = comp_bbox
+        if heat_score < self.min_discovery_heatmap_score:
+            return False
+        if bw * bh < 300:
+            return False
+        return True
+
+    def _passes_blob_size_filter(
         self,
         descriptor: MobDescriptor,
         comp_bbox: tuple[int, int, int, int],
         *,
         multi_blob_frame: bool,
     ) -> bool:
-        """Reject heatmap blobs that cannot plausibly be this mob.
+        """Reject heatmap blobs whose bbox cannot plausibly be this mob.
 
-        Uses per-mob descriptor bounds only — not frame-relative peer
-        comparisons — so results are stable across hunt search range.
+        Size rules (descriptor-absolute, stable across hunt search range):
+        1. Sliver — thinnest axis too small vs descriptor minimum.
+        2. Area — when both axes are near full scale, bbox area must match.
+        3. Bounds — single-blob minimum and oversized maximum vs descriptor.
         """
         _bx, _by, bw, bh = comp_bbox
         blob_area = bw * bh
@@ -315,10 +333,12 @@ class MobDetector:
 
         if desc_min_w is not None and desc_min_h is not None:
             dim_min = min(bw / desc_min_w, bh / desc_min_h)
-            area_min = blob_area / (desc_min_w * desc_min_h)
-            partial_dim_floor = float(self.config["partialBlobDimFloor"])
-            partial_area_ceiling = float(self.config["partialBlobMinAreaRatio"])
-            if dim_min > partial_dim_floor and area_min < partial_area_ceiling:
+            if dim_min < float(self.config["minBlobSliverDimRatio"]):
+                return False
+            area_ratio = blob_area / (desc_min_w * desc_min_h)
+            full_scale_dim = float(self.config["minBlobFullScaleDimRatio"])
+            min_area = float(self.config["minBlobAreaRatio"])
+            if dim_min >= full_scale_dim and area_ratio < min_area:
                 return False
 
         if not multi_blob_frame and desc_min_w is not None and desc_min_h is not None:
