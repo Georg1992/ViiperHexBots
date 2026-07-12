@@ -47,6 +47,28 @@ class SilhouetteSimilarityTests(unittest.TestCase):
         self.assertGreaterEqual(tight_score, 0.99)
         self.assertLess(bloated_score, 0.75)
 
+    def test_sparse_match_passes_while_outside_fill_fails_at_half(self) -> None:
+        """Regression: low-contrast legit extraction vs viewport-filling false positive."""
+        reference = np.zeros((16, 16), dtype=np.float32)
+        stable_mask = np.zeros((16, 16), dtype=bool)
+        reference[3:12, 2:11] = 1.0
+        stable_mask[3:12, 2:11] = True
+        reference[6:9, 5:8] = 0.0
+        stable_mask[6:9, 5:8] = False
+
+        sparse_candidate = np.zeros((16, 16), dtype=np.float32)
+        sparse_candidate[3:10, 2:9] = 1.0
+
+        bloated_candidate = np.zeros((16, 16), dtype=np.float32)
+        bloated_candidate[1:14, 1:14] = 1.0
+
+        sparse_score = silhouette_similarity(sparse_candidate, reference, stable_mask)
+        bloated_score = silhouette_similarity(bloated_candidate, reference, stable_mask)
+
+        self.assertGreaterEqual(sparse_score, 0.50)
+        self.assertLess(bloated_score, 0.50)
+        self.assertGreater(sparse_score, bloated_score)
+
 
 if __name__ == "__main__":
     unittest.main()

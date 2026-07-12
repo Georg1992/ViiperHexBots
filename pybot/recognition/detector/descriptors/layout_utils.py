@@ -145,11 +145,12 @@ def layout_similarity(
 
 
 def silhouette_similarity(candidate: np.ndarray, reference: np.ndarray, stable_mask: np.ndarray) -> float:
-    """Binary IoU over the union of reference and candidate occupancy.
+    """Asymmetric overlap score on the 16×16 silhouette grid.
 
-    Compares on the full 16×16 grid where either shape is occupied. Candidate
-    pixels outside the reference silhouette expand the union and lower the score,
-    so viewport-filling blobs cannot score highly against a tight mob ref.
+    Candidate pixels outside the reference silhouette are penalized more heavily
+    than reference pixels the candidate misses. Sparse extraction in low-contrast
+    scenes therefore still passes at the 0.50 gate, while viewport-filling blobs
+    cannot inflate their score by covering unrelated cells.
     """
     if reference.size == 0 or not np.any(stable_mask):
         return 1.0
@@ -158,10 +159,14 @@ def silhouette_similarity(candidate: np.ndarray, reference: np.ndarray, stable_m
     ref_bin = ((reference >= 0.5) & stable).astype(np.float32)
     cand_bin = (candidate >= 0.5).astype(np.float32)
     intersection = float(np.sum(ref_bin * cand_bin))
-    union = float(np.sum(np.maximum(ref_bin, cand_bin)))
-    if union <= 0.0:
+    if intersection <= 0.0:
         return 0.0
-    return float(np.clip(intersection / union, 0.0, 1.0))
+    miss = float(np.sum(ref_bin * (1.0 - cand_bin)))
+    extra = float(np.sum((1.0 - ref_bin) * cand_bin))
+    miss_weight = 0.5
+    extra_weight = 1.5
+    denom = intersection + miss_weight * miss + extra_weight * extra
+    return float(np.clip(intersection / denom, 0.0, 1.0))
 
 
 def best_silhouette_similarity(
