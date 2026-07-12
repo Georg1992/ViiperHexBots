@@ -25,7 +25,7 @@ from pybot.recognition.detector.descriptors.layout_utils import (
     frame_silhouette,
 )
 
-DESCRIPTOR_VERSION = 13
+DESCRIPTOR_VERSION = 15
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -35,7 +35,13 @@ JUMP_ACTION_COUNT = 8
 LIVING_FACING_ACTION_LIMIT = STAND_WALK_ACTION_COUNT + JUMP_ACTION_COUNT
 LIVING_ACTION_SIZE_TOLERANCE = 0.40  # ±40% area vs stand/walk baseline
 MATCH_PALETTE_MAX_COLORS = 20
-MATCH_PALETTE_COVERAGE_DISTANCE = 20.0  # matches config maxSpritePaletteDistance
+MATCH_PALETTE_MAX_ACCENT_COLORS = 4
+PALETTE_DEDUP_H_THRESH = 12.0
+PALETTE_DEDUP_SV_THRESH = 25.0
+PALETTE_NEAR_BLACK_MAX_VALUE = 20.0
+PALETTE_NEAR_BLACK_MAX_SATURATION = 25.0
+PALETTE_NEAR_WHITE_MIN_VALUE = 250.0
+PALETTE_NEAR_WHITE_MAX_SATURATION = 15.0
 MIN_DISTINCTIVE_SATURATION = 40.0
 MIN_DISTINCTIVE_VALUE = 30.0
 LAYOUT_GRID_SIZE = 5
@@ -149,23 +155,7 @@ class DescriptorBuilder:
         if not profile_accent_colors:
             raise RuntimeError(f"no distinctive accent colors for {mob_name}")
         distinctive_rare = self._distinctive_clusters(profile["rare_colors"])
-        match_palette_bgr = self._match_palette_union(spr_file, act_file, facing_pairs)
-        # Enrich with accent + rare BGRs so the discovery heatmap includes
-        # distinctive colours (e.g. purple shirt on Alligator) that may not
-        # make the greedy coverage cut.
-        seen_colors: set[tuple[int, int, int]] = set(match_palette_bgr)
-        for cluster in profile_accent_colors:
-            bgr = (int(cluster.bgr[0]), int(cluster.bgr[1]), int(cluster.bgr[2]))
-            if bgr not in seen_colors:
-                seen_colors.add(bgr)
-                match_palette_bgr.append(bgr)
-        for cluster in distinctive_rare:
-            bgr = (int(cluster.bgr[0]), int(cluster.bgr[1]), int(cluster.bgr[2]))
-            if bgr not in seen_colors:
-                seen_colors.add(bgr)
-                match_palette_bgr.append(bgr)
-        # Cap at 20
-        match_palette_bgr = match_palette_bgr[:MATCH_PALETTE_MAX_COLORS]
+        match_palette_bgr = self._match_palette(all_facing_frames)
         dominant_pixels_bgr, accent_pixels_bgr = self._collect_structural_pixels(
             spr_file,
             act_file,
@@ -282,32 +272,121 @@ class DescriptorBuilder:
             frames.extend(self._collect_frames(spr_file, act_file, pair, frame_start=0))
         return frames
 
-    def _match_palette_union(
-        self,
-        spr_file,
-        act_file,
-        facing_pairs: tuple[tuple[int, int], ...],
-    ) -> list[tuple[int, int, int]]:
-        """Greedy coverage palette union across facing pairs.
+    @staticmethod
+    def _is_scene_matching_speck(bgr: tuple[int, int, int]) -> bool:
+        """Drop colors that match generic scene shadows/highlights instead of mob fill."""
+        pixel = np.uint8([[list(bgr)]])
+        _hue, saturation, value = cv2.cvtColor(pixel, cv2.COLOR_BGR2HSV)[0, 0]
+        sat = float(saturation)
+        val = float(value)
+        if val <= PALETTE_NEAR_BLACK_MAX_VALUE and sat <= PALETTE_NEAR_BLACK_MAX_SATURATION:
+            return True
+        if val >= PALETTE_NEAR_WHITE_MIN_VALUE and sat <= PALETTE_NEAR_WHITE_MAX_SATURATION:
+            return True
+        return False
 
-        Runs greedy selection per facing pair, then unions the results.
-        This yields more total colors than running greedy on all frames
-        at once because similar-but-distinct colors from different facings
-        (e.g. front vs back) are kept separately.
-        """
-        seen: set[tuple[int, int, int]] = set()
-        palette: list[tuple[int, int, int]] = []
-        for pair in facing_pairs:
-            frames = self._collect_frames(spr_file, act_file, pair, frame_start=0)
-            if not frames:
+    @classmethod
+    def _rank_accent_colors(
+        cls,
+        accent_counts: dict[tuple[int, int, int], int],
+    ) -> list[tuple[int, int, int]]:
+        if not accent_counts:
+            return []
+        ordered = sorted(accent_counts.items(), key=lambda item: item[1], reverse=True)
+        unique_colors = np.asarray([list(bgr) for bgr, _count in ordered], dtype=np.uint8)
+        dedup_local = cls._deduplicate_palette_indices(unique_colors)
+        return [
+            tuple(int(v) for v in unique_colors[idx])
+            for idx in dedup_local
+        ]
+
+    @staticmethod
+    def _collect_palette_pixel_data(
+        frames: list[np.ndarray],
+    ) -> tuple[np.ndarray, np.ndarray, dict[tuple[int, int, int], int]]:
+        """Return sorted unique BGR colors, count order, and accent pixel masses."""
+        pixel_chunks: list[np.ndarray] = []
+        accent_counts: dict[tuple[int, int, int], int] = {}
+
+        for bgra in frames:
+            opaque = bgra[:, :, 3] >= 128
+            if not np.any(opaque):
                 continue
-            for color in self._match_palette_greedy(frames):
-                if color in seen:
-                    continue
-                seen.add(color)
-                palette.append(color)
-                if len(palette) >= MATCH_PALETTE_MAX_COLORS:
-                    return palette
+            bgr = bgra[:, :, :3]
+            pixel_chunks.append(bgr[opaque])
+            hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+            mask = opaque.astype(np.uint8) * 255
+            accent_mask = DescriptorBuilder._accent_mask(bgr, hsv, mask)
+            accent_pixels = bgr[accent_mask > 0]
+            if len(accent_pixels) == 0:
+                continue
+            unique_accent, accent_n = np.unique(accent_pixels, axis=0, return_counts=True)
+            for color, count in zip(unique_accent, accent_n):
+                key = tuple(int(v) for v in color)
+                accent_counts[key] = accent_counts.get(key, 0) + int(count)
+
+        if not pixel_chunks:
+            raise ValueError("no frames with opaque pixels to build match palette")
+
+        all_pixels = np.concatenate(pixel_chunks, axis=0)
+        unique_colors, counts = np.unique(all_pixels, axis=0, return_counts=True)
+        order = np.argsort(counts)[::-1]
+        return unique_colors[order], order, accent_counts
+
+    @classmethod
+    def _append_palette_colors(
+        cls,
+        palette: list[tuple[int, int, int]],
+        candidates: list[tuple[int, int, int]],
+        *,
+        limit: int,
+    ) -> None:
+        palette_set = set(palette)
+        for bgr in candidates:
+            if len(palette) >= limit:
+                return
+            if cls._is_scene_matching_speck(bgr) or bgr in palette_set:
+                continue
+            palette.append(bgr)
+            palette_set.add(bgr)
+
+    def _match_palette(self, frames: list[np.ndarray]) -> list[tuple[int, int, int]]:
+        """Build match palette from unique sprite fill colors plus accents and shades.
+
+        Structural colors are ranked by opaque pixel mass with HSV shade dedup.
+        Up to MATCH_PALETTE_MAX_ACCENT_COLORS accent-region colors are appended,
+        then remaining slots are filled with the next-most-frequent shade variants.
+        """
+        sorted_unique, _order, accent_counts = self._collect_palette_pixel_data(frames)
+        dedup_local = self._deduplicate_palette_indices(sorted_unique)
+
+        palette: list[tuple[int, int, int]] = []
+        structural = [
+            tuple(int(v) for v in sorted_unique[local_idx])
+            for local_idx in dedup_local
+        ]
+        self._append_palette_colors(palette, structural, limit=MATCH_PALETTE_MAX_COLORS)
+
+        accent_budget = min(
+            MATCH_PALETTE_MAX_ACCENT_COLORS,
+            MATCH_PALETTE_MAX_COLORS - len(palette),
+        )
+        if accent_budget > 0:
+            self._append_palette_colors(
+                palette,
+                self._rank_accent_colors(accent_counts)[:accent_budget],
+                limit=len(palette) + accent_budget,
+            )
+
+        shade_candidates = [
+            tuple(int(v) for v in sorted_unique[idx])
+            for idx in range(len(sorted_unique))
+        ]
+        self._append_palette_colors(palette, shade_candidates, limit=MATCH_PALETTE_MAX_COLORS)
+
+        if not palette:
+            raise ValueError("no match palette colors after deduplication")
+
         return palette
 
     def _collect_structural_pixels(
@@ -530,100 +609,11 @@ class DescriptorBuilder:
                 kept.append(candidate)
         return kept
 
-    def _match_palette_greedy(self, frames: list[np.ndarray]) -> list[tuple[int, int, int]]:
-        """Pick up to MATCH_PALETTE_MAX_COLORS colors that maximize coverage of sprite pixels.
-
-        Uses greedy set cover: each iteration picks the color that covers the most
-        currently uncovered pixels (within MATCH_PALETTE_COVERAGE_DISTANCE in BGR space).
-        Called per-facing-pair through _match_palette_union so that similar colors
-        from different facings (front vs back) are kept separately.
-        """
-        # Collect all opaque pixels
-        all_pixels_list: list[np.ndarray] = []
-        for bgra in frames:
-            mask = bgra[:, :, 3] >= 128
-            pixels = bgra[:, :, :3][mask]
-            if len(pixels) > 0:
-                all_pixels_list.append(pixels)
-
-        if not all_pixels_list:
-            raise ValueError("no frames with opaque pixels to build match palette")
-
-        all_pixels = np.concatenate(all_pixels_list, axis=0)
-
-        # Unique colors weighted by pixel count
-        unique_colors, counts = np.unique(all_pixels, axis=0, return_counts=True)
-
-        # Build candidate list: deduplicated colors sorted by frequency.
-        # Only distinctive colors (saturation >= 40, value >= 30, not white)
-        # are included — shadows, outlines, and gray/dull/muddy colors that
-        # match the game background are excluded from the descriptor entirely.
-        sorted_order = np.argsort(counts)[::-1]
-        sorted_unique = unique_colors[sorted_order]
-        dedup_local = self._deduplicate_palette_indices(sorted_unique)
-        dedup_original_indices = [int(sorted_order[i]) for i in dedup_local]
-        candidates: list[tuple[int, tuple[int, int, int]]] = [
-            (i, tuple(int(v) for v in unique_colors[i]))
-            for i in dedup_original_indices
-            if DescriptorBuilder._is_distinctive_bgr(tuple(int(v) for v in unique_colors[i]))
-        ]
-
-        # Greedy coverage selection
-        max_dist_sq = MATCH_PALETTE_COVERAGE_DISTANCE * MATCH_PALETTE_COVERAGE_DISTANCE
-        uncovered = np.ones(len(unique_colors), dtype=bool)
-        selected: list[tuple[int, int, int]] = []
-
-        for _ in range(MATCH_PALETTE_MAX_COLORS):
-            best_cand_idx = -1
-            best_mass = 0
-
-            for cand_idx, bgr_tuple in candidates:
-                if not uncovered[cand_idx]:
-                    continue
-                # Distance from this candidate to all currently uncovered unique colors
-                diff = unique_colors[uncovered].astype(np.float32) - unique_colors[cand_idx].astype(np.float32)
-                dist_sq = np.sum(diff * diff, axis=1)
-                # Pixel mass of uncovered colors within max_dist
-                covered_mass = int(np.sum(counts[uncovered][dist_sq <= max_dist_sq]))
-                if covered_mass > best_mass:
-                    best_mass = covered_mass
-                    best_cand_idx = cand_idx
-
-            if best_cand_idx < 0 or best_mass == 0:
-                break
-
-            selected.append(tuple(int(v) for v in unique_colors[best_cand_idx]))
-
-            # Mark all unique colors within max_dist of the chosen color as covered
-            diff = unique_colors[uncovered].astype(np.float32) - unique_colors[best_cand_idx].astype(np.float32)
-            dist_sq = np.sum(diff * diff, axis=1)
-            uncovered_indices = np.where(uncovered)[0]
-            covered_these = uncovered_indices[dist_sq <= max_dist_sq]
-            uncovered[covered_these] = False
-
-        if not selected:
-            # Fallback: most common from candidates
-            sorted_by_count = sorted(candidates, key=lambda x: int(counts[x[0]]), reverse=True)
-            return [bgr for _, bgr in sorted_by_count[:MATCH_PALETTE_MAX_COLORS]]
-
-        # Fill remaining slots with the highest-frequency candidates not yet selected.
-        # This ensures we always use the full MATCH_PALETTE_MAX_COLORS budget even
-        # when the greedy cover converges early (fewer than 48 distinct color groups).
-        selected_set: set[tuple[int, int, int]] = set(selected)
-        for cand_idx, bgr_tuple in candidates:
-            if len(selected) >= MATCH_PALETTE_MAX_COLORS:
-                break
-            if bgr_tuple not in selected_set:
-                selected_set.add(bgr_tuple)
-                selected.append(bgr_tuple)
-
-        return selected
-
     @staticmethod
     def _deduplicate_palette_indices(
         unique_colors: np.ndarray,
-        h_thresh: float = 12.0,
-        sv_thresh: float = 25.0,
+        h_thresh: float = PALETTE_DEDUP_H_THRESH,
+        sv_thresh: float = PALETTE_DEDUP_SV_THRESH,
     ) -> list[int]:
         """Return indices of unique_colors array that pass HSV dedup.
 

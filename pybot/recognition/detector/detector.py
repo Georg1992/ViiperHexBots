@@ -20,7 +20,7 @@ from pybot.recognition.detector.descriptors.layout_utils import (
     best_silhouette_similarity,
     candidate_silhouette,
 )
-from pybot.recognition.detector.scoring.heatmap_detector import HeatmapDetector, sprite_palette_heatmap
+from pybot.recognition.detector.scoring.heatmap_detector import HeatmapDetector, palette_heatmap, sprite_palette_heatmap
 
 
 REQUIRED_CONFIG_KEYS = {
@@ -43,6 +43,11 @@ REQUIRED_CONFIG_KEYS = {
     "minBlobFullScaleDimRatio",
     "minBlobAreaRatio",
     "minBlobSliverDimRatio",
+    "minBlobHeatmapAreaRatio",
+    "minBlobHeatmapAreaFloor",
+    "minBlobModerateHeat",
+    "minBlobAccentFootprint",
+    "minBlobAccentPixelScore",
     "minBlobDimRatio",
     "maxBlobDimRatio",
     # death-detection keys (still used by local_tracker / opacity_probe)
@@ -197,6 +202,7 @@ class MobDetector:
         sprite_heatmap = self.heatmap_detector.build_sprite_heatmap(
             frame_bgr, hsv, descriptor, downscale=downscale,
         )
+        accent_heatmap = palette_heatmap(hsv, descriptor.accent_colors)
 
         # --- blobs ----------------------------------------------------
         blobs_start = time.perf_counter()
@@ -212,7 +218,7 @@ class MobDetector:
         qualifying = [
             (cx, cy, h, bb)
             for cx, cy, h, bb in blobs
-            if self._passes_blob_heat_filter(h, bb)
+            if self._passes_blob_heat_filter(h, bb, descriptor, accent_heatmap)
         ]
         multi_blob_frame = len(qualifying) > 1
 
@@ -296,17 +302,50 @@ class MobDetector:
     #  Blob pre-filters (descriptor-absolute, before silhouette gate)
     # ------------------------------------------------------------------
 
+    def _min_blob_heatmap_area(self, descriptor: MobDescriptor) -> int:
+        desc_min_w = descriptor.size.min_width
+        desc_min_h = descriptor.size.min_height
+        floor = int(self.config["minBlobHeatmapAreaFloor"])
+        if desc_min_w is None or desc_min_h is None:
+            return floor
+        ratio_area = int(
+            desc_min_w * desc_min_h * float(self.config["minBlobHeatmapAreaRatio"]),
+        )
+        return max(floor, ratio_area)
+
+    @staticmethod
+    def _blob_accent_footprint(
+        accent_heatmap: np.ndarray,
+        comp_bbox: tuple[int, int, int, int],
+        accent_pixel_score: float,
+    ) -> float:
+        bx, by, bw, bh = comp_bbox
+        accent_crop = accent_heatmap[by : by + bh, bx : bx + bw]
+        if accent_crop.size == 0:
+            return 0.0
+        return float(np.mean(accent_crop >= accent_pixel_score))
+
     def _passes_blob_heat_filter(
         self,
         heat_score: float,
         comp_bbox: tuple[int, int, int, int],
+        descriptor: MobDescriptor,
+        accent_heatmap: np.ndarray,
     ) -> bool:
         """Reject heatmap blobs whose peak score or pixel footprint is too weak."""
         _bx, _by, bw, bh = comp_bbox
         if heat_score < self.min_discovery_heatmap_score:
             return False
-        if bw * bh < 300:
+        if bw * bh < self._min_blob_heatmap_area(descriptor):
             return False
+        if heat_score >= float(self.config["minBlobModerateHeat"]):
+            accent_footprint = self._blob_accent_footprint(
+                accent_heatmap,
+                comp_bbox,
+                float(self.config["minBlobAccentPixelScore"]),
+            )
+            if accent_footprint < float(self.config["minBlobAccentFootprint"]):
+                return False
         return True
 
     def _passes_blob_size_filter(
