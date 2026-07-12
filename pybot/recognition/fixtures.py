@@ -7,9 +7,14 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from pybot.paths import RECOGNITION_FIXTURES_DIR
+import numpy as np
+
+from pybot.paths import PROJECT_ROOT, RECOGNITION_FIXTURES_DIR
+from pybot.runtime.capture.window_roi import crop_frame_to_hunt_search_roi
+from pybot.runtime.constants import CELL_SIZE_PX, DEFAULT_SEARCH_RANGE_CELLS
 
 SCREENSHOTS_DIR = RECOGNITION_FIXTURES_DIR / "game-screenshots"
+MAX_SEARCH_RANGE_CELLS = DEFAULT_SEARCH_RANGE_CELLS
 
 
 @dataclass(frozen=True)
@@ -108,9 +113,38 @@ def suite_by_folder(folder: str) -> MobFixtureSuite | None:
     return None
 
 
+def shipped_mob_spr_stems() -> tuple[str, ...]:
+    """SPR stems for every mob under assets/mobs (one per folder)."""
+    mobs_dir = PROJECT_ROOT / "assets" / "mobs"
+    if not mobs_dir.is_dir():
+        return ()
+    stems: list[str] = []
+    for folder in sorted(mobs_dir.iterdir()):
+        if not folder.is_dir():
+            continue
+        spr_files = sorted(folder.glob("*.spr"))
+        if spr_files:
+            stems.append(spr_files[0].stem.lower())
+    return tuple(stems)
+
+
 def default_horn_fixture() -> Path:
     """Representative horn screenshot used by tracker/state integration tests."""
     path = SCREENSHOTS_DIR / "Horn" / "3Horn.png"
     if not path.is_file():
         raise FileNotFoundError(f"missing default horn fixture: {path}")
     return path
+
+
+def fixture_search_frame(
+    frame: np.ndarray,
+    *,
+    search_range_cells: int = MAX_SEARCH_RANGE_CELLS,
+    cell_size_px: int = CELL_SIZE_PX,
+) -> np.ndarray:
+    """Crop a fixture screenshot to the max GUI hunt search range (production parity)."""
+    return crop_frame_to_hunt_search_roi(
+        frame,
+        search_range_cells=search_range_cells,
+        cell_size_px=cell_size_px,
+    )

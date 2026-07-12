@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
+
 
 @dataclass(frozen=True)
 class HuntRoi:
@@ -55,6 +57,49 @@ def hunt_roi_from_client_rect(
     if w <= 0 or h <= 0:
         return None
     return HuntRoi(x=x, y=y, w=w, h=h)
+
+
+def hunt_roi_from_frame_shape(
+    frame_h: int,
+    frame_w: int,
+    *,
+    search_range_cells: int,
+    cell_size_px: int,
+) -> HuntRoi | None:
+    """Local-frame hunt ROI using the same math as live capture."""
+    return hunt_roi_from_client_rect(
+        0,
+        0,
+        frame_w,
+        frame_h,
+        search_range_cells=search_range_cells,
+        cell_size_px=cell_size_px,
+    )
+
+
+def crop_frame_to_hunt_search_roi(
+    frame: np.ndarray,
+    *,
+    search_range_cells: int,
+    cell_size_px: int,
+) -> np.ndarray:
+    """Crop a BGR frame to the hunt search box (mirrors production capture)."""
+    h, w = frame.shape[:2]
+    roi = hunt_roi_from_frame_shape(
+        h,
+        w,
+        search_range_cells=search_range_cells,
+        cell_size_px=cell_size_px,
+    )
+    if roi is None:
+        return frame
+    x0 = max(0, roi.x)
+    y0 = max(0, roi.y)
+    x1 = min(w, roi.x + roi.w)
+    y1 = min(h, roi.y + roi.h)
+    if x1 <= x0 or y1 <= y0:
+        return frame
+    return frame[y0:y1, x0:x1].copy()
 
 
 def player_ignore_box(

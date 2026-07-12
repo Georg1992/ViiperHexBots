@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import unittest
 
+import numpy as np
+
 from pybot.runtime.capture.window_roi import (
+    crop_frame_to_hunt_search_roi,
     hunt_roi_from_client_rect,
+    hunt_roi_from_frame_shape,
     player_ignore_box,
     point_inside_ignore,
     search_box_size_px,
@@ -43,6 +47,21 @@ class WindowRoiTests(unittest.TestCase):
         assert roi is not None
         self.assertEqual(roi.x, 800 - 1024)
         self.assertEqual(roi.y, 600 - 1024)
+
+    def test_crop_frame_to_hunt_search_roi_matches_client_math(self) -> None:
+        frame_h, frame_w = 1079, 1919
+        roi = hunt_roi_from_client_rect(
+            0, 0, frame_w, frame_h,
+            search_range_cells=16,
+            cell_size_px=64,
+        )
+        assert roi is not None
+        frame = np.zeros((frame_h, frame_w, 3), dtype=np.uint8)
+        cropped = crop_frame_to_hunt_search_roi(frame, search_range_cells=16, cell_size_px=64)
+        self.assertEqual(cropped.shape[0], 1024)
+        self.assertEqual(cropped.shape[1], 1024)
+        self.assertEqual(roi.x, (frame_w // 2) - 512)
+        self.assertEqual(roi.y, (frame_h // 2) - 512)
 
     def test_player_ignore_centered_two_by_two_cells(self) -> None:
         roi = hunt_roi_from_client_rect(

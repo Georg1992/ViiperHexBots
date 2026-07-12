@@ -27,7 +27,7 @@ def frame_palette_coverage_grid(
         return np.zeros((grid_size, grid_size), dtype=np.float32)
     palette = np.asarray(palette_bgr, dtype=np.float32)
     pixels = bgr.reshape(-1, 3).astype(np.float32)
-    opaque = (alpha.reshape(-1) > 0)
+    opaque = (alpha.reshape(-1) >= 128)
     match = np.zeros(pixels.shape[0], dtype=bool)
     if np.any(opaque):
         visible = pixels[opaque]
@@ -39,7 +39,7 @@ def frame_palette_coverage_grid(
             min_dist_sq = np.minimum(min_dist_sq, dist_sq.min(axis=1))
         match[opaque] = min_dist_sq <= max_distance * max_distance
     match_img = match.reshape(bgr.shape[:2]).astype(np.float32)
-    return frame_alpha_occupancy_grid(match_img * (alpha > 0), grid_size)
+    return frame_alpha_occupancy_grid(match_img * (alpha >= 128).astype(np.float32), grid_size)
 
 
 def frame_cluster_grid(
@@ -49,7 +49,7 @@ def frame_cluster_grid(
     grid_size: int,
 ) -> np.ndarray:
     grid = np.full((grid_size, grid_size), -1, dtype=np.int32)
-    if not clusters or not np.any(alpha > 0):
+    if not clusters or not np.any(alpha >= 128):
         return grid
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
     height, width = alpha.shape[:2]
@@ -63,7 +63,7 @@ def frame_cluster_grid(
         for gx in range(grid_size):
             x0 = int(round(gx * cell_w))
             x1 = int(round((gx + 1) * cell_w))
-            cell_alpha = alpha[y0:y1, x0:x1] > 0
+            cell_alpha = alpha[y0:y1, x0:x1] >= 128
             if not np.any(cell_alpha):
                 continue
             cell_hsv = hsv[y0:y1, x0:x1][cell_alpha]
@@ -89,7 +89,7 @@ def frame_cluster_grid(
 def frame_silhouette(alpha: np.ndarray, width: int, height: int) -> np.ndarray:
     if alpha.size == 0:
         return np.zeros((height, width), dtype=np.float32)
-    return cv2.resize((alpha > 0).astype(np.float32), (width, height), interpolation=cv2.INTER_AREA)
+    return cv2.resize((alpha >= 128).astype(np.float32), (width, height), interpolation=cv2.INTER_AREA)
 
 
 def candidate_palette_layout(
@@ -123,8 +123,10 @@ def candidate_silhouette(
         diff = pixels[:, None, :] - chunk[None, :, :]
         dist_sq = np.sum(diff * diff, axis=2)
         min_dist_sq = np.minimum(min_dist_sq, dist_sq.min(axis=1))
-    match = (min_dist_sq <= max_distance * max_distance).reshape(region_bgr.shape[:2]).astype(np.float32)
-    return frame_silhouette(match, width, height)
+    match = (min_dist_sq <= max_distance * max_distance).reshape(region_bgr.shape[:2])
+    # frame_silhouette expects uint8 alpha (0-255), convert from bool.
+    match_uint8 = (match.astype(np.uint8)) * 255
+    return frame_silhouette(match_uint8, width, height)
 
 
 def layout_similarity(
@@ -143,15 +145,44 @@ def layout_similarity(
 
 
 def silhouette_similarity(candidate: np.ndarray, reference: np.ndarray, stable_mask: np.ndarray) -> float:
+    """Binary IoU on cells that are ≥50% occupied in the reference or candidate.
+
+    Unlike the old float-IoU (which averaged fractional occupancy and was overly
+    permissive), this converts both masks to binary at a 0.5 threshold so that
+    a cell either counts as "part of the mob" or not.  The comparison is then
+    intersection-over-union on the stable cells, giving a much more honest
+    measure of shape match.
+    """
     if reference.size == 0 or not np.any(stable_mask):
         return 1.0
-    reference_flat = reference.reshape(-1)[stable_mask.reshape(-1)]
-    candidate_flat = candidate.reshape(-1)[stable_mask.reshape(-1)]
-    if reference_flat.size == 0:
+    ref_bin = (reference >= 0.5).astype(np.float32)
+    cand_bin = (candidate >= 0.5).astype(np.float32)
+    ref_flat = ref_bin.reshape(-1)[stable_mask.reshape(-1)]
+    cand_flat = cand_bin.reshape(-1)[stable_mask.reshape(-1)]
+    if ref_flat.size == 0:
         return 1.0
-    overlap = np.minimum(candidate_flat, reference_flat)
-    union = np.maximum(candidate_flat, reference_flat)
+    overlap = np.minimum(cand_flat, ref_flat)
+    union = np.maximum(cand_flat, ref_flat)
     union_sum = float(np.sum(union))
     if union_sum <= 0.0:
         return 0.0
     return float(np.clip(np.sum(overlap) / union_sum, 0.0, 1.0))
+
+
+def best_silhouette_similarity(
+    candidate: np.ndarray,
+    references: list[tuple[np.ndarray, np.ndarray]],
+) -> tuple[float, int, list[float]]:
+    """Score candidate against multiple refs; return best score, index, and all scores."""
+    if not references:
+        return 1.0, 0, []
+    scores: list[float] = []
+    best_sim = -1.0
+    best_idx = 0
+    for idx, (reference, stable_mask) in enumerate(references):
+        sim = silhouette_similarity(candidate, reference, stable_mask)
+        scores.append(sim)
+        if sim > best_sim:
+            best_sim = sim
+            best_idx = idx
+    return float(best_sim), best_idx, scores

@@ -404,10 +404,8 @@ def main() -> int:
         print(f"  Accepted:   {len(result.accepted)}")
         for i, c in enumerate(result.accepted):
             print(f"  [{i}] center=({c.center_x},{c.center_y}) "
-                  f"body={c.body_palette_score:.4f} "
-                  f"accent={c.accent_score:.4f} "
-                  f"size={c.size_score:.4f} "
-                  f"heat={c.heatmap_score:.4f}")
+                  f"heat={c.heatmap_score:.4f} "
+                  f"score={c.final_score:.4f}")
         for i, c in enumerate(result.candidates):
             if not c.accepted:
                 print(f"  [REJ {i}] center=({c.center_x},{c.center_y}) "
@@ -471,8 +469,6 @@ def main() -> int:
                         ignore_x, ignore_y, ignore_w, ignore_h = player_ignore_box(roi, CELL_SIZE_PX)
                         reconciles = 0
                         for c in save_result.accepted:
-                            if c.is_dead:
-                                continue
                             sx = c.center_x + roi.x
                             sy = c.center_y + roi.y
                             if point_inside_ignore(sx, sy, ignore_x, ignore_y, ignore_w, ignore_h):
@@ -524,20 +520,13 @@ def main() -> int:
                                 "center": [c.center_x, c.center_y],
                                 "accepted": c.accepted,
                                 "score": round(c.final_score, 4),
-                                "body": round(c.body_palette_score, 4),
-                                "accent": round(c.accent_score, 4),
-                                "purity": round(c.color_purity_score, 4),
-                                "size": round(c.size_score, 4),
-                                "pattern": round(c.local_pattern_score, 4),
-                                "rare": round(c.rare_color_score, 4),
                                 "heat": round(c.heatmap_score, 4),
                                 "scale": round(c.candidate_scale, 4),
-
                                 "rejection": c.rejection_reason,
                             } for c in save_result.candidates],
                         }
                         (save_dir / f"frame_{ts}.json").write_text(json.dumps(diag, indent=2), encoding="utf-8")
-                        print(f"[S] {reconciles} tracked in {detect_ms:.0f}ms | {save_result.candidates} raw")
+                        print(f"[S] {reconciles} tracked in {detect_ms:.0f}ms | {len(save_result.candidates)} raw")
                 except Exception as e:
                     print(f"[S ERROR] {e}")
             last_s = s_down
@@ -573,20 +562,18 @@ def main() -> int:
                 cy = t.y - roi.y
                 try:
                     scale = t.discovery_scale if t.discovery_scale > 0 else 1.0
-                    living = detector._score_point_at(
-                        frame, hsv, mob_descriptor, cx, cy,
-                        scales=[scale],
+                    accepted, _bbox, sim = detector.score_at(
+                        frame, hsv, mob_descriptor, cx, cy, scale,
                     )
 
-                    if living is not None and living.accepted:
+                    if accepted:
                         # Alive — update position
-                        t.x = living.center_x + roi.x
-                        t.y = living.center_y + roi.y
+                        t.x = cx + roi.x
+                        t.y = cy + roi.y
                         t.last_seen = now
                         t.miss_count = 0
-                        t.confidence = living.final_score
+                        t.confidence = sim
                         t.color = COLOR_DOT_GREEN
-                        t.discovery_scale = living.candidate_scale
                     else:
                         t.miss_count += 1
                         t.color = COLOR_DOT_YELLOW

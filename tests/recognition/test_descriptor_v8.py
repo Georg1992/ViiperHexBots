@@ -19,16 +19,29 @@ class DescriptorV8Tests(unittest.TestCase):
     def test_builds_v8_fields(self) -> None:
         descriptor = self.builder.build("horn", force=True)
         self.assertEqual(descriptor.version, DESCRIPTOR_VERSION)
-        self.assertIsNotNone(descriptor.size_stats)
-        self.assertIsNotNone(descriptor.occupancy_stats)
-        self.assertGreater(len(descriptor.color_stats), 0)
         self.assertIsNotNone(descriptor.layout_grid)
-        self.assertIsNotNone(descriptor.silhouette_mask)
+        self.assertIsNotNone(descriptor.facing_silhouette_masks)
         assert descriptor.layout_grid is not None
         self.assertEqual(descriptor.layout_grid.grid_size, 5)
         self.assertEqual(len(descriptor.layout_grid.avg_occupancy), 25)
-        assert descriptor.silhouette_mask is not None
-        self.assertEqual(len(descriptor.silhouette_mask.avg_mask), 256)
+        assert descriptor.facing_silhouette_masks is not None
+        self.assertGreater(len(descriptor.facing_silhouette_masks), 0)
+        self.assertEqual(len(descriptor.facing_silhouette_masks[0].avg_mask), 256)
+        self.assertIsNotNone(descriptor.silhouette_masks)
+        assert descriptor.silhouette_masks is not None
+        self.assertGreater(len(descriptor.silhouette_masks), 0)
+        self.assertLessEqual(len(descriptor.silhouette_masks), 4)
+
+    def test_gate_masks_are_facing_medoids(self) -> None:
+        descriptor = self.builder.build("horn", force=True)
+        assert descriptor.facing_silhouette_masks is not None
+        assert descriptor.silhouette_masks is not None
+        self.assertEqual(len(descriptor.silhouette_masks), 4)
+        for gate_mask in descriptor.silhouette_masks:
+            self.assertIn(gate_mask, descriptor.facing_silhouette_masks)
+        all_union = self.builder._merge_facing_silhouette_masks(descriptor.facing_silhouette_masks)
+        max_gate_stable = max(sum(mask.stable_mask) for mask in descriptor.silhouette_masks)
+        self.assertLess(max_gate_stable, sum(all_union.stable_mask))
 
     def test_v7_json_still_loads(self) -> None:
         payload = {
@@ -61,7 +74,7 @@ class DescriptorV8Tests(unittest.TestCase):
         self.assertEqual(descriptor.version, 7)
         self.assertIsNone(descriptor.layout_grid)
         stats = descriptor.effective_size_stats()
-        self.assertGreater(stats.max_width, stats.min_width)
+        self.assertGreater(stats["maxWidth"], stats["minWidth"])
 
 
 if __name__ == "__main__":

@@ -1,25 +1,15 @@
-"""Vectorized descriptor heatmaps and center peak selection."""
+"""Vectorized descriptor sprite heatmap and blob finding.
+
+Pipeline: sprite palette heatmap → selectivity boost → edge-density boost
+          → multi-scale blur → connected components → blob centers.
+"""
 
 from __future__ import annotations
-
-from dataclasses import dataclass
 
 import cv2
 import numpy as np
 
 from pybot.recognition.detector.descriptors.descriptor import ColorCluster, MobDescriptor
-
-
-@dataclass
-class Heatmaps:
-    body_palette: np.ndarray
-    accent: np.ndarray
-    rare_color: np.ndarray
-    local_pattern: np.ndarray
-    final_center: np.ndarray
-    structural_center: np.ndarray
-    ui_mask: np.ndarray
-    playfield_offset: tuple[int, int] = (0, 0)
 
 
 def _cluster_match(hsv: np.ndarray, cluster: ColorCluster) -> np.ndarray:
@@ -50,6 +40,7 @@ def sprite_palette_heatmap(
     palette_bgr: list[tuple[int, int, int]],
     max_distance: float,
 ) -> np.ndarray:
+    """Euclidean-distance heatmap: how close each pixel is to any palette color."""
     if not palette_bgr:
         return np.zeros(frame_bgr.shape[:2], dtype=np.float32)
 
@@ -68,172 +59,170 @@ def sprite_palette_heatmap(
 
 
 class HeatmapDetector:
+    """Builds a single sprite-matching heatmap and finds blob centers."""
+
     def __init__(self, config: dict):
         self.max_centers = int(config["topCandidateCenters"])
-        self.min_center_distance = int(config["minCenterDistancePx"])
-        self.ui_top_ratio = float(config["playfieldTopRatio"])
-        self.ui_bottom_ratio = float(config["playfieldBottomRatio"])
-        self.ui_left_ratio = float(config["playfieldLeftRatio"])
-        self.ui_right_ratio = float(config["playfieldRightRatio"])
         self.min_center_heat = float(config["minCenterHeat"])
         self.peak_relative_threshold = float(config["peakRelativeThreshold"])
         self.center_scales = [float(scale) for scale in config["centerScales"]]
         self.small_scale_min_frame_width = int(config["smallScaleMinFrameWidth"])
         self.small_scale_cutoff = float(config["smallScaleCutoff"])
         self.max_sprite_palette_distance = float(config["maxSpritePaletteDistance"])
-        self.accent_structural_distance = float(config["accentStructuralPixelDistance"])
-        self.structural_discovery_min_score = float(config["structuralDiscoveryMinScore"])
 
-    def playfield_bounds(self, shape: tuple[int, int]) -> tuple[int, int, int, int]:
-        h, w = shape
-        return (
-            int(h * self.ui_top_ratio),
-            int(h * self.ui_bottom_ratio),
-            int(w * self.ui_left_ratio),
-            int(w * self.ui_right_ratio),
-        )
+    def _center_scales(self, frame_width: int) -> list[float]:
+        return [
+            s for s in self.center_scales
+            if s >= self.small_scale_cutoff or frame_width >= self.small_scale_min_frame_width
+        ]
 
-    def build_heatmaps(
+    def build_sprite_heatmap(
         self,
         frame_bgr: np.ndarray,
-        hsv: np.ndarray | None,
+        hsv: np.ndarray,
         descriptor: MobDescriptor,
         downscale: int = 1,
-        *,
-        discovery_only: bool = True,
-    ) -> Heatmaps:
-        y1, y2, x1, x2 = self.playfield_bounds(frame_bgr.shape[:2])
-        crop_bgr = frame_bgr[y1:y2, x1:x2]
-        crop_shape = crop_bgr.shape[:2]
+    ) -> np.ndarray:
+        """Build sprite palette heatmap with selectivity and edge-density boosts.
 
-        if discovery_only:
-            body = accent = rare = local_pattern = np.zeros(crop_shape, dtype=np.float32)
-        else:
-            if hsv is None:
-                raise ValueError("hsv is required when discovery_only is False")
-            crop_hsv = hsv[y1:y2, x1:x2]
-            body = palette_heatmap(crop_hsv, descriptor.body_palette)
-            accent = palette_heatmap(crop_hsv, descriptor.accent_colors)
-            rare = palette_heatmap(crop_hsv, descriptor.rare_colors)
-            local_pattern = self._local_pattern(crop_bgr, accent, body)
+        Returns a float32 heatmap at full frame resolution. Each pixel ≈ how likely
+        it is part of the mob based on palette match, colour selectivity, and edges.
+        """
+        frame_shape = frame_bgr.shape[:2]
 
-        work_bgr = crop_bgr
+        # --- downscale work images if needed ---
+        work_bgr = frame_bgr
+        work_hsv = hsv
         if downscale > 1:
             work_bgr = cv2.resize(
-                crop_bgr,
-                None,
-                fx=1.0 / downscale,
-                fy=1.0 / downscale,
+                frame_bgr, None,
+                fx=1.0 / downscale, fy=1.0 / downscale,
+                interpolation=cv2.INTER_AREA,
+            )
+            work_hsv = cv2.resize(
+                hsv, None,
+                fx=1.0 / downscale, fy=1.0 / downscale,
                 interpolation=cv2.INTER_AREA,
             )
 
-        sprite = sprite_palette_heatmap(
-            work_bgr,
-            descriptor.match_palette_bgr,
-            self.max_sprite_palette_distance,
-        )
-        body_sprite: np.ndarray | None = None
-        accent_sprite: np.ndarray | None = None
-        has_structural = (
-            descriptor.dominant_pixel_bgr is not None and descriptor.accent_pixel_bgr is not None
-        )
-        if has_structural:
-            body_sprite = sprite_palette_heatmap(
-                work_bgr,
-                [tuple(descriptor.dominant_pixel_bgr)],
-                self.max_sprite_palette_distance,
-            )
-            accent_sprite = sprite_palette_heatmap(
-                work_bgr,
-                [tuple(descriptor.accent_pixel_bgr)],
-                self.accent_structural_distance,
-            )
+        # --- 1. Pure sprite-palette-distance heatmap ---
+        sprite = sprite_palette_heatmap(work_bgr, descriptor.match_palette_bgr,
+                                        self.max_sprite_palette_distance)
 
-        final = np.zeros(crop_shape, dtype=np.float32)
-        structural_final = np.zeros(crop_shape, dtype=np.float32)
+        # --- 2. Selectivity: body × accent → suppress non-mob colour combos ---
+        accent = palette_heatmap(work_hsv, descriptor.accent_colors)
+        body = palette_heatmap(work_hsv, descriptor.body_palette)
+        selectivity = np.sqrt(body * accent).astype(np.float32)
+        sprite *= np.float32(0.5) + np.float32(0.5) * selectivity
+
+        # --- 3. Edge-density: mobs have edges, flat terrain doesn't ---
+        gray = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2GRAY)
+        grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        edge_mag = cv2.magnitude(grad_x, grad_y)
+        edge_density = cv2.blur(edge_mag, (7, 7))
+        p95 = float(np.percentile(edge_density, 95))
+        if p95 > 1e-6:
+            edge_density = np.clip(edge_density / p95, 0.0, 1.0).astype(np.float32)
+        else:
+            edge_density = np.zeros_like(edge_density, dtype=np.float32)
+        sprite *= np.float32(0.5) + np.float32(0.5) * edge_density
+
+        # --- 4. Multi-scale blur → aggregate hot-spots at mob-sized scales ---
+        final = np.zeros(frame_shape, dtype=np.float32)
         for scale in self._center_scales(work_bgr.shape[1]):
             window = (
                 max(3, int(round(descriptor.avg_width * scale / downscale)) | 1),
                 max(3, int(round(descriptor.avg_height * scale / downscale)) | 1),
             )
-            sprite_heat = cv2.blur(sprite, window)
+            blurred = cv2.blur(sprite, window)
             if downscale > 1:
-                sprite_heat = cv2.resize(
-                    sprite_heat,
-                    (crop_shape[1], crop_shape[0]),
+                blurred = cv2.resize(
+                    blurred, (frame_shape[1], frame_shape[0]),
                     interpolation=cv2.INTER_LINEAR,
                 )
-            final = np.maximum(final, sprite_heat.astype(np.float32))
-            if body_sprite is not None and accent_sprite is not None:
-                body_heat = cv2.blur(body_sprite, window)
-                accent_heat = cv2.blur(accent_sprite, window)
-                structural_heat = np.sqrt(body_heat * accent_heat).astype(np.float32)
-                if downscale > 1:
-                    structural_heat = cv2.resize(
-                        structural_heat,
-                        (crop_shape[1], crop_shape[0]),
-                        interpolation=cv2.INTER_LINEAR,
-                    )
-                structural_final = np.maximum(structural_final, structural_heat.astype(np.float32))
+            final = np.maximum(final, blurred.astype(np.float32))
 
-        ui_mask = self._ui_mask(crop_shape)
-        final[ui_mask == 0] = 0.0
-        structural_final[ui_mask == 0] = 0.0
-        return Heatmaps(
-            body_palette=body,
-            accent=accent,
-            rare_color=rare,
-            local_pattern=local_pattern,
-            final_center=final,
-            structural_center=structural_final,
-            ui_mask=ui_mask,
-            playfield_offset=(x1, y1),
-        )
+        return final
 
-    def top_centers(self, heatmap: np.ndarray) -> list[tuple[int, int, float]]:
+    def top_centers(
+        self, heatmap: np.ndarray,
+    ) -> list[tuple[int, int, float, tuple[int, int, int, int]]]:
+        """Find distinct hot regions via connected components.
+
+        Thresholds the heatmap, finds contiguous blobs above threshold,
+        merges nearby fragments, and returns heat-weighted centroids with
+        bounding boxes.  Yields exactly 1 center per visually distinct
+        hot region, typically 3–5 per frame at most.
+        """
         if heatmap.size == 0:
             return []
-        radius = max(3, self.min_center_distance // 2)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (radius * 2 + 1, radius * 2 + 1))
-        local_max = heatmap == cv2.dilate(heatmap, kernel)
+
         threshold = max(
             float(heatmap.max()) * self.peak_relative_threshold,
             self.min_center_heat,
         )
-        ys, xs = np.where(local_max & (heatmap >= threshold))
-        if len(xs) == 0:
+        binary = (heatmap >= threshold).astype(np.uint8)
+        if not np.any(binary):
             return []
-        scores = heatmap[ys, xs]
-        order = np.argsort(scores)[::-1]
-        centers: list[tuple[int, int, float]] = []
-        min_dist_sq = self.min_center_distance * self.min_center_distance
-        for idx in order:
-            x, y, score = int(xs[idx]), int(ys[idx]), float(scores[idx])
-            if all((x - px) ** 2 + (y - py) ** 2 >= min_dist_sq for px, py, _ in centers):
-                centers.append((x, y, score))
-                if len(centers) >= self.max_centers:
+
+        num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            binary, connectivity=8,
+        )
+        if num_labels <= 1:
+            return []
+
+        raw: list[tuple[int, int, float, tuple[int, int, int, int]]] = []
+        for label in range(1, num_labels):
+            area = stats[label, cv2.CC_STAT_AREA]
+            if area < 12:
+                continue
+
+            mask = labels == label
+            vals = heatmap[mask]
+            peak_score = float(vals.max())
+
+            weights = vals.astype(np.float32)
+            if weights.sum() > 0:
+                ys, xs = np.where(mask)
+                cx = int(np.average(xs, weights=weights))
+                cy = int(np.average(ys, weights=weights))
+            else:
+                r = _centroids[label]
+                cx, cy = int(round(r[0])), int(round(r[1]))
+
+            comp_bbox = (
+                stats[label, cv2.CC_STAT_LEFT],
+                stats[label, cv2.CC_STAT_TOP],
+                stats[label, cv2.CC_STAT_WIDTH],
+                stats[label, cv2.CC_STAT_HEIGHT],
+            )
+            raw.append((cx, cy, peak_score, comp_bbox))
+
+        raw.sort(key=lambda item: item[2], reverse=True)
+
+        # Merge fragments within MERGE_DIST that belong to the same mob.
+        MERGE_DIST = 40  # pixels in heatmap space
+        MERGE_DIST_SQ = MERGE_DIST * MERGE_DIST
+        merged: list[tuple[int, int, float, tuple[int, int, int, int]]] = []
+        for cx, cy, heat, (left, top, w, h) in raw:
+            merged_flag = False
+            for mi, (mx, my, mheat, mbbox) in enumerate(merged):
+                if (cx - mx) ** 2 + (cy - my) ** 2 < MERGE_DIST_SQ:
+                    ml, mt, mw, mh = mbbox
+                    nleft = min(ml, left)
+                    ntop = min(mt, top)
+                    nright = max(ml + mw, left + w)
+                    nbottom = max(mt + mh, top + h)
+                    merged[mi] = (
+                        (nleft + nright) // 2,
+                        (ntop + nbottom) // 2,
+                        max(mheat, heat),
+                        (nleft, ntop, nright - nleft, nbottom - ntop),
+                    )
+                    merged_flag = True
                     break
-        return centers
+            if not merged_flag:
+                merged.append((cx, cy, heat, (left, top, w, h)))
 
-    @staticmethod
-    def _local_pattern(frame_bgr: np.ndarray, accent: np.ndarray, body: np.ndarray) -> np.ndarray:
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-        edge = cv2.magnitude(grad_x, grad_y)
-        edge = cv2.normalize(edge, None, 0.0, 1.0, cv2.NORM_MINMAX)
-        pattern = np.maximum(accent * 0.8, body * edge)
-        return np.clip(pattern, 0.0, 1.0).astype(np.float32)
-
-    def _center_scales(self, frame_width: int) -> list[float]:
-        return [
-            scale
-            for scale in self.center_scales
-            if scale >= self.small_scale_cutoff or frame_width >= self.small_scale_min_frame_width
-        ]
-
-    def _ui_mask(self, shape: tuple[int, int]) -> np.ndarray:
-        h, w = shape
-        mask = np.zeros((h, w), dtype=np.uint8)
-        mask[:, :] = 255
-        return mask
+        return merged[: self.max_centers]

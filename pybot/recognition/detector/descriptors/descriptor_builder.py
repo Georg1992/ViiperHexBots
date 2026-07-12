@@ -13,13 +13,10 @@ from pybot.recognition.spr_reader import SprReader
 
 from pybot.recognition.detector.descriptors.descriptor import (
     ColorCluster,
-    ColorStat,
     LayoutGrid,
     MobDescriptor,
-    OccupancyStats,
     SilhouetteMask,
     SizeDescriptor,
-    SizeStats,
 )
 from pybot.recognition.detector.descriptors.layout_utils import (
     frame_alpha_occupancy_grid,
@@ -28,16 +25,23 @@ from pybot.recognition.detector.descriptors.layout_utils import (
     frame_silhouette,
 )
 
-DESCRIPTOR_VERSION = 8
-# RO mobs: actions 0-7 are stand/walk for four facing directions (pairs 0+1, 2+3, ...).
-LIVING_FACING_ACTION_LIMIT = 8
-MATCH_PALETTE_MAX_COLORS = 48
+DESCRIPTOR_VERSION = 13
+# RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
+# Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
+# Actions 16+ (wide leap / special) are excluded by size auto-detect in
+# _living_action_pairs() — not by a hardcoded action index cap.
+STAND_WALK_ACTION_COUNT = 8
+JUMP_ACTION_COUNT = 8
+LIVING_FACING_ACTION_LIMIT = STAND_WALK_ACTION_COUNT + JUMP_ACTION_COUNT
+LIVING_ACTION_SIZE_TOLERANCE = 0.40  # ±40% area vs stand/walk baseline
+MATCH_PALETTE_MAX_COLORS = 20
+MATCH_PALETTE_COVERAGE_DISTANCE = 20.0  # matches config maxSpritePaletteDistance
 MIN_DISTINCTIVE_SATURATION = 40.0
 MIN_DISTINCTIVE_VALUE = 30.0
 LAYOUT_GRID_SIZE = 5
 SILHOUETTE_WIDTH = 16
 SILHOUETTE_HEIGHT = 16
-STABLE_FRAME_RATIO = 0.80
+GATE_SILHOUETTE_MASK_COUNT = 4
 STABLE_CELL_OCCUPANCY = 0.08
 STABLE_SILHOUETTE_VALUE = 0.20
 MATCH_DISTANCE = 20.0
@@ -124,16 +128,16 @@ class DescriptorBuilder:
 
         spr_file = SprReader(spr_path).load()
         act_file = ActReader(act_path).load()
-        facing_pairs = self._living_facing_pairs(len(act_file.actions))
+        facing_pairs = self._living_action_pairs(act_file, spr_file)
         if not facing_pairs:
             raise RuntimeError(f"no stand/walk actions found for {mob_name}")
-        primary_frames = self._collect_frames(spr_file, act_file, facing_pairs[0], frame_start=0)
         all_facing_frames = self._collect_facing_frames(spr_file, act_file, facing_pairs)
-        if not primary_frames:
+        if not all_facing_frames:
             raise RuntimeError(f"no stand/walk frames could be rendered for {mob_name}")
 
-        # Color clusters come from the primary facing so they stay selective.
-        profile = self._build_frame_profile(primary_frames, dominant_tolerance=(12, 35, 55))
+        # Color clusters come from all facing directions so both front
+        # and back views of the mob share the same body/accent palette.
+        profile = self._build_frame_profile(all_facing_frames, dominant_tolerance=(12, 35, 55))
         profile["size"] = self._size_descriptor(all_facing_frames)
 
         profile_body_colors = self._distinctive_clusters(profile["body_colors"])
@@ -144,7 +148,24 @@ class DescriptorBuilder:
         profile_accent_colors = self._distinctive_clusters(profile["accent_colors"])
         if not profile_accent_colors:
             raise RuntimeError(f"no distinctive accent colors for {mob_name}")
+        distinctive_rare = self._distinctive_clusters(profile["rare_colors"])
         match_palette_bgr = self._match_palette_union(spr_file, act_file, facing_pairs)
+        # Enrich with accent + rare BGRs so the discovery heatmap includes
+        # distinctive colours (e.g. purple shirt on Alligator) that may not
+        # make the greedy coverage cut.
+        seen_colors: set[tuple[int, int, int]] = set(match_palette_bgr)
+        for cluster in profile_accent_colors:
+            bgr = (int(cluster.bgr[0]), int(cluster.bgr[1]), int(cluster.bgr[2]))
+            if bgr not in seen_colors:
+                seen_colors.add(bgr)
+                match_palette_bgr.append(bgr)
+        for cluster in distinctive_rare:
+            bgr = (int(cluster.bgr[0]), int(cluster.bgr[1]), int(cluster.bgr[2]))
+            if bgr not in seen_colors:
+                seen_colors.add(bgr)
+                match_palette_bgr.append(bgr)
+        # Cap at 20
+        match_palette_bgr = match_palette_bgr[:MATCH_PALETTE_MAX_COLORS]
         dominant_pixels_bgr, accent_pixels_bgr = self._collect_structural_pixels(
             spr_file,
             act_file,
@@ -152,12 +173,14 @@ class DescriptorBuilder:
         )
         dominant_pixel_bgr = dominant_pixels_bgr[0] if dominant_pixels_bgr else None
         accent_pixel_bgr = accent_pixels_bgr[0] if accent_pixels_bgr else None
-        all_clusters = [profile_dominant, *profile_supporting, *profile_accent_colors, *self._distinctive_clusters(profile["rare_colors"])]
-        size_stats = self._build_size_stats(all_facing_frames)
-        occupancy_stats = self._build_occupancy_stats(all_facing_frames)
-        color_stats = self._build_color_stats(all_facing_frames, all_clusters)
+        all_clusters = [profile_dominant, *profile_supporting, *profile_accent_colors, *distinctive_rare]
         layout_grid = self._build_layout_grid(all_facing_frames, all_clusters, match_palette_bgr)
-        silhouette_mask = self._build_silhouette_mask(all_facing_frames)
+        facing_silhouette_masks = self._build_facing_silhouette_masks(
+            spr_file, act_file, facing_pairs,
+        )
+        if not facing_silhouette_masks:
+            raise RuntimeError(f"no silhouette masks could be built for {mob_name}")
+        silhouette_masks = self._build_gate_silhouette_masks(facing_silhouette_masks)
 
         descriptor = MobDescriptor(
             mob_name=mob_name,
@@ -166,26 +189,23 @@ class DescriptorBuilder:
             dominant_color=profile_dominant,
             supporting_colors=profile_supporting,
             accent_colors=profile_accent_colors,
-            rare_colors=self._distinctive_clusters(profile["rare_colors"]),
-            sprite_palette_bgr=profile["sprite_palette_bgr"],
+            rare_colors=distinctive_rare,
             match_palette_bgr=match_palette_bgr,
             hsv_histogram=profile["hsv_histogram"],
             dominant_pixel_bgr=dominant_pixel_bgr,
             accent_pixel_bgr=accent_pixel_bgr,
             dominant_pixels_bgr=dominant_pixels_bgr,
             accent_pixels_bgr=accent_pixels_bgr,
-            size_stats=size_stats,
-            occupancy_stats=occupancy_stats,
-            color_stats=color_stats,
             layout_grid=layout_grid,
-            silhouette_mask=silhouette_mask,
+            facing_silhouette_masks=facing_silhouette_masks,
+            silhouette_masks=silhouette_masks,
         )
         descriptor.save(descriptor_path)
         return descriptor
 
     @staticmethod
     def _living_facing_pairs(action_count: int) -> tuple[tuple[int, int], ...]:
-        """Stand/walk pairs for each facing direction in the first action row."""
+        """Stand/walk and jump action pairs up to LIVING_FACING_ACTION_LIMIT."""
         limit = min(action_count, LIVING_FACING_ACTION_LIMIT)
         if limit <= 0:
             return ()
@@ -195,6 +215,61 @@ class DescriptorBuilder:
         for start in range(0, limit - 1, 2):
             pairs.append((start, start + 1))
         return tuple(pairs)
+
+    def _living_action_pairs(
+        self,
+        act_file,
+        spr_file,
+    ) -> tuple[tuple[int, int], ...]:
+        """Auto-detect action pairs whose frame size matches stand/walk baseline.
+
+        Considers stand/walk (0-7) and both jump rows (8-15). Each pair is
+        included only when its first-frame bbox area is within
+        LIVING_ACTION_SIZE_TOLERANCE of the stand/walk baseline. Stops at the
+        first out-of-tolerance pair so wide leap poses (typically action 16+)
+        never enter the descriptor.
+        """
+        raw_pairs = self._living_facing_pairs(len(act_file.actions))
+        if not raw_pairs:
+            return ()
+
+        # Render first frame of the baseline pair (0,1)
+        baseline_areas: list[float] = []
+        for pair in raw_pairs:
+            frames = self._collect_frames(spr_file, act_file, pair, frame_start=0)
+            if frames:
+                area = float(frames[0].shape[1] * frames[0].shape[0])
+                baseline_areas.append(area)
+
+        if not baseline_areas:
+            return raw_pairs[:1]  # fallback: at least one pair
+
+        baseline = float(np.median(baseline_areas[:2]))  # median of first 2 pairs
+        if baseline <= 0:
+            return raw_pairs[:1]
+
+        max_area = baseline * (1.0 + LIVING_ACTION_SIZE_TOLERANCE)
+        min_area = baseline * (1.0 - LIVING_ACTION_SIZE_TOLERANCE)
+
+        kept: list[tuple[int, int]] = []
+        for idx, pair in enumerate(raw_pairs):
+            if idx < len(baseline_areas):
+                area = baseline_areas[idx]
+            else:
+                # Compute on demand for pairs beyond the baseline
+                frames = self._collect_frames(spr_file, act_file, pair, frame_start=0)
+                if not frames:
+                    continue
+                area = float(frames[0].shape[1] * frames[0].shape[0])
+
+            if min_area <= area <= max_area:
+                kept.append(pair)
+            else:
+                break  # Stop at the first out-of-tolerance pair
+
+        if not kept:
+            return raw_pairs[:1]
+        return tuple(kept)
 
     def _collect_facing_frames(
         self,
@@ -213,13 +288,20 @@ class DescriptorBuilder:
         act_file,
         facing_pairs: tuple[tuple[int, int], ...],
     ) -> list[tuple[int, int, int]]:
+        """Greedy coverage palette union across facing pairs.
+
+        Runs greedy selection per facing pair, then unions the results.
+        This yields more total colors than running greedy on all frames
+        at once because similar-but-distinct colors from different facings
+        (e.g. front vs back) are kept separately.
+        """
         seen: set[tuple[int, int, int]] = set()
         palette: list[tuple[int, int, int]] = []
         for pair in facing_pairs:
             frames = self._collect_frames(spr_file, act_file, pair, frame_start=0)
             if not frames:
                 continue
-            for color in self._match_palette(frames):
+            for color in self._match_palette_greedy(frames):
                 if color in seen:
                     continue
                 seen.add(color)
@@ -309,7 +391,7 @@ class DescriptorBuilder:
 
         for bgra in frames:
             bgr = bgra[:, :, :3]
-            mask = (bgra[:, :, 3] > 0).astype(np.uint8) * 255
+            mask = (bgra[:, :, 3] >= 128).astype(np.uint8) * 255
             hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
             widths.append(int(bgra.shape[1]))
             heights.append(int(bgra.shape[0]))
@@ -339,7 +421,6 @@ class DescriptorBuilder:
             )
         accent_colors = self._clusters("accent", None, accent_hsv, count=4, tolerance=(16, 60, 65))
         rare_colors = self._rare_clusters(opaque_bgr, opaque_hsv)
-        sprite_palette_bgr = self._sprite_palette(opaque_bgr)
         hsv_hist = self._hsv_histogram(opaque_hsv)
 
         size = SizeDescriptor(
@@ -351,114 +432,15 @@ class DescriptorBuilder:
             "body_colors": body_colors,
             "accent_colors": accent_colors,
             "rare_colors": rare_colors,
-            "sprite_palette_bgr": sprite_palette_bgr,
             "hsv_histogram": hsv_hist,
         }
-
-    def _extract_dominant_colors(
-        self, frames: list[np.ndarray]
-    ) -> tuple[ColorCluster, list[ColorCluster]]:
-        """
-        Find exact pixel colors that exist in all living frames, ranked by frequency.
-
-        1. For each frame, collect the set of unique BGR colors.
-        2. Intersect across all frames to find colors present in EVERY frame.
-        3. Fall back to >= 90% threshold if no single color exists in all frames.
-        4. Sort by total pixel count across all frames.
-        5. Top = dominant_color, next up to 4 = supporting_colors.
-        """
-        per_frame_sets: list[set[tuple[int, int, int]]] = []
-        per_frame_counts: list[dict[tuple[int, int, int], int]] = []
-
-        for bgra in frames:
-            bgr = bgra[:, :, :3]
-            mask = bgra[:, :, 3] > 0
-            pixels = bgr[mask]
-            if len(pixels) == 0:
-                continue
-            unique_colors, counts = np.unique(pixels, axis=0, return_counts=True)
-            color_set = {tuple(int(v) for v in c) for c in unique_colors}
-            per_frame_sets.append(color_set)
-            per_frame_counts.append(
-                {
-                    tuple(int(v) for v in c): int(counts[i])
-                    for i, c in enumerate(unique_colors)
-                }
-            )
-
-        if not per_frame_sets:
-            raise ValueError("no frames with opaque pixels to extract dominant colors")
-
-        # Intersection across all frames
-        common_colors = per_frame_sets[0]
-        for s in per_frame_sets[1:]:
-            common_colors = common_colors & s
-            if not common_colors:
-                break
-
-        # Fallback: present in >= 90% of frames
-        if not common_colors:
-            threshold = max(1, int(len(per_frame_sets) * 0.9))
-            color_votes: dict[tuple[int, int, int], int] = {}
-            for color_set in per_frame_sets:
-                for color in color_set:
-                    color_votes[color] = color_votes.get(color, 0) + 1
-            common_colors = {c for c, v in color_votes.items() if v >= threshold}
-
-        # Ultimate fallback: aggregate top color
-        if not common_colors:
-            all_pixels = np.concatenate(
-                [bgra[:, :, :3][bgra[:, :, 3] > 0] for bgra in frames], axis=0
-            )
-            unique, counts = np.unique(all_pixels, axis=0, return_counts=True)
-            top_idx = int(np.argmax(counts))
-            top_color = tuple(int(v) for v in unique[top_idx])
-            common_colors = {top_color}
-
-        # Count total pixels for each common color across all frames
-        total_counts: dict[tuple[int, int, int], int] = {}
-        for frame_counts in per_frame_counts:
-            for color, count in frame_counts.items():
-                if color in common_colors:
-                    total_counts[color] = total_counts.get(color, 0) + count
-
-        sorted_colors = sorted(total_counts.items(), key=lambda x: x[1], reverse=True)
-        total_pixels = sum(total_counts.values())
-
-        def _bgr_to_hsv(bgr_tuple):
-            pixel = np.uint8([[list(bgr_tuple)]])
-            hsv = cv2.cvtColor(pixel, cv2.COLOR_BGR2HSV)[0, 0]
-            return tuple(float(v) for v in hsv)
-
-        dominant_bgr = sorted_colors[0][0]
-        dominant_color = ColorCluster(
-            label="dominant",
-            bgr=tuple(float(v) for v in dominant_bgr),
-            hsv=_bgr_to_hsv(dominant_bgr),
-            fraction=sorted_colors[0][1] / total_pixels if total_pixels > 0 else 0.0,
-            tolerance=(14, 40, 40),
-        )
-
-        supporting: list[ColorCluster] = []
-        for i, (bgr_color, count) in enumerate(sorted_colors[1:5], 1):
-            supporting.append(
-                ColorCluster(
-                    label=f"supporting_{i}",
-                    bgr=tuple(float(v) for v in bgr_color),
-                    hsv=_bgr_to_hsv(bgr_color),
-                    fraction=count / total_pixels if total_pixels > 0 else 0.0,
-                    tolerance=(16, 45, 45),
-                )
-            )
-
-        return dominant_color, supporting
 
     @staticmethod
     def _find_dominant_pixel(frames: list[np.ndarray]) -> list[int]:
         """Find the single most common opaque pixel BGR value across all frames."""
         all_pixels: list[np.ndarray] = []
         for bgra in frames:
-            mask = bgra[:, :, 3] > 0
+            mask = bgra[:, :, 3] >= 128
             if np.any(mask):
                 all_pixels.append(bgra[:, :, :3][mask])
         if not all_pixels:
@@ -473,7 +455,7 @@ class DescriptorBuilder:
         for bgra in frames:
             bgr = bgra[:, :, :3]
             hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-            mask = (bgra[:, :, 3] > 0).astype(np.uint8) * 255
+            mask = (bgra[:, :, 3] >= 128).astype(np.uint8) * 255
             accent_mask = self._accent_mask(bgr, hsv, mask)
             if np.any(accent_mask > 0):
                 accent_pixels.append(bgr[accent_mask > 0])
@@ -487,7 +469,7 @@ class DescriptorBuilder:
     @staticmethod
     def _tight_crop(bgra: np.ndarray) -> np.ndarray:
         alpha = bgra[:, :, 3]
-        ys, xs = np.where(alpha > 0)
+        ys, xs = np.where(alpha >= 128)
         if len(xs) == 0:
             raise ValueError("cannot build descriptor from an empty sprite frame")
         return bgra[int(ys.min()) : int(ys.max()) + 1, int(xs.min()) : int(xs.max()) + 1].copy()
@@ -528,52 +510,143 @@ class DescriptorBuilder:
     def _distinctive_clusters(cls, clusters: list[ColorCluster]) -> list[ColorCluster]:
         return [cluster for cluster in clusters if cls._is_distinctive_cluster(cluster)]
 
-    def _match_palette(self, frames: list[np.ndarray]) -> list[tuple[int, int, int]]:
-        per_frame_sets: list[set[tuple[int, int, int]]] = []
-        per_frame_counts: list[dict[tuple[int, int, int], int]] = []
+    @staticmethod
+    def _hsv_distance(a: ColorCluster, b: ColorCluster) -> float:
+        h_diff = min(abs(a.hsv[0] - b.hsv[0]), 180.0 - abs(a.hsv[0] - b.hsv[0]))
+        s_diff = a.hsv[1] - b.hsv[1]
+        v_diff = a.hsv[2] - b.hsv[2]
+        return float(np.sqrt(h_diff * h_diff + s_diff * s_diff + v_diff * v_diff))
 
+    @classmethod
+    def _union_clusters(
+        cls,
+        clusters: list[ColorCluster],
+        max_dist: float,
+    ) -> list[ColorCluster]:
+        """Deduplicate clusters: keep highest-fraction cluster within HSV distance."""
+        kept: list[ColorCluster] = []
+        for candidate in sorted(clusters, key=lambda c: c.fraction, reverse=True):
+            if all(cls._hsv_distance(candidate, existing) > max_dist for existing in kept):
+                kept.append(candidate)
+        return kept
+
+    def _match_palette_greedy(self, frames: list[np.ndarray]) -> list[tuple[int, int, int]]:
+        """Pick up to MATCH_PALETTE_MAX_COLORS colors that maximize coverage of sprite pixels.
+
+        Uses greedy set cover: each iteration picks the color that covers the most
+        currently uncovered pixels (within MATCH_PALETTE_COVERAGE_DISTANCE in BGR space).
+        Called per-facing-pair through _match_palette_union so that similar colors
+        from different facings (front vs back) are kept separately.
+        """
+        # Collect all opaque pixels
+        all_pixels_list: list[np.ndarray] = []
         for bgra in frames:
-            mask = bgra[:, :, 3] > 0
+            mask = bgra[:, :, 3] >= 128
             pixels = bgra[:, :, :3][mask]
-            if len(pixels) == 0:
-                continue
-            unique_colors, counts = np.unique(pixels, axis=0, return_counts=True)
-            color_set = {tuple(int(v) for v in color) for color in unique_colors}
-            per_frame_sets.append(color_set)
-            per_frame_counts.append(
-                {
-                    tuple(int(v) for v in color): int(counts[index])
-                    for index, color in enumerate(unique_colors)
-                }
-            )
+            if len(pixels) > 0:
+                all_pixels_list.append(pixels)
 
-        if not per_frame_sets:
+        if not all_pixels_list:
             raise ValueError("no frames with opaque pixels to build match palette")
 
-        threshold = max(1, int(len(per_frame_sets) * 0.9))
-        color_votes: dict[tuple[int, int, int], int] = {}
-        for color_set in per_frame_sets:
-            for color in color_set:
-                color_votes[color] = color_votes.get(color, 0) + 1
-        stable_colors = {color for color, votes in color_votes.items() if votes >= threshold}
+        all_pixels = np.concatenate(all_pixels_list, axis=0)
 
-        total_counts: dict[tuple[int, int, int], int] = {}
-        for frame_counts in per_frame_counts:
-            for color, count in frame_counts.items():
-                if color in stable_colors:
-                    total_counts[color] = total_counts.get(color, 0) + count
+        # Unique colors weighted by pixel count
+        unique_colors, counts = np.unique(all_pixels, axis=0, return_counts=True)
 
-        ranked = sorted(total_counts.items(), key=lambda item: item[1], reverse=True)
-        total_pixels = sum(count for _color, count in ranked)
-        min_fraction = 0.02
-        distinctive = [
-            color
-            for color, count in ranked
-            if self._is_distinctive_bgr(color) and (count / max(total_pixels, 1)) >= min_fraction
+        # Build candidate list: deduplicated colors sorted by frequency.
+        # Only distinctive colors (saturation >= 40, value >= 30, not white)
+        # are included — shadows, outlines, and gray/dull/muddy colors that
+        # match the game background are excluded from the descriptor entirely.
+        sorted_order = np.argsort(counts)[::-1]
+        sorted_unique = unique_colors[sorted_order]
+        dedup_local = self._deduplicate_palette_indices(sorted_unique)
+        dedup_original_indices = [int(sorted_order[i]) for i in dedup_local]
+        candidates: list[tuple[int, tuple[int, int, int]]] = [
+            (i, tuple(int(v) for v in unique_colors[i]))
+            for i in dedup_original_indices
+            if DescriptorBuilder._is_distinctive_bgr(tuple(int(v) for v in unique_colors[i]))
         ]
-        if distinctive:
-            return distinctive[:12]
-        return [color for color, _count in ranked[:12]]
+
+        # Greedy coverage selection
+        max_dist_sq = MATCH_PALETTE_COVERAGE_DISTANCE * MATCH_PALETTE_COVERAGE_DISTANCE
+        uncovered = np.ones(len(unique_colors), dtype=bool)
+        selected: list[tuple[int, int, int]] = []
+
+        for _ in range(MATCH_PALETTE_MAX_COLORS):
+            best_cand_idx = -1
+            best_mass = 0
+
+            for cand_idx, bgr_tuple in candidates:
+                if not uncovered[cand_idx]:
+                    continue
+                # Distance from this candidate to all currently uncovered unique colors
+                diff = unique_colors[uncovered].astype(np.float32) - unique_colors[cand_idx].astype(np.float32)
+                dist_sq = np.sum(diff * diff, axis=1)
+                # Pixel mass of uncovered colors within max_dist
+                covered_mass = int(np.sum(counts[uncovered][dist_sq <= max_dist_sq]))
+                if covered_mass > best_mass:
+                    best_mass = covered_mass
+                    best_cand_idx = cand_idx
+
+            if best_cand_idx < 0 or best_mass == 0:
+                break
+
+            selected.append(tuple(int(v) for v in unique_colors[best_cand_idx]))
+
+            # Mark all unique colors within max_dist of the chosen color as covered
+            diff = unique_colors[uncovered].astype(np.float32) - unique_colors[best_cand_idx].astype(np.float32)
+            dist_sq = np.sum(diff * diff, axis=1)
+            uncovered_indices = np.where(uncovered)[0]
+            covered_these = uncovered_indices[dist_sq <= max_dist_sq]
+            uncovered[covered_these] = False
+
+        if not selected:
+            # Fallback: most common from candidates
+            sorted_by_count = sorted(candidates, key=lambda x: int(counts[x[0]]), reverse=True)
+            return [bgr for _, bgr in sorted_by_count[:MATCH_PALETTE_MAX_COLORS]]
+
+        # Fill remaining slots with the highest-frequency candidates not yet selected.
+        # This ensures we always use the full MATCH_PALETTE_MAX_COLORS budget even
+        # when the greedy cover converges early (fewer than 48 distinct color groups).
+        selected_set: set[tuple[int, int, int]] = set(selected)
+        for cand_idx, bgr_tuple in candidates:
+            if len(selected) >= MATCH_PALETTE_MAX_COLORS:
+                break
+            if bgr_tuple not in selected_set:
+                selected_set.add(bgr_tuple)
+                selected.append(bgr_tuple)
+
+        return selected
+
+    @staticmethod
+    def _deduplicate_palette_indices(
+        unique_colors: np.ndarray,
+        h_thresh: float = 12.0,
+        sv_thresh: float = 25.0,
+    ) -> list[int]:
+        """Return indices of unique_colors array that pass HSV dedup.
+
+        For each pair of colors, if both hue and sat+val are within threshold,
+        only the first occurrence (lower index) is kept.
+        """
+        if len(unique_colors) == 0:
+            return []
+        bgr_arr = unique_colors.reshape(-1, 1, 3).astype(np.uint8)
+        hsv_arr = cv2.cvtColor(bgr_arr, cv2.COLOR_BGR2HSV).reshape(-1, 3).astype(np.float32)
+        kept: list[int] = []
+        for i in range(len(hsv_arr)):
+            is_unique = True
+            for j in kept:
+                h_diff = min(abs(hsv_arr[i, 0] - hsv_arr[j, 0]), 180.0 - abs(hsv_arr[i, 0] - hsv_arr[j, 0]))
+                s_diff = abs(hsv_arr[i, 1] - hsv_arr[j, 1])
+                v_diff = abs(hsv_arr[i, 2] - hsv_arr[j, 2])
+                if h_diff < h_thresh and s_diff < sv_thresh and v_diff < sv_thresh:
+                    is_unique = False
+                    break
+            if is_unique:
+                kept.append(i)
+        return kept
 
     @staticmethod
     def _clusters(
@@ -623,104 +696,11 @@ class DescriptorBuilder:
         return [cluster for cluster in clusters if cluster.fraction <= 0.12][:4]
 
     @staticmethod
-    def _sprite_palette(bgr_pixels: np.ndarray) -> list[tuple[int, int, int]]:
-        if bgr_pixels.size == 0:
-            return []
-        unique = np.unique(np.rint(bgr_pixels).astype(np.uint8), axis=0)
-        unique = unique[np.lexsort((unique[:, 2], unique[:, 1], unique[:, 0]))]
-        return [tuple(int(v) for v in color) for color in unique]
-
-    @staticmethod
     def _hsv_histogram(hsv_pixels: np.ndarray) -> list[float]:
         strip = hsv_pixels.astype(np.uint8).reshape(1, -1, 3)
         hist = cv2.calcHist([strip], [0, 1], None, [24, 16], [0, 180, 0, 256])
         cv2.normalize(hist, hist)
         return hist.reshape(-1).astype(float).tolist()
-
-    def _build_size_stats(self, frames: list[np.ndarray]) -> SizeStats:
-        widths = [float(frame.shape[1]) for frame in frames]
-        heights = [float(frame.shape[0]) for frame in frames]
-        aspects = [width / max(height, 1.0) for width, height in zip(widths, heights)]
-        return SizeStats(
-            min_width=float(min(widths)),
-            max_width=float(max(widths)),
-            avg_width=float(np.mean(widths)),
-            std_width=float(np.std(widths)),
-            min_height=float(min(heights)),
-            max_height=float(max(heights)),
-            avg_height=float(np.mean(heights)),
-            std_height=float(np.std(heights)),
-            min_aspect=float(min(aspects)),
-            max_aspect=float(max(aspects)),
-            avg_aspect=float(np.mean(aspects)),
-        )
-
-    def _build_occupancy_stats(self, frames: list[np.ndarray]) -> OccupancyStats:
-        opaque_counts: list[int] = []
-        densities: list[float] = []
-        for bgra in frames:
-            alpha = bgra[:, :, 3] > 0
-            opaque = int(np.sum(alpha))
-            area = max(1, int(bgra.shape[0] * bgra.shape[1]))
-            opaque_counts.append(opaque)
-            densities.append(float(opaque / area))
-        return OccupancyStats(
-            min_opaque_pixels=int(min(opaque_counts)),
-            max_opaque_pixels=int(max(opaque_counts)),
-            avg_opaque_pixels=float(np.mean(opaque_counts)),
-            min_density=float(min(densities)),
-            max_density=float(max(densities)),
-            avg_density=float(np.mean(densities)),
-        )
-
-    def _build_color_stats(
-        self,
-        frames: list[np.ndarray],
-        clusters: list[ColorCluster],
-    ) -> list[ColorStat]:
-        if not frames or not clusters:
-            return []
-        frame_total = len(frames)
-        stats: list[ColorStat] = []
-        for cluster in clusters:
-            fractions: list[float] = []
-            present_frames = 0
-            for bgra in frames:
-                alpha = bgra[:, :, 3] > 0
-                if not np.any(alpha):
-                    fractions.append(0.0)
-                    continue
-                hsv = cv2.cvtColor(bgra[:, :, :3], cv2.COLOR_BGR2HSV).astype(np.float32)
-                center = np.asarray(cluster.hsv, dtype=np.float32)
-                tol = np.asarray(cluster.tolerance, dtype=np.float32)
-                pixels = hsv[alpha]
-                hue_diff = np.abs(pixels[:, 0] - center[0])
-                hue_diff = np.minimum(hue_diff, 180.0 - hue_diff)
-                sat_diff = np.abs(pixels[:, 1] - center[1])
-                val_diff = np.abs(pixels[:, 2] - center[2])
-                matched = (
-                    (hue_diff <= tol[0]) & (sat_diff <= tol[1]) & (val_diff <= tol[2])
-                )
-                fraction = float(np.mean(matched)) if matched.size else 0.0
-                fractions.append(fraction)
-                if fraction >= 0.01:
-                    present_frames += 1
-            frame_presence = present_frames / max(frame_total, 1)
-            stats.append(
-                ColorStat(
-                    label=cluster.label,
-                    bgr=cluster.bgr,
-                    hsv=cluster.hsv,
-                    frame_presence=float(frame_presence),
-                    avg_fraction=float(np.mean(fractions)),
-                    min_fraction=float(min(fractions)),
-                    max_fraction=float(max(fractions)),
-                    is_stable=frame_presence >= STABLE_FRAME_RATIO,
-                    is_distinctive=self._is_distinctive_cluster(cluster),
-                    tolerance=cluster.tolerance,
-                )
-            )
-        return stats
 
     def _build_layout_grid(
         self,
@@ -762,6 +742,142 @@ class DescriptorBuilder:
             stable_occupied=stable_occupied,
             dominant_cluster_ids=dominant_cluster_ids,
             palette_coverage=palette_coverage,
+        )
+
+    def _build_facing_silhouette_masks(
+        self,
+        spr_file,
+        act_file,
+        facing_pairs: tuple[tuple[int, int], ...],
+    ) -> list[SilhouetteMask]:
+        """One silhouette ref per facing pair (stand/walk/jump row).
+
+        Frames within a pair share orientation; averaging across pairs would
+        smear directional sprites into a single blob.
+        """
+        masks: list[SilhouetteMask] = []
+        for pair in facing_pairs:
+            frames = self._collect_frames(spr_file, act_file, pair, frame_start=0)
+            if not frames:
+                continue
+            masks.append(self._build_silhouette_mask(frames))
+        return masks
+
+    @staticmethod
+    def _silhouette_mask_binary(mask: SilhouetteMask) -> np.ndarray:
+        avg = np.array(mask.avg_mask, dtype=np.float32).reshape(mask.height, mask.width)
+        return (avg >= 0.5).astype(np.float32)
+
+    @staticmethod
+    def _binary_mask_iou(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
+        overlap = float(np.sum(np.minimum(mask_a, mask_b)))
+        union = float(np.sum(np.maximum(mask_a, mask_b)))
+        if union <= 0.0:
+            return 1.0
+        return overlap / union
+
+    def _build_gate_silhouette_masks(
+        self,
+        facing_masks: list[SilhouetteMask],
+    ) -> list[SilhouetteMask]:
+        """Up to four gate refs: one per facing when ≤4, else recursive medoid clusters."""
+        if len(facing_masks) <= GATE_SILHOUETTE_MASK_COUNT:
+            return facing_masks
+        return self._cluster_facing_masks_into_k(
+            facing_masks, GATE_SILHOUETTE_MASK_COUNT,
+        )
+
+    def _split_facing_masks(
+        self,
+        masks: list[SilhouetteMask],
+    ) -> tuple[list[SilhouetteMask], list[SilhouetteMask]]:
+        binaries = [self._silhouette_mask_binary(mask) for mask in masks]
+        best_i, best_j = 0, 1
+        min_iou = 1.0
+        for i in range(len(binaries)):
+            for j in range(i + 1, len(binaries)):
+                iou = self._binary_mask_iou(binaries[i], binaries[j])
+                if iou < min_iou:
+                    min_iou = iou
+                    best_i, best_j = i, j
+
+        clusters: list[list[SilhouetteMask]] = [[], []]
+        seed_bins = [binaries[best_i], binaries[best_j]]
+        for mask, binary in zip(masks, binaries):
+            iou_a = self._binary_mask_iou(binary, seed_bins[0])
+            iou_b = self._binary_mask_iou(binary, seed_bins[1])
+            clusters[0 if iou_a >= iou_b else 1].append(mask)
+
+        if not clusters[0] or not clusters[1]:
+            raise RuntimeError("failed to split silhouette facing masks")
+        return clusters[0], clusters[1]
+
+    def _cluster_facing_masks_into_k(
+        self,
+        masks: list[SilhouetteMask],
+        k: int,
+    ) -> list[SilhouetteMask]:
+        if k <= 0:
+            raise ValueError("k must be positive")
+        if len(masks) < k:
+            raise RuntimeError(f"need at least {k} facing masks to select {k} gate refs")
+        if len(masks) == k:
+            return masks
+        if k == 1:
+            return [self._medoid_silhouette_mask(masks)]
+
+        left, right = self._split_facing_masks(masks)
+        left_k = k // 2
+        right_k = k - left_k
+        return (
+            self._cluster_facing_masks_into_k(left, left_k)
+            + self._cluster_facing_masks_into_k(right, right_k)
+        )
+
+    def _medoid_silhouette_mask(self, masks: list[SilhouetteMask]) -> SilhouetteMask:
+        """Return the facing mask closest to all others in the cluster."""
+        if len(masks) == 1:
+            return masks[0]
+        binaries = [self._silhouette_mask_binary(mask) for mask in masks]
+        best_idx = 0
+        best_score = -1.0
+        for i in range(len(binaries)):
+            score = sum(
+                self._binary_mask_iou(binaries[i], binaries[j])
+                for j in range(len(binaries))
+                if j != i
+            )
+            if score > best_score:
+                best_score = score
+                best_idx = i
+        return masks[best_idx]
+
+    @staticmethod
+    def _merge_facing_silhouette_masks(masks: list[SilhouetteMask]) -> SilhouetteMask:
+        """Union per-facing refs into one mask that covers every orientation.
+
+        Per-cell max (not mean) keeps each facing's shape without smearing
+        opposing directions into a blob.
+        """
+        if len(masks) == 1:
+            return masks[0]
+        height = masks[0].height
+        width = masks[0].width
+        avg_stack = np.stack([
+            np.array(mask.avg_mask, dtype=np.float32).reshape(height, width)
+            for mask in masks
+        ])
+        merged_avg = np.max(avg_stack, axis=0)
+        stable_stack = np.stack([
+            np.array(mask.stable_mask, dtype=bool).reshape(height, width)
+            for mask in masks
+        ])
+        merged_stable = np.any(stable_stack, axis=0)
+        return SilhouetteMask(
+            width=width,
+            height=height,
+            avg_mask=merged_avg.reshape(-1).tolist(),
+            stable_mask=merged_stable.reshape(-1).tolist(),
         )
 
     def _build_silhouette_mask(self, frames: list[np.ndarray]) -> SilhouetteMask:

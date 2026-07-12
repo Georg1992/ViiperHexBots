@@ -8,7 +8,7 @@ import cv2
 
 from pybot.paths import PROJECT_ROOT
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
-from pybot.recognition.fixtures import MOB_FIXTURE_SUITES, MobFixtureImage, MobFixtureSuite
+from pybot.recognition.fixtures import MOB_FIXTURE_SUITES, fixture_search_frame, MobFixtureImage, MobFixtureSuite
 
 
 class MobFixtureSuiteTests(unittest.TestCase):
@@ -50,6 +50,8 @@ class MobFixtureSuiteTests(unittest.TestCase):
     def _assert_image_count(self, suite: MobFixtureSuite, image: MobFixtureImage) -> None:
         frame = cv2.imread(str(image.path), cv2.IMREAD_COLOR)
         self.assertIsNotNone(frame, f"missing or unreadable fixture: {image.path}")
+
+        frame = fixture_search_frame(frame)
 
         result = self.detector.detect(frame, suite.mob_name)
         accepted = len(result.accepted)

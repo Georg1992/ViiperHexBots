@@ -7,7 +7,15 @@ import numpy as np
 
 from pybot.recognition.detector.descriptors.descriptor import MobDescriptor
 from pybot.recognition.detector.scoring.heatmap_detector import palette_heatmap, sprite_palette_heatmap
-from pybot.recognition.detector.scoring.region_scorer import RegionScorer
+
+
+def _top_match_score(heatmap: np.ndarray, fraction: float) -> float:
+    if heatmap.size == 0:
+        return 0.0
+    flat = heatmap.reshape(-1)
+    keep = max(1, int(round(len(flat) * fraction)))
+    top = np.partition(flat, len(flat) - keep)[-keep:]
+    return float(np.clip(top.mean(), 0.0, 1.0))
 
 
 def measure_opacity_score(
@@ -15,7 +23,8 @@ def measure_opacity_score(
     hsv: np.ndarray,
     descriptor: MobDescriptor,
     bbox: tuple[int, int, int, int],
-    region_scorer: RegionScorer,
+    max_sprite_palette_distance: float,
+    min_sprite_palette_match: float,
 ) -> float:
     """Estimate sprite opacity/solidity in a tracked mob window.
 
@@ -30,16 +39,14 @@ def measure_opacity_score(
 
     body_heat = palette_heatmap(region_hsv, descriptor.body_palette)
     accent_heat = palette_heatmap(region_hsv, descriptor.accent_colors)
-    rare_heat = palette_heatmap(region_hsv, descriptor.rare_colors)
-    descriptor_heat = np.maximum.reduce([body_heat, accent_heat, rare_heat])
     sprite_palette_heat = sprite_palette_heatmap(
         region_bgr,
         descriptor.match_palette_bgr,
-        region_scorer.max_sprite_palette_distance,
+        max_sprite_palette_distance,
     )
 
-    body = RegionScorer._top_match_score(body_heat, 0.22)
-    sprite_pixels = sprite_palette_heat >= region_scorer.min_sprite_palette_match
+    body = _top_match_score(body_heat, 0.22)
+    sprite_pixels = sprite_palette_heat >= min_sprite_palette_match
     informative_fraction = float(sprite_pixels.mean()) if sprite_pixels.size else 0.0
     purity = informative_fraction
 

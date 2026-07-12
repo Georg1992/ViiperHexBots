@@ -55,7 +55,7 @@ def track_local(
     track_id = int(track["trackId"])
     cx = int(track["x"])
     cy = int(track["y"])
-    scale_hint = track.get("scale")
+    scale = float(track.get("scale", 1.0))
     opacity_baseline = float(track.get("opacityBaseline", 0.0))
     opacity_baseline_samples = int(track.get("opacityBaselineSamples", 0))
     opacity_decay_streak = int(track.get("opacityDecayStreak", 0))
@@ -69,99 +69,60 @@ def track_local(
 
     descriptor = detector.ensure_descriptor(mob_name)
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-    scale = _resolve_local_track_scale(
-        detector,
-        frame_bgr.shape[1],
-        float(scale_hint) if scale_hint is not None else None,
-    )
 
     screen_cx = cx + offset_x
     screen_cy = cy + offset_y
 
-    center_score, center_bbox = detector._score_living_only_at(
-        frame_bgr,
-        hsv,
-        descriptor,
-        cx,
-        cy,
-        scale,
+    accepted, center_bbox, sim = detector.score_at(
+        frame_bgr, hsv, descriptor, cx, cy, scale,
     )
-    center_hit = (
-        center_score is not None
-        and center_score.accepted
-        and center_bbox is not None
-    )
+    center_hit = accepted and center_bbox is not None
 
     peak_x = cx
     peak_y = cy
-    peak_score = None
     peak_bbox = None
+    peak_sim = 0.0
     if not center_hit:
         peak = _find_local_peak(
-            detector,
-            frame_bgr,
-            hsv,
-            descriptor,
-            cx,
-            cy,
-            scale,
+            detector, frame_bgr, hsv, descriptor, cx, cy, scale,
             search_radius_px=radius,
         )
         if peak is None:
-            reason = "no_peak"
-            if center_score is not None and not center_score.accepted:
-                reason = center_score.rejection_reason or "below_threshold"
             return _miss_result(
                 track_id=track_id,
-                x=screen_cx,
-                y=screen_cy,
-                reason=reason,
-                confidence=round(center_score.final_score, 4) if center_score is not None else 0.0,
+                x=screen_cx, y=screen_cy,
+                reason="no_peak" if not center_hit else sim < 0.5 and "below_threshold" or "unknown",
+                confidence=sim,
                 opacity_baseline=opacity_baseline,
                 opacity_baseline_samples=opacity_baseline_samples,
                 opacity_decay_streak=opacity_decay_streak,
             )
 
         peak_x, peak_y, _heat_score = peak
-        peak_score, peak_bbox = detector._score_living_only_at(
-            frame_bgr,
-            hsv,
-            descriptor,
-            peak_x,
-            peak_y,
-            scale,
+        accepted, peak_bbox, peak_sim = detector.score_at(
+            frame_bgr, hsv, descriptor, peak_x, peak_y, scale,
         )
-        if peak_score is None or not peak_score.accepted or peak_bbox is None:
-            reason = peak_score.rejection_reason if peak_score is not None else "no_bbox"
+        if not accepted or peak_bbox is None:
             return _miss_result(
                 track_id=track_id,
-                x=screen_cx,
-                y=screen_cy,
-                reason=reason or "below_threshold",
-                confidence=round(peak_score.final_score, 4) if peak_score is not None else 0.0,
+                x=screen_cx, y=screen_cy,
+                reason="below_threshold",
+                confidence=peak_sim,
                 opacity_baseline=opacity_baseline,
                 opacity_baseline_samples=opacity_baseline_samples,
                 opacity_decay_streak=opacity_decay_streak,
             )
 
     hit_bbox = center_bbox if center_hit else peak_bbox
-    hit_score = center_score if center_hit else peak_score
+    hit_sim = sim if center_hit else peak_sim
     assert hit_bbox is not None
-    assert hit_score is not None
 
     return _finalize_track_hit(
-        detector,
-        frame_bgr,
-        hsv,
-        descriptor,
-        track_id=track_id,
-        bbox=hit_bbox,
-        score=hit_score,
-        offset_x=offset_x,
-        offset_y=offset_y,
+        detector, frame_bgr, hsv, descriptor,
+        track_id=track_id, bbox=hit_bbox, similarity=hit_sim,
+        offset_x=offset_x, offset_y=offset_y,
         death_detection_enabled=death_detection_enabled,
-        created_tick=created_tick,
-        now_tick=now_tick,
+        created_tick=created_tick, now_tick=now_tick,
         opacity_baseline=opacity_baseline,
         opacity_baseline_samples=opacity_baseline_samples,
         opacity_decay_streak=opacity_decay_streak,
@@ -170,24 +131,15 @@ def track_local(
 
 def _miss_result(
     *,
-    track_id: int,
-    x: int,
-    y: int,
-    reason: str,
-    confidence: float = 0.0,
-    dead: bool = False,
+    track_id: int, x: int, y: int, reason: str,
+    confidence: float = 0.0, dead: bool = False,
     opacity_baseline: float = 0.0,
     opacity_baseline_samples: int = 0,
     opacity_decay_streak: int = 0,
 ) -> LocalTrackResult:
     return LocalTrackResult(
-        track_id=track_id,
-        found=False,
-        x=x,
-        y=y,
-        confidence=confidence,
-        miss_reason=reason,
-        dead=dead,
+        track_id=track_id, found=False, x=x, y=y,
+        confidence=confidence, miss_reason=reason, dead=dead,
         opacity_baseline=opacity_baseline,
         opacity_baseline_samples=opacity_baseline_samples,
         opacity_decay_streak=opacity_decay_streak,
@@ -196,18 +148,15 @@ def _miss_result(
 
 def _finalize_track_hit(
     detector: MobDetector,
-    frame_bgr: np.ndarray,
-    hsv: np.ndarray,
+    frame_bgr: np.ndarray, hsv: np.ndarray,
     descriptor: MobDescriptor,
     *,
     track_id: int,
     bbox: tuple[int, int, int, int],
-    score,
-    offset_x: int,
-    offset_y: int,
+    similarity: float,
+    offset_x: int, offset_y: int,
     death_detection_enabled: bool,
-    created_tick: int,
-    now_tick: int,
+    created_tick: int, now_tick: int,
     opacity_baseline: float,
     opacity_baseline_samples: int,
     opacity_decay_streak: int,
@@ -215,19 +164,16 @@ def _finalize_track_hit(
     bx, by, bw, bh = bbox
     x = bx + bw // 2 + offset_x
     y = by + bh // 2 + offset_y
-    confidence = round(score.final_score, 4)
 
     if death_detection_enabled and _track_old_enough(
         detector.config,
         created_tick=created_tick,
         now_tick=now_tick,
     ):
+        max_dist = float(detector.config["maxSpritePaletteDistance"])
+        min_match = float(detector.config["minSpritePaletteMatch"])
         opacity_score = measure_opacity_score(
-            frame_bgr,
-            hsv,
-            descriptor,
-            bbox,
-            detector.region_scorer,
+            frame_bgr, hsv, descriptor, bbox, max_dist, min_match,
         )
         if not is_opacity_calibrated(
             baseline=opacity_baseline,
@@ -253,25 +199,17 @@ def _finalize_track_hit(
             )
             if dead:
                 return LocalTrackResult(
-                    track_id=track_id,
-                    found=False,
-                    x=x,
-                    y=y,
-                    confidence=confidence,
-                    miss_reason="opacity_decay",
-                    dead=True,
+                    track_id=track_id, found=False, x=x, y=y,
+                    confidence=similarity,
+                    miss_reason="opacity_decay", dead=True,
                     opacity_baseline=opacity_baseline,
                     opacity_baseline_samples=opacity_baseline_samples,
                     opacity_decay_streak=opacity_decay_streak,
                 )
 
     return LocalTrackResult(
-        track_id=track_id,
-        found=True,
-        x=x,
-        y=y,
-        confidence=confidence,
-        miss_reason="",
+        track_id=track_id, found=True, x=x, y=y,
+        confidence=similarity, miss_reason="",
         opacity_baseline=opacity_baseline,
         opacity_baseline_samples=opacity_baseline_samples,
         opacity_decay_streak=opacity_decay_streak,
@@ -279,43 +217,21 @@ def _finalize_track_hit(
 
 
 def _track_old_enough(
-    config: dict,
-    *,
-    created_tick: int,
-    now_tick: int,
+    config: dict, *, created_tick: int, now_tick: int,
 ) -> bool:
-    """Death confirmation only after the track has lived long enough."""
     min_age_ms = int(config["deathOpacityMinTrackAgeMs"])
-    if (
-        now_tick > 0
-        and created_tick > 0
-        and (now_tick - created_tick) < min_age_ms
-    ):
+    if now_tick > 0 and created_tick > 0 and (now_tick - created_tick) < min_age_ms:
         return False
     return True
 
 
-def _resolve_local_track_scale(
-    detector: MobDetector,
-    frame_width: int,
-    scale_hint: float | None,
-) -> float:
-    if scale_hint is None:
-        return detector._direct_track_scale(frame_width, None)
-    scales = detector._scales_for_track(frame_width, float(scale_hint))
-    return scales[0]
-
-
 def _find_local_peak(
     detector: MobDetector,
-    frame_bgr: np.ndarray,
-    hsv: np.ndarray,
+    frame_bgr: np.ndarray, hsv: np.ndarray,
     descriptor: MobDescriptor,
-    cx: int,
-    cy: int,
+    cx: int, cy: int,
     scale: float,
-    *,
-    search_radius_px: int,
+    *, search_radius_px: int,
 ) -> tuple[int, int, float] | None:
     frame_h, frame_w = frame_bgr.shape[:2]
     margin_x = int(round(descriptor.avg_width * scale * 0.6))
@@ -331,11 +247,7 @@ def _find_local_peak(
     crop_bgr = frame_bgr[y0:y1, x0:x1]
     crop_hsv = hsv[y0:y1, x0:x1]
     local_final = _build_local_follow_heatmap(
-        detector.heatmap_detector,
-        crop_bgr,
-        crop_hsv,
-        descriptor,
-        scale,
+        detector.heatmap_detector, crop_bgr, crop_hsv, descriptor, scale,
     )
     if local_final.size == 0:
         return None
@@ -349,7 +261,7 @@ def _find_local_peak(
     min_heat = detector.heatmap_detector.min_center_heat * 0.5
 
     best_peak: tuple[int, int, float] | None = None
-    best_living_score = -1.0
+    best_living_sim = -1.0
     work = masked.copy()
     suppress_radius = max(8, search_radius_px // 4)
     for _ in range(3):
@@ -359,73 +271,36 @@ def _find_local_peak(
         peak_y_local, peak_x_local = np.unravel_index(int(work.argmax()), work.shape)
         peak_x = int(peak_x_local + x0)
         peak_y = int(peak_y_local + y0)
-        living_score, _bbox = detector._score_living_only_at(
-            frame_bgr,
-            hsv,
-            descriptor,
-            peak_x,
-            peak_y,
-            scale,
+        accepted, _bbox, sim = detector.score_at(
+            frame_bgr, hsv, descriptor, peak_x, peak_y, scale,
         )
-        living_val = living_score.final_score if living_score is not None else 0.0
-        if living_val > best_living_score:
-            best_living_score = living_val
+        if accepted and sim > best_living_sim:
+            best_living_sim = sim
             best_peak = (peak_x, peak_y, peak_val)
         cv2.circle(work, (peak_x_local, peak_y_local), suppress_radius, 0.0, thickness=-1)
 
     if best_peak is None:
         return None
-    peak_score, peak_bbox = detector._score_living_only_at(
-        frame_bgr,
-        hsv,
-        descriptor,
-        best_peak[0],
-        best_peak[1],
-        scale,
+    accepted, _bbox, _sim = detector.score_at(
+        frame_bgr, hsv, descriptor, best_peak[0], best_peak[1], scale,
     )
-    if peak_score is None or not peak_score.accepted or peak_bbox is None:
+    if not accepted:
         return None
     return best_peak
 
 
 def _build_local_follow_heatmap(
     heatmap_detector,
-    crop_bgr: np.ndarray,
-    crop_hsv: np.ndarray,
-    descriptor: MobDescriptor,
-    scale: float,
+    crop_bgr: np.ndarray, crop_hsv: np.ndarray,
+    descriptor: MobDescriptor, scale: float,
 ) -> np.ndarray:
     sprite = sprite_palette_heatmap(
-        crop_bgr,
-        descriptor.match_palette_bgr,
+        crop_bgr, descriptor.match_palette_bgr,
         heatmap_detector.max_sprite_palette_distance,
     )
     body = palette_heatmap(crop_hsv, descriptor.body_palette)
     accent = palette_heatmap(crop_hsv, descriptor.accent_colors)
     color_signal = np.maximum(body * 0.55, accent * 0.45)
-
-    body_sprite = accent_sprite = None
-    structural_pairs = descriptor.structural_pixel_pairs()
-    if structural_pairs:
-        body_sprite = np.zeros(crop_bgr.shape[:2], dtype=np.float32)
-        accent_sprite = np.zeros(crop_bgr.shape[:2], dtype=np.float32)
-        for dominant, accent in structural_pairs:
-            body_sprite = np.maximum(
-                body_sprite,
-                sprite_palette_heatmap(
-                    crop_bgr,
-                    [tuple(dominant)],
-                    heatmap_detector.max_sprite_palette_distance,
-                ),
-            )
-            accent_sprite = np.maximum(
-                accent_sprite,
-                sprite_palette_heatmap(
-                    crop_bgr,
-                    [tuple(accent)],
-                    heatmap_detector.accent_structural_distance,
-                ),
-            )
 
     final = np.zeros(crop_bgr.shape[:2], dtype=np.float32)
     scales = heatmap_detector._center_scales(crop_bgr.shape[1])
@@ -440,9 +315,4 @@ def _build_local_follow_heatmap(
         color_heat = cv2.blur(color_signal, window)
         combined = np.maximum(sprite_heat * 0.75, color_heat * 0.55).astype(np.float32)
         final = np.maximum(final, combined)
-        if body_sprite is not None and accent_sprite is not None:
-            body_heat = cv2.blur(body_sprite, window)
-            accent_heat = cv2.blur(accent_sprite, window)
-            structural_heat = np.sqrt(body_heat * accent_heat).astype(np.float32)
-            final = np.maximum(final, structural_heat)
     return final
