@@ -202,7 +202,7 @@ class MobDetector:
         if self.discovery_heatmap_downscale > 1 and min(fw, fh) >= self.discovery_heatmap_downscale_min_side:
             downscale = self.discovery_heatmap_downscale
 
-        sprite_heatmap, accent_heatmap = self.heatmap_detector.build_sprite_heatmap(
+        sprite_heatmap, _accent = self.heatmap_detector.build_sprite_heatmap(
             frame_bgr,
             hsv,
             descriptor,
@@ -219,23 +219,10 @@ class MobDetector:
         silhouette_checks: list[SilhouetteCheck] = []
         no_centers_found = len(blobs) == 0
 
-        # Compute per-frame reference values among qualifying blobs (for relative filters)
-        qualifying = [
-            (cx, cy, h, bb)
-            for cx, cy, h, bb in blobs
-            if self._passes_blob_heat_filter(h, bb, descriptor, accent_heatmap)
-        ]
-        filter_end = time.perf_counter()
-        multi_blob_frame = len(qualifying) > 1
+        filter_end = blobs_end  # no pre-silhouette filtering
 
-        for cx, cy, heat_score, comp_bbox in qualifying:
+        for cx, cy, heat_score, comp_bbox in blobs:
             bx, by, bw, bh = comp_bbox
-
-            if not self._passes_blob_size_filter(
-                descriptor, comp_bbox, multi_blob_frame=multi_blob_frame,
-            ):
-                continue
-
             bbox = (bx, by, bw, bh)
 
             passed, similarity, candidate, matched_idx, scores = self._evaluate_silhouette_gate(
@@ -310,97 +297,6 @@ class MobDetector:
             sprite_heatmap=sprite_heatmap,
             silhouette_checks=silhouette_checks,
         )
-
-    # ------------------------------------------------------------------
-    #  Blob pre-filters (descriptor-absolute, before silhouette gate)
-    # ------------------------------------------------------------------
-
-    def _min_blob_heatmap_area(self, descriptor: MobDescriptor) -> int:
-        desc_min_w = descriptor.size.min_width
-        desc_min_h = descriptor.size.min_height
-        floor = int(self.config["minBlobHeatmapAreaFloor"])
-        if desc_min_w is None or desc_min_h is None:
-            return floor
-        ratio_area = int(
-            desc_min_w * desc_min_h * float(self.config["minBlobHeatmapAreaRatio"]),
-        )
-        return max(floor, ratio_area)
-
-    @staticmethod
-    def _blob_accent_footprint(
-        accent_heatmap: np.ndarray,
-        comp_bbox: tuple[int, int, int, int],
-        accent_pixel_score: float,
-    ) -> float:
-        bx, by, bw, bh = comp_bbox
-        accent_crop = accent_heatmap[by : by + bh, bx : bx + bw]
-        if accent_crop.size == 0:
-            return 0.0
-        return float(np.mean(accent_crop >= accent_pixel_score))
-
-    def _passes_blob_heat_filter(
-        self,
-        heat_score: float,
-        comp_bbox: tuple[int, int, int, int],
-        descriptor: MobDescriptor,
-        accent_heatmap: np.ndarray,
-    ) -> bool:
-        """Reject heatmap blobs whose peak score or pixel footprint is too weak."""
-        _bx, _by, bw, bh = comp_bbox
-        if heat_score < self.min_discovery_heatmap_score:
-            return False
-        if bw * bh < self._min_blob_heatmap_area(descriptor):
-            return False
-        if heat_score >= float(self.config["minBlobModerateHeat"]):
-            accent_footprint = self._blob_accent_footprint(
-                accent_heatmap,
-                comp_bbox,
-                float(self.config["minBlobAccentPixelScore"]),
-            )
-            if accent_footprint < float(self.config["minBlobAccentFootprint"]):
-                return False
-        return True
-
-    def _passes_blob_size_filter(
-        self,
-        descriptor: MobDescriptor,
-        comp_bbox: tuple[int, int, int, int],
-        *,
-        multi_blob_frame: bool,
-    ) -> bool:
-        """Reject heatmap blobs whose bbox cannot plausibly be this mob.
-
-        Size rules (descriptor-absolute, stable across hunt search range):
-        1. Sliver — thinnest axis too small vs descriptor minimum.
-        2. Area — when both axes are near full scale, bbox area must match.
-        3. Bounds — single-blob minimum and oversized maximum vs descriptor.
-        """
-        _bx, _by, bw, bh = comp_bbox
-        blob_area = bw * bh
-        min_r = float(self.config["minBlobDimRatio"])
-        max_r = float(self.config["maxBlobDimRatio"])
-        desc_min_w = descriptor.size.min_width
-        desc_min_h = descriptor.size.min_height
-        desc_max_w = descriptor.size.max_width
-        desc_max_h = descriptor.size.max_height
-
-        if desc_min_w is not None and desc_min_h is not None:
-            dim_min = min(bw / desc_min_w, bh / desc_min_h)
-            if dim_min < float(self.config["minBlobSliverDimRatio"]):
-                return False
-            area_ratio = blob_area / (desc_min_w * desc_min_h)
-            full_scale_dim = float(self.config["minBlobFullScaleDimRatio"])
-            min_area = float(self.config["minBlobAreaRatio"])
-            if dim_min >= full_scale_dim and area_ratio < min_area:
-                return False
-
-        if not multi_blob_frame and desc_min_w is not None and desc_min_h is not None:
-            if bw < desc_min_w * min_r and bh < desc_min_h * min_r:
-                return False
-        if desc_max_w is not None and desc_max_h is not None:
-            if bw > desc_max_w * max_r and bh > desc_max_h * max_r:
-                return False
-        return True
 
     # ------------------------------------------------------------------
     #  Silhouette gate  (component search + resize)
