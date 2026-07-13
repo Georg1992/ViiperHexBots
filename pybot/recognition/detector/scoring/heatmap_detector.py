@@ -157,22 +157,6 @@ def weighted_sprite_palette_heatmap(
     return best_weighted.reshape(frame_bgr.shape[:2])
 
 
-def _pool_downscale(heatmap: np.ndarray, scale: int) -> np.ndarray:
-    """Max-pool a heatmap by an integer factor."""
-    if scale <= 1:
-        return heatmap.astype(np.float32)
-    height, width = heatmap.shape
-    height_trim = (height // scale) * scale
-    width_trim = (width // scale) * scale
-    if height_trim == 0 or width_trim == 0:
-        return heatmap.astype(np.float32)
-    trimmed = heatmap[:height_trim, :width_trim]
-    blocks = trimmed.reshape(
-        height_trim // scale, scale, width_trim // scale, scale,
-    )
-    return blocks.max(axis=(1, 3)).astype(np.float32)
-
-
 def _nearest_upscale(heatmap: np.ndarray, scale: int, out_h: int, out_w: int) -> np.ndarray:
     """Repeat each pooled cell to recover full-frame heatmap coordinates."""
     if scale <= 1:
@@ -189,19 +173,6 @@ def _local_peak_boost(heatmap: np.ndarray, factor: float = 1.08) -> np.ndarray:
     boosted = heatmap.copy()
     boosted[peak_mask] *= np.float32(factor)
     return np.clip(boosted, np.float32(0.0), np.float32(1.0)).astype(np.float32)
-
-
-def _discovery_downscale_heatmap(
-    heatmap: np.ndarray,
-    downscale: int,
-) -> np.ndarray:
-    """Preserve narrow peaks through discovery downscale via max-pool + nearest up."""
-    if downscale <= 1:
-        return heatmap.astype(np.float32)
-    out_h, out_w = heatmap.shape
-    pooled = _pool_downscale(heatmap, downscale)
-    pooled = _local_peak_boost(pooled)
-    return _nearest_upscale(pooled, downscale, out_h, out_w)
 
 
 class HeatmapDetector:
