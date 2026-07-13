@@ -105,7 +105,12 @@ def weighted_sprite_palette_heatmap(
     descriptor: MobDescriptor,
     max_distance: float,
 ) -> np.ndarray:
-    """Palette heatmap with runtime rarity, descriptor, and role weighting."""
+    """Palette heatmap with runtime rarity, descriptor, and role weighting.
+
+    Distance computed via |p-c|² = |p|² + |c|² - 2p·c to avoid the (N,C,3)
+    intermediate and to route through BLAS (numpy dot).  The single (N,C)
+    buffer is reused in-place for distance, similarity, and weighting.
+    """
     palette_bgr = descriptor.match_palette_bgr
     if not palette_bgr:
         return np.zeros(frame_bgr.shape[:2], dtype=np.float32)
@@ -116,9 +121,16 @@ def weighted_sprite_palette_heatmap(
     n_colors = len(palette)
     max_dist = np.float32(max(max_distance, 1.0))
 
-    diff = pixels[:, None, :] - palette[None, :, :]
-    dist_sq = np.sum(diff * diff, axis=2)
+    # --- distance via expansion (avoids 3×-larger diff intermediate) ---
+    p_norm = np.sum(pixels * pixels, axis=1, keepdims=True)            # (N, 1)
+    c_norm = np.sum(palette * palette, axis=1, keepdims=True)          # (C, 1)
+    dist_sq = np.dot(pixels, palette.T)                                # (N, C)
+    dist_sq *= np.float32(-2.0)
+    dist_sq += p_norm                                                  # broadcast (N, 1)
+    dist_sq += c_norm.T                                                # broadcast (1, C)
+    np.maximum(dist_sq, np.float32(0.0), out=dist_sq)  # clamp fp noise
 
+    # --- nearest-color index → per-color rarity weights ---
     nearest_idx = dist_sq.argmin(axis=1)
     palette_match_count = np.bincount(nearest_idx, minlength=n_colors).astype(np.float32)
     scene_fraction = palette_match_count / np.float32(max(n_pixels, 1))
@@ -134,14 +146,15 @@ def weighted_sprite_palette_heatmap(
         * _palette_role_weights(descriptor)
     ).astype(np.float32)
 
-    similarity = np.clip(
-        np.float32(1.0) - np.sqrt(dist_sq) / max_dist,
-        np.float32(0.0),
-        np.float32(1.0),
-    )
-    best_weighted = (similarity * combined_w[None, :]).max(axis=1)
+    # --- in-place: dist_sq → distance → similarity → weighted → max ---
+    np.sqrt(dist_sq, out=dist_sq)                                       # now distances
+    dist_sq /= max_dist
+    np.subtract(np.float32(1.0), dist_sq, out=dist_sq)                  # similarity
+    np.clip(dist_sq, np.float32(0.0), np.float32(1.0), out=dist_sq)
+    np.multiply(dist_sq, combined_w, out=dist_sq)                      # weighted (guaranteed in-place)
+    best_weighted = dist_sq.max(axis=1)
 
-    return best_weighted.reshape(frame_bgr.shape[:2]).astype(np.float32)
+    return best_weighted.reshape(frame_bgr.shape[:2])
 
 
 def _pool_downscale(heatmap: np.ndarray, scale: int) -> np.ndarray:
