@@ -235,16 +235,8 @@ class HeatmapDetector:
         accent_heatmap is the raw accent cluster heatmap reused by blob filters.
         """
         frame_shape = frame_bgr.shape[:2]
-
-        # --- early downscale: run the expensive steps at discovery resolution ---
-        if downscale > 1:
-            ds_h, ds_w = frame_shape[0] // downscale, frame_shape[1] // downscale
-            work_bgr = cv2.resize(frame_bgr, (ds_w, ds_h), interpolation=cv2.INTER_NEAREST)
-            work_hsv = cv2.resize(hsv, (ds_w, ds_h), interpolation=cv2.INTER_NEAREST)
-        else:
-            work_bgr = frame_bgr
-            work_hsv = hsv
-        work_shape = work_bgr.shape[:2]
+        work_bgr = frame_bgr
+        work_hsv = hsv
 
         # --- 1. Weighted sprite-palette-distance heatmap ---
         sprite = weighted_sprite_palette_heatmap(
@@ -276,21 +268,16 @@ class HeatmapDetector:
             edge_density = np.zeros_like(edge_density, dtype=np.float32)
         sprite *= np.float32(0.5) + np.float32(0.5) * edge_density
 
-        # --- 4. Multi-scale blur → aggregate hot-spots at mob-sized scales ---
-        final = np.zeros(work_shape, dtype=np.float32)
-        for scale in self._center_scales(frame_shape[1]):
+        # --- 4. Multi-scale blur at full resolution (max-pool + peak boost at end) ---
+        final = np.zeros(frame_shape, dtype=np.float32)
+        for scale in self._center_scales(work_bgr.shape[1]):
             w = max(7, int(round(descriptor.avg_width * scale / downscale)) | 1)
             h = max(7, int(round(descriptor.avg_height * scale / downscale)) | 1)
             blurred = cv2.GaussianBlur(sprite, (w, h), 0)
             final = np.maximum(final, blurred.astype(np.float32))
 
-        # --- 5. Upscale back to full frame with local peak recovery ---
-        if downscale > 1:
-            final = _local_peak_boost(final)
-            final = _nearest_upscale(final, downscale, frame_shape[0], frame_shape[1])
-            accent = _nearest_upscale(accent, downscale, frame_shape[0], frame_shape[1])
-
-        return final, accent
+        # --- 5. Max-preserving discovery downscale + local peak recovery ---
+        return _discovery_downscale_heatmap(final, downscale), accent
 
     def top_centers(
         self, heatmap: np.ndarray,
@@ -345,4 +332,29 @@ class HeatmapDetector:
             raw.append((cx, cy, peak_score, comp_bbox))
 
         raw.sort(key=lambda item: item[2], reverse=True)
-        return raw[: self.max_centers]
+
+        # Merge nearby fragments of the same mob (tight 15 px — won't merge distinct mobs).
+        MERGE_DIST = 15  # pixels in heatmap space
+        MERGE_DIST_SQ = MERGE_DIST * MERGE_DIST
+        merged: list[tuple[int, int, float, tuple[int, int, int, int]]] = []
+        for cx, cy, heat, (left, top, w, h) in raw:
+            merged_flag = False
+            for mi, (mx, my, mheat, mbbox) in enumerate(merged):
+                if (cx - mx) ** 2 + (cy - my) ** 2 < MERGE_DIST_SQ:
+                    ml, mt, mw, mh = mbbox
+                    nleft = min(ml, left)
+                    ntop = min(mt, top)
+                    nright = max(ml + mw, left + w)
+                    nbottom = max(mt + mh, top + h)
+                    merged[mi] = (
+                        (nleft + nright) // 2,
+                        (ntop + nbottom) // 2,
+                        max(mheat, heat),
+                        (nleft, ntop, nright - nleft, nbottom - ntop),
+                    )
+                    merged_flag = True
+                    break
+            if not merged_flag:
+                merged.append((cx, cy, heat, (left, top, w, h)))
+
+        return merged[: self.max_centers]
