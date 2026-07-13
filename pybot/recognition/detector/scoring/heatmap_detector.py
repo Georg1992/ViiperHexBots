@@ -1,6 +1,6 @@
 """Vectorized descriptor sprite heatmap and blob finding.
 
-Pipeline: sprite palette heatmap → selectivity boost → edge-density boost
+Pipeline: weighted sprite palette heatmap → selectivity boost → edge-density boost
           → multi-scale blur → connected components → blob centers.
 """
 
@@ -58,6 +58,154 @@ def sprite_palette_heatmap(
     return np.clip(heat, 0.0, 1.0).reshape(frame_bgr.shape[:2]).astype(np.float32)
 
 
+def _palette_role_weights(descriptor: MobDescriptor) -> np.ndarray:
+    peak_weight = max(descriptor.match_palette_weights) if descriptor.match_palette_weights else 1.0
+    shade_cutoff = np.float32(0.20) * np.float32(peak_weight)
+
+    accent_bgrs: set[tuple[int, int, int]] = set()
+    for pixel in descriptor.accent_pixels_bgr or []:
+        accent_bgrs.add(tuple(int(v) for v in pixel))
+    for cluster in descriptor.accent_colors:
+        accent_bgrs.add(tuple(int(v) for v in cluster.bgr))
+
+    structural_bgrs: set[tuple[int, int, int]] = set()
+    for pixel in descriptor.dominant_pixels_bgr or []:
+        structural_bgrs.add(tuple(int(v) for v in pixel))
+    if descriptor.dominant_pixel_bgr is not None:
+        structural_bgrs.add(tuple(int(v) for v in descriptor.dominant_pixel_bgr))
+
+    roles = np.empty(len(descriptor.match_palette_bgr), dtype=np.float32)
+    for index, bgr in enumerate(descriptor.match_palette_bgr):
+        key = tuple(int(v) for v in bgr)
+        weight = (
+            descriptor.match_palette_weights[index]
+            if index < len(descriptor.match_palette_weights)
+            else 1.0
+        )
+        if key in accent_bgrs:
+            roles[index] = np.float32(1.10)
+        elif key in structural_bgrs or np.float32(weight) >= shade_cutoff:
+            roles[index] = np.float32(1.00)
+        else:
+            roles[index] = np.float32(0.45)
+    return roles
+
+
+def _palette_descriptor_weights(descriptor: MobDescriptor) -> np.ndarray:
+    raw = descriptor.match_palette_weights
+    if len(raw) != len(descriptor.match_palette_bgr):
+        raw = [1.0] * len(descriptor.match_palette_bgr)
+    return (
+        np.float32(0.6) + np.float32(0.4) * np.sqrt(np.asarray(raw, dtype=np.float32))
+    ).astype(np.float32)
+
+
+def weighted_sprite_palette_heatmap(
+    frame_bgr: np.ndarray,
+    descriptor: MobDescriptor,
+    max_distance: float,
+) -> np.ndarray:
+    """Palette heatmap with runtime rarity, descriptor, and role weighting."""
+    palette_bgr = descriptor.match_palette_bgr
+    if not palette_bgr:
+        return np.zeros(frame_bgr.shape[:2], dtype=np.float32)
+
+    pixels = frame_bgr.reshape(-1, 3).astype(np.float32)
+    palette = np.asarray(palette_bgr, dtype=np.float32)
+    n_pixels = pixels.shape[0]
+    n_colors = len(palette)
+    max_dist = max(max_distance, 1.0)
+
+    nearest_idx = np.zeros(n_pixels, dtype=np.int32)
+    min_dist_sq = np.full(n_pixels, np.inf, dtype=np.float32)
+    for start in range(0, n_colors, 128):
+        chunk = palette[start : start + 128]
+        diff = pixels[:, None, :] - chunk[None, :, :]
+        dist_sq = np.sum(diff * diff, axis=2)
+        chunk_min = dist_sq.min(axis=1)
+        chunk_argmin = dist_sq.argmin(axis=1).astype(np.int32) + np.int32(start)
+        better = chunk_min < min_dist_sq
+        min_dist_sq = np.where(better, chunk_min, min_dist_sq)
+        nearest_idx = np.where(better, chunk_argmin, nearest_idx)
+
+    palette_match_count = np.bincount(nearest_idx, minlength=n_colors).astype(np.float32)
+    scene_fraction = palette_match_count / np.float32(max(n_pixels, 1))
+    rarity = np.float32(1.0) / np.sqrt(scene_fraction + np.float32(1e-6))
+    median_rarity = float(np.median(rarity))
+    if median_rarity > 0.0:
+        rarity = (rarity / np.float32(median_rarity)).astype(np.float32)
+    rarity = np.clip(rarity, np.float32(0.25), np.float32(2.0))
+
+    combined_w = (
+        rarity
+        * _palette_descriptor_weights(descriptor)
+        * _palette_role_weights(descriptor)
+    ).astype(np.float32)
+
+    best_weighted = np.zeros(n_pixels, dtype=np.float32)
+    for start in range(0, n_colors, 128):
+        end = min(start + 128, n_colors)
+        chunk = palette[start:end]
+        diff = pixels[:, None, :] - chunk[None, :, :]
+        dist_sq = np.sum(diff * diff, axis=2)
+        similarity = np.clip(
+            np.float32(1.0) - np.sqrt(dist_sq) / np.float32(max_dist),
+            np.float32(0.0),
+            np.float32(1.0),
+        )
+        chunk_w = combined_w[start:end][None, :]
+        best_weighted = np.maximum(best_weighted, (similarity * chunk_w).max(axis=1))
+
+    return best_weighted.reshape(frame_bgr.shape[:2]).astype(np.float32)
+
+
+def _pool_downscale(heatmap: np.ndarray, scale: int) -> np.ndarray:
+    """Max-pool a heatmap by an integer factor."""
+    if scale <= 1:
+        return heatmap.astype(np.float32)
+    height, width = heatmap.shape
+    height_trim = (height // scale) * scale
+    width_trim = (width // scale) * scale
+    if height_trim == 0 or width_trim == 0:
+        return heatmap.astype(np.float32)
+    trimmed = heatmap[:height_trim, :width_trim]
+    blocks = trimmed.reshape(
+        height_trim // scale, scale, width_trim // scale, scale,
+    )
+    return blocks.max(axis=(1, 3)).astype(np.float32)
+
+
+def _nearest_upscale(heatmap: np.ndarray, scale: int, out_h: int, out_w: int) -> np.ndarray:
+    """Repeat each pooled cell to recover full-frame heatmap coordinates."""
+    if scale <= 1:
+        return heatmap.astype(np.float32)
+    upscaled = np.repeat(np.repeat(heatmap, scale, axis=0), scale, axis=1)
+    return upscaled[:out_h, :out_w].astype(np.float32)
+
+
+def _local_peak_boost(heatmap: np.ndarray, factor: float = 1.08) -> np.ndarray:
+    """Boost local maxima only — leaves broad background plateaus unchanged."""
+    kernel = np.ones((3, 3), np.uint8)
+    local_max = cv2.dilate(heatmap, kernel)
+    peak_mask = heatmap >= local_max - np.float32(1e-6)
+    boosted = heatmap.copy()
+    boosted[peak_mask] *= np.float32(factor)
+    return np.clip(boosted, np.float32(0.0), np.float32(1.0)).astype(np.float32)
+
+
+def _discovery_downscale_heatmap(
+    heatmap: np.ndarray,
+    downscale: int,
+) -> np.ndarray:
+    """Preserve narrow peaks through discovery downscale via max-pool + nearest up."""
+    if downscale <= 1:
+        return heatmap.astype(np.float32)
+    out_h, out_w = heatmap.shape
+    pooled = _pool_downscale(heatmap, downscale)
+    pooled = _local_peak_boost(pooled)
+    return _nearest_upscale(pooled, downscale, out_h, out_w)
+
+
 class HeatmapDetector:
     """Builds a single sprite-matching heatmap and finds blob centers."""
 
@@ -93,25 +241,14 @@ class HeatmapDetector:
         """
         frame_shape = frame_bgr.shape[:2]
 
-        # --- downscale work images if needed ---
+        # --- full-resolution heatmap (downscale applied only at the end) ---
         work_bgr = frame_bgr
         work_hsv = hsv
-        if downscale > 1:
-            work_bgr = cv2.resize(
-                frame_bgr, None,
-                fx=1.0 / downscale, fy=1.0 / downscale,
-                interpolation=cv2.INTER_AREA,
-            )
-            work_hsv = cv2.resize(
-                hsv, None,
-                fx=1.0 / downscale, fy=1.0 / downscale,
-                interpolation=cv2.INTER_AREA,
-            )
 
-        # --- 1. Pure sprite-palette-distance heatmap ---
-        sprite = sprite_palette_heatmap(
+        # --- 1. Weighted sprite-palette-distance heatmap ---
+        sprite = weighted_sprite_palette_heatmap(
             work_bgr,
-            descriptor.match_palette_bgr,
+            descriptor,
             self.max_sprite_palette_distance,
         )
 
@@ -124,20 +261,17 @@ class HeatmapDetector:
             sprite = np.where(background_heat >= np.float32(0.55), np.float32(0.0), sprite)
 
         if texture_mask is not None:
-            work_mask = texture_mask
-            if downscale > 1:
-                work_mask = cv2.resize(
-                    texture_mask,
-                    (work_bgr.shape[1], work_bgr.shape[0]),
-                    interpolation=cv2.INTER_AREA,
-                )
-            sprite *= work_mask.astype(np.float32)
+            sprite *= texture_mask.astype(np.float32)
 
         # --- 2. Selectivity: body × accent → suppress non-mob colour combos ---
         accent = palette_heatmap(work_hsv, descriptor.accent_colors)
         body = palette_heatmap(work_hsv, descriptor.body_palette)
-        selectivity = np.sqrt(body * accent).astype(np.float32)
-        sprite *= np.float32(0.5) + np.float32(0.5) * selectivity
+        if descriptor.accent_colors:
+            joint = np.sqrt(body * accent).astype(np.float32)
+            selectivity = np.float32(0.18) + np.float32(0.82) * joint
+        else:
+            selectivity = np.float32(0.18) + np.float32(0.82) * body.astype(np.float32)
+        sprite *= selectivity
 
         # --- 3. Edge-density: mobs have edges, flat terrain doesn't ---
         gray = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2GRAY)
@@ -160,14 +294,10 @@ class HeatmapDetector:
                 max(3, int(round(descriptor.avg_height * scale / downscale)) | 1),
             )
             blurred = cv2.blur(sprite, window)
-            if downscale > 1:
-                blurred = cv2.resize(
-                    blurred, (frame_shape[1], frame_shape[0]),
-                    interpolation=cv2.INTER_LINEAR,
-                )
             final = np.maximum(final, blurred.astype(np.float32))
 
-        return final
+        # --- 5. Max-preserving discovery downscale + local peak recovery ---
+        return _discovery_downscale_heatmap(final, downscale)
 
     def top_centers(
         self, heatmap: np.ndarray,
