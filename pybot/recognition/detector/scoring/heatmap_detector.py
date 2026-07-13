@@ -279,11 +279,9 @@ class HeatmapDetector:
         # --- 4. Multi-scale blur → aggregate hot-spots at mob-sized scales ---
         final = np.zeros(work_shape, dtype=np.float32)
         for scale in self._center_scales(frame_shape[1]):
-            window = (
-                max(3, int(round(descriptor.avg_width * scale / downscale / downscale)) | 1),
-                max(3, int(round(descriptor.avg_height * scale / downscale / downscale)) | 1),
-            )
-            blurred = cv2.blur(sprite, window)
+            w = max(7, int(round(descriptor.avg_width * scale / downscale)) | 1)
+            h = max(7, int(round(descriptor.avg_height * scale / downscale)) | 1)
+            blurred = cv2.GaussianBlur(sprite, (w, h), 0)
             final = np.maximum(final, blurred.astype(np.float32))
 
         # --- 5. Upscale back to full frame with local peak recovery ---
