@@ -1,7 +1,7 @@
 """Vectorized descriptor sprite heatmap and blob finding.
 
 Pipeline: weighted sprite palette heatmap → selectivity boost → edge-density boost
-          → multi-scale blur → connected components → blob centers.
+          → GaussianBlur → normalize → connected components → blob centers.
 """
 
 from __future__ import annotations
