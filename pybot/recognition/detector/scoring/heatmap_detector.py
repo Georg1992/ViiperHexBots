@@ -235,8 +235,15 @@ class HeatmapDetector:
         accent_heatmap is the raw accent cluster heatmap reused by blob filters.
         """
         frame_shape = frame_bgr.shape[:2]
-        work_bgr = frame_bgr
-        work_hsv = hsv
+
+        # --- early downscale: run the expensive steps at discovery resolution ---
+        if downscale > 1:
+            ds_h, ds_w = frame_shape[0] // downscale, frame_shape[1] // downscale
+            work_bgr = cv2.resize(frame_bgr, (ds_w, ds_h), interpolation=cv2.INTER_NEAREST)
+            work_hsv = cv2.resize(hsv, (ds_w, ds_h), interpolation=cv2.INTER_NEAREST)
+        else:
+            work_bgr = frame_bgr
+            work_hsv = hsv
 
         # --- 1. Weighted sprite-palette-distance heatmap ---
         sprite = weighted_sprite_palette_heatmap(
@@ -268,47 +275,96 @@ class HeatmapDetector:
             edge_density = np.zeros_like(edge_density, dtype=np.float32)
         sprite *= np.float32(0.5) + np.float32(0.5) * edge_density
 
-        # --- 4. Single strong GaussianBlur sized to the mob ---
+        # --- 4. Single strong GaussianBlur covering the full mob ---
         w = max(3, int(round(descriptor.avg_width * 0.8 / downscale)) | 1)
         h = max(3, int(round(descriptor.avg_height * 0.8 / downscale)) | 1)
         final = cv2.GaussianBlur(sprite, (w, h), 0).astype(np.float32)
 
-        # --- 5. Max-preserving discovery downscale + local peak recovery ---
-        return _discovery_downscale_heatmap(final, downscale), accent
+        # --- 5. Upscale back to full frame with local peak recovery ---
+        if downscale > 1:
+            final = _local_peak_boost(final)
+            final = _nearest_upscale(final, downscale, frame_shape[0], frame_shape[1])
+            accent = _nearest_upscale(accent, downscale, frame_shape[0], frame_shape[1])
+
+        return final, accent
 
     def top_centers(
-        self, heatmap: np.ndarray, avg_width: float, avg_height: float,
+        self, heatmap: np.ndarray,
     ) -> list[tuple[int, int, float, tuple[int, int, int, int]]]:
-        """Find distinct hot regions via local-maxima detection.
+        """Find distinct hot regions via connected components.
 
-        Dilates the heatmap with a kernel proportional to the mob's size,
-        then keeps pixels where heatmap == dilated (local maxima) above
-        min_center_heat.  One peak per mob — no fragmentation, no merging.
+        Thresholds the heatmap, finds contiguous blobs above threshold,
+        merges nearby fragments, and returns heat-weighted centroids with
+        bounding boxes.
         """
         if heatmap.size == 0:
             return []
 
-        kw = max(3, int(avg_width * 0.9) | 1)
-        kh = max(3, int(avg_height * 0.9) | 1)
-        kernel = np.ones((kh, kw), np.uint8)
-        local_max = cv2.dilate(heatmap, kernel)
+        threshold = max(
+            float(heatmap.max()) * self.peak_relative_threshold,
+            self.min_center_heat,
+        )
+        binary = (heatmap >= threshold).astype(np.uint8)
+        if not np.any(binary):
+            return []
 
-        threshold = max(float(heatmap.max()) * self.peak_relative_threshold, self.min_center_heat)
-        mask = (heatmap >= local_max - np.float32(1e-6)) & (heatmap >= threshold)
-        ys, xs = np.where(mask)
-        if len(xs) == 0:
+        num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            binary, connectivity=8,
+        )
+        if num_labels <= 1:
             return []
 
         raw: list[tuple[int, int, float, tuple[int, int, int, int]]] = []
-        for cx, cy in zip(xs, ys):
-            heat = float(heatmap[cy, cx])
+        for label in range(1, num_labels):
+            area = stats[label, cv2.CC_STAT_AREA]
+            if area < 12:
+                continue
+
+            mask = labels == label
+            vals = heatmap[mask]
+            peak_score = float(vals.max())
+
+            weights = vals.astype(np.float32)
+            if weights.sum() > 0:
+                ys, xs = np.where(mask)
+                cx = int(np.average(xs, weights=weights))
+                cy = int(np.average(ys, weights=weights))
+            else:
+                r = _centroids[label]
+                cx, cy = int(round(r[0])), int(round(r[1]))
+
             comp_bbox = (
-                int(cx - avg_width / 2),
-                int(cy - avg_height / 2),
-                int(avg_width),
-                int(avg_height),
+                stats[label, cv2.CC_STAT_LEFT],
+                stats[label, cv2.CC_STAT_TOP],
+                stats[label, cv2.CC_STAT_WIDTH],
+                stats[label, cv2.CC_STAT_HEIGHT],
             )
-            raw.append((int(cx), int(cy), heat, comp_bbox))
+            raw.append((cx, cy, peak_score, comp_bbox))
 
         raw.sort(key=lambda item: item[2], reverse=True)
-        return raw[: self.max_centers]
+
+        # Merge nearby fragments of the same mob (tight 15 px — won't merge distinct mobs).
+        MERGE_DIST = 15  # pixels in heatmap space
+        MERGE_DIST_SQ = MERGE_DIST * MERGE_DIST
+        merged: list[tuple[int, int, float, tuple[int, int, int, int]]] = []
+        for cx, cy, heat, (left, top, w, h) in raw:
+            merged_flag = False
+            for mi, (mx, my, mheat, mbbox) in enumerate(merged):
+                if (cx - mx) ** 2 + (cy - my) ** 2 < MERGE_DIST_SQ:
+                    ml, mt, mw, mh = mbbox
+                    nleft = min(ml, left)
+                    ntop = min(mt, top)
+                    nright = max(ml + mw, left + w)
+                    nbottom = max(mt + mh, top + h)
+                    merged[mi] = (
+                        (nleft + nright) // 2,
+                        (ntop + nbottom) // 2,
+                        max(mheat, heat),
+                        (nleft, ntop, nright - nleft, nbottom - ntop),
+                    )
+                    merged_flag = True
+                    break
+            if not merged_flag:
+                merged.append((cx, cy, heat, (left, top, w, h)))
+
+        return merged[: self.max_centers]

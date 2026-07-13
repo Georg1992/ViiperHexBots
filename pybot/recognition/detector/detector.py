@@ -211,9 +211,7 @@ class MobDetector:
         heatmap_end = time.perf_counter()
 
         # --- blobs ----------------------------------------------------
-        blobs = self.heatmap_detector.top_centers(
-            sprite_heatmap, descriptor.avg_width, descriptor.avg_height,
-        )
+        blobs = self.heatmap_detector.top_centers(sprite_heatmap)
         blobs_end = time.perf_counter()
 
         # --- validate each blob via silhouette gate -------------------

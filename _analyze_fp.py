@@ -52,7 +52,7 @@ for suite in MOB_FIXTURE_SUITES:
         accepted_centers = set((c.center_x, c.center_y) for c in result.accepted)
 
         hm, _accent = heat_det.build_sprite_heatmap(frame, hsv, desc)
-        blobs = heat_det.top_centers(hm, desc.avg_width, desc.avg_height)
+        blobs = heat_det.top_centers(hm)
         blobs.sort(key=lambda x: x[2], reverse=True)
 
         for i, (cx, cy, score, comp_bbox) in enumerate(blobs):
