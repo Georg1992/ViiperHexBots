@@ -246,7 +246,7 @@ class HeatmapDetector:
             edge_density = np.zeros_like(edge_density, dtype=np.float32)
         sprite *= np.float32(0.5) + np.float32(0.5) * edge_density
 
-        # --- 4. Single strong GaussianBlur covering the full mob ---
+        # --- 4. Single GaussianBlur sized to the mob ---
         w = max(3, int(round(descriptor.avg_width * 0.8 / downscale)) | 1)
         h = max(3, int(round(descriptor.avg_height * 0.8 / downscale)) | 1)
         final = cv2.GaussianBlur(sprite, (w, h), 0).astype(np.float32)
