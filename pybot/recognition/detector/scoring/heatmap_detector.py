@@ -246,10 +246,11 @@ class HeatmapDetector:
             edge_density = np.zeros_like(edge_density, dtype=np.float32)
         sprite *= np.float32(0.5) + np.float32(0.5) * edge_density
 
-        # --- 4. Single GaussianBlur sized to the mob ---
+        # --- 4. GaussianBlur + normalize — every mob gets full contrast ---
         w = max(3, int(round(descriptor.avg_width * 0.8 / downscale)) | 1)
         h = max(3, int(round(descriptor.avg_height * 0.8 / downscale)) | 1)
-        final = cv2.GaussianBlur(sprite, (w, h), 0).astype(np.float32)
+        blurred = cv2.GaussianBlur(sprite, (w, h), 0)
+        final = cv2.normalize(blurred, None, 0.0, 1.0, cv2.NORM_MINMAX)
 
         # --- 5. Upscale back to full frame with local peak recovery ---
         if downscale > 1:
@@ -314,8 +315,8 @@ class HeatmapDetector:
 
         raw.sort(key=lambda item: item[2], reverse=True)
 
-        # Merge nearby fragments of the same mob (tight 15 px — won't merge distinct mobs).
-        MERGE_DIST = 15  # pixels in heatmap space
+        # Merge nearby fragments (close handles 1-2px gaps, merge catches larger splits).
+        MERGE_DIST = 15
         MERGE_DIST_SQ = MERGE_DIST * MERGE_DIST
         merged: list[tuple[int, int, float, tuple[int, int, int, int]]] = []
         for cx, cy, heat, (left, top, w, h) in raw:
