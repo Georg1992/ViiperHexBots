@@ -263,12 +263,7 @@ class HeatmapDetector:
     def top_centers(
         self, heatmap: np.ndarray,
     ) -> list[tuple[int, int, float, tuple[int, int, int, int]]]:
-        """Find distinct hot regions via connected components.
-
-        Thresholds the heatmap, finds contiguous blobs above threshold,
-        merges nearby fragments, and returns heat-weighted centroids with
-        bounding boxes.
-        """
+        """Find distinct hot regions via connected components, no merge."""
         if heatmap.size == 0:
             return []
 
@@ -314,29 +309,4 @@ class HeatmapDetector:
             raw.append((cx, cy, peak_score, comp_bbox))
 
         raw.sort(key=lambda item: item[2], reverse=True)
-
-        # Merge nearby fragments (close handles 1-2px gaps, merge catches larger splits).
-        MERGE_DIST = 15
-        MERGE_DIST_SQ = MERGE_DIST * MERGE_DIST
-        merged: list[tuple[int, int, float, tuple[int, int, int, int]]] = []
-        for cx, cy, heat, (left, top, w, h) in raw:
-            merged_flag = False
-            for mi, (mx, my, mheat, mbbox) in enumerate(merged):
-                if (cx - mx) ** 2 + (cy - my) ** 2 < MERGE_DIST_SQ:
-                    ml, mt, mw, mh = mbbox
-                    nleft = min(ml, left)
-                    ntop = min(mt, top)
-                    nright = max(ml + mw, left + w)
-                    nbottom = max(mt + mh, top + h)
-                    merged[mi] = (
-                        (nleft + nright) // 2,
-                        (ntop + nbottom) // 2,
-                        max(mheat, heat),
-                        (nleft, ntop, nright - nleft, nbottom - ntop),
-                    )
-                    merged_flag = True
-                    break
-            if not merged_flag:
-                merged.append((cx, cy, heat, (left, top, w, h)))
-
-        return merged[: self.max_centers]
+        return raw[: self.max_centers]
