@@ -12,10 +12,9 @@ import numpy as np
 from pybot.recognition.detector.descriptors.descriptor import ColorCluster, MobDescriptor
 
 
-def _cluster_match(hsv: np.ndarray, cluster: ColorCluster) -> np.ndarray:
+def _cluster_match(hsv_f: np.ndarray, cluster: ColorCluster) -> np.ndarray:
     center = np.array(cluster.hsv, dtype=np.float32)
     tol = np.array(cluster.tolerance, dtype=np.float32)
-    hsv_f = hsv.astype(np.float32)
     hue_diff = np.abs(hsv_f[:, :, 0] - center[0])
     hue_diff = np.minimum(hue_diff, 180.0 - hue_diff)
     sat_diff = np.abs(hsv_f[:, :, 1] - center[1])
@@ -29,9 +28,10 @@ def _cluster_match(hsv: np.ndarray, cluster: ColorCluster) -> np.ndarray:
 def palette_heatmap(hsv: np.ndarray, clusters: list[ColorCluster]) -> np.ndarray:
     if not clusters:
         return np.zeros(hsv.shape[:2], dtype=np.float32)
+    hsv_f = hsv.astype(np.float32)
     heat = np.zeros(hsv.shape[:2], dtype=np.float32)
     for cluster in clusters:
-        heat = np.maximum(heat, _cluster_match(hsv, cluster))
+        heat = np.maximum(heat, _cluster_match(hsv_f, cluster))
     return heat
 
 
