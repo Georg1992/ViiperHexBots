@@ -114,20 +114,12 @@ def weighted_sprite_palette_heatmap(
     palette = np.asarray(palette_bgr, dtype=np.float32)
     n_pixels = pixels.shape[0]
     n_colors = len(palette)
-    max_dist = max(max_distance, 1.0)
+    max_dist = np.float32(max(max_distance, 1.0))
 
-    nearest_idx = np.zeros(n_pixels, dtype=np.int32)
-    min_dist_sq = np.full(n_pixels, np.inf, dtype=np.float32)
-    for start in range(0, n_colors, 128):
-        chunk = palette[start : start + 128]
-        diff = pixels[:, None, :] - chunk[None, :, :]
-        dist_sq = np.sum(diff * diff, axis=2)
-        chunk_min = dist_sq.min(axis=1)
-        chunk_argmin = dist_sq.argmin(axis=1).astype(np.int32) + np.int32(start)
-        better = chunk_min < min_dist_sq
-        min_dist_sq = np.where(better, chunk_min, min_dist_sq)
-        nearest_idx = np.where(better, chunk_argmin, nearest_idx)
+    diff = pixels[:, None, :] - palette[None, :, :]
+    dist_sq = np.sum(diff * diff, axis=2)
 
+    nearest_idx = dist_sq.argmin(axis=1)
     palette_match_count = np.bincount(nearest_idx, minlength=n_colors).astype(np.float32)
     scene_fraction = palette_match_count / np.float32(max(n_pixels, 1))
     rarity = np.float32(1.0) / np.sqrt(scene_fraction + np.float32(1e-6))
@@ -142,19 +134,12 @@ def weighted_sprite_palette_heatmap(
         * _palette_role_weights(descriptor)
     ).astype(np.float32)
 
-    best_weighted = np.zeros(n_pixels, dtype=np.float32)
-    for start in range(0, n_colors, 128):
-        end = min(start + 128, n_colors)
-        chunk = palette[start:end]
-        diff = pixels[:, None, :] - chunk[None, :, :]
-        dist_sq = np.sum(diff * diff, axis=2)
-        similarity = np.clip(
-            np.float32(1.0) - np.sqrt(dist_sq) / np.float32(max_dist),
-            np.float32(0.0),
-            np.float32(1.0),
-        )
-        chunk_w = combined_w[start:end][None, :]
-        best_weighted = np.maximum(best_weighted, (similarity * chunk_w).max(axis=1))
+    similarity = np.clip(
+        np.float32(1.0) - np.sqrt(dist_sq) / max_dist,
+        np.float32(0.0),
+        np.float32(1.0),
+    )
+    best_weighted = (similarity * combined_w[None, :]).max(axis=1)
 
     return best_weighted.reshape(frame_bgr.shape[:2]).astype(np.float32)
 
