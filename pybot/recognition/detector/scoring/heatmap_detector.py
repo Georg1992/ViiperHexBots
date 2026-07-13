@@ -300,9 +300,7 @@ class HeatmapDetector:
         """Find distinct hot regions via connected components.
 
         Thresholds the heatmap, finds contiguous blobs above threshold,
-        merges nearby fragments, and returns heat-weighted centroids with
-        bounding boxes.  Yields exactly 1 center per visually distinct
-        hot region, typically 3–5 per frame at most.
+        and returns heat-weighted centroids with bounding boxes.
         """
         if heatmap.size == 0:
             return []
@@ -349,29 +347,4 @@ class HeatmapDetector:
             raw.append((cx, cy, peak_score, comp_bbox))
 
         raw.sort(key=lambda item: item[2], reverse=True)
-
-        # Merge fragments within MERGE_DIST that belong to the same mob.
-        MERGE_DIST = 40  # pixels in heatmap space
-        MERGE_DIST_SQ = MERGE_DIST * MERGE_DIST
-        merged: list[tuple[int, int, float, tuple[int, int, int, int]]] = []
-        for cx, cy, heat, (left, top, w, h) in raw:
-            merged_flag = False
-            for mi, (mx, my, mheat, mbbox) in enumerate(merged):
-                if (cx - mx) ** 2 + (cy - my) ** 2 < MERGE_DIST_SQ:
-                    ml, mt, mw, mh = mbbox
-                    nleft = min(ml, left)
-                    ntop = min(mt, top)
-                    nright = max(ml + mw, left + w)
-                    nbottom = max(mt + mh, top + h)
-                    merged[mi] = (
-                        (nleft + nright) // 2,
-                        (ntop + nbottom) // 2,
-                        max(mheat, heat),
-                        (nleft, ntop, nright - nleft, nbottom - ntop),
-                    )
-                    merged_flag = True
-                    break
-            if not merged_flag:
-                merged.append((cx, cy, heat, (left, top, w, h)))
-
-        return merged[: self.max_centers]
+        return raw[: self.max_centers]
