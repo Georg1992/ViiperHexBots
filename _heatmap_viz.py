@@ -96,30 +96,7 @@ def heatmap_to_color(heatmap: np.ndarray) -> np.ndarray:
 
 
 def annotate_heatmap_pane(pane_heat: np.ndarray, result: DetectionResult) -> None:
-    """Label the heatmap pane and highlight when the noisy fallback path is active."""
-    if result.noisy_heatmap:
-        banner_h = 36
-        cv2.rectangle(pane_heat, (0, 0), (pane_heat.shape[1], banner_h), (0, 200, 255), -1)
-        cv2.putText(
-            pane_heat,
-            f"NOISY FALLBACK  hot={result.heatmap_hot_frac:.3f}",
-            (10, 24),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 0, 0),
-            2,
-        )
-        cv2.putText(
-            pane_heat,
-            "texture mask + bg exclude + outline silhouette",
-            (10, 52),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.42,
-            (255, 255, 255),
-            1,
-        )
-        return
-
+    """Label the heatmap pane."""
     cv2.putText(
         pane_heat,
         "HEATMAP",
@@ -281,6 +258,59 @@ def draw_extracted_silhouette_on_frame(
     )
 
 
+def format_timing_ms(timing: dict[str, float]) -> str:
+    """Compact single-line timing summary for discovery scan stages."""
+    order = (
+        "descriptor",
+        "hsv",
+        "spriteHeatmap",
+        "accentHeatmap",
+        "blobCenters",
+        "blobFilters",
+        "silhouetteGate",
+        "nms",
+    )
+    parts = [f"{key}={timing[key] * 1000:.0f}ms" for key in order if key in timing]
+    total_ms = timing.get("total", 0.0) * 1000
+    return "  ".join(parts) + f"  total={total_ms:.0f}ms"
+
+
+def draw_timing_overlay(pane: np.ndarray, timing: dict[str, float], y0: int = 100) -> None:
+    """Stacked timing bars for each discovery stage."""
+    order = (
+        ("spriteHeatmap", (0, 200, 255)),
+        ("silhouetteGate", (0, 220, 0)),
+        ("blobCenters", (255, 180, 0)),
+        ("accentHeatmap", (200, 120, 255)),
+        ("blobFilters", (180, 180, 180)),
+        ("hsv", (120, 120, 120)),
+        ("descriptor", (80, 80, 80)),
+        ("nms", (255, 255, 255)),
+    )
+    total = max(timing.get("total", 0.0), 1e-9)
+    bar_max_w = min(280, pane.shape[1] - 20)
+    line_h = 14
+    cv2.putText(
+        pane, "TIMING", (10, y0),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 180, 180), 1,
+    )
+    y = y0 + 16
+    for key, color in order:
+        if key not in timing:
+            continue
+        sec = timing[key]
+        if sec < 1e-6:
+            continue
+        ms = sec * 1000
+        bar_w = max(2, int(bar_max_w * sec / total))
+        cv2.rectangle(pane, (10, y - 9), (10 + bar_w, y + 2), color, -1)
+        cv2.putText(
+            pane, f"{key} {ms:.0f}ms", (16 + bar_max_w, y),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1,
+        )
+        y += line_h
+
+
 def draw_detection_overlay(
     frame: np.ndarray,
     result: DetectionResult,
@@ -317,10 +347,9 @@ def draw_detection_overlay(
     n_sil = len(silhouette_checks)
     n_sil_pass = sum(1 for c in silhouette_checks if c.passed)
     n_acc = len(result.accepted)
-    bg_tag = "  NOISY FALLBACK" if result.noisy_heatmap else ""
     cv2.putText(
         overlay,
-        f"Sil:{n_sil} Pass:{n_sil_pass} Acc:{n_acc}  {result.elapsed_s * 1000:.0f}ms{bg_tag}",
+        f"Sil:{n_sil} Pass:{n_sil_pass} Acc:{n_acc}  {result.elapsed_s * 1000:.0f}ms",
         (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
     )
     cv2.putText(
@@ -328,6 +357,7 @@ def draw_detection_overlay(
         "green=accepted  cyan=sil-pass  orange=sil-fail  #=BLB index",
         (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1,
     )
+    draw_timing_overlay(overlay, result.timing, y0=75)
     return overlay
 
 
@@ -342,6 +372,8 @@ def main():
     print(f"Generating fresh visualizations at {generated_at}")
 
     count = 0
+    timing_totals: dict[str, float] = {}
+    timing_runs = 0
     for suite in MOB_FIXTURE_SUITES:
         mob_name = suite.mob_name
         try:
@@ -362,8 +394,6 @@ def main():
             annotate_heatmap_pane(pane_heat, result)
 
             pane_overlay = draw_detection_overlay(frame, result)
-            cv2.putText(pane_overlay, "DETECTION", (10, 75),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
             panel_w = 350
             panel_h = frame.shape[0]
@@ -396,9 +426,28 @@ def main():
                 f"  {mob_name:15s} {image.file_name.replace('.png', ''):20s}  "
                 f"expect={expected} got={n_acc}  sil={n_sil}  {ok}"
             )
+            print(f"    {format_timing_ms(result.timing)}")
+            timing_runs += 1
+            for key, sec in result.timing.items():
+                timing_totals[key] = timing_totals.get(key, 0.0) + sec
 
     print(f"\nDone — {count} visualizations in {OUT_DIR.resolve()}/")
     print(f"Generated at {generated_at}")
+    if timing_runs:
+        print(f"\nAverage discovery timing over {timing_runs} frames:")
+        order = (
+            "descriptor", "hsv", "spriteHeatmap", "accentHeatmap",
+            "blobCenters", "blobFilters", "silhouetteGate", "nms", "total",
+        )
+        avg_total = timing_totals.get("total", 0.0) / timing_runs
+        for key in order:
+            if key not in timing_totals:
+                continue
+            avg_ms = timing_totals[key] / timing_runs * 1000
+            pct = (timing_totals[key] / timing_totals["total"] * 100) if timing_totals.get("total") else 0
+            bar = "#" * max(1, int(pct / 2))
+            print(f"  {key:16s} {avg_ms:6.0f}ms  ({pct:4.1f}%)  {bar}")
+        print(f"  {'TOTAL':16s} {avg_total * 1000:6.0f}ms")
 
 
 if __name__ == "__main__":

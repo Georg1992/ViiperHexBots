@@ -52,9 +52,6 @@
   "minBlobAccentPixelScore": 0.15,
   "minBlobDimRatio": 0.50,
   "maxBlobDimRatio": 1.50,
-  "noisyHeatmapHotFracMin": 0.05,
-  "noisyHeatmapRawHeatThreshold": 0.35,
-  "backgroundGridCellPx": 48,
   "debugOutputDir": "pybot/recognition/debug/detector",
   "centerWeights": {
     "bodyPalette": 0.45,
