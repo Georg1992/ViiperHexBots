@@ -236,9 +236,15 @@ class HeatmapDetector:
         """
         frame_shape = frame_bgr.shape[:2]
 
-        # --- full-resolution heatmap (downscale applied only at the end) ---
-        work_bgr = frame_bgr
-        work_hsv = hsv
+        # --- early downscale: run the expensive steps at discovery resolution ---
+        if downscale > 1:
+            ds_h, ds_w = frame_shape[0] // downscale, frame_shape[1] // downscale
+            work_bgr = cv2.resize(frame_bgr, (ds_w, ds_h), interpolation=cv2.INTER_NEAREST)
+            work_hsv = cv2.resize(hsv, (ds_w, ds_h), interpolation=cv2.INTER_NEAREST)
+        else:
+            work_bgr = frame_bgr
+            work_hsv = hsv
+        work_shape = work_bgr.shape[:2]
 
         # --- 1. Weighted sprite-palette-distance heatmap ---
         sprite = weighted_sprite_palette_heatmap(
@@ -271,17 +277,22 @@ class HeatmapDetector:
         sprite *= np.float32(0.5) + np.float32(0.5) * edge_density
 
         # --- 4. Multi-scale blur → aggregate hot-spots at mob-sized scales ---
-        final = np.zeros(frame_shape, dtype=np.float32)
-        for scale in self._center_scales(work_bgr.shape[1]):
+        final = np.zeros(work_shape, dtype=np.float32)
+        for scale in self._center_scales(frame_shape[1]):
             window = (
-                max(3, int(round(descriptor.avg_width * scale / downscale)) | 1),
-                max(3, int(round(descriptor.avg_height * scale / downscale)) | 1),
+                max(3, int(round(descriptor.avg_width * scale / downscale / downscale)) | 1),
+                max(3, int(round(descriptor.avg_height * scale / downscale / downscale)) | 1),
             )
             blurred = cv2.blur(sprite, window)
             final = np.maximum(final, blurred.astype(np.float32))
 
-        # --- 5. Max-preserving discovery downscale + local peak recovery ---
-        return _discovery_downscale_heatmap(final, downscale), accent
+        # --- 5. Upscale back to full frame with local peak recovery ---
+        if downscale > 1:
+            final = _local_peak_boost(final)
+            final = _nearest_upscale(final, downscale, frame_shape[0], frame_shape[1])
+            accent = _nearest_upscale(accent, downscale, frame_shape[0], frame_shape[1])
+
+        return final, accent
 
     def top_centers(
         self, heatmap: np.ndarray,
