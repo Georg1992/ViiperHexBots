@@ -264,7 +264,6 @@ def format_timing_ms(timing: dict[str, float]) -> str:
         "descriptor",
         "hsv",
         "spriteHeatmap",
-        "accentHeatmap",
         "blobCenters",
         "blobFilters",
         "silhouetteGate",
@@ -281,7 +280,6 @@ def draw_timing_overlay(pane: np.ndarray, timing: dict[str, float], y0: int = 10
         ("spriteHeatmap", (0, 200, 255)),
         ("silhouetteGate", (0, 220, 0)),
         ("blobCenters", (255, 180, 0)),
-        ("accentHeatmap", (200, 120, 255)),
         ("blobFilters", (180, 180, 180)),
         ("hsv", (120, 120, 120)),
         ("descriptor", (80, 80, 80)),
@@ -436,7 +434,7 @@ def main():
     if timing_runs:
         print(f"\nAverage discovery timing over {timing_runs} frames:")
         order = (
-            "descriptor", "hsv", "spriteHeatmap", "accentHeatmap",
+            "descriptor", "hsv", "spriteHeatmap",
             "blobCenters", "blobFilters", "silhouetteGate", "nms", "total",
         )
         avg_total = timing_totals.get("total", 0.0) / timing_runs

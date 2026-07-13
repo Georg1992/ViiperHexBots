@@ -215,11 +215,11 @@ class HeatmapDetector:
         hsv: np.ndarray,
         descriptor: MobDescriptor,
         downscale: int = 1,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Build sprite palette heatmap with selectivity and edge-density boosts.
 
-        Returns a float32 heatmap at full frame resolution. Each pixel ≈ how likely
-        it is part of the mob based on palette match, colour selectivity, and edges.
+        Returns (sprite_heatmap, accent_heatmap) at full frame resolution.
+        accent_heatmap is the raw accent cluster heatmap reused by blob filters.
         """
         frame_shape = frame_bgr.shape[:2]
 
@@ -268,7 +268,7 @@ class HeatmapDetector:
             final = np.maximum(final, blurred.astype(np.float32))
 
         # --- 5. Max-preserving discovery downscale + local peak recovery ---
-        return _discovery_downscale_heatmap(final, downscale)
+        return _discovery_downscale_heatmap(final, downscale), accent
 
     def top_centers(
         self, heatmap: np.ndarray,

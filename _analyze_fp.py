@@ -51,7 +51,7 @@ for suite in MOB_FIXTURE_SUITES:
         result = detector.detect(frame, mob_dir)
         accepted_centers = set((c.center_x, c.center_y) for c in result.accepted)
 
-        hm = heat_det.build_sprite_heatmap(frame, hsv, desc)
+        hm, _accent = heat_det.build_sprite_heatmap(frame, hsv, desc)
         blobs = heat_det.top_centers(hm)
         blobs.sort(key=lambda x: x[2], reverse=True)
 

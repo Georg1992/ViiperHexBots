@@ -22,7 +22,6 @@ from pybot.recognition.detector.descriptors.layout_utils import (
 )
 from pybot.recognition.detector.scoring.heatmap_detector import (
     HeatmapDetector,
-    palette_heatmap,
     sprite_palette_heatmap,
 )
 
@@ -203,15 +202,13 @@ class MobDetector:
         if self.discovery_heatmap_downscale > 1 and min(fw, fh) >= self.discovery_heatmap_downscale_min_side:
             downscale = self.discovery_heatmap_downscale
 
-        sprite_heatmap = self.heatmap_detector.build_sprite_heatmap(
+        sprite_heatmap, accent_heatmap = self.heatmap_detector.build_sprite_heatmap(
             frame_bgr,
             hsv,
             descriptor,
             downscale=downscale,
         )
-        sprite_end = time.perf_counter()
-        accent_heatmap = palette_heatmap(hsv, descriptor.accent_colors)
-        accent_end = time.perf_counter()
+        heatmap_end = time.perf_counter()
 
         # --- blobs ----------------------------------------------------
         blobs = self.heatmap_detector.top_centers(sprite_heatmap)
@@ -295,9 +292,8 @@ class MobDetector:
         timing = {
             "descriptor": hsv_start - start,
             "hsv": heatmap_start - hsv_start,
-            "spriteHeatmap": sprite_end - heatmap_start,
-            "accentHeatmap": accent_end - sprite_end,
-            "blobCenters": blobs_end - accent_end,
+            "spriteHeatmap": heatmap_end - heatmap_start,
+            "blobCenters": blobs_end - heatmap_end,
             "blobFilters": filter_end - blobs_end,
             "silhouetteGate": nms_start - filter_end,
             "nms": nms_end - nms_start,
