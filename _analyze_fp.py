@@ -34,10 +34,7 @@ for suite in MOB_FIXTURE_SUITES:
     desc_avg_aspect = desc.avg_width / max(desc.avg_height, 1)
 
     detector = MobDetector(PROJECT_ROOT, config)
-    heat_det_config = dict(config)
-    for k in ('playfieldTopRatio', 'playfieldBottomRatio', 'playfieldLeftRatio', 'playfieldRightRatio'):
-        heat_det_config[k] = 0.0 if k.endswith('TopRatio') or k.endswith('LeftRatio') else 1.0
-    heat_det = HeatmapDetector(heat_det_config)
+    heat_det = HeatmapDetector(config)
 
     for image in suite.images():
         fix_name = image.path.stem
@@ -88,7 +85,7 @@ for suite in MOB_FIXTURE_SUITES:
             pal_frac = pal_above / max(blob_area, 1)
 
             passes_sil = (
-                score >= config['minDiscoveryHeatmapScore']
+                score >= config['minCenterHeat']
                 and detector._passes_silhouette_gate(frame, desc, (bx, by, bw, bh), comp_bbox=comp_bbox)
             )
 

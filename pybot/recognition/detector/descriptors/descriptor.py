@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Any
 
 
+from pybot.recognition.detector.descriptors.palette_groups import (
+    cluster_match_palette_groups,
+)
+
+
 @dataclass
 class ColorCluster:
     label: str
@@ -56,6 +61,7 @@ class MobDescriptor:
     accent_colors: list[ColorCluster]
     match_palette_bgr: list[tuple[int, int, int]]
     match_palette_weights: list[float]
+    match_palette_groups: list[list[int]]
     dominant_pixels_bgr: list[list[int]]
     accent_pixels_bgr: list[list[int]]
     silhouette_masks: list[SilhouetteMask]
@@ -96,6 +102,13 @@ class MobDescriptor:
         if "accentColors" not in data:
             raise ValueError("descriptor missing accentColors")
 
+        if "matchPaletteGroups" in data:
+            match_palette_groups = [
+                [int(idx) for idx in group] for group in data["matchPaletteGroups"]
+            ]
+        else:
+            match_palette_groups = cluster_match_palette_groups(match_palette_bgr)
+
         return cls(
             mob_name=str(data["mobName"]),
             version=int(data["version"]),
@@ -105,6 +118,7 @@ class MobDescriptor:
             accent_colors=[ColorCluster(**item) for item in data["accentColors"]],
             match_palette_bgr=match_palette_bgr,
             match_palette_weights=match_palette_weights,
+            match_palette_groups=match_palette_groups,
             dominant_pixels_bgr=dominant_pixels_bgr,
             accent_pixels_bgr=accent_pixels_bgr,
             silhouette_masks=silhouette_masks,
@@ -125,6 +139,7 @@ class MobDescriptor:
             "accentColors": data["accent_colors"],
             "matchPaletteBgr": data["match_palette_bgr"],
             "matchPaletteWeights": data["match_palette_weights"],
+            "matchPaletteGroups": data["match_palette_groups"],
             "dominantPixelsBgr": data["dominant_pixels_bgr"],
             "accentPixelsBgr": data["accent_pixels_bgr"],
             "silhouetteMasks": [

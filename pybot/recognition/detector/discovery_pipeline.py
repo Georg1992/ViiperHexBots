@@ -39,6 +39,11 @@ def _build_sprite_heatmap() -> Callable:
     return HeatmapDetector.build_sprite_heatmap
 
 
+def _finish_heatmap() -> Callable:
+    from pybot.recognition.detector.scoring.heatmap_detector import HeatmapDetector
+    return HeatmapDetector._finish_heatmap
+
+
 def _top_centers() -> Callable:
     from pybot.recognition.detector.scoring.heatmap_detector import HeatmapDetector
     return HeatmapDetector.top_centers
@@ -83,8 +88,9 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
         items=(
             "downscale frame when large enough",
             "weighted_sprite_palette_heatmap",
+            "optional palette diversity",
             "edge-density boost",
-            "GaussianBlur + normalize",
+            "GaussianBlur",
             "upscale + local peak boost",
         ),
         sources=(
@@ -93,9 +99,15 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                 (
                     "downscale",
                     "weighted_sprite_palette_heatmap",
+                    "use_palette_diversity",
+                    "_finish_heatmap",
+                ),
+            ),
+            SourceCheck(
+                _finish_heatmap,
+                (
                     "edge_density",
                     "GaussianBlur",
-                    "normalize",
                     "_local_peak_boost",
                     "_nearest_upscale",
                 ),

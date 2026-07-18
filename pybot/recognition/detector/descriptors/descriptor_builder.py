@@ -20,6 +20,9 @@ from pybot.recognition.detector.descriptors.descriptor import (
 from pybot.recognition.detector.descriptors.layout_utils import (
     frame_silhouette,
 )
+from pybot.recognition.detector.descriptors.palette_groups import (
+    cluster_match_palette_groups,
+)
 
 DESCRIPTOR_VERSION = 18
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
@@ -198,6 +201,7 @@ class DescriptorBuilder:
         if not profile_accent_colors:
             raise RuntimeError(f"no distinctive accent colors for {mob_name}")
         match_palette_bgr, match_palette_weights = self._match_palette(all_facing_frames)
+        match_palette_groups = cluster_match_palette_groups(match_palette_bgr)
         dominant_pixels_bgr, accent_pixels_bgr = self._collect_structural_pixels(
             spr_file,
             act_file,
@@ -221,6 +225,7 @@ class DescriptorBuilder:
             accent_colors=profile_accent_colors,
             match_palette_bgr=match_palette_bgr,
             match_palette_weights=match_palette_weights,
+            match_palette_groups=match_palette_groups,
             dominant_pixels_bgr=dominant_pixels_bgr,
             accent_pixels_bgr=accent_pixels_bgr,
             silhouette_masks=silhouette_masks,

@@ -27,7 +27,6 @@ from pybot.recognition.detector.scoring.heatmap_detector import (
 
 
 REQUIRED_CONFIG_KEYS = {
-    "minDiscoveryHeatmapScore",
     "discoveryHeatmapDownscale",
     "discoveryHeatmapDownscaleMinSide",
     "maxSpritePaletteDistance",
@@ -43,22 +42,16 @@ REQUIRED_CONFIG_KEYS = {
     "smallScaleCutoff",
     "centerScales",
     "localTrackSearchRadiusPx",
-    "minBlobFullScaleDimRatio",
-    "minBlobAreaRatio",
-    "minBlobSliverDimRatio",
-    "minBlobHeatmapAreaRatio",
-    "minBlobHeatmapAreaFloor",
-    "minBlobModerateHeat",
-    "minBlobAccentFootprint",
-    "minBlobAccentPixelScore",
-    "minBlobDimRatio",
-    "maxBlobDimRatio",
-    # death-detection keys (still used by local_tracker / opacity_probe)
+    "discoveryClusterRadiusPx",
+    "trackDedupRadiusPx",
+    "trackLostMissLimit",
+    "debugOutputDir",
+    # death-detection keys (local_tracker / opacity_probe / hunt)
     "deathOpacityBaselineSamples",
     "deathOpacityMinBaseline",
     "deathOpacityDecayRatio",
     "deathOpacityConfirmTicks",
-    "deathRediscoveryCooldownMs",
+    "deathRediscoveryDataMs",
     "deathOpacityMoveThresholdPx",
     "deathOpacityStopThresholdPx",
     "deathOpacityMinTrackAgeMs",
@@ -144,7 +137,6 @@ class MobDetector:
         self.config = load_detector_config() if config is None else config
         self.heatmap_detector = HeatmapDetector(self.config)
         self._descriptor_cache: dict[str, MobDescriptor] = {}
-        self.min_discovery_heatmap_score = float(self.config["minDiscoveryHeatmapScore"])
         self.discovery_heatmap_downscale = int(self.config["discoveryHeatmapDownscale"])
         self.discovery_heatmap_downscale_min_side = int(self.config["discoveryHeatmapDownscaleMinSide"])
         self.local_track_search_radius_px = int(self.config.get("localTrackSearchRadiusPx", 120))
@@ -152,7 +144,6 @@ class MobDetector:
     def apply_runtime_config(self, config: dict) -> None:
         self.config = dict(config)
         self.heatmap_detector = HeatmapDetector(self.config)
-        self.min_discovery_heatmap_score = float(self.config["minDiscoveryHeatmapScore"])
         self.discovery_heatmap_downscale = int(self.config["discoveryHeatmapDownscale"])
         self.discovery_heatmap_downscale_min_side = int(self.config["discoveryHeatmapDownscaleMinSide"])
         self.local_track_search_radius_px = int(self.config.get("localTrackSearchRadiusPx", 120))

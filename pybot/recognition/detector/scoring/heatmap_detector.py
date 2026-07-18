@@ -1,7 +1,7 @@
 """Vectorized descriptor sprite heatmap and blob finding.
 
-Pipeline: weighted sprite palette heatmap → edge-density boost
-          → GaussianBlur → normalize → connected components → blob centers.
+Pipeline: weighted sprite palette heatmap → optional palette diversity
+          → edge boost → GaussianBlur → connected components → blob centers.
 """
 
 from __future__ import annotations
@@ -10,6 +10,17 @@ import cv2
 import numpy as np
 
 from pybot.recognition.detector.descriptors.descriptor import ColorCluster, MobDescriptor
+
+_EDGE_BLUR_KSIZE = (7, 7)
+
+# Soft local palette-diversity (optional via usePaletteDiversity).
+# Accents are sparse vs the coverage window, so minGroupAreaFraction stays low.
+_PRESENCE_SIMILARITY_LOW = np.float32(0.35)
+_PRESENCE_SIMILARITY_HIGH = np.float32(0.75)
+_MIN_GROUP_AREA_FRACTION = np.float32(0.01)
+_DIVERSITY_FLOOR = np.float32(0.08)
+_COVERAGE_SIZE_FRAC = 0.6
+_REQUIRED_GROUPS_CAP = 2.0
 
 
 def _cluster_match(bgr_f: np.ndarray, cluster: ColorCluster) -> np.ndarray:
@@ -59,20 +70,35 @@ def _palette_descriptor_weights(descriptor: MobDescriptor) -> np.ndarray:
     return (np.float32(0.6) + np.float32(0.4) * np.sqrt(raw)).astype(np.float32)
 
 
+def _coverage_window(avg_width: float, avg_height: float, downscale: int) -> tuple[int, int]:
+    """Odd local support ≈ 0.6 × mob size at discovery resolution."""
+    w = max(3, int(round(avg_width * _COVERAGE_SIZE_FRAC / max(downscale, 1))) | 1)
+    h = max(3, int(round(avg_height * _COVERAGE_SIZE_FRAC / max(downscale, 1))) | 1)
+    return (w, h)
+
+
 def weighted_sprite_palette_heatmap(
     frame_bgr: np.ndarray,
     descriptor: MobDescriptor,
     max_distance: float,
-) -> np.ndarray:
+    *,
+    return_similarity: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """Palette heatmap with runtime rarity and descriptor frequency weights.
 
     Distance computed via |p-c|² = |p|² + |c|² - 2p·c to avoid the (N,C,3)
-    intermediate and to route through BLAS (numpy dot).  The single (N,C)
-    buffer is reused in-place for distance, similarity, and weighting.
+    intermediate and to route through BLAS (numpy dot).
+
+    When ``return_similarity`` is True, also returns the unweighted per-color
+    similarity map shaped (H, W, C) for palette-group coverage.
     """
     palette_bgr = descriptor.match_palette_bgr
+    shape_hw = frame_bgr.shape[:2]
     if not palette_bgr:
-        return np.zeros(frame_bgr.shape[:2], dtype=np.float32)
+        empty = np.zeros(shape_hw, dtype=np.float32)
+        if return_similarity:
+            return empty, np.zeros((*shape_hw, 0), dtype=np.float32)
+        return empty
 
     pixels = frame_bgr.reshape(-1, 3).astype(np.float32)
     palette = np.asarray(palette_bgr, dtype=np.float32)
@@ -101,15 +127,104 @@ def weighted_sprite_palette_heatmap(
 
     combined_w = (rarity * _palette_descriptor_weights(descriptor)).astype(np.float32)
 
-    # --- in-place: dist_sq → distance → similarity → weighted → max ---
-    np.sqrt(dist_sq, out=dist_sq)                                       # now distances
+    # --- distance → similarity (keep unweighted for group coverage) ---
+    np.sqrt(dist_sq, out=dist_sq)
     dist_sq /= max_dist
-    np.subtract(np.float32(1.0), dist_sq, out=dist_sq)                  # similarity
+    np.subtract(np.float32(1.0), dist_sq, out=dist_sq)
     np.clip(dist_sq, np.float32(0.0), np.float32(1.0), out=dist_sq)
-    np.multiply(dist_sq, combined_w, out=dist_sq)                      # weighted (guaranteed in-place)
-    best_weighted = dist_sq.max(axis=1)
+    similarity = dist_sq  # (N, C) unweighted
 
-    return best_weighted.reshape(frame_bgr.shape[:2])
+    best_weighted = (similarity * combined_w).max(axis=1)
+    base_sprite = best_weighted.reshape(shape_hw)
+
+    if return_similarity:
+        return base_sprite, similarity.reshape(*shape_hw, n_colors).astype(np.float32)
+    return base_sprite
+
+
+def apply_palette_diversity(
+    base_sprite: np.ndarray,
+    similarity_hwc: np.ndarray,
+    palette_groups: list[list[int]],
+    *,
+    avg_width: float,
+    avg_height: float,
+    downscale: int = 1,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Soft local multi-family coverage factor (never hard-rejects).
+
+    Returns ``(sprite_with_diversity, debug_maps)``.
+    """
+    h, w = base_sprite.shape[:2]
+    n_groups = len(palette_groups)
+    if n_groups == 0 or similarity_hwc.size == 0:
+        ones = np.ones((h, w), dtype=np.float32)
+        return base_sprite.copy(), {
+            "group_similarity": [],
+            "group_present": [],
+            "effective_groups": np.zeros((h, w), dtype=np.float32),
+            "diversity_factor": ones,
+        }
+
+    denom = _PRESENCE_SIMILARITY_HIGH - _PRESENCE_SIMILARITY_LOW
+    ksize = _coverage_window(avg_width, avg_height, downscale)
+    required_groups = min(_REQUIRED_GROUPS_CAP, float(n_groups))
+
+    group_similarity: list[np.ndarray] = []
+    group_present: list[np.ndarray] = []
+    effective = np.zeros((h, w), dtype=np.float32)
+
+    for indices in palette_groups:
+        idx = np.asarray(indices, dtype=np.int32)
+        g_sim = similarity_hwc[:, :, idx].max(axis=2).astype(np.float32)
+        group_similarity.append(g_sim)
+
+        matched = np.clip(
+            (g_sim - _PRESENCE_SIMILARITY_LOW) / denom,
+            0.0,
+            1.0,
+        ).astype(np.float32)
+        local_presence = cv2.boxFilter(
+            matched, ddepth=-1, ksize=ksize, normalize=True,
+        )
+        present = np.clip(
+            local_presence / _MIN_GROUP_AREA_FRACTION, 0.0, 1.0,
+        ).astype(np.float32)
+        group_present.append(present)
+        effective += present
+
+    diversity = np.clip(
+        (effective - np.float32(1.0)) / np.float32(max(required_groups - 1.0, 1.0)),
+        0.0,
+        1.0,
+    ).astype(np.float32)
+    diversity_factor = (
+        _DIVERSITY_FLOOR + (np.float32(1.0) - _DIVERSITY_FLOOR) * diversity
+    ).astype(np.float32)
+
+    sprite = (base_sprite * diversity_factor).astype(np.float32)
+    return sprite, {
+        "group_similarity": group_similarity,
+        "group_present": group_present,
+        "effective_groups": effective,
+        "diversity_factor": diversity_factor,
+    }
+
+
+def _p95_normalize(field: np.ndarray) -> np.ndarray:
+    """Frame-relative normalize: p95 → 1.0, clip to [0, 1]."""
+    p95 = float(np.percentile(field, 95))
+    if p95 > 1e-6:
+        return np.clip(field / p95, 0.0, 1.0).astype(np.float32)
+    return np.zeros(field.shape[:2], dtype=np.float32)
+
+
+def box_blurred_edge_density(gray: np.ndarray) -> np.ndarray:
+    """Sobel magnitude + 7×7 box blur, p95-normalized."""
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    edge_mag = cv2.magnitude(gx, gy)
+    return _p95_normalize(cv2.blur(edge_mag, _EDGE_BLUR_KSIZE))
 
 
 def _nearest_upscale(heatmap: np.ndarray, scale: int, out_h: int, out_w: int) -> np.ndarray:
@@ -127,7 +242,7 @@ def _local_peak_boost(heatmap: np.ndarray, factor: float = 1.08) -> np.ndarray:
     peak_mask = heatmap >= local_max - np.float32(1e-6)
     boosted = heatmap.copy()
     boosted[peak_mask] *= np.float32(factor)
-    return np.clip(boosted, np.float32(0.0), np.float32(1.0)).astype(np.float32)
+    return np.maximum(boosted, np.float32(0.0)).astype(np.float32)
 
 
 class HeatmapDetector:
@@ -141,12 +256,45 @@ class HeatmapDetector:
         self.small_scale_min_frame_width = int(config["smallScaleMinFrameWidth"])
         self.small_scale_cutoff = float(config["smallScaleCutoff"])
         self.max_sprite_palette_distance = float(config["maxSpritePaletteDistance"])
+        # Debug A/B: False restores production path without diversity.
+        self.use_palette_diversity = bool(config.get("usePaletteDiversity", True))
 
     def _center_scales(self, frame_width: int) -> list[float]:
         return [
             s for s in self.center_scales
             if s >= self.small_scale_cutoff or frame_width >= self.small_scale_min_frame_width
         ]
+
+    def _work_bgr(self, frame_bgr: np.ndarray, downscale: int) -> np.ndarray:
+        if downscale > 1:
+            fh, fw = frame_bgr.shape[:2]
+            return cv2.resize(
+                frame_bgr,
+                (fw // downscale, fh // downscale),
+                interpolation=cv2.INTER_NEAREST,
+            )
+        return frame_bgr
+
+    def _finish_heatmap(
+        self,
+        sprite: np.ndarray,
+        work_bgr: np.ndarray,
+        descriptor: MobDescriptor,
+        downscale: int,
+        frame_shape: tuple[int, int],
+    ) -> np.ndarray:
+        gray = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2GRAY)
+        edge_density = box_blurred_edge_density(gray)
+        sprite = sprite * (np.float32(0.5) + np.float32(0.5) * edge_density)
+
+        w = max(3, int(round(descriptor.avg_width * 0.8 / downscale)) | 1)
+        h = max(3, int(round(descriptor.avg_height * 0.8 / downscale)) | 1)
+        final = cv2.GaussianBlur(sprite, (w, h), 0)
+
+        if downscale > 1:
+            final = _local_peak_boost(final)
+            final = _nearest_upscale(final, downscale, frame_shape[0], frame_shape[1])
+        return final
 
     def build_sprite_heatmap(
         self,
@@ -159,46 +307,84 @@ class HeatmapDetector:
         Returns sprite_heatmap at full frame resolution.
         """
         frame_shape = frame_bgr.shape[:2]
-
-        # --- early downscale: run the expensive steps at discovery resolution ---
-        if downscale > 1:
-            ds_h, ds_w = frame_shape[0] // downscale, frame_shape[1] // downscale
-            work_bgr = cv2.resize(frame_bgr, (ds_w, ds_h), interpolation=cv2.INTER_NEAREST)
-        else:
-            work_bgr = frame_bgr
+        work_bgr = self._work_bgr(frame_bgr, downscale)
 
         # --- 1. Weighted sprite-palette-distance heatmap ---
-        sprite = weighted_sprite_palette_heatmap(
+        if self.use_palette_diversity:
+            base_sprite, similarity = weighted_sprite_palette_heatmap(
+                work_bgr,
+                descriptor,
+                self.max_sprite_palette_distance,
+                return_similarity=True,
+            )
+            sprite, _div_maps = apply_palette_diversity(
+                base_sprite,
+                similarity,
+                descriptor.match_palette_groups,
+                avg_width=descriptor.size.avg_width,
+                avg_height=descriptor.size.avg_height,
+                downscale=downscale,
+            )
+        else:
+            sprite = weighted_sprite_palette_heatmap(
+                work_bgr,
+                descriptor,
+                self.max_sprite_palette_distance,
+            )
+
+        # --- 2. Edge-density boost ---
+        # --- 3. GaussianBlur ---
+        # --- 4. Upscale + local peak boost ---
+        return self._finish_heatmap(sprite, work_bgr, descriptor, downscale, frame_shape)
+
+    def palette_diversity_debug(
+        self,
+        frame_bgr: np.ndarray,
+        descriptor: MobDescriptor,
+        downscale: int = 1,
+    ) -> dict[str, object]:
+        """Intermediate diversity / heatmap maps for visualization (full-frame)."""
+        frame_shape = frame_bgr.shape[:2]
+        work_bgr = self._work_bgr(frame_bgr, downscale)
+
+        base_sprite, similarity = weighted_sprite_palette_heatmap(
             work_bgr,
             descriptor,
             self.max_sprite_palette_distance,
+            return_similarity=True,
+        )
+        sprite_div, div_maps = apply_palette_diversity(
+            base_sprite,
+            similarity,
+            descriptor.match_palette_groups,
+            avg_width=descriptor.size.avg_width,
+            avg_height=descriptor.size.avg_height,
+            downscale=downscale,
         )
 
-        # --- 2. Edge-density: mobs have edges, flat terrain doesn't ---
-        gray = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2GRAY)
-        grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-        edge_mag = cv2.magnitude(grad_x, grad_y)
-        edge_density = cv2.blur(edge_mag, (7, 7))
-        p95 = float(np.percentile(edge_density, 95))
-        if p95 > 1e-6:
-            edge_density = np.clip(edge_density / p95, 0.0, 1.0).astype(np.float32)
-        else:
-            edge_density = np.zeros_like(edge_density, dtype=np.float32)
-        sprite *= np.float32(0.5) + np.float32(0.5) * edge_density
+        final_new = self._finish_heatmap(
+            sprite_div, work_bgr, descriptor, downscale, frame_shape,
+        )
+        final_old = self._finish_heatmap(
+            base_sprite, work_bgr, descriptor, downscale, frame_shape,
+        )
 
-        # --- 3. GaussianBlur + normalize — every mob gets full contrast ---
-        w = max(3, int(round(descriptor.avg_width * 0.8 / downscale)) | 1)
-        h = max(3, int(round(descriptor.avg_height * 0.8 / downscale)) | 1)
-        blurred = cv2.GaussianBlur(sprite, (w, h), 0)
-        final = cv2.normalize(blurred, None, 0.0, 1.0, cv2.NORM_MINMAX)
+        def up(field: np.ndarray) -> np.ndarray:
+            if downscale <= 1:
+                return field.astype(np.float32)
+            return _nearest_upscale(field, downscale, frame_shape[0], frame_shape[1])
 
-        # --- 4. Upscale back to full frame with local peak recovery ---
-        if downscale > 1:
-            final = _local_peak_boost(final)
-            final = _nearest_upscale(final, downscale, frame_shape[0], frame_shape[1])
-
-        return final
+        return {
+            "base_sprite": up(base_sprite),
+            "group_similarity": [up(g) for g in div_maps["group_similarity"]],
+            "group_present": [up(g) for g in div_maps["group_present"]],
+            "effective_groups": up(div_maps["effective_groups"]),
+            "diversity_factor": up(div_maps["diversity_factor"]),
+            "heatmap_after_diversity": up(sprite_div),
+            "final_heatmap_new": final_new,
+            "final_heatmap_old": final_old,
+            "downscale": downscale,
+        }
 
     def top_centers(
         self, heatmap: np.ndarray,

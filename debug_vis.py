@@ -95,7 +95,12 @@ def pad_to_height(image: np.ndarray, height: int) -> np.ndarray:
 
 
 def heatmap_to_color(heatmap: np.ndarray) -> np.ndarray:
-    vis = (np.clip(heatmap, 0.0, 1.0) * 255).astype(np.uint8)
+    """Viz-only colorization; detection heatmap is not frame-normalized."""
+    peak = float(heatmap.max()) if heatmap.size else 0.0
+    if peak > 1e-6:
+        vis = (np.clip(heatmap / peak, 0.0, 1.0) * 255).astype(np.uint8)
+    else:
+        vis = np.zeros(heatmap.shape[:2], dtype=np.uint8)
     return cv2.applyColorMap(vis, cv2.COLORMAP_JET)
 
 
@@ -403,6 +408,13 @@ def render_descriptor_info(descriptor: MobDescriptor) -> np.ndarray:
             [tuple(int(v) for v in c) for c in descriptor.match_palette_bgr],
             list(descriptor.match_palette_weights),
         )),
+        (
+            f"PALETTE GROUPS ({len(descriptor.match_palette_groups)})",
+            _text_block([
+                f"g{i}: {group}"
+                for i, group in enumerate(descriptor.match_palette_groups)
+            ], width=720),
+        ),
         ("DOMINANT", _cluster_swatch_row([descriptor.dominant_color])),
         ("SUPPORTING", _cluster_swatch_row(descriptor.supporting_colors)),
         ("ACCENT CLUSTERS", _cluster_swatch_row(descriptor.accent_colors)),
