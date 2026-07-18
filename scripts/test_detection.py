@@ -553,9 +553,6 @@ def main() -> int:
 
             now = time.time()
 
-            # ── Pre-compute HSV once (shared by all tracks) ────────────
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
             # ── TRACKING: score each track at its last known position ─────
             for t in tracked:
                 cx = t.x - roi.x
@@ -563,7 +560,7 @@ def main() -> int:
                 try:
                     scale = t.discovery_scale if t.discovery_scale > 0 else 1.0
                     accepted, _bbox, sim = detector.score_at(
-                        frame, hsv, mob_descriptor, cx, cy, scale,
+                        frame, mob_descriptor, cx, cy, scale,
                     )
 
                     if accepted:

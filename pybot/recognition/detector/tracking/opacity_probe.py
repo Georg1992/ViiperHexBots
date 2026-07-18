@@ -20,7 +20,6 @@ def _top_match_score(heatmap: np.ndarray, fraction: float) -> float:
 
 def measure_opacity_score(
     frame_bgr: np.ndarray,
-    hsv: np.ndarray,
     descriptor: MobDescriptor,
     bbox: tuple[int, int, int, int],
     max_sprite_palette_distance: float,
@@ -33,12 +32,10 @@ def measure_opacity_score(
     """
     x, y, w, h = bbox
     region_bgr = frame_bgr[y : y + h, x : x + w]
-    region_hsv = hsv[y : y + h, x : x + w]
     if region_bgr.size == 0:
         return 0.0
 
-    body_heat = palette_heatmap(region_hsv, descriptor.body_palette)
-    accent_heat = palette_heatmap(region_hsv, descriptor.accent_colors)
+    body_heat = palette_heatmap(region_bgr, descriptor.body_palette)
     sprite_palette_heat = sprite_palette_heatmap(
         region_bgr,
         descriptor.match_palette_bgr,

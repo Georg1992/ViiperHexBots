@@ -13,19 +13,15 @@ from pybot.recognition.spr_reader import SprReader
 
 from pybot.recognition.detector.descriptors.descriptor import (
     ColorCluster,
-    LayoutGrid,
     MobDescriptor,
     SilhouetteMask,
     SizeDescriptor,
 )
 from pybot.recognition.detector.descriptors.layout_utils import (
-    frame_alpha_occupancy_grid,
-    frame_cluster_grid,
-    frame_palette_coverage_grid,
     frame_silhouette,
 )
 
-DESCRIPTOR_VERSION = 16
+DESCRIPTOR_VERSION = 18
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -44,13 +40,54 @@ PALETTE_NEAR_WHITE_MIN_VALUE = 250.0
 PALETTE_NEAR_WHITE_MAX_SATURATION = 15.0
 MIN_DISTINCTIVE_SATURATION = 40.0
 MIN_DISTINCTIVE_VALUE = 30.0
-LAYOUT_GRID_SIZE = 5
+BODY_CLUSTER_MAX_DISTANCE = 28.0
+DOMINANT_CLUSTER_MAX_DISTANCE = 20.0
+ACCENT_CLUSTER_MAX_DISTANCE = 30.0
 SILHOUETTE_WIDTH = 16
 SILHOUETTE_HEIGHT = 16
 GATE_SILHOUETTE_MASK_COUNT = 4
-STABLE_CELL_OCCUPANCY = 0.08
 STABLE_SILHOUETTE_VALUE = 0.20
-MATCH_DISTANCE = 20.0
+
+
+def _bgr_value_saturation(bgr: tuple[int, int, int] | np.ndarray) -> tuple[float, float] | tuple[np.ndarray, np.ndarray]:
+    """Value/saturation from BGR channels (OpenCV HSV V/S formulas, no cvtColor)."""
+    if isinstance(bgr, tuple):
+        value = float(max(bgr))
+        chroma = float(max(bgr) - min(bgr))
+        saturation = (chroma / value * 255.0) if value > 0.0 else 0.0
+        return value, saturation
+    bgr_f = bgr.astype(np.float32)
+    value = bgr_f.max(axis=2)
+    chroma = value - bgr_f.min(axis=2)
+    saturation = np.zeros_like(value)
+    np.divide(chroma, value, out=saturation, where=value > 0.0)
+    saturation *= np.float32(255.0)
+    return value, saturation
+
+
+def _bgr_hue_sat_val(colors: np.ndarray) -> np.ndarray:
+    """OpenCV-compatible HSV for Nx3 BGR colors, without cvtColor (H in 0..180)."""
+    b = colors[:, 0].astype(np.float32)
+    g = colors[:, 1].astype(np.float32)
+    r = colors[:, 2].astype(np.float32)
+    value = np.maximum(np.maximum(b, g), r)
+    min_c = np.minimum(np.minimum(b, g), r)
+    chroma = value - min_c
+    saturation = np.zeros_like(value)
+    np.divide(chroma, value, out=saturation, where=value > 0.0)
+    saturation *= np.float32(255.0)
+
+    hue = np.zeros_like(value)
+    # Avoid div-by-zero on gray pixels; hue stays 0 there.
+    safe = chroma > 0.0
+    rb = safe & (value == b)
+    rg = safe & (value == g) & ~rb
+    rr = safe & (value == r) & ~rb & ~rg
+    hue[rb] = 60.0 * ((r[rb] - g[rb]) / chroma[rb]) + 240.0
+    hue[rg] = 60.0 * ((b[rg] - r[rg]) / chroma[rg]) + 120.0
+    hue[rr] = 60.0 * ((g[rr] - b[rr]) / chroma[rr])
+    hue = np.mod(hue, 360.0) * np.float32(0.5)  # OpenCV 0..180
+    return np.stack([hue, saturation, value], axis=1)
 
 
 class DescriptorBuilder:
@@ -143,28 +180,31 @@ class DescriptorBuilder:
 
         # Color clusters come from all facing directions so both front
         # and back views of the mob share the same body/accent palette.
-        profile = self._build_frame_profile(all_facing_frames, dominant_tolerance=(12, 35, 55))
+        profile = self._build_frame_profile(all_facing_frames)
         profile["size"] = self._size_descriptor(all_facing_frames)
 
         profile_body_colors = self._distinctive_clusters(profile["body_colors"])
         if not profile_body_colors:
             raise RuntimeError(f"no distinctive body colors for {mob_name}")
-        profile_dominant = profile_body_colors[0]
+        dc0 = profile_body_colors[0]
+        profile_dominant = ColorCluster(
+            label=dc0.label,
+            bgr=dc0.bgr,
+            fraction=dc0.fraction,
+            max_distance=DOMINANT_CLUSTER_MAX_DISTANCE,
+        )
         profile_supporting = profile_body_colors[1:]
         profile_accent_colors = self._distinctive_clusters(profile["accent_colors"])
         if not profile_accent_colors:
             raise RuntimeError(f"no distinctive accent colors for {mob_name}")
-        distinctive_rare = self._distinctive_clusters(profile["rare_colors"])
         match_palette_bgr, match_palette_weights = self._match_palette(all_facing_frames)
         dominant_pixels_bgr, accent_pixels_bgr = self._collect_structural_pixels(
             spr_file,
             act_file,
             facing_pairs,
         )
-        dominant_pixel_bgr = dominant_pixels_bgr[0] if dominant_pixels_bgr else None
-        accent_pixel_bgr = accent_pixels_bgr[0] if accent_pixels_bgr else None
-        all_clusters = [profile_dominant, *profile_supporting, *profile_accent_colors, *distinctive_rare]
-        layout_grid = self._build_layout_grid(all_facing_frames, all_clusters, match_palette_bgr)
+        if not dominant_pixels_bgr or not accent_pixels_bgr:
+            raise RuntimeError(f"no structural pixels for {mob_name}")
         facing_silhouette_masks = self._build_facing_silhouette_masks(
             spr_file, act_file, facing_pairs,
         )
@@ -179,16 +219,10 @@ class DescriptorBuilder:
             dominant_color=profile_dominant,
             supporting_colors=profile_supporting,
             accent_colors=profile_accent_colors,
-            rare_colors=distinctive_rare,
             match_palette_bgr=match_palette_bgr,
             match_palette_weights=match_palette_weights,
-            hsv_histogram=profile["hsv_histogram"],
-            dominant_pixel_bgr=dominant_pixel_bgr,
-            accent_pixel_bgr=accent_pixel_bgr,
             dominant_pixels_bgr=dominant_pixels_bgr,
             accent_pixels_bgr=accent_pixels_bgr,
-            layout_grid=layout_grid,
-            facing_silhouette_masks=facing_silhouette_masks,
             silhouette_masks=silhouette_masks,
         )
         descriptor.save(descriptor_path)
@@ -276,13 +310,10 @@ class DescriptorBuilder:
     @staticmethod
     def _is_scene_matching_speck(bgr: tuple[int, int, int]) -> bool:
         """Drop colors that match generic scene shadows/highlights instead of mob fill."""
-        pixel = np.uint8([[list(bgr)]])
-        _hue, saturation, value = cv2.cvtColor(pixel, cv2.COLOR_BGR2HSV)[0, 0]
-        sat = float(saturation)
-        val = float(value)
-        if val <= PALETTE_NEAR_BLACK_MAX_VALUE and sat <= PALETTE_NEAR_BLACK_MAX_SATURATION:
+        value, saturation = _bgr_value_saturation(bgr)
+        if value <= PALETTE_NEAR_BLACK_MAX_VALUE and saturation <= PALETTE_NEAR_BLACK_MAX_SATURATION:
             return True
-        if val >= PALETTE_NEAR_WHITE_MIN_VALUE and sat <= PALETTE_NEAR_WHITE_MAX_SATURATION:
+        if value >= PALETTE_NEAR_WHITE_MIN_VALUE and saturation <= PALETTE_NEAR_WHITE_MAX_SATURATION:
             return True
         return False
 
@@ -315,9 +346,8 @@ class DescriptorBuilder:
                 continue
             bgr = bgra[:, :, :3]
             pixel_chunks.append(bgr[opaque])
-            hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
             mask = opaque.astype(np.uint8) * 255
-            accent_mask = DescriptorBuilder._accent_mask(bgr, hsv, mask)
+            accent_mask = DescriptorBuilder._accent_mask(bgr, mask)
             accent_pixels = bgr[accent_mask > 0]
             if len(accent_pixels) == 0:
                 continue
@@ -357,7 +387,7 @@ class DescriptorBuilder:
     ) -> tuple[list[tuple[int, int, int]], list[float]]:
         """Build match palette from unique sprite fill colors plus accents and shades.
 
-        Structural colors are ranked by opaque pixel mass with HSV shade dedup.
+        Structural colors are ranked by opaque pixel mass with hue/sat/val shade dedup.
         Up to MATCH_PALETTE_MAX_ACCENT_COLORS accent-region colors are appended,
         then remaining slots are filled with the next-most-frequent shade variants.
         Each entry carries a weight proportional to opaque sprite pixel mass.
@@ -455,10 +485,6 @@ class DescriptorBuilder:
         return SizeDescriptor(
             avg_width=float(np.mean(widths)),
             avg_height=float(np.mean(heights)),
-            min_width=float(min(widths)),
-            max_width=float(max(widths)),
-            min_height=float(min(heights)),
-            max_height=float(max(heights)),
         )
 
     def _collect_frames(
@@ -487,46 +513,43 @@ class DescriptorBuilder:
                 frames.append(cropped)
         return frames
 
-    def _build_frame_profile(self, frames: list[np.ndarray], *, dominant_tolerance: tuple[float, float, float] | None = None) -> dict:
+    def _build_frame_profile(
+        self,
+        frames: list[np.ndarray],
+    ) -> dict:
         widths: list[int] = []
         heights: list[int] = []
         opaque_bgr_parts: list[np.ndarray] = []
-        opaque_hsv_parts: list[np.ndarray] = []
-        accent_hsv_parts: list[np.ndarray] = []
+        accent_bgr_parts: list[np.ndarray] = []
 
         for bgra in frames:
             bgr = bgra[:, :, :3]
             mask = (bgra[:, :, 3] >= 128).astype(np.uint8) * 255
-            hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
             widths.append(int(bgra.shape[1]))
             heights.append(int(bgra.shape[0]))
             opaque_bgr_parts.append(bgr[mask > 0])
-            opaque_hsv_parts.append(hsv[mask > 0])
 
-            accent_mask = self._accent_mask(bgr, hsv, mask)
+            accent_mask = self._accent_mask(bgr, mask)
             if np.any(accent_mask > 0):
-                accent_hsv_parts.append(hsv[accent_mask > 0])
+                accent_bgr_parts.append(bgr[accent_mask > 0])
 
         opaque_bgr = np.concatenate(opaque_bgr_parts, axis=0)
-        opaque_hsv = np.concatenate(opaque_hsv_parts, axis=0)
-        if not accent_hsv_parts:
+        if not accent_bgr_parts:
             raise ValueError("no accent pixels found while building frame profile")
-        accent_hsv = np.concatenate(accent_hsv_parts, axis=0)
+        accent_bgr = np.concatenate(accent_bgr_parts, axis=0)
 
-        body_colors = self._clusters("body", opaque_bgr, opaque_hsv, count=6, tolerance=(18, 55, 55))
-        # Apply tighter tolerance to the dominant cluster only
-        if dominant_tolerance is not None and body_colors:
-            dc = body_colors[0]
-            body_colors[0] = ColorCluster(
-                label=dc.label,
-                bgr=dc.bgr,
-                hsv=dc.hsv,
-                fraction=dc.fraction,
-                tolerance=dominant_tolerance,
-            )
-        accent_colors = self._clusters("accent", None, accent_hsv, count=4, tolerance=(16, 60, 65))
-        rare_colors = self._rare_clusters(opaque_bgr, opaque_hsv)
-        hsv_hist = self._hsv_histogram(opaque_hsv)
+        body_colors = self._clusters(
+            "body",
+            opaque_bgr,
+            count=6,
+            max_distance=BODY_CLUSTER_MAX_DISTANCE,
+        )
+        accent_colors = self._clusters(
+            "accent",
+            accent_bgr,
+            count=4,
+            max_distance=ACCENT_CLUSTER_MAX_DISTANCE,
+        )
 
         size = SizeDescriptor(
             avg_width=float(np.mean(widths)),
@@ -536,8 +559,6 @@ class DescriptorBuilder:
             "size": size,
             "body_colors": body_colors,
             "accent_colors": accent_colors,
-            "rare_colors": rare_colors,
-            "hsv_histogram": hsv_hist,
         }
 
     @staticmethod
@@ -559,9 +580,8 @@ class DescriptorBuilder:
         accent_pixels: list[np.ndarray] = []
         for bgra in frames:
             bgr = bgra[:, :, :3]
-            hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
             mask = (bgra[:, :, 3] >= 128).astype(np.uint8) * 255
-            accent_mask = self._accent_mask(bgr, hsv, mask)
+            accent_mask = self._accent_mask(bgr, mask)
             if np.any(accent_mask > 0):
                 accent_pixels.append(bgr[accent_mask > 0])
         if not accent_pixels:
@@ -580,31 +600,30 @@ class DescriptorBuilder:
         return bgra[int(ys.min()) : int(ys.max()) + 1, int(xs.min()) : int(xs.max()) + 1].copy()
 
     @staticmethod
-    def _accent_mask(bgr: np.ndarray, hsv: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    def _accent_mask(bgr: np.ndarray, mask: np.ndarray) -> np.ndarray:
         opaque = mask > 0
         if not np.any(opaque):
             return np.zeros(mask.shape, dtype=np.uint8)
-        v = hsv[:, :, 2].astype(np.float32)
+        value, saturation = _bgr_value_saturation(bgr)
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
         contrast = gray - cv2.GaussianBlur(gray, (5, 5), 0)
-        v_threshold = float(np.percentile(v[opaque], 72))
+        v_threshold = float(np.percentile(value[opaque], 72))
         c_threshold = max(5.0, float(np.percentile(contrast[opaque], 60)))
-        accent = opaque & (v >= v_threshold) & (contrast >= c_threshold)
-        saturation = hsv[:, :, 1].astype(np.float32)
+        accent = opaque & (value >= v_threshold) & (contrast >= c_threshold)
         accent &= saturation >= MIN_DISTINCTIVE_SATURATION
         return accent.astype(np.uint8) * 255
 
     @staticmethod
     def _is_distinctive_bgr(bgr: tuple[int, int, int]) -> bool:
-        pixel = np.uint8([[list(bgr)]])
-        _hue, saturation, value = cv2.cvtColor(pixel, cv2.COLOR_BGR2HSV)[0, 0]
-        if float(saturation) < MIN_DISTINCTIVE_SATURATION:
+        value, saturation = _bgr_value_saturation(bgr)
+        if saturation < MIN_DISTINCTIVE_SATURATION:
             return False
-        if float(value) < MIN_DISTINCTIVE_VALUE:
+        if value < MIN_DISTINCTIVE_VALUE:
             return False
-        if float(value) > 245.0 and float(saturation) < 30.0:
+        if value > 245.0 and saturation < 30.0:
             return False
         return True
+
     @staticmethod
     def _is_distinctive_cluster(cluster: ColorCluster) -> bool:
         return DescriptorBuilder._is_distinctive_bgr(
@@ -616,45 +635,26 @@ class DescriptorBuilder:
         return [cluster for cluster in clusters if cls._is_distinctive_cluster(cluster)]
 
     @staticmethod
-    def _hsv_distance(a: ColorCluster, b: ColorCluster) -> float:
-        h_diff = min(abs(a.hsv[0] - b.hsv[0]), 180.0 - abs(a.hsv[0] - b.hsv[0]))
-        s_diff = a.hsv[1] - b.hsv[1]
-        v_diff = a.hsv[2] - b.hsv[2]
-        return float(np.sqrt(h_diff * h_diff + s_diff * s_diff + v_diff * v_diff))
-
-    @classmethod
-    def _union_clusters(
-        cls,
-        clusters: list[ColorCluster],
-        max_dist: float,
-    ) -> list[ColorCluster]:
-        """Deduplicate clusters: keep highest-fraction cluster within HSV distance."""
-        kept: list[ColorCluster] = []
-        for candidate in sorted(clusters, key=lambda c: c.fraction, reverse=True):
-            if all(cls._hsv_distance(candidate, existing) > max_dist for existing in kept):
-                kept.append(candidate)
-        return kept
-
-    @staticmethod
     def _deduplicate_palette_indices(
         unique_colors: np.ndarray,
         h_thresh: float = PALETTE_DEDUP_H_THRESH,
         sv_thresh: float = PALETTE_DEDUP_SV_THRESH,
     ) -> list[int]:
-        """Return indices of unique_colors array that pass HSV dedup.
+        """Return indices of unique_colors that pass hue/sat/val shade dedup.
 
-        For each pair of colors, if both hue and sat+val are within threshold,
-        only the first occurrence (lower index) is kept.
+        Hue/sat/val are derived from BGR channel formulas (no cvtColor).
         """
         if len(unique_colors) == 0:
             return []
-        bgr_arr = unique_colors.reshape(-1, 1, 3).astype(np.uint8)
-        hsv_arr = cv2.cvtColor(bgr_arr, cv2.COLOR_BGR2HSV).reshape(-1, 3).astype(np.float32)
+        hsv_arr = _bgr_hue_sat_val(unique_colors)
         kept: list[int] = []
         for i in range(len(hsv_arr)):
             is_unique = True
             for j in kept:
-                h_diff = min(abs(hsv_arr[i, 0] - hsv_arr[j, 0]), 180.0 - abs(hsv_arr[i, 0] - hsv_arr[j, 0]))
+                h_diff = min(
+                    abs(hsv_arr[i, 0] - hsv_arr[j, 0]),
+                    180.0 - abs(hsv_arr[i, 0] - hsv_arr[j, 0]),
+                )
                 s_diff = abs(hsv_arr[i, 1] - hsv_arr[j, 1])
                 v_diff = abs(hsv_arr[i, 2] - hsv_arr[j, 2])
                 if h_diff < h_thresh and s_diff < sv_thresh and v_diff < sv_thresh:
@@ -667,15 +667,14 @@ class DescriptorBuilder:
     @staticmethod
     def _clusters(
         label: str,
-        bgr_pixels: np.ndarray | None,
-        hsv_pixels: np.ndarray,
+        bgr_pixels: np.ndarray,
         *,
         count: int,
-        tolerance: tuple[float, float, float],
+        max_distance: float,
     ) -> list[ColorCluster]:
-        if hsv_pixels.size == 0:
+        if bgr_pixels.size == 0:
             return []
-        samples = hsv_pixels.astype(np.float32)
+        samples = bgr_pixels.astype(np.float32)
         k = min(count, len(samples))
         _, labels, centers = cv2.kmeans(
             samples,
@@ -686,79 +685,21 @@ class DescriptorBuilder:
             cv2.KMEANS_PP_CENTERS,
         )
         clusters: list[ColorCluster] = []
-        for idx, center in enumerate(centers):
+        for idx in range(len(centers)):
             fraction = float((labels.ravel() == idx).mean())
             if fraction < 0.015:
                 continue
-            if bgr_pixels is None:
-                center_hsv = np.uint8([[center]])
-                center_bgr = cv2.cvtColor(center_hsv, cv2.COLOR_HSV2BGR)[0, 0].astype(np.float32)
-            else:
-                center_bgr = bgr_pixels[labels.ravel() == idx].mean(axis=0)
+            center_bgr = samples[labels.ravel() == idx].mean(axis=0)
             clusters.append(
                 ColorCluster(
                     label=f"{label}_{idx}",
                     bgr=tuple(float(v) for v in center_bgr),
-                    hsv=tuple(float(v) for v in center),
                     fraction=fraction,
-                    tolerance=tolerance,
+                    max_distance=max_distance,
                 )
             )
         clusters.sort(key=lambda c: c.fraction, reverse=True)
         return clusters
-
-    def _rare_clusters(self, bgr_pixels: np.ndarray, hsv_pixels: np.ndarray) -> list[ColorCluster]:
-        clusters = self._clusters("rare", bgr_pixels, hsv_pixels, count=10, tolerance=(14, 45, 45))
-        return [cluster for cluster in clusters if cluster.fraction <= 0.12][:4]
-
-    @staticmethod
-    def _hsv_histogram(hsv_pixels: np.ndarray) -> list[float]:
-        strip = hsv_pixels.astype(np.uint8).reshape(1, -1, 3)
-        hist = cv2.calcHist([strip], [0, 1], None, [24, 16], [0, 180, 0, 256])
-        cv2.normalize(hist, hist)
-        return hist.reshape(-1).astype(float).tolist()
-
-    def _build_layout_grid(
-        self,
-        frames: list[np.ndarray],
-        clusters: list[ColorCluster],
-        match_palette_bgr: list[tuple[int, int, int]],
-    ) -> LayoutGrid:
-        grid_size = LAYOUT_GRID_SIZE
-        occupancy_frames: list[np.ndarray] = []
-        coverage_frames: list[np.ndarray] = []
-        cluster_frames: list[np.ndarray] = []
-        for bgra in frames:
-            alpha = bgra[:, :, 3]
-            bgr = bgra[:, :, :3]
-            occupancy_frames.append(frame_alpha_occupancy_grid(alpha, grid_size))
-            coverage_frames.append(
-                frame_palette_coverage_grid(bgr, alpha, match_palette_bgr, grid_size, MATCH_DISTANCE)
-            )
-            cluster_frames.append(frame_cluster_grid(bgr, alpha, clusters, grid_size))
-        avg_occupancy = np.mean(np.stack(occupancy_frames, axis=0), axis=0).reshape(-1).tolist()
-        palette_coverage = np.mean(np.stack(coverage_frames, axis=0), axis=0).reshape(-1).tolist()
-        stable_occupied = [
-            float(value) >= STABLE_CELL_OCCUPANCY for value in avg_occupancy
-        ]
-        dominant_cluster_ids: list[int] = []
-        stacked_clusters = np.stack(cluster_frames, axis=0)
-        for cell in range(grid_size * grid_size):
-            gy, gx = divmod(cell, grid_size)
-            values = stacked_clusters[:, gy, gx]
-            valid = values[values >= 0]
-            if valid.size == 0:
-                dominant_cluster_ids.append(-1)
-                continue
-            counts = np.bincount(valid.astype(np.int32))
-            dominant_cluster_ids.append(int(np.argmax(counts)))
-        return LayoutGrid(
-            grid_size=grid_size,
-            avg_occupancy=avg_occupancy,
-            stable_occupied=stable_occupied,
-            dominant_cluster_ids=dominant_cluster_ids,
-            palette_coverage=palette_coverage,
-        )
 
     def _build_facing_silhouette_masks(
         self,

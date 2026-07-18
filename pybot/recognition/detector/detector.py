@@ -192,9 +192,6 @@ class MobDetector:
         start = time.perf_counter()
         descriptor = self.ensure_descriptor(mob_name)
 
-        hsv_start = time.perf_counter()
-        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-
         # --- heatmap --------------------------------------------------
         heatmap_start = time.perf_counter()
         fh, fw = frame_bgr.shape[:2]
@@ -202,9 +199,8 @@ class MobDetector:
         if self.discovery_heatmap_downscale > 1 and min(fw, fh) >= self.discovery_heatmap_downscale_min_side:
             downscale = self.discovery_heatmap_downscale
 
-        sprite_heatmap, _accent = self.heatmap_detector.build_sprite_heatmap(
+        sprite_heatmap = self.heatmap_detector.build_sprite_heatmap(
             frame_bgr,
-            hsv,
             descriptor,
             downscale=downscale,
         )
@@ -277,8 +273,7 @@ class MobDetector:
         elapsed = time.perf_counter() - start
         nms_end = time.perf_counter()
         timing = {
-            "descriptor": hsv_start - start,
-            "hsv": heatmap_start - hsv_start,
+            "descriptor": heatmap_start - start,
             "spriteHeatmap": heatmap_end - heatmap_start,
             "blobCenters": blobs_end - heatmap_end,
             "blobFilters": filter_end - blobs_end,
@@ -466,7 +461,6 @@ class MobDetector:
     def score_at(
         self,
         frame_bgr: np.ndarray,
-        hsv: np.ndarray,
         descriptor: MobDescriptor,
         cx: int,
         cy: int,

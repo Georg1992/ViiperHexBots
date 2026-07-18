@@ -68,13 +68,12 @@ def track_local(
     )
 
     descriptor = detector.ensure_descriptor(mob_name)
-    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
 
     screen_cx = cx + offset_x
     screen_cy = cy + offset_y
 
     accepted, center_bbox, sim = detector.score_at(
-        frame_bgr, hsv, descriptor, cx, cy, scale,
+        frame_bgr, descriptor, cx, cy, scale,
     )
     center_hit = accepted and center_bbox is not None
 
@@ -84,7 +83,7 @@ def track_local(
     peak_sim = 0.0
     if not center_hit:
         peak = _find_local_peak(
-            detector, frame_bgr, hsv, descriptor, cx, cy, scale,
+            detector, frame_bgr, descriptor, cx, cy, scale,
             search_radius_px=radius,
         )
         if peak is None:
@@ -100,7 +99,7 @@ def track_local(
 
         peak_x, peak_y, _heat_score = peak
         accepted, peak_bbox, peak_sim = detector.score_at(
-            frame_bgr, hsv, descriptor, peak_x, peak_y, scale,
+            frame_bgr, descriptor, peak_x, peak_y, scale,
         )
         if not accepted or peak_bbox is None:
             return _miss_result(
@@ -118,7 +117,7 @@ def track_local(
     assert hit_bbox is not None
 
     return _finalize_track_hit(
-        detector, frame_bgr, hsv, descriptor,
+        detector, frame_bgr, descriptor,
         track_id=track_id, bbox=hit_bbox, similarity=hit_sim,
         offset_x=offset_x, offset_y=offset_y,
         death_detection_enabled=death_detection_enabled,
@@ -148,7 +147,7 @@ def _miss_result(
 
 def _finalize_track_hit(
     detector: MobDetector,
-    frame_bgr: np.ndarray, hsv: np.ndarray,
+    frame_bgr: np.ndarray,
     descriptor: MobDescriptor,
     *,
     track_id: int,
@@ -173,7 +172,7 @@ def _finalize_track_hit(
         max_dist = float(detector.config["maxSpritePaletteDistance"])
         min_match = float(detector.config["minSpritePaletteMatch"])
         opacity_score = measure_opacity_score(
-            frame_bgr, hsv, descriptor, bbox, max_dist, min_match,
+            frame_bgr, descriptor, bbox, max_dist, min_match,
         )
         if not is_opacity_calibrated(
             baseline=opacity_baseline,
@@ -227,7 +226,7 @@ def _track_old_enough(
 
 def _find_local_peak(
     detector: MobDetector,
-    frame_bgr: np.ndarray, hsv: np.ndarray,
+    frame_bgr: np.ndarray,
     descriptor: MobDescriptor,
     cx: int, cy: int,
     scale: float,
@@ -245,9 +244,8 @@ def _find_local_peak(
         return None
 
     crop_bgr = frame_bgr[y0:y1, x0:x1]
-    crop_hsv = hsv[y0:y1, x0:x1]
     local_final = _build_local_follow_heatmap(
-        detector.heatmap_detector, crop_bgr, crop_hsv, descriptor, scale,
+        detector.heatmap_detector, crop_bgr, descriptor, scale,
     )
     if local_final.size == 0:
         return None
@@ -272,7 +270,7 @@ def _find_local_peak(
         peak_x = int(peak_x_local + x0)
         peak_y = int(peak_y_local + y0)
         accepted, _bbox, sim = detector.score_at(
-            frame_bgr, hsv, descriptor, peak_x, peak_y, scale,
+            frame_bgr, descriptor, peak_x, peak_y, scale,
         )
         if accepted and sim > best_living_sim:
             best_living_sim = sim
@@ -282,7 +280,7 @@ def _find_local_peak(
     if best_peak is None:
         return None
     accepted, _bbox, _sim = detector.score_at(
-        frame_bgr, hsv, descriptor, best_peak[0], best_peak[1], scale,
+        frame_bgr, descriptor, best_peak[0], best_peak[1], scale,
     )
     if not accepted:
         return None
@@ -291,15 +289,15 @@ def _find_local_peak(
 
 def _build_local_follow_heatmap(
     heatmap_detector,
-    crop_bgr: np.ndarray, crop_hsv: np.ndarray,
+    crop_bgr: np.ndarray,
     descriptor: MobDescriptor, scale: float,
 ) -> np.ndarray:
     sprite = sprite_palette_heatmap(
         crop_bgr, descriptor.match_palette_bgr,
         heatmap_detector.max_sprite_palette_distance,
     )
-    body = palette_heatmap(crop_hsv, descriptor.body_palette)
-    accent = palette_heatmap(crop_hsv, descriptor.accent_colors)
+    body = palette_heatmap(crop_bgr, descriptor.body_palette)
+    accent = palette_heatmap(crop_bgr, descriptor.accent_colors)
     color_signal = np.maximum(body * 0.55, accent * 0.45)
 
     final = np.zeros(crop_bgr.shape[:2], dtype=np.float32)

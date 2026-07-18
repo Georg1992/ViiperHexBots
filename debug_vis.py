@@ -1,13 +1,9 @@
-"""3-pane visual validation: heatmap | frame+boxes | silhouette comparison.
+"""Debug visualization for the discovery pipeline.
 
-Uses MobDetector.detect() only — no duplicated pipeline logic.
-
-Pane 1 — Heatmap:      jet-colormap sprite palette heatmap.
-Pane 2 — Frame+boxes:  original frame with green = accepted, red = rejected.
-Pane 3 — Silhouettes:  reference silhouette (from descriptor) vs extracted
-                        silhouette for each blob, with similarity score.
-
-Output:  _heatmap_viz/{mob}/{fixture_name}_viz.png
+Outputs under _debug_vis/:
+  pipeline.txt                 — discovery pipeline structure (text)
+  {mob}/descriptor.png         — descriptor fields used for that mob
+  {mob}/{fixture}_viz.png      — heatmap | frame+boxes | silhouettes
 """
 
 from __future__ import annotations
@@ -20,20 +16,28 @@ import cv2
 import numpy as np
 
 from pybot.paths import PROJECT_ROOT
-from pybot.recognition.detector.descriptors.descriptor import MobDescriptor
+from pybot.recognition.detector.descriptors.descriptor import (
+    ColorCluster,
+    MobDescriptor,
+)
 from pybot.recognition.detector.detector import (
     DetectionResult,
     MobDetector,
     SilhouetteCheck,
     load_detector_config,
 )
+from pybot.recognition.detector.discovery_pipeline import (
+    assert_discovery_pipeline_matches_source,
+    format_discovery_pipeline_text,
+)
 from pybot.recognition.fixtures import MOB_FIXTURE_SUITES, fixture_search_frame
 
-OUT_DIR = Path("_heatmap_viz")
+OUT_DIR = Path("_debug_vis")
 
-_SIL_SCALE = 10  # 16×10 = 160 px per silhouette cell
-_SIL_SIZE = 16 * _SIL_SCALE  # 160 px
-_SIL_OVERLAY_PX = 40  # extracted silhouette thumbnail on the frame
+_SIL_SCALE = 10
+_SIL_SIZE = 16 * _SIL_SCALE
+_SIL_OVERLAY_PX = 40
+_SWATCH = 28
 
 
 def _candidate_sil_size(check_count: int) -> int:
@@ -96,25 +100,17 @@ def heatmap_to_color(heatmap: np.ndarray) -> np.ndarray:
 
 
 def annotate_heatmap_pane(pane_heat: np.ndarray, result: DetectionResult) -> None:
-    """Label the heatmap pane."""
     cv2.putText(
-        pane_heat,
-        "HEATMAP",
-        (10, 25),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
-        (255, 255, 255),
-        2,
+        pane_heat, "HEATMAP", (10, 25),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
     )
 
 
-def render_silhouette_grid(mask_avg: list[float], mask_stable: list[bool],
-                           size: int) -> np.ndarray:
-    """Render a 16×16 silhouette as a size×size RGB image.
-
-    Stable cells: white if occupied, black if empty.
-    Unstable cells: gray with a soft outline.
-    """
+def render_silhouette_grid(
+    mask_avg: list[float],
+    mask_stable: list[bool],
+    size: int,
+) -> np.ndarray:
     avg = np.array(mask_avg).reshape(16, 16)
     stable = np.array(mask_stable).reshape(16, 16)
     canvas = np.zeros((size, size, 3), dtype=np.uint8)
@@ -129,7 +125,6 @@ def render_silhouette_grid(mask_avg: list[float], mask_stable: list[bool],
                 color = (v, v, v)
             cy, cx = y * cell, x * cell
             canvas[cy:cy + cell, cx:cx + cell] = color
-    # Draw grid lines
     for i in range(17):
         cv2.line(canvas, (i * cell, 0), (i * cell, size), (60, 60, 60), 1)
         cv2.line(canvas, (0, i * cell), (size, i * cell), (60, 60, 60), 1)
@@ -142,8 +137,8 @@ def _candidate_pixels_outside_ref(
 ) -> int | None:
     if check.candidate_mask is None:
         return None
-    gate_masks = descriptor.silhouette_masks or []
-    if not gate_masks or check.matched_mask_index >= len(gate_masks):
+    gate_masks = descriptor.silhouette_masks
+    if check.matched_mask_index >= len(gate_masks):
         return None
     mask = gate_masks[check.matched_mask_index]
     cand = np.array(check.candidate_mask, dtype=np.float32).reshape(16, 16)
@@ -160,16 +155,13 @@ def allocate_silhouette_panel(
     panel_width: int,
     panel_height: int,
 ) -> np.ndarray:
-    """Build the silhouette comparison panel from production gate results."""
-    gate_masks = descriptor.silhouette_masks or []
+    gate_masks = descriptor.silhouette_masks
     check_count = len(silhouette_checks)
     panel_height = _silhouette_panel_height(len(gate_masks), check_count, panel_height)
     panel = np.zeros((panel_height, panel_width, 3), dtype=np.uint8)
     panel[:] = (20, 20, 20)
 
-    if not gate_masks or not any(
-        mask.stable_mask and any(mask.stable_mask) for mask in gate_masks
-    ):
+    if not any(mask.stable_mask and any(mask.stable_mask) for mask in gate_masks):
         cv2.putText(panel, "NO SILHOUETTE", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 100), 1)
         return panel
@@ -190,19 +182,18 @@ def allocate_silhouette_panel(
     y_offset += 4
 
     for idx, check in enumerate(silhouette_checks):
-        passed = check.passed
-        sim = check.similarity
-        heat_score = check.heat_score
-
-        border_color = (0, 200, 0) if passed else (0, 0, 200)
-        status = "PASS" if passed else "FAIL"
+        border_color = (0, 200, 0) if check.passed else (0, 0, 200)
+        status = "PASS" if check.passed else "FAIL"
         ref_tag = f"ref={check.matched_mask_index}"
         if check.mask_similarities:
             score_bits = "/".join(f"{score:.2f}" for score in check.mask_similarities)
             ref_tag = f"{ref_tag} [{score_bits}]"
         extra_px = _candidate_pixels_outside_ref(check, descriptor)
         extra_tag = f"  out={extra_px}" if extra_px is not None else ""
-        label = f"BLB{idx}: {heat_score:.3f}  sim={sim:.2f}  {status}  {ref_tag}{extra_tag}"
+        label = (
+            f"BLB{idx}: {check.heat_score:.3f}  sim={check.similarity:.2f}  "
+            f"{status}  {ref_tag}{extra_tag}"
+        )
         cv2.putText(panel, label, (10, y_offset + 12),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, border_color, 1)
         y_offset += 18
@@ -214,9 +205,7 @@ def allocate_silhouette_panel(
             continue
 
         cand_img = render_silhouette_grid(
-            check.candidate_mask,
-            [True] * 256,
-            cand_size,
+            check.candidate_mask, [True] * 256, cand_size,
         )
         cv2.rectangle(cand_img, (0, 0), (cand_size - 1, cand_size - 1), border_color, 3)
         panel[y_offset:y_offset + cand_size, 10:10 + cand_size] = cand_img
@@ -230,7 +219,6 @@ def draw_extracted_silhouette_on_frame(
     check: SilhouetteCheck,
     idx: int,
 ) -> None:
-    """Draw the production-extracted silhouette thumbnail on the frame."""
     if check.candidate_mask is None:
         return
 
@@ -259,15 +247,9 @@ def draw_extracted_silhouette_on_frame(
 
 
 def format_timing_ms(timing: dict[str, float]) -> str:
-    """Compact single-line timing summary for discovery scan stages."""
     order = (
-        "descriptor",
-        "hsv",
-        "spriteHeatmap",
-        "blobCenters",
-        "blobFilters",
-        "silhouetteGate",
-        "nms",
+        "descriptor", "spriteHeatmap", "blobCenters",
+        "blobFilters", "silhouetteGate", "nms",
     )
     parts = [f"{key}={timing[key] * 1000:.0f}ms" for key in order if key in timing]
     total_ms = timing.get("total", 0.0) * 1000
@@ -275,13 +257,11 @@ def format_timing_ms(timing: dict[str, float]) -> str:
 
 
 def draw_timing_overlay(pane: np.ndarray, timing: dict[str, float], y0: int = 100) -> None:
-    """Stacked timing bars for each discovery stage."""
     order = (
         ("spriteHeatmap", (0, 200, 255)),
         ("silhouetteGate", (0, 220, 0)),
         ("blobCenters", (255, 180, 0)),
         ("blobFilters", (180, 180, 180)),
-        ("hsv", (120, 120, 120)),
         ("descriptor", (80, 80, 80)),
         ("nms", (255, 255, 255)),
     )
@@ -309,11 +289,7 @@ def draw_timing_overlay(pane: np.ndarray, timing: dict[str, float], y0: int = 10
         y += line_h
 
 
-def draw_detection_overlay(
-    frame: np.ndarray,
-    result: DetectionResult,
-) -> np.ndarray:
-    """Draw silhouette-checked blobs and final accepted detections on the frame."""
+def draw_detection_overlay(frame: np.ndarray, result: DetectionResult) -> np.ndarray:
     overlay = frame.copy()
     silhouette_checks = result.silhouette_checks
     accepted_centers = {(c.center_x, c.center_y) for c in result.accepted}
@@ -327,10 +303,10 @@ def draw_detection_overlay(
             color = (0, 220, 0)
             thickness = 3
         elif check.passed:
-            color = (0, 180, 255)  # cyan: passed silhouette, NMS suppressed
+            color = (0, 180, 255)
             thickness = 2
         else:
-            color = (0, 120, 255)  # orange: reached silhouette gate, failed
+            color = (0, 120, 255)
             thickness = 2
 
         cv2.rectangle(overlay, (bx, by), (bx + bw, by + bh), color, thickness)
@@ -359,7 +335,130 @@ def draw_detection_overlay(
     return overlay
 
 
-def main():
+def _bgr_swatch_row(
+    colors: list[tuple[int, int, int]],
+    weights: list[float] | None = None,
+    cell: int = _SWATCH,
+) -> np.ndarray:
+    if not colors:
+        blank = np.full((cell + 18, 120, 3), 40, dtype=np.uint8)
+        cv2.putText(
+            blank, "(empty)", (8, cell // 2 + 4),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (140, 140, 140), 1,
+        )
+        return blank
+    n = len(colors)
+    row = np.full((cell + 18, n * (cell + 4) + 4, 3), 28, dtype=np.uint8)
+    peak = max(weights) if weights else 1.0
+    for i, bgr in enumerate(colors):
+        x0 = 4 + i * (cell + 4)
+        color = tuple(int(v) for v in bgr)
+        cv2.rectangle(row, (x0, 2), (x0 + cell - 1, 2 + cell - 1), color, -1)
+        cv2.rectangle(row, (x0, 2), (x0 + cell - 1, 2 + cell - 1), (200, 200, 200), 1)
+        if weights is not None and i < len(weights):
+            bar_h = max(1, int(round(14 * (weights[i] / max(peak, 1e-9)))))
+            cv2.rectangle(
+                row,
+                (x0, cell + 16 - bar_h),
+                (x0 + cell - 1, cell + 15),
+                (180, 180, 80),
+                -1,
+            )
+    return row
+
+
+def _cluster_swatch_row(clusters: list[ColorCluster], cell: int = _SWATCH) -> np.ndarray:
+    colors = [tuple(int(v) for v in c.bgr) for c in clusters]
+    weights = [float(c.fraction) for c in clusters]
+    return _bgr_swatch_row(colors, weights, cell=cell)
+
+
+def _text_block(lines: list[str], width: int = 420, line_h: int = 18) -> np.ndarray:
+    height = 12 + line_h * max(1, len(lines))
+    canvas = np.full((height, width, 3), 28, dtype=np.uint8)
+    y = 16
+    for line in lines:
+        cv2.putText(
+            canvas, line, (8, y),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (210, 210, 210), 1, cv2.LINE_AA,
+        )
+        y += line_h
+    return canvas
+
+
+def render_descriptor_info(descriptor: MobDescriptor) -> np.ndarray:
+    header = _text_block([
+        f"{descriptor.mob_name}  v{descriptor.version}",
+        f"size avg={descriptor.avg_width}x{descriptor.avg_height}",
+        (
+            f"matchPalette={len(descriptor.match_palette_bgr)}  "
+            f"body={len(descriptor.body_palette)}  "
+            f"accent={len(descriptor.accent_colors)}  "
+            f"silMasks={len(descriptor.silhouette_masks)}"
+        ),
+    ], width=720)
+
+    sections: list[tuple[str, np.ndarray]] = [
+        ("MATCH PALETTE (weight bars)", _bgr_swatch_row(
+            [tuple(int(v) for v in c) for c in descriptor.match_palette_bgr],
+            list(descriptor.match_palette_weights),
+        )),
+        ("DOMINANT", _cluster_swatch_row([descriptor.dominant_color])),
+        ("SUPPORTING", _cluster_swatch_row(descriptor.supporting_colors)),
+        ("ACCENT CLUSTERS", _cluster_swatch_row(descriptor.accent_colors)),
+        (
+            "STRUCTURAL PIXELS",
+            _bgr_swatch_row([tuple(int(v) for v in p) for p in descriptor.dominant_pixels_bgr]),
+        ),
+        (
+            "ACCENT PIXELS",
+            _bgr_swatch_row([tuple(int(v) for v in p) for p in descriptor.accent_pixels_bgr]),
+        ),
+    ]
+
+    sil_row_imgs: list[np.ndarray] = []
+    for idx, mask in enumerate(descriptor.silhouette_masks):
+        sil = render_silhouette_grid(mask.avg_mask, mask.stable_mask, _SIL_SIZE)
+        labeled = np.full((_SIL_SIZE + 22, _SIL_SIZE, 3), 28, dtype=np.uint8)
+        labeled[22:] = sil
+        cv2.putText(
+            labeled, f"SIL {idx}", (4, 14),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1,
+        )
+        sil_row_imgs.append(labeled)
+    sections.append(("SILHOUETTE REFS", np.hstack(sil_row_imgs)))
+
+    rows: list[np.ndarray] = [header]
+    max_w = header.shape[1]
+    for title, img in sections:
+        block_w = max(img.shape[1], 200)
+        title_bar = np.full((22, block_w, 3), 36, dtype=np.uint8)
+        cv2.putText(
+            title_bar, title, (6, 15),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 220, 255), 1, cv2.LINE_AA,
+        )
+        if img.shape[1] < block_w:
+            pad = np.full((img.shape[0], block_w - img.shape[1], 3), 28, dtype=np.uint8)
+            img = np.hstack([img, pad])
+        block = np.vstack([title_bar, img])
+        max_w = max(max_w, block.shape[1])
+        rows.append(block)
+
+    padded: list[np.ndarray] = []
+    for row in rows:
+        if row.shape[1] < max_w:
+            pad = np.full((row.shape[0], max_w - row.shape[1], 3), 28, dtype=np.uint8)
+            row = np.hstack([row, pad])
+        padded.append(row)
+    return np.vstack(padded)
+
+
+def write_pipeline_structure(path: Path) -> None:
+    assert_discovery_pipeline_matches_source()
+    path.write_text(format_discovery_pipeline_text(), encoding="utf-8")
+
+
+def main() -> None:
     config = load_detector_config()
     detector = MobDetector(PROJECT_ROOT, config)
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -367,18 +466,30 @@ def main():
     if OUT_DIR.exists():
         shutil.rmtree(OUT_DIR)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"Generating fresh visualizations at {generated_at}")
+    print(f"Generating debug viz at {generated_at}")
 
-    count = 0
+    pipeline_path = OUT_DIR / "pipeline.txt"
+    write_pipeline_structure(pipeline_path)
+    print(f"  wrote {pipeline_path}")
+
+    viz_count = 0
+    descriptor_count = 0
     timing_totals: dict[str, float] = {}
     timing_runs = 0
+
     for suite in MOB_FIXTURE_SUITES:
         mob_name = suite.mob_name
         try:
-            detector.ensure_descriptor(mob_name)
+            descriptor = detector.ensure_descriptor(mob_name)
         except (FileNotFoundError, RuntimeError) as exc:
             print(f"  SKIP {suite.folder:15s}  {exc}")
             continue
+
+        mob_dir = OUT_DIR / mob_name
+        mob_dir.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(mob_dir / "descriptor.png"), render_descriptor_info(descriptor))
+        descriptor_count += 1
+        print(f"  {mob_name:15s} wrote descriptor.png")
 
         for image in suite.images():
             frame = cv2.imread(str(image.path))
@@ -390,59 +501,61 @@ def main():
 
             pane_heat = heatmap_to_color(result.sprite_heatmap)
             annotate_heatmap_pane(pane_heat, result)
-
             pane_overlay = draw_detection_overlay(frame, result)
-
-            panel_w = 350
-            panel_h = frame.shape[0]
             pane_sil = allocate_silhouette_panel(
                 result.descriptor,
                 result.silhouette_checks,
-                panel_w,
-                panel_h,
+                350,
+                frame.shape[0],
             )
             cv2.putText(pane_sil, "SILHOUETTES", (10, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 2)
 
-            combined_height = max(pane_heat.shape[0], pane_overlay.shape[0], pane_sil.shape[0])
-            pane_heat = pad_to_height(pane_heat, combined_height)
-            pane_overlay = pad_to_height(pane_overlay, combined_height)
-            pane_sil = pad_to_height(pane_sil, combined_height)
+            combined_height = max(
+                pane_heat.shape[0], pane_overlay.shape[0], pane_sil.shape[0],
+            )
+            combined = np.hstack([
+                pad_to_height(pane_heat, combined_height),
+                pad_to_height(pane_overlay, combined_height),
+                pad_to_height(pane_sil, combined_height),
+            ])
 
-            combined = np.hstack([pane_heat, pane_overlay, pane_sil])
-
-            out_path = OUT_DIR / mob_name / f"{image.file_name.replace('.png', '')}_viz.png"
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(out_path), combined)
-            count += 1
+            stem = image.file_name.replace(".png", "")
+            cv2.imwrite(str(mob_dir / f"{stem}_viz.png"), combined)
+            viz_count += 1
 
             n_acc = len(result.accepted)
             expected = image.expected_count
             ok = "OK" if n_acc == expected else "FAIL"
-            n_sil = len(result.silhouette_checks)
             print(
-                f"  {mob_name:15s} {image.file_name.replace('.png', ''):20s}  "
-                f"expect={expected} got={n_acc}  sil={n_sil}  {ok}"
+                f"  {mob_name:15s} {stem:20s}  "
+                f"expect={expected} got={n_acc}  "
+                f"sil={len(result.silhouette_checks)}  {ok}"
             )
             print(f"    {format_timing_ms(result.timing)}")
             timing_runs += 1
             for key, sec in result.timing.items():
                 timing_totals[key] = timing_totals.get(key, 0.0) + sec
 
-    print(f"\nDone — {count} visualizations in {OUT_DIR.resolve()}/")
-    print(f"Generated at {generated_at}")
+    print(
+        f"\nDone — {viz_count} viz, {descriptor_count} descriptors, "
+        f"1 pipeline in {OUT_DIR.resolve()}/"
+    )
     if timing_runs:
         print(f"\nAverage discovery timing over {timing_runs} frames:")
         order = (
-            "descriptor", "hsv", "spriteHeatmap",
-            "blobCenters", "blobFilters", "silhouetteGate", "nms", "total",
+            "descriptor", "spriteHeatmap", "blobCenters",
+            "blobFilters", "silhouetteGate", "nms", "total",
         )
         avg_total = timing_totals.get("total", 0.0) / timing_runs
         for key in order:
             if key not in timing_totals:
                 continue
             avg_ms = timing_totals[key] / timing_runs * 1000
-            pct = (timing_totals[key] / timing_totals["total"] * 100) if timing_totals.get("total") else 0
+            pct = (
+                timing_totals[key] / timing_totals["total"] * 100
+                if timing_totals.get("total") else 0
+            )
             bar = "#" * max(1, int(pct / 2))
             print(f"  {key:16s} {avg_ms:6.0f}ms  ({pct:4.1f}%)  {bar}")
         print(f"  {'TOTAL':16s} {avg_total * 1000:6.0f}ms")

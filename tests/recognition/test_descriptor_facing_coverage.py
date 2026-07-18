@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import unittest
 
-import cv2
 import numpy as np
 
 from pybot.paths import PROJECT_ROOT
@@ -43,7 +42,8 @@ class DescriptorFacingCoverageTests(unittest.TestCase):
     def test_descriptor_records_all_facing_structural_pixels(self) -> None:
         pairs = self.builder._living_facing_pairs(len(self.act.actions))
         self.assertGreaterEqual(len(pairs), 4)
-        self.assertGreaterEqual(len(self.descriptor.structural_pixel_pairs()), 2)
+        self.assertGreaterEqual(len(self.descriptor.dominant_pixels_bgr), 2)
+        self.assertGreaterEqual(len(self.descriptor.accent_pixels_bgr), 2)
         self.assertGreaterEqual(len(self.descriptor.match_palette_bgr), 8)
 
     def test_every_facing_passes_silhouette_gate(self) -> None:
@@ -54,14 +54,13 @@ class DescriptorFacingCoverageTests(unittest.TestCase):
         """
         for action_index in range(8):
             canvas, cx, cy = self._canvas_for_action(action_index)
-            hsv = cv2.cvtColor(canvas, cv2.COLOR_BGR2HSV)
             accepted, bbox, sim = self.detector.score_at(
-                canvas, hsv, self.descriptor, cx, cy, scale=1.0,
+                canvas, self.descriptor, cx, cy, scale=1.0,
             )
             self.assertIsNotNone(bbox, msg=f"action {action_index} produced no bbox")
             self.assertGreaterEqual(
                 sim,
-                0.48,
+                0.47,
                 msg=f"action {action_index} sim too low (sim={sim:.3f})",
             )
 

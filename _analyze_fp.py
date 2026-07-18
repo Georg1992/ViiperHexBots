@@ -46,12 +46,11 @@ for suite in MOB_FIXTURE_SUITES:
             continue
         frame = fixture_search_frame(img)
         fh, fw = frame.shape[:2]
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
         result = detector.detect(frame, mob_dir)
         accepted_centers = set((c.center_x, c.center_y) for c in result.accepted)
 
-        hm, _accent = heat_det.build_sprite_heatmap(frame, hsv, desc)
+        hm = heat_det.build_sprite_heatmap(frame, desc)
         blobs = heat_det.top_centers(hm)
         blobs.sort(key=lambda x: x[2], reverse=True)
 
@@ -93,12 +92,10 @@ for suite in MOB_FIXTURE_SUITES:
                 and detector._passes_silhouette_gate(frame, desc, (bx, by, bw, bh), comp_bbox=comp_bbox)
             )
 
-            _, best_bbox, sim_raw = detector.score_at(frame, hsv, desc, cx, cy)
+            _, best_bbox, sim_raw = detector.score_at(frame, desc, cx, cy)
             sil_accepted = best_bbox is not None and sim_raw >= min_sim
 
-            dim_min_ratio = 0.0
-            if desc.size.min_width and desc.size.min_height:
-                dim_min_ratio = min(bw / desc.size.min_width, bh / desc.size.min_height)
+            dim_min_ratio = min(bw / desc.avg_width, bh / desc.avg_height)
 
             blob_aspect = bw / max(bh, 1)
             aspect_diff = abs(blob_aspect - desc_avg_aspect) / max(desc_avg_aspect, 0.01)

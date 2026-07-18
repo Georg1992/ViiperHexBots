@@ -49,23 +49,19 @@ for subdir in sorted(FIXTURES_DIR.iterdir()):
     for img in sorted(subdir.glob("*.png")):
         frame = cv2.imread(str(img))
         if frame is None: continue
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         y1, y2, x1, x2 = detector.playfield_bounds(frame.shape[:2])
         crop = frame[y1:y2, x1:x2]
-        crop_hsv = hsv[y1:y2, x1:x2]
         max_dist = float(config["maxSpritePaletteDistance"])
 
         # Full palette
         full_heat = sprite_palette_heatmap(crop, desc.match_palette_bgr, max_dist)
 
-        # Accent+rare palette
+        # Accent palette
         ar_palette = [(int(c.bgr[0]), int(c.bgr[1]), int(c.bgr[2])) for c in desc.accent_colors]
-        for c in desc.rare_colors:
-            ar_palette.append((int(c.bgr[0]), int(c.bgr[1]), int(c.bgr[2])))
         ar_heat = sprite_palette_heatmap(crop, ar_palette, max_dist)
 
         fp = peaks(full_heat, config)
         ap = peaks(ar_heat, config)
         diff = fp - ap
         arrow = " <<<" if diff > 2 else ""
-        print(f"{mob:15s} {img.name:25s} full={fp:3d}  accent+rare={ap:3d}  removed={diff:3d}{arrow}")
+        print(f"{mob:15s} {img.name:25s} full={fp:3d}  accent={ap:3d}  removed={diff:3d}{arrow}")

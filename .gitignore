@@ -19,6 +19,5 @@ VIIPER/dist/
 input-bridge/embed/viiper.exe
 nul
 scripts/test_overlay.py
-_heatmap_viz/
 _debug_vis/
 _commit_msg.txt
