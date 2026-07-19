@@ -17,7 +17,7 @@ import numpy as np
 from pybot.recognition.detector.descriptors.descriptor import MobDescriptor
 from pybot.recognition.detector.descriptors.descriptor_builder import DESCRIPTOR_VERSION
 from pybot.recognition.detector.descriptors.layout_utils import (
-    best_silhouette_similarity,
+    best_silhouette_match,
     candidate_silhouette,
 )
 from pybot.recognition.detector.scoring.heatmap_detector import (
@@ -31,8 +31,11 @@ REQUIRED_CONFIG_KEYS = {
     "discoveryHeatmapDownscaleMinSide",
     "maxSpritePaletteDistance",
     "maxSilhouettePaletteDistance",
+    "silhouettePaletteDistanceScale",
     "minSpritePaletteMatch",
     "minSilhouetteSimilarity",
+    "minSilhouetteRecall",
+    "minSilhouettePrecision",
     "topCandidateCenters",
     "minCenterHeat",
     "peakRelativeThreshold",
@@ -421,7 +424,10 @@ class MobDetector:
                 interpolation=cv2.INTER_NEAREST,
             ).astype(bool)
 
-        silhouette_distance = float(descriptor.max_silhouette_palette_distance)
+        silhouette_distance = (
+            float(descriptor.max_silhouette_palette_distance)
+            * float(self.config["silhouettePaletteDistanceScale"])
+        )
         candidate = candidate_silhouette(
             mob_region,
             np.asarray(descriptor.match_palette_bgr, dtype=np.float32),
@@ -429,9 +435,14 @@ class MobDetector:
             gate_mask.width, gate_mask.height,
             occupancy_mask=comp_mask,
         )
-        similarity, matched_idx, scores = best_silhouette_similarity(candidate, refs)
-
-        if similarity < float(self.config["minSilhouetteSimilarity"]):
+        similarity, matched_idx, scores, precision, recall = best_silhouette_match(
+            candidate, refs,
+        )
+        passed = (
+            recall >= float(self.config["minSilhouetteRecall"])
+            and precision >= float(self.config["minSilhouettePrecision"])
+        )
+        if not passed:
             return False, float(similarity), candidate, matched_idx, scores, extract_bbox
         return True, float(similarity), candidate, matched_idx, scores, extract_bbox
 
@@ -473,11 +484,15 @@ class MobDetector:
         pal = np.asarray(descriptor.match_palette_bgr, dtype=np.float32)
         cand = candidate_silhouette(
             region, pal,
-            float(descriptor.max_silhouette_palette_distance),
+            float(descriptor.max_silhouette_palette_distance)
+            * float(self.config["silhouettePaletteDistanceScale"]),
             gate_mask.width, gate_mask.height,
         )
-        sim, _, _ = best_silhouette_similarity(cand, refs)
-        accepted = sim >= float(self.config["minSilhouetteSimilarity"])
+        sim, _, _, precision, recall = best_silhouette_match(cand, refs)
+        accepted = (
+            recall >= float(self.config["minSilhouetteRecall"])
+            and precision >= float(self.config["minSilhouettePrecision"])
+        )
         return accepted, bbox, float(sim)
 
     # ------------------------------------------------------------------

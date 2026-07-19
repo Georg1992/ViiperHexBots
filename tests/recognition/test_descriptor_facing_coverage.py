@@ -49,8 +49,9 @@ class DescriptorFacingCoverageTests(unittest.TestCase):
     def test_every_facing_passes_silhouette_gate(self) -> None:
         """Smoke-test facing silhouettes on an isolated padded canvas.
 
-        Production screenshots are validated by mob fixture suites at 0.50.
-        The synthetic canvas here is a weaker signal, so the bar is slightly lower.
+        Production screenshots are validated by mob fixture suites via the
+        recall/precision silhouette gate. The synthetic canvas here is a weaker
+        signal, so only a soft-Jaccard floor is asserted.
         """
         for action_index in range(8):
             canvas, cx, cy = self._canvas_for_action(action_index)

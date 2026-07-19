@@ -7,9 +7,6 @@ import numpy as np
 
 # Occupancy at/above this is a hard cell (same cutoff as soft-membership cores).
 HARD_OCCUPANCY = 0.5
-# Soft Tversky FP weight for hard cells outside the soft ref:
-# 1× soft-Jaccard mass + the gap below full occupancy at the hard cutoff.
-SILHOUETTE_HARD_FP_WEIGHT = 1.0 + HARD_OCCUPANCY
 
 
 def frame_silhouette(alpha: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -70,28 +67,34 @@ def _soft_membership(occupancy: np.ndarray, *, radius: float = 1.0) -> np.ndarra
     return np.maximum(occ, halo)
 
 
-def silhouette_similarity(candidate: np.ndarray, reference: np.ndarray, stable_mask: np.ndarray) -> float:
-    """Soft Tversky similarity of reference and candidate occupancy.
-
-    .. math::
-
-        T = \\frac{\\sum_i \\min(A_i, B_i)}
-                  {\\sum_i \\min(A_i, B_i)
-                   + w \\sum_i \\max(H_i - A_i, 0)
-                   + \\sum_i \\max(A_i - B_i, 0)}
+def silhouette_match(
+    candidate: np.ndarray,
+    reference: np.ndarray,
+    stable_mask: np.ndarray,
+) -> tuple[float, float, float]:
+    """Soft occupancy match: (jaccard, precision, recall).
 
     ``A`` is the stable reference (hard cells + 1-cell soft halo).
     ``B`` is the candidate (soft-gray kept, hard cores + same 1-cell halo).
-    ``H`` is hard candidate occupancy (``>= HARD_OCCUPANCY``) — soft-gray
-    outside the ref is not charged as false mass; solid fill-in is.
-    ``w = SILHOUETTE_HARD_FP_WEIGHT`` so hard extras cost more than holes.
+    ``H`` is hard candidate occupancy (``>= HARD_OCCUPANCY``).
+
+    Soft-gray outside the ref is not charged as false mass; solid fill-in is.
+
+    .. math::
+
+        inter = \\sum_i \\min(A_i, B_i)
+        FP = \\sum_i \\max(H_i - A_i, 0)
+        FN = \\sum_i \\max(A_i - B_i, 0)
+        precision = inter / (inter + FP)
+        recall = inter / (inter + FN)
+        jaccard = inter / (inter + FP + FN)
 
     Scores are absolute-grid (no per-ref translation search): independently
     maximizing shift per facing flattens wrong-pose scores into the true match.
     One-cell soft halo already absorbs small framing jitter.
     """
     if reference.size == 0 or not np.any(stable_mask):
-        return 1.0
+        return 0.0, 0.0, 0.0
 
     shape = reference.shape
     stable = stable_mask.reshape(shape)
@@ -104,10 +107,41 @@ def silhouette_similarity(candidate: np.ndarray, reference: np.ndarray, stable_m
     hard = (cand_raw >= HARD_OCCUPANCY).astype(np.float32)
     false_pos = float(np.sum(np.maximum(hard - ref, 0.0)))
     false_neg = float(np.sum(np.maximum(ref - cand, 0.0)))
-    denom = inter + SILHOUETTE_HARD_FP_WEIGHT * false_pos + false_neg
-    if denom <= 0.0:
-        return 0.0
-    return float(np.clip(inter / denom, 0.0, 1.0))
+
+    precision = inter / (inter + false_pos) if (inter + false_pos) > 0.0 else 0.0
+    recall = inter / (inter + false_neg) if (inter + false_neg) > 0.0 else 0.0
+    denom = inter + false_pos + false_neg
+    jaccard = float(np.clip(inter / denom, 0.0, 1.0)) if denom > 0.0 else 0.0
+    return jaccard, float(precision), float(recall)
+
+
+def silhouette_similarity(candidate: np.ndarray, reference: np.ndarray, stable_mask: np.ndarray) -> float:
+    """Soft Jaccard similarity of reference and candidate occupancy."""
+    jaccard, _precision, _recall = silhouette_match(candidate, reference, stable_mask)
+    return jaccard
+
+
+def best_silhouette_match(
+    candidate: np.ndarray,
+    references: list[tuple[np.ndarray, np.ndarray]],
+) -> tuple[float, int, list[float], float, float]:
+    """Score candidate against refs; return best jaccard, index, all scores, prec, recall."""
+    if not references:
+        return 0.0, 0, [], 0.0, 0.0
+    scores: list[float] = []
+    best_sim = -1.0
+    best_idx = 0
+    best_precision = 0.0
+    best_recall = 0.0
+    for idx, (reference, stable_mask) in enumerate(references):
+        jaccard, precision, recall = silhouette_match(candidate, reference, stable_mask)
+        scores.append(jaccard)
+        if jaccard > best_sim:
+            best_sim = jaccard
+            best_idx = idx
+            best_precision = precision
+            best_recall = recall
+    return float(best_sim), best_idx, scores, float(best_precision), float(best_recall)
 
 
 def best_silhouette_similarity(
@@ -115,15 +149,5 @@ def best_silhouette_similarity(
     references: list[tuple[np.ndarray, np.ndarray]],
 ) -> tuple[float, int, list[float]]:
     """Score candidate against multiple refs; return best score, index, and all scores."""
-    if not references:
-        return 1.0, 0, []
-    scores: list[float] = []
-    best_sim = -1.0
-    best_idx = 0
-    for idx, (reference, stable_mask) in enumerate(references):
-        sim = silhouette_similarity(candidate, reference, stable_mask)
-        scores.append(sim)
-        if sim > best_sim:
-            best_sim = sim
-            best_idx = idx
-    return float(best_sim), best_idx, scores
+    best_sim, best_idx, scores, _precision, _recall = best_silhouette_match(candidate, references)
+    return best_sim, best_idx, scores

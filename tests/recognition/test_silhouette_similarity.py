@@ -8,6 +8,7 @@ import numpy as np
 
 from pybot.recognition.detector.descriptors.layout_utils import (
     candidate_silhouette,
+    silhouette_match,
     silhouette_similarity,
 )
 
@@ -142,7 +143,7 @@ class SilhouetteSimilarityTests(unittest.TestCase):
         self.assertGreater(sparse_score, hole_score)
 
     def test_scattered_extras_score_below_threshold(self) -> None:
-        """Hard noise outside the ref must pull soft Tversky under 0.5."""
+        """Hard noise outside the ref must pull soft Jaccard under 0.5."""
         reference = np.zeros((16, 16), dtype=np.float32)
         reference[6:10, 6:10] = 1.0
         stable_mask = reference >= 0.5
@@ -173,7 +174,18 @@ class SilhouetteSimilarityTests(unittest.TestCase):
         disk[(yy - 7.5) ** 2 + (xx - 7.5) ** 2 <= 6.5 ** 2] = 1.0
 
         score = silhouette_similarity(disk, reference, stable_mask)
+        _jac, precision, recall = silhouette_match(disk, reference, stable_mask)
         self.assertLess(score, 0.50)
+        # Dual gate floors used at runtime (recall>=0.45, precision>=0.71).
+        self.assertFalse(recall >= 0.45 and precision >= 0.71)
+
+    def test_matching_shape_clears_dual_gate_floors(self) -> None:
+        reference = np.zeros((16, 16), dtype=np.float32)
+        reference[5:11, 4:10] = 1.0
+        stable_mask = reference >= 0.5
+        _jac, precision, recall = silhouette_match(reference, reference, stable_mask)
+        self.assertGreaterEqual(recall, 0.45)
+        self.assertGreaterEqual(precision, 0.71)
 
 
 if __name__ == "__main__":
