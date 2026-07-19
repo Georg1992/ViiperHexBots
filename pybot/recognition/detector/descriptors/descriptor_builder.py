@@ -26,7 +26,7 @@ from pybot.recognition.detector.descriptors.palette_groups import (
     split_palette_groups_by_required,
 )
 
-DESCRIPTOR_VERSION = 24
+DESCRIPTOR_VERSION = 28
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -35,6 +35,13 @@ STAND_WALK_ACTION_COUNT = 8
 JUMP_ACTION_COUNT = 8
 LIVING_FACING_ACTION_LIMIT = STAND_WALK_ACTION_COUNT + JUMP_ACTION_COUNT
 LIVING_ACTION_SIZE_TOLERANCE = 0.40  # ±40% area vs stand/walk baseline
+# Gate ref counts snap to one-per-facing (4), +partial jump (6), or full (8).
+MIN_GATE_SILHOUETTE_MASKS = STAND_WALK_ACTION_COUNT // 2
+GATE_SILHOUETTE_REF_COUNTS = (
+    MIN_GATE_SILHOUETTE_MASKS,
+    MIN_GATE_SILHOUETTE_MASKS + MIN_GATE_SILHOUETTE_MASKS // 2,
+    STAND_WALK_ACTION_COUNT,
+)
 MATCH_PALETTE_MAX_COLORS = 32
 MATCH_PALETTE_MAX_ACCENT_COLORS = 8
 # Palette shades present in at least this fraction of opaque frames are
@@ -53,7 +60,6 @@ DOMINANT_CLUSTER_MAX_DISTANCE = 20.0
 ACCENT_CLUSTER_MAX_DISTANCE = 30.0
 SILHOUETTE_WIDTH = 16
 SILHOUETTE_HEIGHT = 16
-GATE_SILHOUETTE_MASK_COUNT = 4
 STABLE_SILHOUETTE_VALUE = 0.20
 
 
@@ -225,12 +231,14 @@ class DescriptorBuilder:
         )
         if not dominant_pixels_bgr or not accent_pixels_bgr:
             raise RuntimeError(f"no structural pixels for {mob_name}")
-        facing_silhouette_masks = self._build_facing_silhouette_masks(
+        frame_silhouette_masks = self._build_frame_silhouette_masks(
             spr_file, act_file, facing_pairs,
         )
-        if not facing_silhouette_masks:
+        if not frame_silhouette_masks:
             raise RuntimeError(f"no silhouette masks could be built for {mob_name}")
-        silhouette_masks = self._build_gate_silhouette_masks(facing_silhouette_masks)
+        silhouette_masks = self._build_gate_silhouette_masks(
+            spr_file, act_file, facing_pairs, frame_silhouette_masks,
+        )
 
         descriptor = MobDescriptor(
             mob_name=mob_name,
@@ -506,10 +514,7 @@ class DescriptorBuilder:
 
     def _detector_distance_priors(self) -> tuple[float, float]:
         """Floor / soft-match from detector_config (single source of truth)."""
-        config_path = (
-            Path(__file__).resolve().parent.parent / "detector_config.json"
-        )
-        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config = self._load_detector_config()
         base = float(config["maxSpritePaletteDistance"])
         soft_match = float(config["minSpritePaletteMatch"])
         if base <= 0.0:
@@ -517,6 +522,16 @@ class DescriptorBuilder:
         if not 0.0 <= soft_match < 1.0:
             raise ValueError("minSpritePaletteMatch must be in [0, 1)")
         return base, soft_match
+
+    def _load_detector_config(self) -> dict:
+        config_path = Path(__file__).resolve().parent.parent / "detector_config.json"
+        return json.loads(config_path.read_text(encoding="utf-8"))
+
+    def _min_silhouette_similarity(self) -> float:
+        value = float(self._load_detector_config()["minSilhouetteSimilarity"])
+        if not 0.0 < value <= 1.0:
+            raise ValueError("minSilhouetteSimilarity must be in (0, 1]")
+        return value
 
     def _estimate_palette_distances(
         self,
@@ -839,141 +854,176 @@ class DescriptorBuilder:
         clusters.sort(key=lambda c: c.fraction, reverse=True)
         return clusters
 
-    def _build_facing_silhouette_masks(
+    def _build_frame_silhouette_masks(
         self,
         spr_file,
         act_file,
         facing_pairs: tuple[tuple[int, int], ...],
     ) -> list[SilhouetteMask]:
-        """One silhouette ref per facing pair (stand/walk/jump row).
-
-        Frames within a pair share orientation; averaging across pairs would
-        smear directional sprites into a single blob.
-        """
+        """One silhouette per living animation frame (keeps wing/pose variation)."""
         masks: list[SilhouetteMask] = []
         for pair in facing_pairs:
             frames = self._collect_frames(spr_file, act_file, pair, frame_start=0)
-            if not frames:
-                continue
-            masks.append(self._build_silhouette_mask(frames))
+            for bgra in frames:
+                masks.append(self._build_silhouette_mask([bgra]))
         return masks
-
-    @staticmethod
-    def _silhouette_mask_binary(mask: SilhouetteMask) -> np.ndarray:
-        avg = np.array(mask.avg_mask, dtype=np.float32).reshape(mask.height, mask.width)
-        return (avg >= 0.5).astype(np.float32)
-
-    @staticmethod
-    def _binary_mask_iou(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
-        overlap = float(np.sum(np.minimum(mask_a, mask_b)))
-        union = float(np.sum(np.maximum(mask_a, mask_b)))
-        if union <= 0.0:
-            return 1.0
-        return overlap / union
 
     def _build_gate_silhouette_masks(
         self,
-        facing_masks: list[SilhouetteMask],
+        spr_file,
+        act_file,
+        facing_pairs: tuple[tuple[int, int], ...],
+        frame_masks: list[SilhouetteMask],
     ) -> list[SilhouetteMask]:
-        """Up to four gate refs: one per facing when ≤4, else recursive medoid clusters."""
-        if len(facing_masks) <= GATE_SILHOUETTE_MASK_COUNT:
-            return facing_masks
-        return self._cluster_facing_masks_into_k(
-            facing_masks, GATE_SILHOUETTE_MASK_COUNT,
-        )
+        """Pick 4, 6, or 8 diverse gate refs from living frames.
 
-    def _split_facing_masks(
+        Count is derived at build time:
+        - Stand/walk frame diversity (soft-Jaccard vs minSilhouetteSimilarity)
+          snapped to 4/6/8 — covers wing-beat variety (creamies).
+        - Plus 0/2/4 if jump-row facing averages differ from stand/walk by more
+          than half the gate margin — covers distinct jump postures (thara).
+        Refs themselves are the farthest-first most unique frames.
+        """
+        if not frame_masks:
+            raise RuntimeError("no frame silhouette masks to select gate refs from")
+        min_sil = self._min_silhouette_similarity()
+        target = self._gate_ref_count(spr_file, act_file, facing_pairs, min_sil)
+        target = min(target, len(frame_masks))
+        order = self._farthest_first_mask_order(frame_masks)
+        return [frame_masks[idx] for idx in order[:target]]
+
+    def _gate_ref_count(
         self,
-        masks: list[SilhouetteMask],
-    ) -> tuple[list[SilhouetteMask], list[SilhouetteMask]]:
-        binaries = [self._silhouette_mask_binary(mask) for mask in masks]
-        best_i, best_j = 0, 1
-        min_iou = 1.0
-        for i in range(len(binaries)):
-            for j in range(i + 1, len(binaries)):
-                iou = self._binary_mask_iou(binaries[i], binaries[j])
-                if iou < min_iou:
-                    min_iou = iou
-                    best_i, best_j = i, j
-
-        clusters: list[list[SilhouetteMask]] = [[], []]
-        seed_bins = [binaries[best_i], binaries[best_j]]
-        for mask, binary in zip(masks, binaries):
-            iou_a = self._binary_mask_iou(binary, seed_bins[0])
-            iou_b = self._binary_mask_iou(binary, seed_bins[1])
-            clusters[0 if iou_a >= iou_b else 1].append(mask)
-
-        if not clusters[0] or not clusters[1]:
-            raise RuntimeError("failed to split silhouette facing masks")
-        return clusters[0], clusters[1]
-
-    def _cluster_facing_masks_into_k(
-        self,
-        masks: list[SilhouetteMask],
-        k: int,
-    ) -> list[SilhouetteMask]:
-        if k <= 0:
-            raise ValueError("k must be positive")
-        if len(masks) < k:
-            raise RuntimeError(f"need at least {k} facing masks to select {k} gate refs")
-        if len(masks) == k:
-            return masks
-        if k == 1:
-            return [self._medoid_silhouette_mask(masks)]
-
-        left, right = self._split_facing_masks(masks)
-        left_k = k // 2
-        right_k = k - left_k
-        return (
-            self._cluster_facing_masks_into_k(left, left_k)
-            + self._cluster_facing_masks_into_k(right, right_k)
+        spr_file,
+        act_file,
+        facing_pairs: tuple[tuple[int, int], ...],
+        min_sil: float,
+    ) -> int:
+        stand_pairs = tuple(
+            pair for pair in facing_pairs if pair[0] < STAND_WALK_ACTION_COUNT
         )
-
-    def _medoid_silhouette_mask(self, masks: list[SilhouetteMask]) -> SilhouetteMask:
-        """Return the facing mask closest to all others in the cluster."""
-        if len(masks) == 1:
-            return masks[0]
-        binaries = [self._silhouette_mask_binary(mask) for mask in masks]
-        best_idx = 0
-        best_score = -1.0
-        for i in range(len(binaries)):
-            score = sum(
-                self._binary_mask_iou(binaries[i], binaries[j])
-                for j in range(len(binaries))
-                if j != i
-            )
-            if score > best_score:
-                best_score = score
-                best_idx = i
-        return masks[best_idx]
+        jump_pairs = tuple(
+            pair for pair in facing_pairs if pair[0] >= STAND_WALK_ACTION_COUNT
+        )
+        stand_masks = self._build_frame_silhouette_masks(
+            spr_file, act_file, stand_pairs,
+        )
+        stand_unique = self._count_unique_masks(stand_masks, min_sil)
+        stand_k = self._snap_gate_ref_count(stand_unique)
+        if stand_k >= GATE_SILHOUETTE_REF_COUNTS[-1]:
+            return GATE_SILHOUETTE_REF_COUNTS[-1]
+        bonus = self._jump_pose_ref_bonus(
+            spr_file, act_file, stand_pairs, jump_pairs, min_sil,
+        )
+        return min(GATE_SILHOUETTE_REF_COUNTS[-1], stand_k + bonus)
 
     @staticmethod
-    def _merge_facing_silhouette_masks(masks: list[SilhouetteMask]) -> SilhouetteMask:
-        """Union per-facing refs into one mask that covers every orientation.
+    def _snap_gate_ref_count(unique_poses: int) -> int:
+        """Snap a unique-pose count to 4, 6, or 8."""
+        count = max(unique_poses, MIN_GATE_SILHOUETTE_MASKS)
+        for option in GATE_SILHOUETTE_REF_COUNTS:
+            if count <= option:
+                return option
+        return GATE_SILHOUETTE_REF_COUNTS[-1]
 
-        Per-cell max (not mean) keeps each facing's shape without smearing
-        opposing directions into a blob.
-        """
-        if len(masks) == 1:
-            return masks[0]
-        height = masks[0].height
-        width = masks[0].width
-        avg_stack = np.stack([
-            np.array(mask.avg_mask, dtype=np.float32).reshape(height, width)
-            for mask in masks
+    def _jump_pose_ref_bonus(
+        self,
+        spr_file,
+        act_file,
+        stand_pairs: tuple[tuple[int, int], ...],
+        jump_pairs: tuple[tuple[int, int], ...],
+        min_sil: float,
+    ) -> int:
+        """0, 2, or 4 extra refs when jump facings differ from stand/walk."""
+        if not stand_pairs or not jump_pairs:
+            return 0
+        # Halfway from identical (1.0) to the gate fail margin (min_sil).
+        distinct_iou = 1.0 - (1.0 - min_sil) * 0.5
+        distinct_facings = 0
+        for index in range(min(len(stand_pairs), len(jump_pairs))):
+            stand_avg = self._pair_average_silhouette(
+                spr_file, act_file, stand_pairs[index],
+            )
+            jump_avg = self._pair_average_silhouette(
+                spr_file, act_file, jump_pairs[index],
+            )
+            if stand_avg is None or jump_avg is None:
+                continue
+            if self._soft_jaccard(stand_avg, jump_avg) < distinct_iou:
+                distinct_facings += 1
+        if distinct_facings >= 3:
+            return 4
+        if distinct_facings >= 1:
+            return 2
+        return 0
+
+    def _pair_average_silhouette(
+        self,
+        spr_file,
+        act_file,
+        pair: tuple[int, int],
+    ) -> np.ndarray | None:
+        frames = self._collect_frames(spr_file, act_file, pair, frame_start=0)
+        if not frames:
+            return None
+        stacked = np.stack([
+            frame_silhouette(bgra[:, :, 3], SILHOUETTE_WIDTH, SILHOUETTE_HEIGHT)
+            for bgra in frames
         ])
-        merged_avg = np.max(avg_stack, axis=0)
-        stable_stack = np.stack([
-            np.array(mask.stable_mask, dtype=bool).reshape(height, width)
-            for mask in masks
-        ])
-        merged_stable = np.any(stable_stack, axis=0)
-        return SilhouetteMask(
-            width=width,
-            height=height,
-            avg_mask=merged_avg.reshape(-1).tolist(),
-            stable_mask=merged_stable.reshape(-1).tolist(),
-        )
+        return np.mean(stacked, axis=0).reshape(-1).astype(np.float32)
+
+    @staticmethod
+    def _soft_jaccard(left: np.ndarray, right: np.ndarray) -> float:
+        inter = float(np.sum(np.minimum(left, right)))
+        union = float(np.sum(np.maximum(left, right)))
+        if union <= 0.0:
+            return 1.0
+        return inter / union
+
+    def _count_unique_masks(
+        self,
+        masks: list[SilhouetteMask],
+        merge_iou: float,
+    ) -> int:
+        if not masks:
+            return 0
+        order = self._farthest_first_mask_order(masks)
+        avgs = [np.asarray(mask.avg_mask, dtype=np.float32) for mask in masks]
+        kept = [order[0]]
+        for idx in order[1:]:
+            max_to_kept = max(self._soft_jaccard(avgs[idx], avgs[s]) for s in kept)
+            if max_to_kept >= merge_iou:
+                break
+            kept.append(idx)
+        return len(kept)
+
+    def _farthest_first_mask_order(
+        self,
+        masks: list[SilhouetteMask],
+    ) -> list[int]:
+        avgs = [np.asarray(mask.avg_mask, dtype=np.float32) for mask in masks]
+        n = len(masks)
+        iou = np.eye(n, dtype=np.float64)
+        for i in range(n):
+            for j in range(i + 1, n):
+                value = self._soft_jaccard(avgs[i], avgs[j])
+                iou[i, j] = value
+                iou[j, i] = value
+        selected: list[int] = [int(np.argmax(iou.sum(axis=1)))]
+        remaining = set(range(n)) - set(selected)
+        while remaining:
+            best_c = -1
+            best_max_iou = 2.0
+            for candidate in remaining:
+                max_to_selected = max(float(iou[candidate, s]) for s in selected)
+                if max_to_selected < best_max_iou:
+                    best_max_iou = max_to_selected
+                    best_c = candidate
+            if best_c < 0:
+                break
+            selected.append(best_c)
+            remaining.remove(best_c)
+        return selected
 
     def _build_silhouette_mask(self, frames: list[np.ndarray]) -> SilhouetteMask:
         masks = [

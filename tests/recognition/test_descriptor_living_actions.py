@@ -149,15 +149,15 @@ class LivingActionPairMobTests(unittest.TestCase):
             with self.subTest(mob=mob_name):
                 spr, act = self._mob_assets(mob_name)
                 pairs = self.builder._living_action_pairs(act, spr)
-                all_masks = self.builder._build_facing_silhouette_masks(spr, act, pairs)
+                all_masks = self.builder._build_frame_silhouette_masks(spr, act, pairs)
                 without_second_jump = tuple(p for p in pairs if p not in SECOND_JUMP_PAIRS)
-                partial_masks = self.builder._build_facing_silhouette_masks(
+                partial_masks = self.builder._build_frame_silhouette_masks(
                     spr, act, without_second_jump,
                 )
                 self.assertGreater(
                     len(all_masks),
                     len(partial_masks),
-                    f"{mob_name}: second jump row must add facing silhouette refs",
+                    f"{mob_name}: second jump row must add frame silhouette refs",
                 )
 
 
@@ -196,12 +196,12 @@ class SecondJumpSilhouetteTests(unittest.TestCase):
                 pairs = self.builder._living_action_pairs(act, spr)
                 without_second_jump = tuple(p for p in pairs if p not in SECOND_JUMP_PAIRS)
 
-                full_masks = self.builder._build_facing_silhouette_masks(spr, act, pairs)
-                partial_masks = self.builder._build_facing_silhouette_masks(
+                full_masks = self.builder._build_frame_silhouette_masks(spr, act, pairs)
+                partial_masks = self.builder._build_frame_silhouette_masks(
                     spr, act, without_second_jump,
                 )
 
-                descriptor = self.builder.build(mob_name, force=False)
+                descriptor = self.builder.build(mob_name, force=True)
                 for action_index in SECOND_JUMP_ACTIONS:
                     if action_index >= len(act.actions):
                         continue
