@@ -66,8 +66,34 @@ class SilhouetteSimilarityTests(unittest.TestCase):
         self.assertGreater(float((restricted >= 0.5).sum()), 0.0)
         self.assertLess(float((restricted >= 0.5).sum()), float((unrestricted >= 0.5).sum()))
 
-    def test_sparse_match_passes_while_outside_fill_fails_at_half(self) -> None:
-        """Near-complete subset still clears the gate; viewport fill stays low."""
+    def test_soft_gray_covers_ref_better_than_empty(self) -> None:
+        reference = np.zeros((16, 16), dtype=np.float32)
+        reference[4:12, 4:12] = 1.0
+        stable_mask = reference >= 0.5
+
+        empty = np.zeros((16, 16), dtype=np.float32)
+        soft = np.zeros((16, 16), dtype=np.float32)
+        soft[4:12, 4:12] = 0.35
+
+        empty_score = silhouette_similarity(empty, reference, stable_mask)
+        soft_score = silhouette_similarity(soft, reference, stable_mask)
+
+        self.assertEqual(empty_score, 0.0)
+        self.assertGreater(soft_score, 0.30)
+        self.assertLess(soft_score, 0.40)
+        self.assertGreater(soft_score, empty_score)
+
+    def test_one_cell_shift_still_scores_high(self) -> None:
+        reference = np.zeros((16, 16), dtype=np.float32)
+        reference[5:11, 4:10] = 1.0
+        stable_mask = reference >= 0.5
+        shifted = np.zeros((16, 16), dtype=np.float32)
+        shifted[5:11, 5:11] = 1.0  # +1 x
+
+        score = silhouette_similarity(shifted, reference, stable_mask)
+        self.assertGreaterEqual(score, 0.70)
+
+    def test_sparse_match_beats_viewport_fill_and_thin_remnant(self) -> None:
         reference = np.zeros((16, 16), dtype=np.float32)
         stable_mask = np.zeros((16, 16), dtype=bool)
         reference[3:12, 2:11] = 1.0
@@ -75,7 +101,6 @@ class SilhouetteSimilarityTests(unittest.TestCase):
         reference[6:9, 5:8] = 0.0
         stable_mask[6:9, 5:8] = False
 
-        # Small trim only — massive structure misses must not clear 0.50.
         sparse_candidate = np.zeros((16, 16), dtype=np.float32)
         sparse_candidate[3:12, 2:11] = 1.0
         sparse_candidate[3, 2:11] = 0.0
@@ -83,8 +108,8 @@ class SilhouetteSimilarityTests(unittest.TestCase):
         bloated_candidate = np.zeros((16, 16), dtype=np.float32)
         bloated_candidate[1:14, 1:14] = 1.0
 
-        large_hole = reference.copy()
-        large_hole[3:9, 2:11] = 0.0
+        large_hole = np.zeros((16, 16), dtype=np.float32)
+        large_hole[10:12, 4:8] = 1.0
 
         sparse_score = silhouette_similarity(sparse_candidate, reference, stable_mask)
         bloated_score = silhouette_similarity(bloated_candidate, reference, stable_mask)
@@ -92,9 +117,26 @@ class SilhouetteSimilarityTests(unittest.TestCase):
 
         self.assertGreaterEqual(sparse_score, 0.50)
         self.assertLess(bloated_score, 0.50)
-        self.assertLess(hole_score, 0.50)
+        self.assertLess(hole_score, 0.35)
         self.assertGreater(sparse_score, bloated_score)
         self.assertGreater(sparse_score, hole_score)
+
+    def test_scattered_extras_score_below_threshold(self) -> None:
+        """Noise outside the ref must pull soft Jaccard under 0.5."""
+        reference = np.zeros((16, 16), dtype=np.float32)
+        reference[6:10, 6:10] = 1.0
+        stable_mask = reference >= 0.5
+
+        scattered = reference.copy()
+        for y in range(0, 16, 2):
+            for x in range(0, 16, 2):
+                if reference[y, x] < 0.5:
+                    scattered[y, x] = 1.0
+
+        score = silhouette_similarity(scattered, reference, stable_mask)
+        perfect = silhouette_similarity(reference, reference, stable_mask)
+        self.assertLess(score, 0.50)
+        self.assertLess(score, perfect)
 
 
 if __name__ == "__main__":

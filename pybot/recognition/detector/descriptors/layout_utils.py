@@ -44,28 +44,54 @@ def candidate_silhouette(
     return frame_silhouette(match_uint8, width, height)
 
 
-def silhouette_similarity(candidate: np.ndarray, reference: np.ndarray, stable_mask: np.ndarray) -> float:
-    """Asymmetric overlap score on the 16×16 silhouette grid.
+def _soft_membership(occupancy: np.ndarray, *, radius: float = 1.0) -> np.ndarray:
+    """Occupancy in [0, 1], with a 1-cell soft halo around hard (``>= 0.5``) cores.
 
-    Misses on stable reference structure are weighted at 0.8× hits. Extra
-    candidate mass outside the reference is still penalized more heavily (1.5×)
-    so viewport-filling blobs cannot inflate their score.
+    Interior hard cells stay 1. Soft-gray keeps its value. Background cells
+    within ``radius`` of a hard core fall off as ``1 - dist/radius``.
+    """
+    occ = np.clip(np.asarray(occupancy, dtype=np.float32), 0.0, 1.0)
+    hard = (occ >= np.float32(0.5)).astype(np.uint8)
+    if not np.any(hard):
+        return occ
+    # distanceTransform: zeros stay 0; nonzeros = distance to nearest zero.
+    dist = cv2.distanceTransform((1 - hard).astype(np.uint8), cv2.DIST_L2, 3)
+    halo = np.clip(
+        np.float32(1.0) - dist / np.float32(radius),
+        0.0,
+        1.0,
+    ).astype(np.float32)
+    return np.maximum(occ, halo)
+
+
+def silhouette_similarity(candidate: np.ndarray, reference: np.ndarray, stable_mask: np.ndarray) -> float:
+    """Soft Jaccard (IoU) of reference and candidate occupancy.
+
+    .. math::
+
+        J(A,B) = \\frac{\\sum_i \\min(A_i, B_i)}{\\sum_i \\max(A_i, B_i)}
+
+    ``A`` is the stable reference (hard cells + 1-cell soft halo).
+    ``B`` is the candidate (soft-gray kept, hard cores + same 1-cell halo).
+    Identical shapes score 1. Extra mass outside the ref grows the union
+    and lowers ``J`` — no separate weights or shape multipliers.
     """
     if reference.size == 0 or not np.any(stable_mask):
         return 1.0
 
-    stable = stable_mask.reshape(reference.shape)
-    ref_bin = ((reference >= 0.5) & stable).astype(np.float32)
-    cand_bin = (candidate >= 0.5).astype(np.float32)
-    intersection = float(np.sum(ref_bin * cand_bin))
-    if intersection <= 0.0:
+    shape = reference.shape
+    stable = stable_mask.reshape(shape)
+    ref_hard = ((reference >= 0.5) & stable).astype(np.float32)
+    cand_raw = np.asarray(candidate, dtype=np.float32).reshape(shape)
+
+    ref = _soft_membership(ref_hard, radius=1.0)
+    cand = _soft_membership(cand_raw, radius=1.0)
+
+    inter = float(np.sum(np.minimum(ref, cand)))
+    union = float(np.sum(np.maximum(ref, cand)))
+    if union <= 0.0:
         return 0.0
-    miss = float(np.sum(ref_bin * (1.0 - cand_bin)))
-    extra = float(np.sum((1.0 - ref_bin) * cand_bin))
-    miss_weight = 0.8
-    extra_weight = 1.5
-    denom = intersection + miss_weight * miss + extra_weight * extra
-    return float(np.clip(intersection / denom, 0.0, 1.0))
+    return float(np.clip(inter / union, 0.0, 1.0))
 
 
 def best_silhouette_similarity(
