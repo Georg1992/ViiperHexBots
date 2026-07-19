@@ -10,10 +10,10 @@ from pathlib import Path
 import cv2
 
 from pybot.paths import PROJECT_ROOT, RECOGNITION_DIR
-from pybot.recognition.detector.debug_renderer import save_debug_bundle, save_summary_contact_sheet
+from pybot.recognition.detector.debug_renderer import save_debug_bundle
 from pybot.recognition.detector.descriptors.descriptor_builder import DescriptorBuilder
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
-from pybot.recognition.fixtures import MOB_FIXTURE_SUITES, MobFixtureImage, MobFixtureSuite, fixture_search_frame
+from pybot.recognition.fixtures import MOB_FIXTURE_SUITES, MobFixtureImage, fixture_search_frame
 
 
 def _manifest_entries(fixtures_dir: Path, mob_name: str) -> list[MobFixtureImage]:
@@ -55,7 +55,6 @@ def run_fixtures(mob_name: str, fixtures_dir: Path, *, debug: bool, rebuild_desc
         "images": [],
         "totals": {"expected": 0, "accepted": 0, "matches": 0, "misses": 0, "extras": 0},
     }
-    overlay_paths: list[Path] = []
     for image in _manifest_entries(fixtures_dir, mob_name):
         frame = cv2.imread(str(image.path), cv2.IMREAD_COLOR)
         if frame is None:
@@ -93,13 +92,11 @@ def run_fixtures(mob_name: str, fixtures_dir: Path, *, debug: bool, rebuild_desc
             f"misses={misses} extras={extras} best={best_scores} time={row['elapsedS']}s"
         )
         if debug:
-            out_dir = save_debug_bundle(debug_root, image.file_name, frame, result)
-            overlay_paths.append(out_dir / "detected_overlay.png")
+            save_debug_bundle(debug_root, image.file_name, frame, result)
     if debug:
         summary_dir = debug_root / mob_name
         summary_dir.mkdir(parents=True, exist_ok=True)
         (summary_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-        save_summary_contact_sheet(summary_dir / "summary_contact_sheet.png", overlay_paths)
     return summary
 
 

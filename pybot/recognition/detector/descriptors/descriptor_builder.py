@@ -33,7 +33,7 @@ STAND_WALK_ACTION_COUNT = 8
 JUMP_ACTION_COUNT = 8
 LIVING_FACING_ACTION_LIMIT = STAND_WALK_ACTION_COUNT + JUMP_ACTION_COUNT
 LIVING_ACTION_SIZE_TOLERANCE = 0.40  # ±40% area vs stand/walk baseline
-MATCH_PALETTE_MAX_COLORS = 24
+MATCH_PALETTE_MAX_COLORS = 30
 MATCH_PALETTE_MAX_ACCENT_COLORS = 4
 PALETTE_DEDUP_H_THRESH = 12.0
 PALETTE_DEDUP_SV_THRESH = 25.0
@@ -123,9 +123,6 @@ class DescriptorBuilder:
             / "modified"
             / spr_stem.lower()
         )
-
-    def modified_asset_dir(self, asset_name: str, spr_stem: str) -> Path:
-        return self.project_root / "assets" / "modified_mobs" / asset_name
 
     def build(self, mob_name: str, force: bool = False) -> MobDescriptor:
         mob_name = mob_name.lower()
@@ -368,23 +365,6 @@ class DescriptorBuilder:
         unique_colors, counts = np.unique(all_pixels, axis=0, return_counts=True)
         order = np.argsort(counts)[::-1]
         return unique_colors[order], counts[order], accent_counts
-
-    @classmethod
-    def _append_palette_colors(
-        cls,
-        palette: list[tuple[int, int, int]],
-        candidates: list[tuple[int, int, int]],
-        *,
-        limit: int,
-    ) -> None:
-        palette_set = set(palette)
-        for bgr in candidates:
-            if len(palette) >= limit:
-                return
-            if cls._is_scene_matching_speck(bgr) or bgr in palette_set:
-                continue
-            palette.append(bgr)
-            palette_set.add(bgr)
 
     def _match_palette(
         self,

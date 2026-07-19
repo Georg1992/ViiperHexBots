@@ -348,55 +348,6 @@ class HeatmapDetector:
         # --- 4. Upscale ---
         return self._finish_heatmap(sprite, work_bgr, descriptor, downscale, frame_shape)
 
-    def palette_diversity_debug(
-        self,
-        frame_bgr: np.ndarray,
-        descriptor: MobDescriptor,
-        downscale: int = 1,
-    ) -> dict[str, object]:
-        """Intermediate diversity / heatmap maps for visualization (full-frame)."""
-        frame_shape = frame_bgr.shape[:2]
-        work_bgr = self._work_bgr(frame_bgr, downscale)
-
-        base_sprite, similarity = weighted_sprite_palette_heatmap(
-            work_bgr,
-            descriptor,
-            self.max_sprite_palette_distance,
-            return_similarity=True,
-        )
-        sprite_div, div_maps = apply_palette_diversity(
-            base_sprite,
-            similarity,
-            descriptor.match_palette_groups,
-            avg_width=descriptor.size.avg_width,
-            avg_height=descriptor.size.avg_height,
-            downscale=downscale,
-        )
-
-        final_new = self._finish_heatmap(
-            sprite_div, work_bgr, descriptor, downscale, frame_shape,
-        )
-        final_old = self._finish_heatmap(
-            base_sprite, work_bgr, descriptor, downscale, frame_shape,
-        )
-
-        def up(field: np.ndarray) -> np.ndarray:
-            if downscale <= 1:
-                return field.astype(np.float32)
-            return _nearest_upscale(field, downscale, frame_shape[0], frame_shape[1])
-
-        return {
-            "base_sprite": up(base_sprite),
-            "group_similarity": [up(g) for g in div_maps["group_similarity"]],
-            "group_present": [up(g) for g in div_maps["group_present"]],
-            "effective_groups": up(div_maps["effective_groups"]),
-            "diversity_factor": up(div_maps["diversity_factor"]),
-            "heatmap_after_diversity": up(sprite_div),
-            "final_heatmap_new": final_new,
-            "final_heatmap_old": final_old,
-            "downscale": downscale,
-        }
-
     def top_centers(
         self,
         heatmap: np.ndarray,

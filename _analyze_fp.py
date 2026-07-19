@@ -1,5 +1,4 @@
 """Analyze what separates false-positive blobs from real sprite blobs."""
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -16,7 +15,6 @@ config = load_detector_config()
 
 mspm = float(config['minSpritePaletteMatch'])
 max_pd = float(config['maxSpritePaletteDistance'])
-min_sim = float(config['minSilhouetteSimilarity'])
 
 
 print("=" * 130)
@@ -42,7 +40,6 @@ for suite in MOB_FIXTURE_SUITES:
         if img is None:
             continue
         frame = fixture_search_frame(img)
-        fh, fw = frame.shape[:2]
 
         result = detector.detect(frame, mob_dir)
         accepted_centers = set((c.center_x, c.center_y) for c in result.accepted)
@@ -62,7 +59,7 @@ for suite in MOB_FIXTURE_SUITES:
             binary = (palette_hm >= mspm).astype(np.uint8)
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
             binary = cv2.dilate(binary, kernel, iterations=1)
-            nl, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, 8)
+            nl, _labels, stats, _centroids = cv2.connectedComponentsWithStats(binary, 8)
 
             ref_cx = bw // 2
             ref_cy = bh // 2
@@ -84,13 +81,7 @@ for suite in MOB_FIXTURE_SUITES:
             pal_above = int(np.sum(palette_hm >= mspm))
             pal_frac = pal_above / max(blob_area, 1)
 
-            passes_sil = (
-                score >= config['minCenterHeat']
-                and detector._passes_silhouette_gate(frame, desc, (bx, by, bw, bh), comp_bbox=comp_bbox)
-            )
-
             _, best_bbox, sim_raw = detector.score_at(frame, desc, cx, cy)
-            sil_accepted = best_bbox is not None and sim_raw >= min_sim
 
             dim_min_ratio = min(bw / desc.avg_width, bh / desc.avg_height)
 
