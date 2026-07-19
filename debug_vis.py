@@ -15,10 +15,15 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from pybot.mobs.catalog import ensure_mob_assets
 from pybot.paths import PROJECT_ROOT
 from pybot.recognition.detector.descriptors.descriptor import (
     ColorCluster,
     MobDescriptor,
+)
+from pybot.recognition.detector.descriptors.layout_utils import (
+    HARD_OCCUPANCY,
+    _soft_membership,
 )
 from pybot.recognition.detector.detector import (
     DetectionResult,
@@ -58,9 +63,9 @@ def _silhouette_panel_height(
 ) -> int:
     ref_size = _ref_sil_size(ref_count)
     cand_size = _candidate_sil_size(check_count)
-    # Header + gate floors line, then refs, then two label lines per blob.
+    # Header + gate floors line, then refs, then labels + ref|cand pair per blob.
     refs_h = 48 + ref_count * (20 + ref_size + 8) + 4
-    rows_h = check_count * (34 + cand_size + 8)
+    rows_h = check_count * (34 + cand_size + 18)
     return max(min_height, refs_h + rows_h + 20)
 
 
@@ -102,29 +107,52 @@ def annotate_heatmap_pane(pane_heat: np.ndarray, result: DetectionResult) -> Non
     )
 
 
-def render_silhouette_grid(
-    mask_avg: list[float],
-    mask_stable: list[bool],
-    size: int,
-) -> np.ndarray:
-    avg = np.array(mask_avg).reshape(16, 16)
-    stable = np.array(mask_stable).reshape(16, 16)
+def gate_ref_occupancy(mask_avg: list[float], mask_stable: list[bool]) -> np.ndarray:
+    """Exact soft occupancy the detector gate uses for a descriptor ref."""
+    avg = np.asarray(mask_avg, dtype=np.float32).reshape(16, 16)
+    stable = np.asarray(mask_stable, dtype=bool).reshape(16, 16)
+    ref_hard = ((avg >= HARD_OCCUPANCY) & stable).astype(np.float32)
+    return _soft_membership(ref_hard, radius=1.0)
+
+
+def gate_candidate_occupancy(candidate_mask: list[float]) -> np.ndarray:
+    """Exact soft occupancy the detector gate uses for a candidate crop."""
+    cand = np.asarray(candidate_mask, dtype=np.float32).reshape(16, 16)
+    return _soft_membership(cand, radius=1.0)
+
+
+def render_occupancy_grid(occupancy: np.ndarray, size: int) -> np.ndarray:
+    """Render a 16×16 gate occupancy field (hard cores + soft halo)."""
+    occ = np.clip(np.asarray(occupancy, dtype=np.float32).reshape(16, 16), 0.0, 1.0)
     canvas = np.zeros((size, size, 3), dtype=np.uint8)
     cell = size // 16
     for y in range(16):
         for x in range(16):
-            if stable[y, x]:
-                val = int(np.clip(avg[y, x] * 255, 0, 255))
-                color = (val, val, val) if val > 40 else (0, 0, 0)
+            val = float(occ[y, x])
+            if val >= HARD_OCCUPANCY:
+                tone = int(np.clip(val * 255, 0, 255))
+                color = (tone, tone, tone)
+            elif val > 0.01:
+                # Soft halo — cyan-tinted so it is distinct from hard cores.
+                tone = int(np.clip(val * 200, 0, 200))
+                color = (tone, tone // 2, 40)
             else:
-                v = int(np.clip(avg[y, x] * 80, 0, 80))
-                color = (v, v, v)
+                color = (0, 0, 0)
             cy, cx = y * cell, x * cell
             canvas[cy:cy + cell, cx:cx + cell] = color
     for i in range(17):
         cv2.line(canvas, (i * cell, 0), (i * cell, size), (60, 60, 60), 1)
         cv2.line(canvas, (0, i * cell), (size, i * cell), (60, 60, 60), 1)
     return canvas
+
+
+def render_silhouette_grid(
+    mask_avg: list[float],
+    mask_stable: list[bool],
+    size: int,
+) -> np.ndarray:
+    """Render a descriptor ref the same way the production silhouette gate sees it."""
+    return render_occupancy_grid(gate_ref_occupancy(mask_avg, mask_stable), size)
 
 
 def allocate_silhouette_panel(
@@ -148,10 +176,11 @@ def allocate_silhouette_panel(
     )
     cv2.putText(
         panel,
-        f"gate: rec>={min_recall:.2f}  prec>={min_precision:.2f}",
+        f"gate: rec>={min_recall:.2f}  prec>={min_precision:.2f}  "
+        f"(prod occupancy)",
         (10, 42),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.4,
+        0.38,
         (180, 200, 220),
         1,
     )
@@ -206,9 +235,41 @@ def allocate_silhouette_panel(
             y_offset += 24
             continue
 
-        cand_img = render_silhouette_grid(
-            check.candidate_mask, [True] * 256, cand_size,
+        cand_img = render_occupancy_grid(
+            gate_candidate_occupancy(check.candidate_mask), cand_size,
         )
+        # Matched prod ref beside candidate for a same-space comparison.
+        if 0 <= check.matched_mask_index < len(gate_masks):
+            matched = gate_masks[check.matched_mask_index]
+            ref_img = render_silhouette_grid(
+                matched.avg_mask, matched.stable_mask, cand_size,
+            )
+            gap = 8
+            pair_w = cand_size * 2 + gap
+            if 10 + pair_w <= panel_width:
+                panel[y_offset:y_offset + cand_size, 10:10 + cand_size] = ref_img
+                panel[
+                    y_offset:y_offset + cand_size,
+                    10 + cand_size + gap:10 + cand_size + gap + cand_size,
+                ] = cand_img
+                cv2.putText(
+                    panel, "ref", (10, y_offset + cand_size + 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.32, (160, 160, 160), 1,
+                )
+                cv2.putText(
+                    panel, "cand", (10 + cand_size + gap, y_offset + cand_size + 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.32, (160, 160, 160), 1,
+                )
+                cv2.rectangle(
+                    panel,
+                    (10 + cand_size + gap, y_offset),
+                    (10 + cand_size + gap + cand_size - 1, y_offset + cand_size - 1),
+                    border_color,
+                    3,
+                )
+                y_offset += cand_size + 18
+                continue
+
         cv2.rectangle(cand_img, (0, 0), (cand_size - 1, cand_size - 1), border_color, 3)
         panel[y_offset:y_offset + cand_size, 10:10 + cand_size] = cand_img
         y_offset += cand_size + 8
@@ -365,11 +426,22 @@ def _text_block(lines: list[str], width: int = 420, line_h: int = 18) -> np.ndar
     return canvas
 
 
-def render_descriptor_info(descriptor: MobDescriptor, config: dict) -> np.ndarray:
+def render_descriptor_info(
+    descriptor: MobDescriptor,
+    config: dict,
+    *,
+    descriptor_file: Path | None = None,
+) -> np.ndarray:
     sil_scale = float(config["silhouettePaletteDistanceScale"])
     runtime_sil = float(descriptor.max_silhouette_palette_distance) * sil_scale
+    desc_path = (
+        str(descriptor_file.relative_to(PROJECT_ROOT))
+        if descriptor_file is not None
+        else "(in-memory)"
+    )
     header = _text_block([
-        f"{descriptor.mob_name}  v{descriptor.version}",
+        f"{descriptor.mob_name}  v{descriptor.version}  PROD descriptor",
+        desc_path,
         f"size avg={descriptor.avg_width}x{descriptor.avg_height}",
         (
             f"matchPalette={len(descriptor.match_palette_bgr)}  "
@@ -387,6 +459,7 @@ def render_descriptor_info(descriptor: MobDescriptor, config: dict) -> np.ndarra
             f"prec>={float(config['minSilhouettePrecision']):.2f}  "
             f"(build uniqueIoU={float(config['minSilhouetteSimilarity']):.2f})"
         ),
+        "SIL render = prod gate occupancy (hard+stable core, cyan=soft halo)",
     ], width=720)
 
     sections: list[tuple[str, np.ndarray]] = [
@@ -465,6 +538,9 @@ def write_pipeline_structure(path: Path) -> None:
 
 def main() -> None:
     config = load_detector_config()
+    # Same auto-build path as the production app before detection.
+    print("Ensuring prod descriptors (ensure_mob_assets)...")
+    ensure_mob_assets()
     detector = MobDetector(PROJECT_ROOT, config)
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -492,12 +568,16 @@ def main() -> None:
 
         mob_dir = OUT_DIR / mob_name
         mob_dir.mkdir(parents=True, exist_ok=True)
+        desc_file = detector.descriptor_path(mob_name)
         cv2.imwrite(
             str(mob_dir / "descriptor.png"),
-            render_descriptor_info(descriptor, config),
+            render_descriptor_info(descriptor, config, descriptor_file=desc_file),
         )
         descriptor_count += 1
-        print(f"  {mob_name:15s} wrote descriptor.png")
+        print(
+            f"  {mob_name:15s} wrote descriptor.png  "
+            f"({desc_file.relative_to(PROJECT_ROOT)} v{descriptor.version})"
+        )
 
         for image in suite.images():
             frame = cv2.imread(str(image.path))

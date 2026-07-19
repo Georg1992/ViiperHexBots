@@ -27,7 +27,7 @@ from pybot.recognition.detector.descriptors.palette_groups import (
     split_palette_groups_by_required,
 )
 
-DESCRIPTOR_VERSION = 29
+DESCRIPTOR_VERSION = 32
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -883,12 +883,14 @@ class DescriptorBuilder:
           snapped to 4/6/8 — covers wing-beat variety (creamies).
         - Plus 0/2/4 if jump-row facing averages differ from stand/walk by more
           than half the gate margin — covers distinct jump postures (thara).
-        Refs themselves are the farthest-first most unique coherent frames
-        (multi-body ACT frames are excluded so dual sprites cannot become refs).
+        Refs are farthest-first among coherent single-body frames (multi-body
+        ACT frames and non-trivial detached islands are excluded).
         """
         if not frame_masks:
             raise RuntimeError("no frame silhouette masks to select gate refs from")
-        coherent = [mask for mask in frame_masks if self._is_coherent_gate_silhouette(mask)]
+        coherent = [
+            mask for mask in frame_masks if self._is_coherent_gate_silhouette(mask)
+        ]
         if len(coherent) < MIN_GATE_SILHOUETTE_MASKS:
             raise RuntimeError(
                 f"need at least {MIN_GATE_SILHOUETTE_MASKS} coherent living "
@@ -902,7 +904,7 @@ class DescriptorBuilder:
 
     @staticmethod
     def _is_coherent_gate_silhouette(mask: SilhouetteMask) -> bool:
-        """Reject silhouettes with a second hard body (tiny speckles allowed)."""
+        """Reject silhouettes with a second hard body (1–2px speckles allowed)."""
         avg = np.asarray(mask.avg_mask, dtype=np.float32).reshape(
             mask.height, mask.width,
         )
@@ -918,7 +920,7 @@ class DescriptorBuilder:
             (int(stats[label, cv2.CC_STAT_AREA]) for label in range(1, label_count)),
             reverse=True,
         )
-        return areas[1] < max(3, int(0.15 * areas[0]))
+        return areas[1] <= 2
 
     def _gate_ref_count(
         self,
