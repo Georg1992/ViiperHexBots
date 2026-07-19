@@ -361,7 +361,7 @@ class MobDetector:
 
         palette_heat = sprite_palette_heatmap(
             search_region, descriptor.match_palette_bgr,
-            float(self.config["maxSpritePaletteDistance"]),
+            float(descriptor.max_sprite_palette_distance),
         )
         binary = (palette_heat >= float(self.config["minSpritePaletteMatch"])).astype(np.uint8)
         if not np.any(binary):
@@ -421,7 +421,7 @@ class MobDetector:
                 interpolation=cv2.INTER_NEAREST,
             ).astype(bool)
 
-        silhouette_distance = float(self.config["maxSilhouettePaletteDistance"])
+        silhouette_distance = float(descriptor.max_silhouette_palette_distance)
         candidate = candidate_silhouette(
             mob_region,
             np.asarray(descriptor.match_palette_bgr, dtype=np.float32),
@@ -473,7 +473,7 @@ class MobDetector:
         pal = np.asarray(descriptor.match_palette_bgr, dtype=np.float32)
         cand = candidate_silhouette(
             region, pal,
-            float(self.config["maxSilhouettePaletteDistance"]),
+            float(descriptor.max_silhouette_palette_distance),
             gate_mask.width, gate_mask.height,
         )
         sim, _, _ = best_silhouette_similarity(cand, refs)

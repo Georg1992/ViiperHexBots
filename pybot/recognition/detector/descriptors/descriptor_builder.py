@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import cv2
@@ -22,9 +23,10 @@ from pybot.recognition.detector.descriptors.layout_utils import (
 )
 from pybot.recognition.detector.descriptors.palette_groups import (
     cluster_match_palette_groups,
+    split_palette_groups_by_required,
 )
 
-DESCRIPTOR_VERSION = 19
+DESCRIPTOR_VERSION = 24
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -33,8 +35,11 @@ STAND_WALK_ACTION_COUNT = 8
 JUMP_ACTION_COUNT = 8
 LIVING_FACING_ACTION_LIMIT = STAND_WALK_ACTION_COUNT + JUMP_ACTION_COUNT
 LIVING_ACTION_SIZE_TOLERANCE = 0.40  # ±40% area vs stand/walk baseline
-MATCH_PALETTE_MAX_COLORS = 30
-MATCH_PALETTE_MAX_ACCENT_COLORS = 4
+MATCH_PALETTE_MAX_COLORS = 32
+MATCH_PALETTE_MAX_ACCENT_COLORS = 8
+# Palette shades present in at least this fraction of opaque frames are
+# "required" for diversity; rarer intermittents (eyes) stay optional.
+MIN_PALETTE_REQUIRED_FRAME_FRACTION = 0.75
 PALETTE_DEDUP_H_THRESH = 12.0
 PALETTE_DEDUP_SV_THRESH = 25.0
 PALETTE_NEAR_BLACK_MAX_VALUE = 20.0
@@ -198,7 +203,21 @@ class DescriptorBuilder:
         if not profile_accent_colors:
             raise RuntimeError(f"no distinctive accent colors for {mob_name}")
         match_palette_bgr, match_palette_weights = self._match_palette(all_facing_frames)
+        match_palette_required = self._palette_required_flags(
+            all_facing_frames, match_palette_bgr,
+        )
         match_palette_groups = cluster_match_palette_groups(match_palette_bgr)
+        match_palette_required_groups, match_palette_optional_groups = (
+            split_palette_groups_by_required(
+                match_palette_groups, match_palette_required,
+            )
+        )
+        max_sprite_palette_distance, max_silhouette_palette_distance = (
+            self._estimate_palette_distances(
+                all_facing_frames,
+                match_palette_bgr,
+            )
+        )
         dominant_pixels_bgr, accent_pixels_bgr = self._collect_structural_pixels(
             spr_file,
             act_file,
@@ -222,7 +241,12 @@ class DescriptorBuilder:
             accent_colors=profile_accent_colors,
             match_palette_bgr=match_palette_bgr,
             match_palette_weights=match_palette_weights,
+            match_palette_required=match_palette_required,
             match_palette_groups=match_palette_groups,
+            match_palette_required_groups=match_palette_required_groups,
+            match_palette_optional_groups=match_palette_optional_groups,
+            max_sprite_palette_distance=max_sprite_palette_distance,
+            max_silhouette_palette_distance=max_silhouette_palette_distance,
             dominant_pixels_bgr=dominant_pixels_bgr,
             accent_pixels_bgr=accent_pixels_bgr,
             silhouette_masks=silhouette_masks,
@@ -373,7 +397,8 @@ class DescriptorBuilder:
         """Build match palette from unique sprite fill colors plus accents and shades.
 
         Structural colors are ranked by opaque pixel mass with hue/sat/val shade dedup.
-        Up to MATCH_PALETTE_MAX_ACCENT_COLORS accent-region colors are appended,
+        Up to MATCH_PALETTE_MAX_ACCENT_COLORS accent-region colors are reserved and
+        appended (so huge sprites do not fill the whole cap with structural only),
         then remaining slots are filled with the next-most-frequent shade variants.
         Each entry carries a weight proportional to opaque sprite pixel mass.
         """
@@ -401,11 +426,13 @@ class DescriptorBuilder:
                 raw_weights.append(mass_by_color.get(bgr, 1.0))
                 palette_set.add(bgr)
 
+        # Leave room for accents; otherwise structural fills the whole 32-cap.
+        structural_limit = max(0, MATCH_PALETTE_MAX_COLORS - MATCH_PALETTE_MAX_ACCENT_COLORS)
         structural = [
             tuple(int(v) for v in sorted_unique[local_idx])
             for local_idx in dedup_local
         ]
-        append_weighted(structural, limit=MATCH_PALETTE_MAX_COLORS)
+        append_weighted(structural, limit=structural_limit)
 
         accent_budget = min(
             MATCH_PALETTE_MAX_ACCENT_COLORS,
@@ -429,6 +456,132 @@ class DescriptorBuilder:
         peak = max(raw_weights)
         weights = [weight / peak for weight in raw_weights]
         return palette, weights
+
+    @staticmethod
+    def _palette_required_flags(
+        frames: list[np.ndarray],
+        palette: list[tuple[int, int, int]],
+    ) -> list[bool]:
+        """True when a palette shade is present in most opaque sprite frames.
+
+        Presence uses hue/sat/val near-match (same thresholds as shade dedup), not
+        exact BGR — animation shifts exact values. Colors that only appear in some
+        facings/frames (eyes, blinks) stay optional for diversity.
+        """
+        if not palette:
+            return []
+        frame_hsv: list[np.ndarray] = []
+        for bgra in frames:
+            opaque = bgra[:, :, 3] >= 128
+            if not np.any(opaque):
+                continue
+            unique = np.unique(bgra[:, :, :3][opaque], axis=0)
+            frame_hsv.append(_bgr_hue_sat_val(unique.astype(np.uint8)))
+        if not frame_hsv:
+            return [True] * len(palette)
+
+        palette_arr = np.asarray([list(c) for c in palette], dtype=np.uint8)
+        palette_hsv = _bgr_hue_sat_val(palette_arr)
+        n_frames = float(len(frame_hsv))
+        min_hits = n_frames * MIN_PALETTE_REQUIRED_FRAME_FRACTION
+        flags: list[bool] = []
+        for ph in palette_hsv:
+            hits = 0
+            for fh in frame_hsv:
+                h_diff = np.minimum(
+                    np.abs(fh[:, 0] - ph[0]),
+                    180.0 - np.abs(fh[:, 0] - ph[0]),
+                )
+                s_diff = np.abs(fh[:, 1] - ph[1])
+                v_diff = np.abs(fh[:, 2] - ph[2])
+                near = (
+                    (h_diff <= PALETTE_DEDUP_H_THRESH)
+                    & (s_diff <= PALETTE_DEDUP_SV_THRESH)
+                    & (v_diff <= PALETTE_DEDUP_SV_THRESH)
+                )
+                if np.any(near):
+                    hits += 1
+            flags.append(float(hits) >= min_hits)
+        return flags
+
+    def _detector_distance_priors(self) -> tuple[float, float]:
+        """Floor / soft-match from detector_config (single source of truth)."""
+        config_path = (
+            Path(__file__).resolve().parent.parent / "detector_config.json"
+        )
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        base = float(config["maxSpritePaletteDistance"])
+        soft_match = float(config["minSpritePaletteMatch"])
+        if base <= 0.0:
+            raise ValueError("maxSpritePaletteDistance must be positive")
+        if not 0.0 <= soft_match < 1.0:
+            raise ValueError("minSpritePaletteMatch must be in [0, 1)")
+        return base, soft_match
+
+    def _estimate_palette_distances(
+        self,
+        frames: list[np.ndarray],
+        palette: list[tuple[int, int, int]],
+    ) -> tuple[float, float]:
+        """Derive match radii from palette intra-shade quantization.
+
+        SPR often has more unique BGR values than the 32-cap keeps. Colors dropped
+        as HSV-near duplicates of a kept entry still need a BGR match radius equal
+        to their distance to the palette. Residual is the mass-weighted mean of
+        those drops that are at least as common as the rarest kept palette color
+        (rarer drops do not drive the radius).
+
+        Soft heatmap needs radius R / (1 - minSpritePaletteMatch) so a pixel at
+        residual R still clears the match floor. Floor at config
+        maxSpritePaletteDistance. Silhouette uses the same radius.
+        """
+        base, soft_match = self._detector_distance_priors()
+        if not palette:
+            return base, base
+
+        palette_arr = np.asarray(palette, dtype=np.float32)
+        palette_set = set(palette)
+        palette_hsv = _bgr_hue_sat_val(palette_arr.astype(np.uint8))
+        sorted_unique, counts, _accent = self._collect_palette_pixel_data(frames)
+        mass_by_color = {
+            tuple(int(v) for v in color): float(count)
+            for color, count in zip(sorted_unique, counts)
+        }
+        kept_masses = [mass_by_color.get(color, 0.0) for color in palette]
+        min_kept_mass = min(kept_masses) if kept_masses else 0.0
+
+        shade_mass = 0.0
+        shade_dist_mass = 0.0
+        for color, count in zip(sorted_unique, counts):
+            key = tuple(int(v) for v in color)
+            mass = float(count)
+            if key in palette_set or self._is_scene_matching_speck(key):
+                continue
+            if mass < min_kept_mass:
+                continue
+            sample_hsv = _bgr_hue_sat_val(np.asarray([key], dtype=np.uint8))[0]
+            h_diff = np.minimum(
+                np.abs(palette_hsv[:, 0] - sample_hsv[0]),
+                180.0 - np.abs(palette_hsv[:, 0] - sample_hsv[0]),
+            )
+            near_shade = (
+                (h_diff <= PALETTE_DEDUP_H_THRESH)
+                & (np.abs(palette_hsv[:, 1] - sample_hsv[1]) <= PALETTE_DEDUP_SV_THRESH)
+                & (np.abs(palette_hsv[:, 2] - sample_hsv[2]) <= PALETTE_DEDUP_SV_THRESH)
+            )
+            if not np.any(near_shade):
+                continue
+            dist = float(
+                np.sqrt(
+                    ((palette_arr - np.asarray(key, dtype=np.float32)) ** 2).sum(axis=1)
+                ).min()
+            )
+            shade_mass += mass
+            shade_dist_mass += mass * dist
+
+        residual = (shade_dist_mass / shade_mass) if shade_mass > 0.0 else 0.0
+        sprite_d = max(base, residual / (1.0 - soft_match))
+        return float(sprite_d), float(sprite_d)
 
     def _collect_structural_pixels(
         self,

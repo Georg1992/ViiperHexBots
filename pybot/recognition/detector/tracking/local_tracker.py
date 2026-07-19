@@ -169,7 +169,7 @@ def _finalize_track_hit(
         created_tick=created_tick,
         now_tick=now_tick,
     ):
-        max_dist = float(detector.config["maxSpritePaletteDistance"])
+        max_dist = float(descriptor.max_sprite_palette_distance)
         min_match = float(detector.config["minSpritePaletteMatch"])
         opacity_score = measure_opacity_score(
             frame_bgr, descriptor, bbox, max_dist, min_match,
@@ -294,7 +294,7 @@ def _build_local_follow_heatmap(
 ) -> np.ndarray:
     sprite = sprite_palette_heatmap(
         crop_bgr, descriptor.match_palette_bgr,
-        heatmap_detector.max_sprite_palette_distance,
+        descriptor.max_sprite_palette_distance,
     )
     body = palette_heatmap(crop_bgr, descriptor.body_palette)
     accent = palette_heatmap(crop_bgr, descriptor.accent_colors)

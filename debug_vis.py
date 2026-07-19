@@ -365,6 +365,10 @@ def render_descriptor_info(descriptor: MobDescriptor) -> np.ndarray:
             f"accent={len(descriptor.accent_colors)}  "
             f"silMasks={len(descriptor.silhouette_masks)}"
         ),
+        (
+            f"spriteDist={descriptor.max_sprite_palette_distance:.1f}  "
+            f"silDist={descriptor.max_silhouette_palette_distance:.1f}"
+        ),
     ], width=720)
 
     sections: list[tuple[str, np.ndarray]] = [
@@ -373,11 +377,18 @@ def render_descriptor_info(descriptor: MobDescriptor) -> np.ndarray:
             list(descriptor.match_palette_weights),
         )),
         (
-            f"PALETTE GROUPS ({len(descriptor.match_palette_groups)})",
+            f"REQUIRED GROUPS ({len(descriptor.match_palette_required_groups)})",
             _text_block([
                 f"g{i}: {group}"
-                for i, group in enumerate(descriptor.match_palette_groups)
-            ], width=720),
+                for i, group in enumerate(descriptor.match_palette_required_groups)
+            ] or ["(none)"], width=720),
+        ),
+        (
+            f"OPTIONAL GROUPS ({len(descriptor.match_palette_optional_groups)})",
+            _text_block([
+                f"g{i}: {group}"
+                for i, group in enumerate(descriptor.match_palette_optional_groups)
+            ] or ["(none)"], width=720),
         ),
         ("DOMINANT", _cluster_swatch_row([descriptor.dominant_color])),
         ("SUPPORTING", _cluster_swatch_row(descriptor.supporting_colors)),

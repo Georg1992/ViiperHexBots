@@ -1,6 +1,6 @@
 {
   "maxSpritePaletteDistance": 20.0,
-  "maxSilhouettePaletteDistance": 26.0,
+  "maxSilhouettePaletteDistance": 24.0,
   "minSpritePaletteMatch": 0.22,
   "minSilhouetteSimilarity": 0.50,
   "discoveryHeatmapDownscale": 2,

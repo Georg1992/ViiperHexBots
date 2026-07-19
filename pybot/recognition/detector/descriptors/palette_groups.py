@@ -65,3 +65,26 @@ def cluster_match_palette_groups(
     groups = [sorted(g) for g in groups]
     groups.sort(key=lambda g: g[0])
     return groups
+
+
+def split_palette_groups_by_required(
+    groups: list[list[int]],
+    color_required: list[bool],
+) -> tuple[list[list[int]], list[list[int]]]:
+    """Split Lab groups into required vs optional-only.
+
+    A group is required when it contains at least one frame-stable palette color.
+    Optional-only groups (eyes / intermittents) boost heat when present but do
+    not raise the diversity bar when absent.
+    """
+    required: list[list[int]] = []
+    optional: list[list[int]] = []
+    for group in groups:
+        if any(
+            idx < len(color_required) and color_required[idx]
+            for idx in group
+        ):
+            required.append(list(group))
+        else:
+            optional.append(list(group))
+    return required, optional

@@ -144,22 +144,35 @@ def weighted_sprite_palette_heatmap(
     return base_sprite
 
 
+# Optional Lab groups (eyes / intermittents) never raise the diversity bar,
+# but their local presence multiplies heat up to this extra gain.
+_OPTIONAL_GROUP_BOOST = np.float32(0.35)
+
+
 def apply_palette_diversity(
     base_sprite: np.ndarray,
     similarity_hwc: np.ndarray,
-    palette_groups: list[list[int]],
+    required_groups: list[list[int]],
     *,
+    optional_groups: list[list[int]] | None = None,
     avg_width: float,
     avg_height: float,
     downscale: int = 1,
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """Soft local multi-family coverage factor (never hard-rejects).
 
+    ``required_groups`` set the diversity bar (missing them lowers heat).
+    ``optional_groups`` (frame-intermittent colors) do not lower heat when
+    absent, but still multiply heat when present.
+
     Returns ``(sprite_with_diversity, debug_maps)``.
     """
     h, w = base_sprite.shape[:2]
-    n_groups = len(palette_groups)
-    if n_groups == 0 or similarity_hwc.size == 0:
+    optional_groups = optional_groups or []
+    if (
+        (not required_groups and not optional_groups)
+        or similarity_hwc.size == 0
+    ):
         ones = np.ones((h, w), dtype=np.float32)
         return base_sprite.copy(), {
             "group_similarity": [],
@@ -170,46 +183,65 @@ def apply_palette_diversity(
 
     denom = _PRESENCE_SIMILARITY_HIGH - _PRESENCE_SIMILARITY_LOW
     ksize = _coverage_window(avg_width, avg_height, downscale)
-    required_groups = float(n_groups)
 
     group_similarity: list[np.ndarray] = []
     group_present: list[np.ndarray] = []
-    effective = np.zeros((h, w), dtype=np.float32)
+    required_effective = np.zeros((h, w), dtype=np.float32)
+    optional_effective = np.zeros((h, w), dtype=np.float32)
 
-    for indices in palette_groups:
-        idx = np.asarray(indices, dtype=np.int32)
-        g_sim = similarity_hwc[:, :, idx].max(axis=2).astype(np.float32)
-        group_similarity.append(g_sim)
+    def _accumulate(groups: list[list[int]], into: np.ndarray) -> int:
+        count = 0
+        for indices in groups:
+            idx = np.asarray(indices, dtype=np.int32)
+            g_sim = similarity_hwc[:, :, idx].max(axis=2).astype(np.float32)
+            group_similarity.append(g_sim)
+            matched = np.clip(
+                (g_sim - _PRESENCE_SIMILARITY_LOW) / denom,
+                0.0,
+                1.0,
+            ).astype(np.float32)
+            local_presence = cv2.boxFilter(
+                matched, ddepth=-1, ksize=ksize, normalize=True,
+            )
+            present = np.clip(
+                local_presence / _MIN_GROUP_AREA_FRACTION, 0.0, 1.0,
+            ).astype(np.float32)
+            group_present.append(present)
+            into += present
+            count += 1
+        return count
 
-        matched = np.clip(
-            (g_sim - _PRESENCE_SIMILARITY_LOW) / denom,
+    n_required = _accumulate(required_groups, required_effective)
+    n_optional = _accumulate(optional_groups, optional_effective)
+
+    if n_required <= 0:
+        diversity_factor = np.ones((h, w), dtype=np.float32)
+    else:
+        diversity = np.clip(
+            (required_effective - np.float32(1.0))
+            / np.float32(max(n_required - 1.0, 1.0)),
             0.0,
             1.0,
         ).astype(np.float32)
-        local_presence = cv2.boxFilter(
-            matched, ddepth=-1, ksize=ksize, normalize=True,
-        )
-        present = np.clip(
-            local_presence / _MIN_GROUP_AREA_FRACTION, 0.0, 1.0,
+        np.power(diversity, _DIVERSITY_POWER, out=diversity)
+        diversity_factor = (
+            _DIVERSITY_FLOOR + (np.float32(1.0) - _DIVERSITY_FLOOR) * diversity
         ).astype(np.float32)
-        group_present.append(present)
-        effective += present
 
-    diversity = np.clip(
-        (effective - np.float32(1.0)) / np.float32(max(required_groups - 1.0, 1.0)),
-        0.0,
-        1.0,
-    ).astype(np.float32)
-    np.power(diversity, _DIVERSITY_POWER, out=diversity)
-    diversity_factor = (
-        _DIVERSITY_FLOOR + (np.float32(1.0) - _DIVERSITY_FLOOR) * diversity
-    ).astype(np.float32)
+    if n_optional > 0:
+        optional_presence = (
+            optional_effective / np.float32(n_optional)
+        ).astype(np.float32)
+        diversity_factor = (
+            diversity_factor
+            * (np.float32(1.0) + _OPTIONAL_GROUP_BOOST * optional_presence)
+        ).astype(np.float32)
 
     sprite = (base_sprite * diversity_factor).astype(np.float32)
     return sprite, {
         "group_similarity": group_similarity,
         "group_present": group_present,
-        "effective_groups": effective,
+        "effective_groups": required_effective + optional_effective,
         "diversity_factor": diversity_factor,
     }
 
@@ -325,13 +357,14 @@ class HeatmapDetector:
             base_sprite, similarity = weighted_sprite_palette_heatmap(
                 work_bgr,
                 descriptor,
-                self.max_sprite_palette_distance,
+                descriptor.max_sprite_palette_distance,
                 return_similarity=True,
             )
             sprite, _div_maps = apply_palette_diversity(
                 base_sprite,
                 similarity,
-                descriptor.match_palette_groups,
+                descriptor.match_palette_required_groups,
+                optional_groups=descriptor.match_palette_optional_groups,
                 avg_width=descriptor.size.avg_width,
                 avg_height=descriptor.size.avg_height,
                 downscale=downscale,
@@ -340,7 +373,7 @@ class HeatmapDetector:
             sprite = weighted_sprite_palette_heatmap(
                 work_bgr,
                 descriptor,
-                self.max_sprite_palette_distance,
+                descriptor.max_sprite_palette_distance,
             )
 
         # --- 2. Edge-density boost ---
