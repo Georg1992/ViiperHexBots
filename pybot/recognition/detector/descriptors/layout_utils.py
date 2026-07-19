@@ -5,6 +5,12 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+# Occupancy at/above this is a hard cell (same cutoff as soft-membership cores).
+HARD_OCCUPANCY = 0.5
+# Soft Tversky FP weight for hard cells outside the soft ref:
+# 1× soft-Jaccard mass + the gap below full occupancy at the hard cutoff.
+SILHOUETTE_HARD_FP_WEIGHT = 1.0 + HARD_OCCUPANCY
+
 
 def frame_silhouette(alpha: np.ndarray, width: int, height: int) -> np.ndarray:
     if alpha.size == 0:
@@ -45,13 +51,13 @@ def candidate_silhouette(
 
 
 def _soft_membership(occupancy: np.ndarray, *, radius: float = 1.0) -> np.ndarray:
-    """Occupancy in [0, 1], with a 1-cell soft halo around hard (``>= 0.5``) cores.
+    """Occupancy in [0, 1], with a 1-cell soft halo around hard cores.
 
     Interior hard cells stay 1. Soft-gray keeps its value. Background cells
     within ``radius`` of a hard core fall off as ``1 - dist/radius``.
     """
     occ = np.clip(np.asarray(occupancy, dtype=np.float32), 0.0, 1.0)
-    hard = (occ >= np.float32(0.5)).astype(np.uint8)
+    hard = (occ >= np.float32(HARD_OCCUPANCY)).astype(np.uint8)
     if not np.any(hard):
         return occ
     # distanceTransform: zeros stay 0; nonzeros = distance to nearest zero.
@@ -65,33 +71,43 @@ def _soft_membership(occupancy: np.ndarray, *, radius: float = 1.0) -> np.ndarra
 
 
 def silhouette_similarity(candidate: np.ndarray, reference: np.ndarray, stable_mask: np.ndarray) -> float:
-    """Soft Jaccard (IoU) of reference and candidate occupancy.
+    """Soft Tversky similarity of reference and candidate occupancy.
 
     .. math::
 
-        J(A,B) = \\frac{\\sum_i \\min(A_i, B_i)}{\\sum_i \\max(A_i, B_i)}
+        T = \\frac{\\sum_i \\min(A_i, B_i)}
+                  {\\sum_i \\min(A_i, B_i)
+                   + w \\sum_i \\max(H_i - A_i, 0)
+                   + \\sum_i \\max(A_i - B_i, 0)}
 
     ``A`` is the stable reference (hard cells + 1-cell soft halo).
     ``B`` is the candidate (soft-gray kept, hard cores + same 1-cell halo).
-    Identical shapes score 1. Extra mass outside the ref grows the union
-    and lowers ``J`` — no separate weights or shape multipliers.
+    ``H`` is hard candidate occupancy (``>= HARD_OCCUPANCY``) — soft-gray
+    outside the ref is not charged as false mass; solid fill-in is.
+    ``w = SILHOUETTE_HARD_FP_WEIGHT`` so hard extras cost more than holes.
+
+    Scores are absolute-grid (no per-ref translation search): independently
+    maximizing shift per facing flattens wrong-pose scores into the true match.
+    One-cell soft halo already absorbs small framing jitter.
     """
     if reference.size == 0 or not np.any(stable_mask):
         return 1.0
 
     shape = reference.shape
     stable = stable_mask.reshape(shape)
-    ref_hard = ((reference >= 0.5) & stable).astype(np.float32)
+    ref_hard = ((reference >= HARD_OCCUPANCY) & stable).astype(np.float32)
     cand_raw = np.asarray(candidate, dtype=np.float32).reshape(shape)
 
     ref = _soft_membership(ref_hard, radius=1.0)
     cand = _soft_membership(cand_raw, radius=1.0)
-
     inter = float(np.sum(np.minimum(ref, cand)))
-    union = float(np.sum(np.maximum(ref, cand)))
-    if union <= 0.0:
+    hard = (cand_raw >= HARD_OCCUPANCY).astype(np.float32)
+    false_pos = float(np.sum(np.maximum(hard - ref, 0.0)))
+    false_neg = float(np.sum(np.maximum(ref - cand, 0.0)))
+    denom = inter + SILHOUETTE_HARD_FP_WEIGHT * false_pos + false_neg
+    if denom <= 0.0:
         return 0.0
-    return float(np.clip(inter / union, 0.0, 1.0))
+    return float(np.clip(inter / denom, 0.0, 1.0))
 
 
 def best_silhouette_similarity(

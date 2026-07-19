@@ -84,6 +84,7 @@ class SilhouetteSimilarityTests(unittest.TestCase):
         self.assertGreater(soft_score, empty_score)
 
     def test_one_cell_shift_still_scores_high(self) -> None:
+        """Soft halo absorbs one-cell framing jitter without a shift search."""
         reference = np.zeros((16, 16), dtype=np.float32)
         reference[5:11, 4:10] = 1.0
         stable_mask = reference >= 0.5
@@ -91,7 +92,26 @@ class SilhouetteSimilarityTests(unittest.TestCase):
         shifted[5:11, 5:11] = 1.0  # +1 x
 
         score = silhouette_similarity(shifted, reference, stable_mask)
-        self.assertGreaterEqual(score, 0.70)
+        self.assertGreaterEqual(score, 0.65)
+
+    def test_wrong_facing_stays_well_below_true_match(self) -> None:
+        """Per-ref scores must stay discriminative — no flat ~0.5 band."""
+        matching = np.zeros((16, 16), dtype=np.float32)
+        matching[4:12, 5:12] = 1.0
+        matching[12:15, 6] = 1.0
+        matching[12:15, 8] = 1.0
+        matching[12:15, 10] = 1.0
+        other = np.zeros((16, 16), dtype=np.float32)
+        other[4:12, 3:10] = 1.0
+        other[12:15, 3] = 1.0
+        other[12:15, 5] = 1.0
+        other[12:15, 7] = 1.0
+
+        candidate = matching.copy()
+        match_score = silhouette_similarity(candidate, matching, matching >= 0.5)
+        other_score = silhouette_similarity(candidate, other, other >= 0.5)
+        self.assertGreaterEqual(match_score, 0.99)
+        self.assertLess(other_score, match_score - 0.15)
 
     def test_sparse_match_beats_viewport_fill_and_thin_remnant(self) -> None:
         reference = np.zeros((16, 16), dtype=np.float32)
@@ -122,7 +142,7 @@ class SilhouetteSimilarityTests(unittest.TestCase):
         self.assertGreater(sparse_score, hole_score)
 
     def test_scattered_extras_score_below_threshold(self) -> None:
-        """Noise outside the ref must pull soft Jaccard under 0.5."""
+        """Hard noise outside the ref must pull soft Tversky under 0.5."""
         reference = np.zeros((16, 16), dtype=np.float32)
         reference[6:10, 6:10] = 1.0
         stable_mask = reference >= 0.5
@@ -137,6 +157,23 @@ class SilhouetteSimilarityTests(unittest.TestCase):
         perfect = silhouette_similarity(reference, reference, stable_mask)
         self.assertLess(score, 0.50)
         self.assertLess(score, perfect)
+
+    def test_solid_disk_fill_scores_below_threshold(self) -> None:
+        """Poring-like solid fill must fail against a shaped ref."""
+        reference = np.zeros((16, 16), dtype=np.float32)
+        # Thin body + wings — not a fat blob the disk can smother.
+        reference[5:12, 7:9] = 1.0
+        reference[6:10, 3:7] = 1.0
+        reference[6:10, 9:13] = 1.0
+        reference[12:15, 7:9] = 1.0
+        stable_mask = reference >= 0.5
+
+        disk = np.zeros((16, 16), dtype=np.float32)
+        yy, xx = np.ogrid[:16, :16]
+        disk[(yy - 7.5) ** 2 + (xx - 7.5) ** 2 <= 6.5 ** 2] = 1.0
+
+        score = silhouette_similarity(disk, reference, stable_mask)
+        self.assertLess(score, 0.50)
 
 
 if __name__ == "__main__":
