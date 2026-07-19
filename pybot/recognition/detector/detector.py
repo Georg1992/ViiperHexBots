@@ -33,7 +33,6 @@ REQUIRED_CONFIG_KEYS = {
     "maxSilhouettePaletteDistance",
     "silhouettePaletteDistanceScale",
     "minSpritePaletteMatch",
-    "minSilhouetteSimilarity",
     "minSilhouetteRecall",
     "minSilhouettePrecision",
     "topCandidateCenters",
@@ -94,10 +93,10 @@ class SilhouetteCheck:
     center_x: int
     center_y: int
     heat_score: float
-    bbox: tuple[int, int, int, int]
-    comp_bbox: tuple[int, int, int, int]
     passed: bool
     similarity: float
+    precision: float = 0.0
+    recall: float = 0.0
     candidate_mask: list[float] | None = None
     matched_mask_index: int = 0
     mask_similarities: list[float] | None = None
@@ -208,33 +207,37 @@ class MobDetector:
         candidates: list[DetectionCandidate] = []
         silhouette_checks: list[SilhouetteCheck] = []
 
-        filter_end = blobs_end  # no pre-silhouette filtering
-
         for cx, cy, heat_score, comp_bbox in blobs:
             bx, by, bw, bh = comp_bbox
             bbox = (bx, by, bw, bh)
 
-            passed, similarity, candidate, matched_idx, scores, extract_bbox = (
-                self._evaluate_silhouette_gate(
-                    frame_bgr,
-                    descriptor,
-                    bbox,
-                    comp_bbox=comp_bbox,
-                )
+            (
+                passed,
+                similarity,
+                candidate,
+                matched_idx,
+                scores,
+                extract_bbox,
+                precision,
+                recall,
+            ) = self._evaluate_silhouette_gate(
+                frame_bgr,
+                descriptor,
+                bbox,
+                comp_bbox=comp_bbox,
             )
             candidate_mask = (
                 candidate.reshape(-1).tolist() if candidate is not None else None
             )
             # Drawn/accept box = heat CC bbox (a35ef47 tight blob box).
-            drawn_bbox = bbox
             silhouette_checks.append(SilhouetteCheck(
                 center_x=cx,
                 center_y=cy,
                 heat_score=heat_score,
-                bbox=drawn_bbox,
-                comp_bbox=comp_bbox,
                 passed=passed,
                 similarity=similarity,
+                precision=precision,
+                recall=recall,
                 candidate_mask=candidate_mask,
                 matched_mask_index=matched_idx,
                 mask_similarities=scores,
@@ -246,7 +249,7 @@ class MobDetector:
             candidates.append(DetectionCandidate(
                 mob_name=descriptor.mob_name,
                 center_x=cx, center_y=cy,
-                bbox=drawn_bbox,
+                bbox=bbox,
                 final_score=heat_score,
                 heatmap_score=heat_score,
                 accepted=True,
@@ -261,8 +264,7 @@ class MobDetector:
             "descriptor": heatmap_start - start,
             "spriteHeatmap": heatmap_end - heatmap_start,
             "blobCenters": blobs_end - heatmap_end,
-            "blobFilters": filter_end - blobs_end,
-            "silhouetteGate": gate_end - filter_end,
+            "silhouetteGate": gate_end - blobs_end,
             "total": elapsed,
         }
 
@@ -297,19 +299,6 @@ class MobDetector:
             ))
         return refs
 
-    def _passes_silhouette_gate(
-        self,
-        frame_bgr: np.ndarray,
-        descriptor: MobDescriptor,
-        bbox: tuple[int, int, int, int],
-        *,
-        comp_bbox: tuple[int, int, int, int] | None = None,
-    ) -> bool:
-        passed, _, _, _, _, _ = self._evaluate_silhouette_gate(
-            frame_bgr, descriptor, bbox, comp_bbox=comp_bbox,
-        )
-        return passed
-
     def _evaluate_silhouette_gate(
         self,
         frame_bgr: np.ndarray,
@@ -317,15 +306,26 @@ class MobDetector:
         bbox: tuple[int, int, int, int],
         *,
         comp_bbox: tuple[int, int, int, int] | None = None,
-    ) -> tuple[bool, float, np.ndarray | None, int, list[float], tuple[int, int, int, int] | None]:
+    ) -> tuple[
+        bool,
+        float,
+        np.ndarray | None,
+        int,
+        list[float],
+        tuple[int, int, int, int] | None,
+        float,
+        float,
+    ]:
         """Silhouette gate matching a35ef47 crop style.
 
         Search around the heat CC (not sprite-inflated). Crop the overlapping
         palette CC tightly, then resize that crop to descriptor size.
+        Returns (passed, jaccard, candidate, matched_idx, scores, extract_bbox,
+        precision, recall).
         """
         refs = self._descriptor_silhouette_references(descriptor)
         if not refs or not descriptor.match_palette_bgr:
-            return True, 1.0, None, 0, [], None
+            return False, 0.0, None, 0, [], None, 0.0, 0.0
         gate_mask = descriptor.silhouette_masks[0]
         x, y, w, h = bbox
         desc_w = max(8, int(round(descriptor.avg_width)))
@@ -357,7 +357,7 @@ class MobDetector:
 
         search_region = frame_bgr[search_y : search_y + search_h, search_x : search_x + search_w]
         if search_region.size == 0:
-            return False, 0.0, None, 0, [], None
+            return False, 0.0, None, 0, [], None, 0.0, 0.0
 
         local_bbox_left = ref_cx - ref_w // 2 - search_x
         local_bbox_top = ref_cy - ref_h // 2 - search_y
@@ -368,14 +368,14 @@ class MobDetector:
         )
         binary = (palette_heat >= float(self.config["minSpritePaletteMatch"])).astype(np.uint8)
         if not np.any(binary):
-            return False, 0.0, None, 0, [], None
+            return False, 0.0, None, 0, [], None, 0.0, 0.0
 
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         binary = cv2.dilate(binary, kernel, iterations=1)
 
         _nl, labels, stats, _centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
         if _nl <= 1:
-            return False, 0.0, None, 0, [], None
+            return False, 0.0, None, 0, [], None, 0.0, 0.0
 
         best_overlap = 0
         best_label = 0
@@ -395,14 +395,14 @@ class MobDetector:
                     best_label = lbl
 
         if best_label == 0:
-            return False, 0.0, None, 0, [], None
+            return False, 0.0, None, 0, [], None, 0.0, 0.0
 
         comp_left = int(stats[best_label, cv2.CC_STAT_LEFT])
         comp_top = int(stats[best_label, cv2.CC_STAT_TOP])
         comp_w = int(stats[best_label, cv2.CC_STAT_WIDTH])
         comp_h = int(stats[best_label, cv2.CC_STAT_HEIGHT])
         if comp_w < 4 or comp_h < 4:
-            return False, 0.0, None, 0, [], None
+            return False, 0.0, None, 0, [], None, 0.0, 0.0
 
         # Tight palette-CC crop (a35ef47) — no expand to sprite size.
         extract_bbox = (
@@ -414,7 +414,7 @@ class MobDetector:
         comp_mask = labels[comp_top : comp_top + comp_h, comp_left : comp_left + comp_w] == best_label
         mob_region = search_region[comp_top : comp_top + comp_h, comp_left : comp_left + comp_w]
         if mob_region.size == 0 or not np.any(comp_mask):
-            return False, 0.0, None, 0, [], extract_bbox
+            return False, 0.0, None, 0, [], extract_bbox, 0.0, 0.0
 
         if mob_region.shape[1] != desc_w or mob_region.shape[0] != desc_h:
             mob_region = cv2.resize(mob_region, (desc_w, desc_h), interpolation=cv2.INTER_LINEAR)
@@ -442,9 +442,16 @@ class MobDetector:
             recall >= float(self.config["minSilhouetteRecall"])
             and precision >= float(self.config["minSilhouettePrecision"])
         )
-        if not passed:
-            return False, float(similarity), candidate, matched_idx, scores, extract_bbox
-        return True, float(similarity), candidate, matched_idx, scores, extract_bbox
+        return (
+            passed,
+            float(similarity),
+            candidate,
+            matched_idx,
+            scores,
+            extract_bbox,
+            float(precision),
+            float(recall),
+        )
 
     # ------------------------------------------------------------------
     #  Per-point scoring  (kept for local_tracker — silhouette-based)
@@ -474,7 +481,7 @@ class MobDetector:
 
         refs = self._descriptor_silhouette_references(descriptor)
         if not refs or not descriptor.match_palette_bgr:
-            return True, bbox, 1.0
+            return False, None, 0.0
 
         gate_mask = descriptor.silhouette_masks[0]
         region = frame_bgr[y: y + h, x: x + w]

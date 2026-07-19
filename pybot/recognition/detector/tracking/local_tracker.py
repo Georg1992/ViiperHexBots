@@ -90,7 +90,7 @@ def track_local(
             return _miss_result(
                 track_id=track_id,
                 x=screen_cx, y=screen_cy,
-                reason="no_peak" if not center_hit else sim < 0.5 and "below_threshold" or "unknown",
+                reason="no_peak",
                 confidence=sim,
                 opacity_baseline=opacity_baseline,
                 opacity_baseline_samples=opacity_baseline_samples,

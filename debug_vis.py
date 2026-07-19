@@ -58,8 +58,9 @@ def _silhouette_panel_height(
 ) -> int:
     ref_size = _ref_sil_size(ref_count)
     cand_size = _candidate_sil_size(check_count)
-    refs_h = 10 + ref_count * (20 + ref_size + 8) + 4
-    rows_h = check_count * (18 + cand_size + 8)
+    # Header + gate floors line, then refs, then two label lines per blob.
+    refs_h = 48 + ref_count * (20 + ref_size + 8) + 4
+    rows_h = check_count * (34 + cand_size + 8)
     return max(min_height, refs_h + rows_h + 20)
 
 
@@ -126,29 +127,14 @@ def render_silhouette_grid(
     return canvas
 
 
-def _candidate_pixels_outside_ref(
-    check: SilhouetteCheck,
-    descriptor: MobDescriptor,
-) -> int | None:
-    if check.candidate_mask is None:
-        return None
-    gate_masks = descriptor.silhouette_masks
-    if check.matched_mask_index >= len(gate_masks):
-        return None
-    mask = gate_masks[check.matched_mask_index]
-    cand = np.array(check.candidate_mask, dtype=np.float32).reshape(16, 16)
-    ref = np.array(mask.avg_mask, dtype=np.float32).reshape(16, 16)
-    stable = np.array(mask.stable_mask, dtype=bool).reshape(16, 16)
-    ref_bin = (ref >= 0.5) & stable
-    cand_bin = cand >= 0.5
-    return int(np.sum(cand_bin & ~ref_bin))
-
-
 def allocate_silhouette_panel(
     descriptor: MobDescriptor,
     silhouette_checks: list[SilhouetteCheck],
     panel_width: int,
     panel_height: int,
+    *,
+    min_recall: float,
+    min_precision: float,
 ) -> np.ndarray:
     gate_masks = descriptor.silhouette_masks
     check_count = len(silhouette_checks)
@@ -156,15 +142,29 @@ def allocate_silhouette_panel(
     panel = np.zeros((panel_height, panel_width, 3), dtype=np.uint8)
     panel[:] = (20, 20, 20)
 
+    cv2.putText(
+        panel, "SILHOUETTES", (10, 22),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 2,
+    )
+    cv2.putText(
+        panel,
+        f"gate: rec>={min_recall:.2f}  prec>={min_precision:.2f}",
+        (10, 42),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.4,
+        (180, 200, 220),
+        1,
+    )
+
     if not any(mask.stable_mask and any(mask.stable_mask) for mask in gate_masks):
-        cv2.putText(panel, "NO SILHOUETTE", (10, 30),
+        cv2.putText(panel, "NO SILHOUETTE", (10, 70),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 100), 1)
         return panel
 
     ref_size = _ref_sil_size(len(gate_masks))
     cand_size = _candidate_sil_size(check_count)
 
-    y_offset = 10
+    y_offset = 52
     for mask_idx, mask in enumerate(gate_masks):
         cv2.putText(
             panel, f"REF {mask_idx}", (10, y_offset + 12),
@@ -179,19 +179,26 @@ def allocate_silhouette_panel(
     for idx, check in enumerate(silhouette_checks):
         border_color = (0, 200, 0) if check.passed else (0, 0, 200)
         status = "PASS" if check.passed else "FAIL"
-        ref_tag = f"ref={check.matched_mask_index}"
+        rec_ok = check.recall >= min_recall
+        prec_ok = check.precision >= min_precision
+        rec_mark = "+" if rec_ok else "-"
+        prec_mark = "+" if prec_ok else "-"
+        line1 = (
+            f"BLB{idx}: heat={check.heat_score:.3f}  jac={check.similarity:.2f}  "
+            f"{status}  ref={check.matched_mask_index}"
+        )
+        line2 = (
+            f"  rec={check.recall:.2f}{rec_mark}/{min_recall:.2f}  "
+            f"prec={check.precision:.2f}{prec_mark}/{min_precision:.2f}"
+        )
         if check.mask_similarities:
             score_bits = "/".join(f"{score:.2f}" for score in check.mask_similarities)
-            ref_tag = f"{ref_tag} [{score_bits}]"
-        extra_px = _candidate_pixels_outside_ref(check, descriptor)
-        extra_tag = f"  out={extra_px}" if extra_px is not None else ""
-        label = (
-            f"BLB{idx}: {check.heat_score:.3f}  sim={check.similarity:.2f}  "
-            f"{status}  {ref_tag}{extra_tag}"
-        )
-        cv2.putText(panel, label, (10, y_offset + 12),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, border_color, 1)
-        y_offset += 18
+            line2 = f"{line2}  [{score_bits}]"
+        cv2.putText(panel, line1, (10, y_offset + 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, border_color, 1)
+        cv2.putText(panel, line2, (10, y_offset + 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.36, border_color, 1)
+        y_offset += 34
 
         if check.candidate_mask is None:
             cv2.putText(panel, "(no candidate)", (10, y_offset + 12),
@@ -211,8 +218,7 @@ def allocate_silhouette_panel(
 
 def format_timing_ms(timing: dict[str, float]) -> str:
     order = (
-        "descriptor", "spriteHeatmap", "blobCenters",
-        "blobFilters", "silhouetteGate",
+        "descriptor", "spriteHeatmap", "blobCenters", "silhouetteGate",
     )
     parts = [f"{key}={timing[key] * 1000:.0f}ms" for key in order if key in timing]
     total_ms = timing.get("total", 0.0) * 1000
@@ -224,7 +230,6 @@ def draw_timing_overlay(pane: np.ndarray, timing: dict[str, float], y0: int = 10
         ("spriteHeatmap", (0, 200, 255)),
         ("silhouetteGate", (0, 220, 0)),
         ("blobCenters", (255, 180, 0)),
-        ("blobFilters", (180, 180, 180)),
         ("descriptor", (80, 80, 80)),
     )
     total = max(timing.get("total", 0.0), 1e-9)
@@ -300,7 +305,12 @@ def draw_detection_overlay(frame: np.ndarray, result: DetectionResult) -> np.nda
         "green=accepted  cyan=sil-pass  orange=sil-fail  box=sil-crop",
         (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1,
     )
-    draw_timing_overlay(overlay, result.timing, y0=75)
+    cv2.putText(
+        overlay,
+        "sil gate: recall AND precision (see right panel)",
+        (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 200, 220), 1,
+    )
+    draw_timing_overlay(overlay, result.timing, y0=92)
     return overlay
 
 
@@ -355,7 +365,9 @@ def _text_block(lines: list[str], width: int = 420, line_h: int = 18) -> np.ndar
     return canvas
 
 
-def render_descriptor_info(descriptor: MobDescriptor) -> np.ndarray:
+def render_descriptor_info(descriptor: MobDescriptor, config: dict) -> np.ndarray:
+    sil_scale = float(config["silhouettePaletteDistanceScale"])
+    runtime_sil = float(descriptor.max_silhouette_palette_distance) * sil_scale
     header = _text_block([
         f"{descriptor.mob_name}  v{descriptor.version}",
         f"size avg={descriptor.avg_width}x{descriptor.avg_height}",
@@ -367,7 +379,13 @@ def render_descriptor_info(descriptor: MobDescriptor) -> np.ndarray:
         ),
         (
             f"spriteDist={descriptor.max_sprite_palette_distance:.1f}  "
-            f"silDist={descriptor.max_silhouette_palette_distance:.1f}"
+            f"silDist={descriptor.max_silhouette_palette_distance:.1f}  "
+            f"runtimeSil={runtime_sil:.1f} (x{sil_scale:.2f})"
+        ),
+        (
+            f"sil gate: rec>={float(config['minSilhouetteRecall']):.2f}  "
+            f"prec>={float(config['minSilhouettePrecision']):.2f}  "
+            f"(build uniqueIoU={float(config['minSilhouetteSimilarity']):.2f})"
         ),
     ], width=720)
 
@@ -474,7 +492,10 @@ def main() -> None:
 
         mob_dir = OUT_DIR / mob_name
         mob_dir.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(mob_dir / "descriptor.png"), render_descriptor_info(descriptor))
+        cv2.imwrite(
+            str(mob_dir / "descriptor.png"),
+            render_descriptor_info(descriptor, config),
+        )
         descriptor_count += 1
         print(f"  {mob_name:15s} wrote descriptor.png")
 
@@ -492,11 +513,11 @@ def main() -> None:
             pane_sil = allocate_silhouette_panel(
                 result.descriptor,
                 result.silhouette_checks,
-                350,
+                420,
                 frame.shape[0],
+                min_recall=float(config["minSilhouetteRecall"]),
+                min_precision=float(config["minSilhouettePrecision"]),
             )
-            cv2.putText(pane_sil, "SILHOUETTES", (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 2)
 
             combined_height = max(
                 pane_heat.shape[0], pane_overlay.shape[0], pane_sil.shape[0],
@@ -532,7 +553,7 @@ def main() -> None:
         print(f"\nAverage discovery timing over {timing_runs} frames:")
         order = (
             "descriptor", "spriteHeatmap", "blobCenters",
-            "blobFilters", "silhouetteGate", "total",
+            "silhouetteGate", "total",
         )
         avg_total = timing_totals.get("total", 0.0) / timing_runs
         for key in order:

@@ -143,11 +143,3 @@ def best_silhouette_match(
             best_recall = recall
     return float(best_sim), best_idx, scores, float(best_precision), float(best_recall)
 
-
-def best_silhouette_similarity(
-    candidate: np.ndarray,
-    references: list[tuple[np.ndarray, np.ndarray]],
-) -> tuple[float, int, list[float]]:
-    """Score candidate against multiple refs; return best score, index, and all scores."""
-    best_sim, best_idx, scores, _precision, _recall = best_silhouette_match(candidate, references)
-    return best_sim, best_idx, scores
