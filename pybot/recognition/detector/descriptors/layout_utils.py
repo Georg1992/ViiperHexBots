@@ -47,10 +47,9 @@ def candidate_silhouette(
 def silhouette_similarity(candidate: np.ndarray, reference: np.ndarray, stable_mask: np.ndarray) -> float:
     """Asymmetric overlap score on the 16×16 silhouette grid.
 
-    Candidate pixels outside the reference silhouette are penalized more heavily
-    than reference pixels the candidate misses. Sparse extraction in low-contrast
-    scenes therefore still passes at the 0.50 gate, while viewport-filling blobs
-    cannot inflate their score by covering unrelated cells.
+    Misses on stable reference structure are weighted at 0.8× hits. Extra
+    candidate mass outside the reference is still penalized more heavily (1.5×)
+    so viewport-filling blobs cannot inflate their score.
     """
     if reference.size == 0 or not np.any(stable_mask):
         return 1.0
@@ -63,7 +62,7 @@ def silhouette_similarity(candidate: np.ndarray, reference: np.ndarray, stable_m
         return 0.0
     miss = float(np.sum(ref_bin * (1.0 - cand_bin)))
     extra = float(np.sum((1.0 - ref_bin) * cand_bin))
-    miss_weight = 0.5
+    miss_weight = 0.8
     extra_weight = 1.5
     denom = intersection + miss_weight * miss + extra_weight * extra
     return float(np.clip(intersection / denom, 0.0, 1.0))

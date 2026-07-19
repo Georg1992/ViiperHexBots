@@ -13,14 +13,16 @@ from pybot.recognition.detector.descriptors.descriptor import ColorCluster, MobD
 
 _EDGE_BLUR_KSIZE = (7, 7)
 
-# Soft local palette-diversity (optional via usePaletteDiversity).
-# Accents are sparse vs the coverage window, so minGroupAreaFraction stays low.
+# Local palette-diversity: mono-family → 0 heat; full heat only when
+# every Lab group is present in the coverage window.
 _PRESENCE_SIMILARITY_LOW = np.float32(0.35)
 _PRESENCE_SIMILARITY_HIGH = np.float32(0.75)
 _MIN_GROUP_AREA_FRACTION = np.float32(0.01)
-_DIVERSITY_FLOOR = np.float32(0.08)
+_DIVERSITY_FLOOR = np.float32(0.0)
+_DIVERSITY_POWER = np.float32(2.0)
 _COVERAGE_SIZE_FRAC = 0.6
-_REQUIRED_GROUPS_CAP = 2.0
+# Near-duplicate blob suppress radius as a fraction of min(sprite w, h).
+_BLOB_DEDUP_SIZE_FRAC = 0.85
 
 
 def _cluster_match(bgr_f: np.ndarray, cluster: ColorCluster) -> np.ndarray:
@@ -168,7 +170,7 @@ def apply_palette_diversity(
 
     denom = _PRESENCE_SIMILARITY_HIGH - _PRESENCE_SIMILARITY_LOW
     ksize = _coverage_window(avg_width, avg_height, downscale)
-    required_groups = min(_REQUIRED_GROUPS_CAP, float(n_groups))
+    required_groups = float(n_groups)
 
     group_similarity: list[np.ndarray] = []
     group_present: list[np.ndarray] = []
@@ -198,6 +200,7 @@ def apply_palette_diversity(
         0.0,
         1.0,
     ).astype(np.float32)
+    np.power(diversity, _DIVERSITY_POWER, out=diversity)
     diversity_factor = (
         _DIVERSITY_FLOOR + (np.float32(1.0) - _DIVERSITY_FLOOR) * diversity
     ).astype(np.float32)
@@ -235,14 +238,23 @@ def _nearest_upscale(heatmap: np.ndarray, scale: int, out_h: int, out_w: int) ->
     return upscaled[:out_h, :out_w].astype(np.float32)
 
 
-def _local_peak_boost(heatmap: np.ndarray, factor: float = 1.08) -> np.ndarray:
-    """Boost local maxima only — leaves broad background plateaus unchanged."""
-    kernel = np.ones((3, 3), np.uint8)
-    local_max = cv2.dilate(heatmap, kernel)
-    peak_mask = heatmap >= local_max - np.float32(1e-6)
-    boosted = heatmap.copy()
-    boosted[peak_mask] *= np.float32(factor)
-    return np.maximum(boosted, np.float32(0.0)).astype(np.float32)
+def _dedup_blobs_by_sprite_size(
+    blobs: list[tuple[int, int, float, tuple[int, int, int, int]]],
+    avg_width: int,
+    avg_height: int,
+) -> list[tuple[int, int, float, tuple[int, int, int, int]]]:
+    """Keep strongest peak when centers fall within ~sprite size of each other."""
+    min_dist = max(1.0, min(avg_width, avg_height) * _BLOB_DEDUP_SIZE_FRAC)
+    min_dist_sq = min_dist * min_dist
+    kept: list[tuple[int, int, float, tuple[int, int, int, int]]] = []
+    for blob in sorted(blobs, key=lambda item: item[2], reverse=True):
+        cx, cy, _score, _bbox = blob
+        if all(
+            (cx - kx) * (cx - kx) + (cy - ky) * (cy - ky) >= min_dist_sq
+            for kx, ky, _ks, _kb in kept
+        ):
+            kept.append(blob)
+    return kept
 
 
 class HeatmapDetector:
@@ -292,7 +304,6 @@ class HeatmapDetector:
         final = cv2.GaussianBlur(sprite, (w, h), 0)
 
         if downscale > 1:
-            final = _local_peak_boost(final)
             final = _nearest_upscale(final, downscale, frame_shape[0], frame_shape[1])
         return final
 
@@ -334,7 +345,7 @@ class HeatmapDetector:
 
         # --- 2. Edge-density boost ---
         # --- 3. GaussianBlur ---
-        # --- 4. Upscale + local peak boost ---
+        # --- 4. Upscale ---
         return self._finish_heatmap(sprite, work_bgr, descriptor, downscale, frame_shape)
 
     def palette_diversity_debug(
@@ -387,11 +398,19 @@ class HeatmapDetector:
         }
 
     def top_centers(
-        self, heatmap: np.ndarray,
+        self,
+        heatmap: np.ndarray,
+        descriptor: MobDescriptor,
     ) -> list[tuple[int, int, float, tuple[int, int, int, int]]]:
-        """Find distinct hot regions via connected components, no merge."""
+        """Find distinct hot regions via connected components.
+
+        Near-duplicate peaks within ~0.85× min(sprite dims) are suppressed.
+        """
         if heatmap.size == 0:
             return []
+
+        avg_width = int(descriptor.avg_width)
+        avg_height = int(descriptor.avg_height)
 
         threshold = max(
             float(heatmap.max()) * self.peak_relative_threshold,
@@ -409,30 +428,36 @@ class HeatmapDetector:
 
         raw: list[tuple[int, int, float, tuple[int, int, int, int]]] = []
         for label in range(1, num_labels):
-            area = stats[label, cv2.CC_STAT_AREA]
-            if area < 12:
+            if stats[label, cv2.CC_STAT_AREA] < 6:
                 continue
+            blob = self._blob_from_mask(heatmap, labels == label)
+            if blob is not None:
+                raw.append(blob)
 
-            mask = labels == label
-            vals = heatmap[mask]
-            peak_score = float(vals.max())
+        kept = _dedup_blobs_by_sprite_size(raw, avg_width, avg_height)
+        return kept[: self.max_centers]
 
-            weights = vals.astype(np.float32)
-            if weights.sum() > 0:
-                ys, xs = np.where(mask)
-                cx = int(np.average(xs, weights=weights))
-                cy = int(np.average(ys, weights=weights))
-            else:
-                r = _centroids[label]
-                cx, cy = int(round(r[0])), int(round(r[1]))
+    def _blob_from_mask(
+        self,
+        heatmap: np.ndarray,
+        mask: np.ndarray,
+    ) -> tuple[int, int, float, tuple[int, int, int, int]] | None:
+        area = int(mask.sum())
+        if area < 6:
+            return None
 
-            comp_bbox = (
-                stats[label, cv2.CC_STAT_LEFT],
-                stats[label, cv2.CC_STAT_TOP],
-                stats[label, cv2.CC_STAT_WIDTH],
-                stats[label, cv2.CC_STAT_HEIGHT],
-            )
-            raw.append((cx, cy, peak_score, comp_bbox))
+        vals = heatmap[mask]
+        peak_score = float(vals.max())
+        weights = vals.astype(np.float32)
+        ys, xs = np.where(mask)
+        if float(weights.sum()) > 0.0:
+            cx = int(np.average(xs, weights=weights))
+            cy = int(np.average(ys, weights=weights))
+        else:
+            cx = int(round(float(xs.mean())))
+            cy = int(round(float(ys.mean())))
 
-        raw.sort(key=lambda item: item[2], reverse=True)
-        return raw[: self.max_centers]
+        x0 = int(xs.min())
+        y0 = int(ys.min())
+        comp_bbox = (x0, y0, int(xs.max()) - x0 + 1, int(ys.max()) - y0 + 1)
+        return (cx, cy, peak_score, comp_bbox)

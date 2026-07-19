@@ -36,7 +36,6 @@ OUT_DIR = Path("_debug_vis")
 
 _SIL_SCALE = 10
 _SIL_SIZE = 16 * _SIL_SCALE
-_SIL_OVERLAY_PX = 40
 _SWATCH = 28
 
 
@@ -64,28 +63,6 @@ def _silhouette_panel_height(
     return max(min_height, refs_h + rows_h + 20)
 
 
-def _paste_image(
-    canvas: np.ndarray,
-    image: np.ndarray,
-    x: int,
-    y: int,
-) -> None:
-    h, w = image.shape[:2]
-    fh, fw = canvas.shape[:2]
-    x1 = max(0, x)
-    y1 = max(0, y)
-    x2 = min(fw, x + w)
-    y2 = min(fh, y + h)
-    if x2 <= x1 or y2 <= y1:
-        return
-    src_x1 = x1 - x
-    src_y1 = y1 - y
-    canvas[y1:y2, x1:x2] = image[
-        src_y1:src_y1 + (y2 - y1),
-        src_x1:src_x1 + (x2 - x1),
-    ]
-
-
 def pad_to_height(image: np.ndarray, height: int) -> np.ndarray:
     if image.shape[0] >= height:
         return image
@@ -94,20 +71,33 @@ def pad_to_height(image: np.ndarray, height: int) -> np.ndarray:
     return np.vstack([image, pad])
 
 
+# Jet full-scale maps to this absolute heat. Same scale every frame so
+# brightness is comparable across fixtures / palette sizes (not /frame-max).
+_HEATMAP_VIZ_ABS_SCALE = 1.0
+
+
 def heatmap_to_color(heatmap: np.ndarray) -> np.ndarray:
-    """Viz-only colorization; detection heatmap is not frame-normalized."""
-    peak = float(heatmap.max()) if heatmap.size else 0.0
-    if peak > 1e-6:
-        vis = (np.clip(heatmap / peak, 0.0, 1.0) * 255).astype(np.uint8)
-    else:
-        vis = np.zeros(heatmap.shape[:2], dtype=np.uint8)
+    """Colorize sprite heatmap on a fixed absolute scale."""
+    vis = (
+        np.clip(heatmap / np.float32(_HEATMAP_VIZ_ABS_SCALE), 0.0, 1.0) * 255
+    ).astype(np.uint8)
     return cv2.applyColorMap(vis, cv2.COLORMAP_JET)
 
 
 def annotate_heatmap_pane(pane_heat: np.ndarray, result: DetectionResult) -> None:
+    peak = float(result.sprite_heatmap.max()) if result.sprite_heatmap.size else 0.0
     cv2.putText(
         pane_heat, "HEATMAP", (10, 25),
         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
+    )
+    cv2.putText(
+        pane_heat,
+        f"abs/{_HEATMAP_VIZ_ABS_SCALE:g}  peak={peak:.3f}",
+        (10, 48),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        (220, 220, 220),
+        1,
     )
 
 
@@ -219,42 +209,10 @@ def allocate_silhouette_panel(
     return panel
 
 
-def draw_extracted_silhouette_on_frame(
-    overlay: np.ndarray,
-    check: SilhouetteCheck,
-    idx: int,
-) -> None:
-    if check.candidate_mask is None:
-        return
-
-    sil_px = _SIL_OVERLAY_PX
-    bx, by, bw, bh = check.bbox
-    border_color = (0, 220, 0) if check.passed else (0, 80, 255)
-
-    mini = render_silhouette_grid(check.candidate_mask, [True] * 256, sil_px)
-    cv2.rectangle(mini, (0, 0), (sil_px - 1, sil_px - 1), border_color, 2)
-
-    fh, fw = overlay.shape[:2]
-    x = bx + bw - sil_px
-    y = by - sil_px - 14
-    if y < 0:
-        y = by + bh + 4
-    if x + sil_px > fw:
-        x = max(0, bx)
-    if y + sil_px > fh:
-        y = max(0, by - sil_px - 14)
-
-    _paste_image(overlay, mini, x, y)
-    cv2.putText(
-        overlay, f"{idx}", (x, max(y - 4, 12)),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.4, border_color, 1,
-    )
-
-
 def format_timing_ms(timing: dict[str, float]) -> str:
     order = (
         "descriptor", "spriteHeatmap", "blobCenters",
-        "blobFilters", "silhouetteGate", "nms",
+        "blobFilters", "silhouetteGate",
     )
     parts = [f"{key}={timing[key] * 1000:.0f}ms" for key in order if key in timing]
     total_ms = timing.get("total", 0.0) * 1000
@@ -268,7 +226,6 @@ def draw_timing_overlay(pane: np.ndarray, timing: dict[str, float], y0: int = 10
         ("blobCenters", (255, 180, 0)),
         ("blobFilters", (180, 180, 180)),
         ("descriptor", (80, 80, 80)),
-        ("nms", (255, 255, 255)),
     )
     total = max(timing.get("total", 0.0), 1e-9)
     bar_max_w = min(280, pane.shape[1] - 20)
@@ -301,10 +258,9 @@ def draw_detection_overlay(frame: np.ndarray, result: DetectionResult) -> np.nda
 
     for idx, check in enumerate(silhouette_checks):
         cx, cy = check.center_x, check.center_y
-        bx, by, bw, bh = check.bbox
-        nms_accepted = check.passed and (cx, cy) in accepted_centers
+        is_accepted = check.passed and (cx, cy) in accepted_centers
 
-        if nms_accepted:
+        if is_accepted:
             color = (0, 220, 0)
             thickness = 3
         elif check.passed:
@@ -314,14 +270,22 @@ def draw_detection_overlay(frame: np.ndarray, result: DetectionResult) -> np.nda
             color = (0, 120, 255)
             thickness = 2
 
+        # Single box = exact palette-CC crop fed into silhouette check.
+        crop = check.extract_bbox
+        if crop is None:
+            continue
+        bx, by, bw, bh = crop
         cv2.rectangle(overlay, (bx, by), (bx + bw, by + bh), color, thickness)
         cv2.circle(overlay, (cx, cy), 5, color, -1)
-        tag = f"{idx}:" + ("ACC" if nms_accepted else ("SIL" if check.passed else "FAIL"))
+        tag = f"{idx}:" + ("ACC" if is_accepted else ("SIL" if check.passed else "FAIL"))
         cv2.putText(
             overlay, tag, (bx, max(by - 6, 12)),
             cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1,
         )
-        draw_extracted_silhouette_on_frame(overlay, check, idx)
+        cv2.putText(
+            overlay, f"{bw}x{bh}", (bx, min(by + bh + 14, overlay.shape[0] - 4)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1,
+        )
 
     n_sil = len(silhouette_checks)
     n_sil_pass = sum(1 for c in silhouette_checks if c.passed)
@@ -333,7 +297,7 @@ def draw_detection_overlay(frame: np.ndarray, result: DetectionResult) -> np.nda
     )
     cv2.putText(
         overlay,
-        "green=accepted  cyan=sil-pass  orange=sil-fail  #=BLB index",
+        "green=accepted  cyan=sil-pass  orange=sil-fail  box=sil-crop",
         (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1,
     )
     draw_timing_overlay(overlay, result.timing, y0=75)
@@ -557,7 +521,7 @@ def main() -> None:
         print(f"\nAverage discovery timing over {timing_runs} frames:")
         order = (
             "descriptor", "spriteHeatmap", "blobCenters",
-            "blobFilters", "silhouetteGate", "nms", "total",
+            "blobFilters", "silhouetteGate", "total",
         )
         avg_total = timing_totals.get("total", 0.0) / timing_runs
         for key in order:

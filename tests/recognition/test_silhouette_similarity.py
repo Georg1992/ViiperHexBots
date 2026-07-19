@@ -67,7 +67,7 @@ class SilhouetteSimilarityTests(unittest.TestCase):
         self.assertLess(float((restricted >= 0.5).sum()), float((unrestricted >= 0.5).sum()))
 
     def test_sparse_match_passes_while_outside_fill_fails_at_half(self) -> None:
-        """Regression: low-contrast legit extraction vs viewport-filling false positive."""
+        """Near-complete subset still clears the gate; viewport fill stays low."""
         reference = np.zeros((16, 16), dtype=np.float32)
         stable_mask = np.zeros((16, 16), dtype=bool)
         reference[3:12, 2:11] = 1.0
@@ -75,18 +75,26 @@ class SilhouetteSimilarityTests(unittest.TestCase):
         reference[6:9, 5:8] = 0.0
         stable_mask[6:9, 5:8] = False
 
+        # Small trim only — massive structure misses must not clear 0.50.
         sparse_candidate = np.zeros((16, 16), dtype=np.float32)
-        sparse_candidate[3:10, 2:9] = 1.0
+        sparse_candidate[3:12, 2:11] = 1.0
+        sparse_candidate[3, 2:11] = 0.0
 
         bloated_candidate = np.zeros((16, 16), dtype=np.float32)
         bloated_candidate[1:14, 1:14] = 1.0
 
+        large_hole = reference.copy()
+        large_hole[3:9, 2:11] = 0.0
+
         sparse_score = silhouette_similarity(sparse_candidate, reference, stable_mask)
         bloated_score = silhouette_similarity(bloated_candidate, reference, stable_mask)
+        hole_score = silhouette_similarity(large_hole, reference, stable_mask)
 
         self.assertGreaterEqual(sparse_score, 0.50)
         self.assertLess(bloated_score, 0.50)
+        self.assertLess(hole_score, 0.50)
         self.assertGreater(sparse_score, bloated_score)
+        self.assertGreater(sparse_score, hole_score)
 
 
 if __name__ == "__main__":

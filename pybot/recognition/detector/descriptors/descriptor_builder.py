@@ -24,7 +24,7 @@ from pybot.recognition.detector.descriptors.palette_groups import (
     cluster_match_palette_groups,
 )
 
-DESCRIPTOR_VERSION = 18
+DESCRIPTOR_VERSION = 19
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -33,7 +33,7 @@ STAND_WALK_ACTION_COUNT = 8
 JUMP_ACTION_COUNT = 8
 LIVING_FACING_ACTION_LIMIT = STAND_WALK_ACTION_COUNT + JUMP_ACTION_COUNT
 LIVING_ACTION_SIZE_TOLERANCE = 0.40  # ±40% area vs stand/walk baseline
-MATCH_PALETTE_MAX_COLORS = 20
+MATCH_PALETTE_MAX_COLORS = 24
 MATCH_PALETTE_MAX_ACCENT_COLORS = 4
 PALETTE_DEDUP_H_THRESH = 12.0
 PALETTE_DEDUP_SV_THRESH = 25.0

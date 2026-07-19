@@ -59,11 +59,6 @@ def _finalize_accepted() -> Callable:
     return MobDetector._finalize_accepted
 
 
-def _nms() -> Callable:
-    from pybot.recognition.detector.detector import MobDetector
-    return MobDetector._nms
-
-
 DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
     PipelineStage(
         title="Descriptor",
@@ -91,7 +86,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             "optional palette diversity",
             "edge-density boost",
             "GaussianBlur",
-            "upscale + local peak boost",
+            "upscale",
         ),
         sources=(
             SourceCheck(
@@ -108,7 +103,6 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                 (
                     "edge_density",
                     "GaussianBlur",
-                    "_local_peak_boost",
                     "_nearest_upscale",
                 ),
             ),
@@ -121,6 +115,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             "connectedComponentsWithStats",
             "peak-weighted centers",
             "component bbox per blob",
+            "dedup nearby peaks by sprite size",
         ),
         sources=(
             SourceCheck(
@@ -129,8 +124,10 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "peak_relative_threshold",
                     "min_center_heat",
                     "connectedComponentsWithStats",
-                    "CC_STAT_LEFT",
-                    "np.average",
+                    "_blob_from_mask",
+                    "_dedup_blobs_by_sprite_size",
+                    "avg_width",
+                    "avg_height",
                 ),
             ),
         ),
@@ -138,10 +135,9 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
     PipelineStage(
         title="Silhouette gate",
         items=(
-            "search around blob / component bbox",
-            "sprite_palette_heatmap on search region",
-            "binary threshold + dilate -> CC component",
-            "resize component to descriptor avg size",
+            "search around heat CC bbox (not sprite-inflated)",
+            "palette binary + dilate(1) -> CC overlapping heat",
+            "tight palette-CC crop resized to descriptor size",
             "candidate_silhouette vs descriptor masks",
             "pass / fail per blob",
         ),
@@ -154,6 +150,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "minSpritePaletteMatch",
                     "dilate",
                     "connectedComponentsWithStats",
+                    "extract_bbox",
                     "candidate_silhouette",
                     "best_silhouette_similarity",
                     "minSilhouetteSimilarity",
@@ -162,15 +159,13 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
         ),
     ),
     PipelineStage(
-        title="NMS / accept",
+        title="Accept",
         items=(
             "sort accepted by heat score",
-            "suppress nearby passes via nmsDistancePx",
             "final accepted set",
         ),
         sources=(
-            SourceCheck(_finalize_accepted, ("accepted.sort", "_nms")),
-            SourceCheck(_nms, ("nmsDistancePx",)),
+            SourceCheck(_finalize_accepted, ("accepted.sort",)),
         ),
     ),
 )
