@@ -32,6 +32,7 @@ REQUIRED_CONFIG_KEYS = {
     "maxSpritePaletteDistance",
     "maxSilhouettePaletteDistance",
     "silhouettePaletteDistanceScale",
+    "silhouetteHorizontalBridgeScale",
     "minSpritePaletteMatch",
     "minSilhouetteRecall",
     "minSilhouettePrecision",
@@ -318,8 +319,9 @@ class MobDetector:
     ]:
         """Silhouette gate matching a35ef47 crop style.
 
-        Search around the heat CC (not sprite-inflated). Crop the overlapping
-        palette CC tightly, then resize that crop to descriptor size.
+        Search around the heat CC (not sprite-inflated). Take the overlapping
+        palette CC, bridge nearby same-row palette fragments horizontally
+        (descriptor-scaled), crop tightly, then resize to descriptor size.
         Returns (passed, jaccard, candidate, matched_idx, scores, extract_bbox,
         precision, recall).
         """
@@ -366,12 +368,12 @@ class MobDetector:
             search_region, descriptor.match_palette_bgr,
             float(descriptor.max_sprite_palette_distance),
         )
-        binary = (palette_heat >= float(self.config["minSpritePaletteMatch"])).astype(np.uint8)
-        if not np.any(binary):
+        binary_raw = (palette_heat >= float(self.config["minSpritePaletteMatch"])).astype(np.uint8)
+        if not np.any(binary_raw):
             return False, 0.0, None, 0, [], None, 0.0, 0.0
 
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        binary = cv2.dilate(binary, kernel, iterations=1)
+        binary = cv2.dilate(binary_raw, kernel, iterations=1)
 
         _nl, labels, stats, _centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
         if _nl <= 1:
@@ -397,22 +399,57 @@ class MobDetector:
         if best_label == 0:
             return False, 0.0, None, 0, [], None, 0.0, 0.0
 
-        comp_left = int(stats[best_label, cv2.CC_STAT_LEFT])
-        comp_top = int(stats[best_label, cv2.CC_STAT_TOP])
-        comp_w = int(stats[best_label, cv2.CC_STAT_WIDTH])
-        comp_h = int(stats[best_label, cv2.CC_STAT_HEIGHT])
+        best_mask = labels == best_label
+        ys, xs = np.where(best_mask)
+        if len(xs) == 0:
+            return False, 0.0, None, 0, [], None, 0.0, 0.0
+        comp_left = int(xs.min())
+        comp_right = int(xs.max()) + 1
+        comp_top = int(ys.min())
+        comp_bottom = int(ys.max()) + 1
+
+        # Horizontally bridge body-height palette fragments that the dilate-CC
+        # missed (patchy wings). Geodesic grow stays inside the closed band so
+        # vertical terrain blobs are not pulled in.
+        bridge_px = max(
+            3,
+            int(round(float(self.config["silhouetteHorizontalBridgeScale"]) * desc_w)),
+        )
+        if bridge_px % 2 == 0:
+            bridge_px += 1
+        band = np.zeros_like(binary_raw)
+        band[comp_top:comp_bottom, :] = binary_raw[comp_top:comp_bottom, :]
+        closed = cv2.morphologyEx(
+            band,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (bridge_px, 1)),
+        )
+        grown = best_mask.astype(np.uint8)
+        grow_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        for _ in range(max(1, bridge_px // 2)):
+            grown = cv2.bitwise_and(cv2.dilate(grown, grow_kernel, iterations=1), closed)
+        occupancy = grown.astype(bool) | best_mask
+
+        ys, xs = np.where(occupancy)
+        if len(xs) == 0:
+            return False, 0.0, None, 0, [], None, 0.0, 0.0
+        comp_left = int(xs.min())
+        comp_right = int(xs.max()) + 1
+        comp_top = int(ys.min())
+        comp_bottom = int(ys.max()) + 1
+        comp_w = comp_right - comp_left
+        comp_h = comp_bottom - comp_top
         if comp_w < 4 or comp_h < 4:
             return False, 0.0, None, 0, [], None, 0.0, 0.0
 
-        # Tight palette-CC crop (a35ef47) — no expand to sprite size.
         extract_bbox = (
             search_x + comp_left,
             search_y + comp_top,
             comp_w,
             comp_h,
         )
-        comp_mask = labels[comp_top : comp_top + comp_h, comp_left : comp_left + comp_w] == best_label
-        mob_region = search_region[comp_top : comp_top + comp_h, comp_left : comp_left + comp_w]
+        comp_mask = occupancy[comp_top:comp_bottom, comp_left:comp_right]
+        mob_region = search_region[comp_top:comp_bottom, comp_left:comp_right]
         if mob_region.size == 0 or not np.any(comp_mask):
             return False, 0.0, None, 0, [], extract_bbox, 0.0, 0.0
 

@@ -2,6 +2,7 @@
   "maxSpritePaletteDistance": 20.0,
   "maxSilhouettePaletteDistance": 24.0,
   "silhouettePaletteDistanceScale": 0.75,
+  "silhouetteHorizontalBridgeScale": 0.20,
   "minSpritePaletteMatch": 0.22,
   "minSilhouetteSimilarity": 0.50,
   "minSilhouetteRecall": 0.45,
