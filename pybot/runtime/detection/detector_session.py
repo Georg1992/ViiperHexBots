@@ -34,6 +34,8 @@ class DiscoveryScanResult:
     detections: list[RawDetection]
     duration_ms: int
     elapsed_s: float
+    # Known-track death hits from the same scan: (track_id, screen_x, screen_y).
+    death_confirmed: list[tuple[int, int, int]] | None = None
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,9 @@ class StateTrackSnapshot:
     attack_count: int = 0
     created_tick: int = 0
     now_tick: int = 0
+    discovery_obs_x: int = 0
+    discovery_obs_y: int = 0
+    discovery_obs_tick: int = 0
 
 
 @dataclass(frozen=True)
@@ -104,10 +109,24 @@ class DetectorSession:
                 detections=[],
                 duration_ms=0,
                 elapsed_s=0.0,
+                death_confirmed=[],
             )
         return self.discover_frame(frame, roi)
 
-    def discover_frame(self, frame: np.ndarray | None, roi: HuntRoi) -> DiscoveryScanResult:
+    def discover_frame(
+        self,
+        frame: np.ndarray | None,
+        roi: HuntRoi,
+        *,
+        known_tracks: list[tuple[int, int, int, float]] | None = None,
+    ) -> DiscoveryScanResult:
+        """Discovery scan: new peaks living-only; known tracks alive+dead gates.
+
+        ``known_tracks`` are ``(track_id, screen_x, screen_y, scale)`` at capture
+        time. Empty on the first scan (living-only). Later scans mark heatmap
+        peaks near those coords and dual-check silhouettes; deaths go to
+        ``death_confirmed`` for the tracker.
+        """
         if frame is None or frame.size == 0:
             return DiscoveryScanResult(
                 ok=False,
@@ -117,10 +136,23 @@ class DetectorSession:
                 detections=[],
                 duration_ms=0,
                 elapsed_s=0.0,
+                death_confirmed=[],
             )
+        frame_known: list[tuple[int, int, int, float]] = [
+            (int(track_id), int(screen_x) - roi.x, int(screen_y) - roi.y, float(scale))
+            for track_id, screen_x, screen_y, scale in (known_tracks or ())
+        ]
+        screen_by_id = {
+            int(track_id): (int(screen_x), int(screen_y))
+            for track_id, screen_x, screen_y, _scale in (known_tracks or ())
+        }
         start = time.perf_counter()
         with self._lock:
-            result = self._detector.detect(frame, self._mob_name)
+            result = self._detector.detect(
+                frame,
+                self._mob_name,
+                known_tracks=frame_known or None,
+            )
         elapsed_s = time.perf_counter() - start
         duration_ms = int(elapsed_s * 1000)
 
@@ -134,6 +166,12 @@ class DetectorSession:
             )
             for candidate in result.accepted
         ]
+        death_confirmed: list[tuple[int, int, int]] = []
+        for track_id, _fx, _fy in result.death_confirmed or ():
+            screen = screen_by_id.get(int(track_id))
+            if screen is None:
+                continue
+            death_confirmed.append((int(track_id), screen[0], screen[1]))
         return DiscoveryScanResult(
             ok=True,
             fail_reason="",
@@ -142,6 +180,7 @@ class DetectorSession:
             detections=accepted,
             duration_ms=duration_ms,
             elapsed_s=elapsed_s,
+            death_confirmed=death_confirmed,
         )
 
     def track_locals(
@@ -206,6 +245,10 @@ class DetectorSession:
                 track["attackCount"] = snapshot.attack_count
                 track["createdTick"] = snapshot.created_tick
                 track["nowTick"] = snapshot.now_tick
+                if snapshot.discovery_obs_tick > 0:
+                    track["discoveryObsX"] = snapshot.discovery_obs_x - roi.x
+                    track["discoveryObsY"] = snapshot.discovery_obs_y - roi.y
+                    track["discoveryObsTick"] = snapshot.discovery_obs_tick
                 results.append(
                     self._detector.track_local(
                         frame,

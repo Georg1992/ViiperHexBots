@@ -1,7 +1,8 @@
 """Discovery reconciliation — create new tracks; list off-screen absences.
 
-Discovery finds NEW mobs. Position updates still belong to tracking
-(LocalTracker); this service never moves existing tracks.
+Discovery finds NEW mobs and publishes soft position priors on match.
+Authoritative position updates still belong to tracking (LocalTracker); this
+service never overwrites existing track ``x``/``y``.
 
 Dedup uses ``existing_positions`` — known-object (x, y) at frame-capture time
 (alive tracks plus recent removal sites). Absence uses
@@ -21,6 +22,7 @@ from pybot.recognition.rules import (
     DiscoveryDetection,
     MobTrack,
     ReconcileSummary,
+    apply_discovery_observation,
     cluster_living_detections,
     detection_matches_existing,
     is_alive,
@@ -68,7 +70,8 @@ class TrackReconciler:
             if existing_track_positions is not None
             else [(t.id, t.x, t.y) for t in tracks if is_alive(t)]
         )
-        unmatched_ids = {track_id for track_id, _x, _y in track_positions}
+        unmatched_ids = {entry[0] for entry in track_positions}
+        tracks_by_id = {t.id: t for t in tracks if is_alive(t)}
 
         # Working set of "known" positions: seeded with frame-time known
         # objects, extended with each track created in this scan so two
@@ -98,6 +101,14 @@ class TrackReconciler:
             if matched_tid is not None:
                 unmatched_ids.discard(matched_tid)
                 matched_count += 1
+                matched_track = tracks_by_id.get(matched_tid)
+                if matched_track is not None:
+                    apply_discovery_observation(
+                        matched_track,
+                        x=detection.x,
+                        y=detection.y,
+                        now_tick=now_tick,
+                    )
                 continue
 
             if detection_matches_existing(
@@ -145,7 +156,8 @@ class TrackReconciler:
         """Nearest unmatched capture-time track within dedup radius, if any."""
         best_id: int | None = None
         best_dist = radius_sq + 1
-        for track_id, px, py in track_positions:
+        for entry in track_positions:
+            track_id, px, py = entry[0], entry[1], entry[2]
             if track_id not in unmatched_ids:
                 continue
             dx = x - px

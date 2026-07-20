@@ -3,11 +3,16 @@
 Used by tests to lock the pipeline contract.
 
 Ownership:
-- **Discovery** creates tracks for new mobs and drops tracks whose capture-time
-  position has no nearby detection on that scan (mob gone from screen). It never
-  updates coordinates on existing tracks.
-- **Tracking** owns position, movement, opacity on visible hits (baseline + death),
-  lost_count, unreachable removal, and death/lost removal for existing tracks.
+- **Discovery** creates tracks for new mobs, marks in-ROI unmatched tracks as
+  ``discovery_absent``, removes outside-ROI unmatched tracks, on match
+  publishes a soft position prior (``discovery_obs_*``), and may set
+  ``discovery_death`` when a death silhouette confirms at track coords.
+  It never overwrites authoritative ``x``/``y`` and never removes on death —
+  tracking owns removal.
+- **Tracking** is the sole writer of authoritative position, movement, opacity
+  death, lost_count, unreachable removal, and death/lost removal. It consumes
+  discovery priors on miss, drops on joint absence, and removes tracks when
+  ``discovery_death`` is set (or opacity confirms).
 - **Attack** records attack_count / last_attack_tick only; it reads position
   snapshots for clicks but must not mutate tracking fields or remove tracks.
 """
@@ -78,6 +83,16 @@ class MobTrack:
     vel_y: float = 0.0
     attack_anchor_x: int = 0
     attack_anchor_y: int = 0
+    # Set by discovery when this track's coords were unmatched on a scan.
+    # Tracking removes the track when it also misses (joint absence).
+    discovery_absent: bool = False
+    # Soft position prior from the latest discovery match (0 tick = none).
+    # Tracking searches/snaps from these coords; authoritative x/y stay tracking-owned.
+    discovery_obs_x: int = 0
+    discovery_obs_y: int = 0
+    discovery_obs_tick: int = 0
+    # Discovery helper: death silhouette confirmed at this track. Tracking removes.
+    discovery_death: bool = False
 
     @classmethod
     def from_discovery(
@@ -222,6 +237,63 @@ def detection_matches_existing(
     return False
 
 
+def has_discovery_observation(track: MobTrack) -> bool:
+    """True when discovery published a soft position prior not yet cleared."""
+    return track.discovery_obs_tick > 0
+
+
+def apply_discovery_observation(
+    track: MobTrack,
+    *,
+    x: int,
+    y: int,
+    now_tick: int,
+) -> None:
+    """Discovery match prior — does not overwrite authoritative track x/y."""
+    track.discovery_obs_x = x
+    track.discovery_obs_y = y
+    track.discovery_obs_tick = now_tick
+    track.last_discovery_tick = now_tick
+    track.discovery_absent = False
+
+
+def note_discovery_death(track: MobTrack) -> None:
+    """Discovery helper signal: death silhouette confirmed; tracking will remove."""
+    track.discovery_death = True
+    track.discovery_absent = False
+    clear_discovery_observation(track)
+
+
+def clear_discovery_observation(track: MobTrack) -> None:
+    track.discovery_obs_x = 0
+    track.discovery_obs_y = 0
+    track.discovery_obs_tick = 0
+
+
+def apply_discovery_reanchor(
+    track: MobTrack,
+    *,
+    now_tick: int,
+) -> bool:
+    """Tracking writer path: snap x/y to discovery prior when drifted from it.
+
+    Returns True when a snap was applied. When already at the prior, returns
+    False so the caller can advance normal miss/lost accounting. Keeps
+    ``discovery_obs_*`` until a real local hit confirms the mob.
+    """
+    if track.x == track.discovery_obs_x and track.y == track.discovery_obs_y:
+        return False
+    track.x = track.discovery_obs_x
+    track.y = track.discovery_obs_y
+    track.updated_tick = now_tick
+    track.lost_count = 0
+    track.moving = False
+    track.vel_x = 0.0
+    track.vel_y = 0.0
+    track.discovery_absent = False
+    return True
+
+
 def apply_track_observation(
     track: MobTrack,
     *,
@@ -241,6 +313,8 @@ def apply_track_observation(
         track.y = y
         track.updated_tick = now_tick
         track.lost_count = 0
+        clear_discovery_observation(track)
+        track.discovery_absent = False
         if confidence > 0:
             track.confidence = confidence
         return

@@ -1,7 +1,11 @@
-"""Click-through overlay that shows parsed Basic Info SP/Weight.
+"""Click-through overlay for Basic Info SP/Weight vision.
 
-Positioned just under the in-game status panel. Hidden from screen capture so
-vision polls do not see the overlay text.
+Two states, same on-screen slot under Basic Info:
+- Panel missing: prompt to open Basic Info
+- Panel found: show current SP / Weight
+
+Stays visible during capture so the UI does not flash. Placement is below
+the panel so the header and digit ROIs stay uncovered.
 """
 
 from __future__ import annotations
@@ -282,39 +286,71 @@ def _show_at(
 
 
 def update(
-    values: StatusPanelValues | None,
+    values: StatusPanelValues,
     *,
     client_left: int,
     client_top: int,
 ) -> None:
-    """Show parsed values under the panel, or the missing-panel prompt."""
-    if values is None:
-        show_panel_missing(client_left=client_left, client_top=client_top)
-        return
-    ox, oy = values.panel_origin
-    _show_at(
-        screen_x=client_left + ox,
-        screen_y=client_top + oy + PANEL_HEIGHT + 2,
+    """Show parsed values under the panel."""
+    _show_under_panel(
+        client_left=client_left,
+        client_top=client_top,
+        panel_origin=values.panel_origin,
         width=PANEL_WIDTH,
         height=VALUES_OVERLAY_H,
         lines=(
             f"SP {values.sp}/{values.sp_max}",
-            f"Weight {values.weight}/{values.weight_max}",
+            f"Weight {_format_weight(values)}",
         ),
         warn=False,
     )
 
 
-def show_panel_missing(*, client_left: int, client_top: int) -> None:
-    """Prompt the user to open Basic Info (top-left of the client)."""
+def show_panel_missing(
+    *,
+    client_left: int,
+    client_top: int,
+    panel_origin: tuple[int, int] = (0, 0),
+) -> None:
+    """Prompt to open Basic Info — same slot as the SP/Weight overlay."""
     height = PAD_Y * 2 + LINE_H * len(PANEL_MISSING_LINES)
-    _show_at(
-        screen_x=client_left + 8,
-        screen_y=client_top + 8,
+    _show_under_panel(
+        client_left=client_left,
+        client_top=client_top,
+        panel_origin=panel_origin,
         width=MESSAGE_OVERLAY_W,
         height=height,
         lines=PANEL_MISSING_LINES,
         warn=True,
+    )
+
+
+def _format_weight(values: StatusPanelValues) -> str:
+    if values.weight is None:
+        return "—"
+    if values.weight_max is not None:
+        return f"{values.weight}/{values.weight_max}"
+    return str(values.weight)
+
+
+def _show_under_panel(
+    *,
+    client_left: int,
+    client_top: int,
+    panel_origin: tuple[int, int],
+    width: int,
+    height: int,
+    lines: tuple[str, ...],
+    warn: bool,
+) -> None:
+    ox, oy = panel_origin
+    _show_at(
+        screen_x=client_left + ox,
+        screen_y=client_top + oy + PANEL_HEIGHT + 2,
+        width=width,
+        height=height,
+        lines=lines,
+        warn=warn,
     )
 
 
@@ -342,12 +378,22 @@ class StatusPanelOverlay:
 
     def update(
         self,
-        values: StatusPanelValues | None,
+        values: StatusPanelValues,
         *,
         client_left: int,
         client_top: int,
     ) -> None:
         update(values, client_left=client_left, client_top=client_top)
 
-    def show_panel_missing(self, *, client_left: int, client_top: int) -> None:
-        show_panel_missing(client_left=client_left, client_top=client_top)
+    def show_panel_missing(
+        self,
+        *,
+        client_left: int,
+        client_top: int,
+        panel_origin: tuple[int, int] = (0, 0),
+    ) -> None:
+        show_panel_missing(
+            client_left=client_left,
+            client_top=client_top,
+            panel_origin=panel_origin,
+        )

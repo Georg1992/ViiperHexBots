@@ -1,9 +1,10 @@
 """Local coordinate follower for already-discovered tracks.
 
-Scores at the predicted center first, searches nearby heatmap peaks when that
-misses, and measures opacity on successful hits. Baseline calibration runs
-while walking; opacity-death confirmation only while stationary. Misses advance
-the lost streak (the store coasts position only when ``moving``).
+Scores at the predicted center first (or a discovery soft prior when present
+and drifted), searches nearby heatmap peaks when that misses, and measures
+opacity only on successful hits. A tracking miss is not opacity decay —
+empty/background windows must not register death. Mild decay confirms only
+while stationary; strong decay can confirm while moving.
 """
 
 from __future__ import annotations
@@ -64,6 +65,10 @@ def track_local(
     moving = bool(track.get("moving", False))
     vel_x = float(track.get("velX", 0.0))
     vel_y = float(track.get("velY", 0.0))
+    discovery_obs_tick = int(track.get("discoveryObsTick", 0))
+    discovery_obs_x = int(track.get("discoveryObsX", 0))
+    discovery_obs_y = int(track.get("discoveryObsY", 0))
+    lost_count = int(track.get("lostCount", 0))
 
     if search_radius_px is not None:
         radius = int(search_radius_px)
@@ -72,9 +77,18 @@ def track_local(
     else:
         radius = int(detector.local_track_search_radius_px)
 
-    # Search one step ahead of a walker; store position still coasts only on miss.
-    search_x = int(round(cx + vel_x)) if moving else cx
-    search_y = int(round(cy + vel_y)) if moving else cy
+    # Prefer a discovery soft prior when local follow is missing or drifted.
+    # Store position still coasts only on miss when no prior is available.
+    predicted_x = int(round(cx + vel_x)) if moving else cx
+    predicted_y = int(round(cy + vel_y)) if moving else cy
+    search_x, search_y = predicted_x, predicted_y
+    if discovery_obs_tick > 0:
+        dedup_radius = int(detector.config["trackDedupRadiusPx"])
+        drift_sq = (cx - discovery_obs_x) ** 2 + (cy - discovery_obs_y) ** 2
+        half_dedup_sq = (dedup_radius // 2) ** 2
+        if lost_count > 0 or drift_sq > half_dedup_sq:
+            search_x = discovery_obs_x
+            search_y = discovery_obs_y
 
     descriptor = detector.ensure_descriptor(mob_name)
 
@@ -96,7 +110,8 @@ def track_local(
         if peak is None:
             return _miss_result(
                 track_id=track_id,
-                x=screen_cx, y=screen_cy,
+                x=screen_cx,
+                y=screen_cy,
                 reason="no_peak",
                 confidence=sim,
                 opacity_baseline=opacity_baseline,
@@ -111,7 +126,8 @@ def track_local(
         if not accepted or peak_bbox is None:
             return _miss_result(
                 track_id=track_id,
-                x=screen_cx, y=screen_cy,
+                x=screen_cx,
+                y=screen_cy,
                 reason="below_threshold",
                 confidence=peak_sim,
                 opacity_baseline=opacity_baseline,
@@ -172,8 +188,8 @@ def _finalize_track_hit(
     y = by + bh // 2 + offset_y
 
     # Calibrate opacity even while walking so death can fire as soon as the
-    # mob stops. Walk/blur frames still look like decay — only *confirm* death
-    # while stationary.
+    # mob stops. Mild decay still needs a stationary confirm; strong decay can
+    # fire while moving (death animations keep the moving flag set).
     if _track_old_enough(
         detector.config,
         created_tick=created_tick,
@@ -196,7 +212,7 @@ def _finalize_track_hit(
                 config=detector.config,
             )
             opacity_decay_streak = 0
-        elif not moving:
+        else:
             opacity_baseline, opacity_baseline_samples, opacity_decay_streak, dead = (
                 evaluate_opacity_death(
                     opacity_score=opacity_score,
@@ -204,6 +220,7 @@ def _finalize_track_hit(
                     baseline_samples=opacity_baseline_samples,
                     decay_streak=opacity_decay_streak,
                     config=detector.config,
+                    moving=moving,
                 )
             )
             if dead:

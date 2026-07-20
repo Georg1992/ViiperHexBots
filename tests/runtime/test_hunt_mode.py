@@ -127,9 +127,10 @@ class HuntModeTests(unittest.TestCase):
         self.assertTrue(self.mode.discovery_confirmed_clear)
         self.assertTrue(self.mode.on_no_attackable_targets())
 
-    def test_death_site_ghost_detections_do_not_block_clear(self) -> None:
-        # After a kill, discovery may still heat the corpse site. Reconcile
-        # matches it as known-removed (no alive tracks) → clear for teleport.
+    def test_death_site_ghost_detections_block_clear(self) -> None:
+        # After a kill, discovery may still heat the corpse. Ghost matching
+        # keeps alive_after=0, but the scan still saw a living candidate — that
+        # must block teleport clear so we do not wipe ghosts and recreate it.
         now = monotonic_ms()
         track_id = self.tracks.create_track(
             "horn", 874, 578, 0.65, 0.9, now_tick=now
@@ -145,12 +146,13 @@ class HuntModeTests(unittest.TestCase):
             now_tick=now + 100,
         )
         self.assertEqual(summary.alive_after, 0)
+        self.assertEqual(summary.matched_count, 1)
         self.mode.note_discovery_scan_completed(
-            living_count=summary.alive_after,
+            living_count=1,
             added_count=summary.added_count,
             area_epoch=self.tracks.area_epoch,
         )
-        self.assertTrue(self.mode.discovery_confirmed_clear)
+        self.assertFalse(self.mode.discovery_confirmed_clear)
 
     def test_blocks_teleport_until_post_teleport_discovery(self) -> None:
         self.mode.note_discovery_scan_completed(

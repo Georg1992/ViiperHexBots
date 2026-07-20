@@ -54,6 +54,7 @@ REQUIRED_CONFIG_KEYS = {
     "deathOpacityBaselineSamples",
     "deathOpacityMinBaseline",
     "deathOpacityDecayRatio",
+    "deathOpacityStrongDecayRatio",
     "deathOpacityConfirmTicks",
     "deathRediscoveryCooldownMs",
     "deathOpacityMoveThresholdPx",
@@ -171,6 +172,8 @@ class DetectionResult:
     timing: dict[str, float]
     sprite_heatmap: np.ndarray
     silhouette_checks: list[SilhouetteCheck]
+    # Known-track deaths from dual alive/dead gate: (track_id, frame_x, frame_y).
+    death_confirmed: list[tuple[int, int, int]] | None = None
 
 
 def load_detector_config(path: Optional[Path] = None) -> dict:
@@ -245,7 +248,15 @@ class MobDetector:
         self,
         frame_bgr: np.ndarray,
         mob_name: str,
+        *,
+        known_tracks: list[tuple[int, int, int, float]] | None = None,
     ) -> DetectionResult:
+        """Heatmap discovery with optional known-track dual silhouette check.
+
+        * First scan (no ``known_tracks``): living silhouette gate only.
+        * Later scans: heatmap blobs near known tracks are extracted and checked
+          with living *and* death silhouettes; other blobs stay living-only.
+        """
         start = time.perf_counter()
         descriptor = self.ensure_descriptor(mob_name)
 
@@ -267,13 +278,21 @@ class MobDetector:
         blobs = self.heatmap_detector.top_centers(sprite_heatmap, descriptor)
         blobs_end = time.perf_counter()
 
+        dedup_radius = int(self.config["trackDedupRadiusPx"])
+        known = list(known_tracks or ())
+        blob_to_known = self._mark_known_blobs(blobs, known, dedup_radius)
+        death_masks = list(descriptor.death_silhouette_masks)
+
         # --- geometry pre-gate, then silhouette gate -------------------
         candidates: list[DetectionCandidate] = []
+        death_confirmed: list[tuple[int, int, int]] = []
         silhouette_checks: list[SilhouetteCheck] = []
+        claimed_death_tracks: set[int] = set()
 
-        for cx, cy, heat_score, comp_bbox in blobs:
+        for blob_index, (cx, cy, heat_score, comp_bbox) in enumerate(blobs):
             bx, by, bw, bh = comp_bbox
             bbox = (bx, by, bw, bh)
+            known_hit = blob_to_known.get(blob_index)
 
             if not self._passes_discovery_geometry_gate(comp_bbox, descriptor):
                 silhouette_checks.append(SilhouetteCheck(
@@ -335,18 +354,49 @@ class MobDetector:
                 extract_area_ratio=extract_area_ratio,
                 soft_hard_ratio=soft_hard_ratio,
             ))
-            if not passed:
+
+            if known_hit is None:
+                # Newly detected peak: living silhouettes only.
+                if passed:
+                    candidates.append(DetectionCandidate(
+                        mob_name=descriptor.mob_name,
+                        center_x=cx, center_y=cy,
+                        bbox=bbox,
+                        final_score=heat_score,
+                        heatmap_score=heat_score,
+                        accepted=True,
+                        rejection_reason="",
+                    ))
                 continue
 
-            candidates.append(DetectionCandidate(
-                mob_name=descriptor.mob_name,
-                center_x=cx, center_y=cy,
-                bbox=bbox,
-                final_score=heat_score,
-                heatmap_score=heat_score,
-                accepted=True,
-                rejection_reason="",
-            ))
+            # Known track peak: same extract, living + death silhouettes.
+            track_id, _kx, _ky, _scale = known_hit
+            if passed:
+                candidates.append(DetectionCandidate(
+                    mob_name=descriptor.mob_name,
+                    center_x=cx, center_y=cy,
+                    bbox=bbox,
+                    final_score=heat_score,
+                    heatmap_score=heat_score,
+                    accepted=True,
+                    rejection_reason="",
+                ))
+            death_passed = False
+            if death_masks:
+                death_passed, _death_sim, *_rest = self._evaluate_silhouette_gate(
+                    frame_bgr,
+                    descriptor,
+                    bbox,
+                    comp_bbox=comp_bbox,
+                    masks=death_masks,
+                )
+            if (
+                death_passed
+                and not passed
+                and int(track_id) not in claimed_death_tracks
+            ):
+                claimed_death_tracks.add(int(track_id))
+                death_confirmed.append((int(track_id), int(cx), int(cy)))
 
         gate_end = time.perf_counter()
         max_candidates = int(self.config["maxCandidates"])
@@ -370,7 +420,42 @@ class MobDetector:
             timing=timing,
             sprite_heatmap=sprite_heatmap,
             silhouette_checks=silhouette_checks,
+            death_confirmed=death_confirmed,
         )
+
+    @staticmethod
+    def _mark_known_blobs(
+        blobs: list[tuple[int, int, float, tuple[int, int, int, int]]],
+        known_tracks: list[tuple[int, int, int, float]],
+        dedup_radius: int,
+    ) -> dict[int, tuple[int, int, int, float]]:
+        """Map blob index → nearest known track within dedup radius (1:1)."""
+        if not blobs or not known_tracks:
+            return {}
+        radius_sq = dedup_radius * dedup_radius
+        claimed_tracks: set[int] = set()
+        marked: dict[int, tuple[int, int, int, float]] = {}
+        # Nearest pairs first so two peaks don't steal the same track poorly.
+        pairs: list[tuple[int, int, int]] = []
+        for blob_index, (cx, cy, _heat, _bbox) in enumerate(blobs):
+            for track_id, kx, ky, _scale in known_tracks:
+                dist = (int(cx) - int(kx)) ** 2 + (int(cy) - int(ky)) ** 2
+                if dist <= radius_sq:
+                    pairs.append((dist, blob_index, int(track_id)))
+        pairs.sort(key=lambda item: item[0])
+        track_by_id = {
+            int(track_id): (int(track_id), int(kx), int(ky), float(scale))
+            for track_id, kx, ky, scale in known_tracks
+        }
+        for _dist, blob_index, track_id in pairs:
+            if blob_index in marked or track_id in claimed_tracks:
+                continue
+            known = track_by_id.get(track_id)
+            if known is None:
+                continue
+            marked[blob_index] = known
+            claimed_tracks.add(track_id)
+        return marked
 
     # ------------------------------------------------------------------
     #  Geometry pre-gate + silhouette gate
@@ -460,12 +545,12 @@ class MobDetector:
 
     def _descriptor_silhouette_references(
         self,
-        descriptor: MobDescriptor,
+        masks: list,
     ) -> list[tuple[np.ndarray, np.ndarray]]:
-        if not descriptor.silhouette_masks:
+        if not masks:
             return []
         refs: list[tuple[np.ndarray, np.ndarray]] = []
-        for mask in descriptor.silhouette_masks:
+        for mask in masks:
             if not mask.stable_mask or not any(mask.stable_mask):
                 continue
             refs.append((
@@ -481,6 +566,7 @@ class MobDetector:
         bbox: tuple[int, int, int, int],
         *,
         comp_bbox: tuple[int, int, int, int] | None = None,
+        masks: list | None = None,
     ) -> tuple[
         bool,
         float,
@@ -499,12 +585,20 @@ class MobDetector:
         (descriptor-scaled), crop tightly, then resize to descriptor size.
         Returns (passed, jaccard, candidate, matched_idx, scores, extract_bbox,
         precision, recall, bridged_extract_area_ratio).
+
+        *masks* defaults to living ``descriptor.silhouette_masks``; pass death
+        masks for corpse validation.
         """
         fail = (False, 0.0, None, 0, [], None, 0.0, 0.0, 0.0)
-        refs = self._descriptor_silhouette_references(descriptor)
+        gate_masks = (
+            list(masks)
+            if masks is not None
+            else list(descriptor.silhouette_masks)
+        )
+        refs = self._descriptor_silhouette_references(gate_masks)
         if not refs or not descriptor.match_palette_bgr:
             return fail
-        gate_mask = descriptor.silhouette_masks[0]
+        gate_mask = gate_masks[0]
         desc_w, desc_h = _descriptor_sprite_size_px(descriptor)
 
         search = self._silhouette_search_window(frame_bgr, bbox, comp_bbox, desc_w, desc_h)
@@ -874,10 +968,52 @@ class MobDetector:
         cy: int,
         scale: float = 1.0,
     ) -> tuple[bool, tuple[int, int, int, int] | None, float]:
-        """Score a point via the same silhouette gate as discovery.
+        """Score a point via the living silhouette gate (discovery / tracker).
 
-        Returns (accepted, bbox, similarity).  Used by local_tracker.
+        Returns (accepted, bbox, similarity).
         """
+        return self._score_at_with_masks(
+            frame_bgr,
+            descriptor,
+            cx,
+            cy,
+            scale,
+            masks=descriptor.silhouette_masks,
+        )
+
+    def score_death_at(
+        self,
+        frame_bgr: np.ndarray,
+        descriptor: MobDescriptor,
+        cx: int,
+        cy: int,
+        scale: float = 1.0,
+    ) -> tuple[bool, tuple[int, int, int, int] | None, float]:
+        """Score a point against death/corpse silhouette refs.
+
+        Returns (accepted, bbox, similarity). Empty death masks never accept.
+        """
+        if not descriptor.death_silhouette_masks:
+            return False, None, 0.0
+        return self._score_at_with_masks(
+            frame_bgr,
+            descriptor,
+            cx,
+            cy,
+            scale,
+            masks=descriptor.death_silhouette_masks,
+        )
+
+    def _score_at_with_masks(
+        self,
+        frame_bgr: np.ndarray,
+        descriptor: MobDescriptor,
+        cx: int,
+        cy: int,
+        scale: float,
+        *,
+        masks: list,
+    ) -> tuple[bool, tuple[int, int, int, int] | None, float]:
         w = max(_MIN_DESCRIPTOR_PX, int(round(descriptor.avg_width * scale)))
         h = max(_MIN_DESCRIPTOR_PX, int(round(descriptor.avg_height * scale)))
         x = int(round(cx - w / 2))
@@ -889,7 +1025,7 @@ class MobDetector:
         bbox = (x, y, w, h)
         passed, sim, _cand, _idx, _scores, extract_bbox, _prec, _rec, _area = (
             self._evaluate_silhouette_gate(
-                frame_bgr, descriptor, bbox, comp_bbox=bbox,
+                frame_bgr, descriptor, bbox, comp_bbox=bbox, masks=masks,
             )
         )
         return passed, extract_bbox if extract_bbox is not None else bbox, float(sim)

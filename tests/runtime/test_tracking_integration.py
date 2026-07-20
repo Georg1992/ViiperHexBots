@@ -191,8 +191,8 @@ class TrackingIntegrationTests(unittest.TestCase):
         count_before = ctx.tracks.get_track_count()
 
         # Re-discover the same mobs slightly shifted (within one object radius):
-        # must NOT spawn duplicates and must NOT move existing tracks
-        # (tracking owns position).
+        # must NOT spawn duplicates and must NOT move authoritative x/y
+        # (tracking owns position). Soft discovery prior is updated.
         detections2 = [
             DiscoveryDetection(x=d.x + 5, y=d.y + 5, confidence=d.confidence, candidate_scale=d.candidate_scale, living=True)
             for d in scan.detections
@@ -205,6 +205,9 @@ class TrackingIntegrationTests(unittest.TestCase):
         self.assertEqual(ctx.tracks.get_track_count(), count_before)
         self.assertEqual(track.x, old_x)
         self.assertEqual(track.y, old_y)
+        self.assertEqual(track.discovery_obs_x, old_x + 5)
+        self.assertEqual(track.discovery_obs_y, old_y + 5)
+        self.assertGreater(track.discovery_obs_tick, 0)
 
     def test_tracking_keeps_track_coords_fresh(self) -> None:
         config = make_config()

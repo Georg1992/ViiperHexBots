@@ -65,6 +65,7 @@ class MobDescriptor:
     dominant_pixels_bgr: list[list[int]]
     accent_pixels_bgr: list[list[int]]
     silhouette_masks: list[SilhouetteMask]
+    death_silhouette_masks: list[SilhouetteMask]
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MobDescriptor":
@@ -104,6 +105,12 @@ class MobDescriptor:
         ]
         if not silhouette_masks:
             raise ValueError("descriptor silhouetteMasks must be non-empty")
+
+        if "deathSilhouetteMasks" not in data:
+            raise ValueError("descriptor missing deathSilhouetteMasks")
+        death_silhouette_masks = [
+            SilhouetteMask.from_dict(item) for item in data["deathSilhouetteMasks"]
+        ]
 
         if "accentColors" not in data:
             raise ValueError("descriptor missing accentColors")
@@ -152,6 +159,7 @@ class MobDescriptor:
             dominant_pixels_bgr=dominant_pixels_bgr,
             accent_pixels_bgr=accent_pixels_bgr,
             silhouette_masks=silhouette_masks,
+            death_silhouette_masks=death_silhouette_masks,
         )
 
     @classmethod
@@ -185,6 +193,15 @@ class MobDescriptor:
                     "stableMask": mask.stable_mask,
                 }
                 for mask in self.silhouette_masks
+            ],
+            "deathSilhouetteMasks": [
+                {
+                    "width": mask.width,
+                    "height": mask.height,
+                    "avgMask": mask.avg_mask,
+                    "stableMask": mask.stable_mask,
+                }
+                for mask in self.death_silhouette_masks
             ],
         }
 

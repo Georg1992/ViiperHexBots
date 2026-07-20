@@ -16,7 +16,8 @@ class OpacityDeathProbeTests(unittest.TestCase):
         return {
             "deathOpacityBaselineSamples": 2,
             "deathOpacityMinBaseline": 0.20,
-            "deathOpacityDecayRatio": 0.90,
+            "deathOpacityDecayRatio": 0.75,
+            "deathOpacityStrongDecayRatio": 0.40,
             "deathOpacityConfirmTicks": 2,
         }
 
@@ -77,30 +78,14 @@ class OpacityDeathProbeTests(unittest.TestCase):
         self.assertTrue(dead)
         self.assertEqual(streak, 0)
 
-    def test_ten_percent_drop_triggers_decay_streak(self) -> None:
+    def test_twenty_five_percent_drop_triggers_mild_decay(self) -> None:
         baseline = 0.60
         samples = 2
         streak = 0
         config = self._config()
 
         baseline, samples, streak, dead = evaluate_opacity_death(
-            opacity_score=0.54,
-            baseline=baseline,
-            baseline_samples=samples,
-            decay_streak=streak,
-            config=config,
-        )
-        self.assertFalse(dead)
-        self.assertEqual(streak, 1)
-
-    def test_fifteen_percent_drop_triggers_decay_streak(self) -> None:
-        baseline = 0.60
-        samples = 2
-        streak = 0
-        config = self._config()
-
-        baseline, samples, streak, dead = evaluate_opacity_death(
-            opacity_score=0.51,
+            opacity_score=0.45,
             baseline=baseline,
             baseline_samples=samples,
             decay_streak=streak,
@@ -116,7 +101,7 @@ class OpacityDeathProbeTests(unittest.TestCase):
         config = self._config()
 
         baseline, samples, streak, dead = evaluate_opacity_death(
-            opacity_score=0.57,
+            opacity_score=0.50,
             baseline=baseline,
             baseline_samples=samples,
             decay_streak=streak,
@@ -137,6 +122,38 @@ class OpacityDeathProbeTests(unittest.TestCase):
             config=self._config(),
         )
         self.assertFalse(dead)
+
+    def test_mild_decay_while_moving_does_not_advance_streak(self) -> None:
+        baseline = 0.60
+        samples = 2
+        streak = 0
+        config = self._config()
+        baseline, samples, streak, dead = evaluate_opacity_death(
+            opacity_score=0.45,
+            baseline=baseline,
+            baseline_samples=samples,
+            decay_streak=streak,
+            config=config,
+            moving=True,
+        )
+        self.assertFalse(dead)
+        self.assertEqual(streak, 0)
+
+    def test_strong_decay_while_moving_advances_streak(self) -> None:
+        baseline = 0.60
+        samples = 2
+        streak = 0
+        config = self._config()
+        baseline, samples, streak, dead = evaluate_opacity_death(
+            opacity_score=0.20,
+            baseline=baseline,
+            baseline_samples=samples,
+            decay_streak=streak,
+            config=config,
+            moving=True,
+        )
+        self.assertFalse(dead)
+        self.assertEqual(streak, 1)
 
 
 if __name__ == "__main__":

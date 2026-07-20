@@ -33,17 +33,20 @@ from pybot.config.clients import load_client_profile, memory_reading_enabled
 from pybot.config.schema import MAX_SKILL_TIMERS, SkillTimerSetting
 from pybot.mobs.catalog import load_mob_catalog
 from pybot.recognition.capture import capture_region
-from pybot.recognition.ui.status_panel import StatusPanelValues, read_status_panel
+from pybot.recognition.ui.status_panel import (
+    StatusPanelValues,
+    find_status_panel,
+    read_status_panel,
+    read_status_panel_currents,
+)
 
 MEMORY_POLL_MS = 500
-STATUS_PANEL_POLL_MS = 500
-# Require consecutive failed reads before swapping to the missing-panel prompt.
-STATUS_PANEL_MISS_TOLERANCE = 3
-# Capture/parse this many times per poll; all must agree before trusting a sample.
-STATUS_PANEL_VALIDATE_READS = 2
-STATUS_PANEL_CAPTURE_GAP_S = 0.05
-# New SP/Weight must match this many consecutive validated polls before publish.
-STATUS_PANEL_CONFIRM_STREAK = 2
+# Searching for the Basic Info header.
+STATUS_PANEL_SEARCH_MS = 1000
+# Panel locked — read current SP / Weight only.
+STATUS_PANEL_VALUE_MS = 200
+# Re-parse max SP / Weight this often while the panel stays locked.
+STATUS_PANEL_MAX_REFRESH_S = 5.0
 
 
 class MainWindow:
@@ -95,10 +98,10 @@ class MainWindow:
         self._memory_poller = GameMemoryPoller()
         self._memory_poll_after_id: str | None = None
         self._status_panel_poll_after_id: str | None = None
-        self._status_panel_misses = 0
         self._status_panel_confirmed: StatusPanelValues | None = None
-        self._status_panel_candidate: StatusPanelValues | None = None
-        self._status_panel_candidate_streak = 0
+        self._status_panel_max_read_at = 0.0
+        # Last known Basic Info origin — anchors the open-panel prompt.
+        self._status_panel_anchor: tuple[int, int] = (0, 0)
         # Ignore widget callbacks while building; enable at end of _build_ui.
         self._settings_apply_enabled = False
         self._mob_radios: list[ttk.Radiobutton] = []
@@ -756,9 +759,15 @@ class MainWindow:
         )
 
     def _apply_status_panel_stats(self, values: StatusPanelValues) -> None:
-        self.memory_sp.configure(text=self._format_pair(values.sp, values.sp_max))
-        self.memory_weight.configure(
-            text=self._format_pair(values.weight, values.weight_max)
+        """Map vision reads onto the same MemorySnapshot fields as memory."""
+        self._apply_memory_snapshot(
+            MemorySnapshot(
+                sp=values.sp,
+                sp_max=values.sp_max,
+                weight=values.weight,
+                weight_max=values.weight_max,
+                ok=True,
+            )
         )
 
     def _refresh_memory_stats(self) -> None:
@@ -805,122 +814,109 @@ class MainWindow:
         if not self.config.use_memory_reading:
             self._clear_vision_stats()
 
+    def _reset_status_panel_tracking(self) -> None:
+        self._status_panel_confirmed = None
+        self._status_panel_max_read_at = 0.0
+
     @staticmethod
-    def _status_panel_key(
+    def _status_panel_numbers(
         values: StatusPanelValues,
-    ) -> tuple[int, int, int, int]:
+    ) -> tuple[int, int, int | None, int | None]:
         return (values.sp, values.sp_max, values.weight, values.weight_max)
 
-    def _reset_status_panel_tracking(self) -> None:
-        self._status_panel_misses = 0
-        self._status_panel_confirmed = None
-        self._status_panel_candidate = None
-        self._status_panel_candidate_streak = 0
+    def _show_panel_missing(
+        self,
+        *,
+        client_left: int,
+        client_top: int,
+    ) -> None:
+        """Basic Info not open — clear reads and prompt to open it."""
+        self._reset_status_panel_tracking()
+        self._clear_status_panel_ui()
+        self._status_panel_overlay.show_panel_missing(
+            client_left=client_left,
+            client_top=client_top,
+            panel_origin=self._status_panel_anchor,
+        )
 
-    def _capture_status_panel_sample(
-        self, left: int, top: int, width: int, height: int
-    ) -> StatusPanelValues | None:
-        """Capture/parse a few times; return only if every sample agrees."""
-        samples: list[StatusPanelValues] = []
-        for index in range(STATUS_PANEL_VALIDATE_READS):
-            if index > 0:
-                time.sleep(STATUS_PANEL_CAPTURE_GAP_S)
-            frame = capture_region(left, top, width, height)
-            if frame is None or frame.size == 0:
-                return None
-            values = read_status_panel(frame)
-            if values is None:
-                return None
-            samples.append(values)
-        first_key = self._status_panel_key(samples[0])
-        if any(self._status_panel_key(sample) != first_key for sample in samples[1:]):
-            return None
-        return samples[-1]
-
-    def _publish_status_panel(
+    def _commit_status_panel(
         self,
         values: StatusPanelValues,
         *,
         client_left: int,
         client_top: int,
     ) -> None:
+        """Store a successful read; UI stats update only when numbers change."""
+        previous = self._status_panel_confirmed
+        self._status_panel_confirmed = values
+        self._status_panel_anchor = values.panel_origin
         self._status_panel_overlay.update(
             values, client_left=client_left, client_top=client_top
         )
+        if previous is not None and self._status_panel_numbers(
+            previous
+        ) == self._status_panel_numbers(values):
+            return
         if not self.config.use_memory_reading:
             self._apply_status_panel_stats(values)
 
-    def _refresh_status_panel_overlay(self) -> None:
+    def _refresh_status_panel_overlay(self) -> int:
+        """Each tick: find Basic Info header, then read or show open-panel.
+
+        - Header missing → clear state, show "Please Open Your Status Panel"
+        - Header found → read SP/Weight and show values under the panel
+        - Currents every tick; full current+max every ``STATUS_PANEL_MAX_REFRESH_S``
+
+        Overlay stays visible (no hide/show flash). Both states use the same
+        slot under the panel so header/digit ROIs stay uncovered.
+        """
         hwnd = self.config.window_id
         if not hwnd or not window_exists(hwnd) or not is_window_active(hwnd):
-            # Vision only while the chosen game window is foreground.
-            self._reset_status_panel_tracking()
             self._status_panel_overlay.hide()
-            self._clear_status_panel_ui()
-            return
+            return STATUS_PANEL_SEARCH_MS
+
         client = client_rect_screen(hwnd)
         if client is None:
             self._reset_status_panel_tracking()
             self._status_panel_overlay.hide()
             self._clear_status_panel_ui()
-            return
+            return STATUS_PANEL_SEARCH_MS
+
         left, top, width, height = client
-        values = self._capture_status_panel_sample(left, top, width, height)
-        if values is None:
-            self._status_panel_misses += 1
-            confirmed = self._status_panel_confirmed
-            if (
-                confirmed is not None
-                and self._status_panel_misses < STATUS_PANEL_MISS_TOLERANCE
-            ):
-                # Keep last confirmed overlay through brief OCR glitches.
-                self._status_panel_overlay.update(
-                    confirmed, client_left=left, client_top=top
-                )
-                return
-            self._status_panel_confirmed = None
-            self._status_panel_candidate = None
-            self._status_panel_candidate_streak = 0
-            self._status_panel_overlay.show_panel_missing(
-                client_left=left, client_top=top
-            )
-            self._clear_status_panel_ui()
-            return
 
-        self._status_panel_misses = 0
+        frame = capture_region(left, top, width, height)
+        if frame is None or frame.size == 0:
+            self._show_panel_missing(client_left=left, client_top=top)
+            return STATUS_PANEL_SEARCH_MS
+
+        origin = find_status_panel(frame)
+        if origin is None:
+            self._show_panel_missing(client_left=left, client_top=top)
+            return STATUS_PANEL_SEARCH_MS
+
         confirmed = self._status_panel_confirmed
-        key = self._status_panel_key(values)
-        if confirmed is None or self._status_panel_key(confirmed) == key:
-            self._status_panel_confirmed = values
-            self._status_panel_candidate = None
-            self._status_panel_candidate_streak = 0
-            self._publish_status_panel(
-                values, client_left=left, client_top=top
-            )
-            return
-
-        # Value changed — require consecutive agreeing polls before switching.
-        candidate = self._status_panel_candidate
-        if candidate is not None and self._status_panel_key(candidate) == key:
-            self._status_panel_candidate_streak += 1
-            self._status_panel_candidate = values
-        else:
-            self._status_panel_candidate = values
-            self._status_panel_candidate_streak = 1
-
-        if self._status_panel_candidate_streak >= STATUS_PANEL_CONFIRM_STREAK:
-            self._status_panel_confirmed = values
-            self._status_panel_candidate = None
-            self._status_panel_candidate_streak = 0
-            self._publish_status_panel(
-                values, client_left=left, client_top=top
-            )
-            return
-
-        # Hold previous confirmed SP/Weight until the new reading is validated.
-        self._status_panel_overlay.update(
-            confirmed, client_left=left, client_top=top
+        now = time.monotonic()
+        refresh_max = (
+            confirmed is None
+            or now - self._status_panel_max_read_at >= STATUS_PANEL_MAX_REFRESH_S
         )
+        if refresh_max:
+            values = read_status_panel(frame, origin=origin)
+        else:
+            values = read_status_panel_currents(
+                frame,
+                origin,
+                sp_max=confirmed.sp_max,
+                weight_max=confirmed.weight_max,
+            )
+        if values is None:
+            self._show_panel_missing(client_left=left, client_top=top)
+            return STATUS_PANEL_SEARCH_MS
+
+        if refresh_max:
+            self._status_panel_max_read_at = now
+        self._commit_status_panel(values, client_left=left, client_top=top)
+        return STATUS_PANEL_VALUE_MS
 
     def _schedule_status_panel_poll(self) -> None:
         if self._status_panel_poll_after_id is not None:
@@ -932,16 +928,17 @@ class MainWindow:
 
         def _tick() -> None:
             self._status_panel_poll_after_id = None
+            delay = STATUS_PANEL_SEARCH_MS
             try:
-                self._refresh_status_panel_overlay()
+                delay = self._refresh_status_panel_overlay()
             finally:
                 if self.root.winfo_exists():
                     self._status_panel_poll_after_id = self.root.after(
-                        STATUS_PANEL_POLL_MS, _tick
+                        max(50, int(delay)), _tick
                     )
 
         self._status_panel_poll_after_id = self.root.after(
-            STATUS_PANEL_POLL_MS, _tick
+            STATUS_PANEL_SEARCH_MS, _tick
         )
 
     def _sync_config_from_ui(self) -> None:

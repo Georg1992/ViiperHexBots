@@ -27,7 +27,7 @@ from pybot.recognition.detector.descriptors.palette_groups import (
     split_palette_groups_by_required,
 )
 
-DESCRIPTOR_VERSION = 32
+DESCRIPTOR_VERSION = 33
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -43,6 +43,10 @@ GATE_SILHOUETTE_REF_COUNTS = (
     MIN_GATE_SILHOUETTE_MASKS + MIN_GATE_SILHOUETTE_MASKS // 2,
     STAND_WALK_ACTION_COUNT,
 )
+# Death clips occupy the last 8 ACT actions on standard mob sheets (≥24 actions).
+DEAD_ACTION_COUNT = 8
+MIN_ACTIONS_FOR_DEATH = LIVING_FACING_ACTION_LIMIT + DEAD_ACTION_COUNT
+MIN_DEATH_GATE_SILHOUETTE_MASKS = 4
 MATCH_PALETTE_MAX_COLORS = 32
 MATCH_PALETTE_MAX_ACCENT_COLORS = 8
 # Palette shades present in at least this fraction of opaque frames are
@@ -215,6 +219,9 @@ class DescriptorBuilder:
         silhouette_masks = self._build_gate_silhouette_masks(
             spr_file, act_file, facing_pairs, frame_silhouette_masks,
         )
+        death_silhouette_masks = self._build_death_gate_silhouette_masks(
+            spr_file, act_file,
+        )
 
         descriptor = MobDescriptor(
             mob_name=mob_name,
@@ -234,6 +241,7 @@ class DescriptorBuilder:
             dominant_pixels_bgr=dominant_pixels_bgr,
             accent_pixels_bgr=accent_pixels_bgr,
             silhouette_masks=silhouette_masks,
+            death_silhouette_masks=death_silhouette_masks,
         )
         descriptor.save(descriptor_path)
         return descriptor
@@ -636,6 +644,9 @@ class DescriptorBuilder:
                 if frame_index < start:
                     continue
                 bgra = render_act_frame(spr_file, frame_ref)
+                # Late death frames are often fully transparent — skip them.
+                if not np.any(bgra[:, :, 3] >= 128):
+                    continue
                 cropped = self._tight_crop(bgra)
                 if cropped.shape[0] <= 1 or cropped.shape[1] <= 1:
                     continue
@@ -843,6 +854,67 @@ class DescriptorBuilder:
             for bgra in frames:
                 masks.append(self._build_silhouette_mask([bgra]))
         return masks
+
+    @staticmethod
+    def _death_action_indices(action_count: int) -> tuple[int, ...]:
+        """Last DEAD_ACTION_COUNT ACT actions when the sheet is large enough."""
+        if action_count < MIN_ACTIONS_FOR_DEATH:
+            return ()
+        start = action_count - DEAD_ACTION_COUNT
+        return tuple(range(start, action_count))
+
+    def _build_death_frame_silhouette_masks(
+        self,
+        spr_file,
+        act_file,
+        action_indices: tuple[int, ...],
+    ) -> list[SilhouetteMask]:
+        """Late non-empty frames from death ACT actions (corpse / fade shapes)."""
+        masks: list[SilhouetteMask] = []
+        for action_index in action_indices:
+            if action_index >= len(act_file.actions):
+                continue
+            action = act_file.actions[action_index]
+            total = len(action.frames)
+            if total <= 0:
+                continue
+            # Last half of the clip — early death frames still look living.
+            frame_start = total // 2
+            frames = self._collect_frames(
+                spr_file, act_file, (action_index,), frame_start=frame_start,
+            )
+            for bgra in frames:
+                masks.append(self._build_silhouette_mask([bgra]))
+        return masks
+
+    def _build_death_gate_silhouette_masks(
+        self,
+        spr_file,
+        act_file,
+    ) -> list[SilhouetteMask]:
+        """Select a small diverse set of death/corpse silhouette refs.
+
+        Empty when the ACT sheet has no death rows (under 24 actions) or when
+        late death frames are fully transparent. Prefers coherent single-body
+        masks; falls back to any late-frame masks when coherence is sparse.
+        """
+        action_indices = self._death_action_indices(len(act_file.actions))
+        if not action_indices:
+            return []
+        frame_masks = self._build_death_frame_silhouette_masks(
+            spr_file, act_file, action_indices,
+        )
+        if not frame_masks:
+            return []
+        coherent = [
+            mask for mask in frame_masks if self._is_coherent_gate_silhouette(mask)
+        ]
+        pool = coherent if coherent else frame_masks
+        target = min(MIN_DEATH_GATE_SILHOUETTE_MASKS, len(pool))
+        if target <= 0:
+            return []
+        order = self._farthest_first_mask_order(pool)
+        return [pool[idx] for idx in order[:target]]
 
     def _build_gate_silhouette_masks(
         self,

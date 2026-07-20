@@ -2,6 +2,9 @@
 
 Uses OpenCV template matching for the panel header, fixed relative ROIs for
 value bands, and RO digit-glyph templates under ``assets/UI/digits/``.
+
+Callers should treat ``find_status_panel`` as the source of truth for whether
+Basic Info is open. Currents-only reads reuse a previously parsed max.
 """
 
 from __future__ import annotations
@@ -22,8 +25,10 @@ DIGITS_DIR = UI_DIR / "digits"
 # Header template is cropped from StatusPanel.png at (HEADER_OFFSET_X, 0).
 HEADER_OFFSET_X = 5
 HEADER_MATCH_THRESHOLD = 0.85
-DIGIT_MATCH_THRESHOLD = 0.90
-BINARIZE_THRESHOLD = 70
+DIGIT_MATCH_THRESHOLD = 0.85
+# RO digit cores are pure black (gray 0). SP bar fill/empty are mid-bright and
+# change with SP%% — keep this well below the darkest real bar pixels (~47+).
+BINARIZE_THRESHOLD = 45
 # Single glyphs are typically 3–6px wide; wider blobs are touching digits.
 MAX_GLYPH_WIDTH = 7
 
@@ -32,16 +37,18 @@ PANEL_WIDTH = 219
 PANEL_HEIGHT = 143
 
 # Value ROIs relative to the full Basic Info panel origin (x, y, w, h).
-SP_ROI = (50, 68, 110, 12)
-WEIGHT_ROI = (85, 118, 58, 11)
+# Padded so ±2px header/origin jitter still keeps full glyph height/width.
+# Weight starts after the ``Weight :`` colon so label ink is not classified.
+SP_ROI = (50, 66, 110, 16)
+WEIGHT_ROI = (88, 116, 60, 14)
 
 
 @dataclass(frozen=True)
 class StatusPanelValues:
     sp: int
     sp_max: int
-    weight: int
-    weight_max: int
+    weight: int | None
+    weight_max: int | None
     panel_origin: tuple[int, int]
 
 
@@ -90,20 +97,50 @@ def find_status_panel(frame_bgr: np.ndarray) -> tuple[int, int] | None:
     return hx - HEADER_OFFSET_X, hy
 
 
-def read_status_panel(frame_bgr: np.ndarray) -> StatusPanelValues | None:
-    """Locate Basic Info and parse SP/Weight ``current / max`` values."""
-    origin = find_status_panel(frame_bgr)
+def read_status_panel(
+    frame_bgr: np.ndarray,
+    *,
+    origin: tuple[int, int] | None = None,
+) -> StatusPanelValues | None:
+    """Find (unless *origin* given) and parse current+max SP/Weight."""
+    if origin is None:
+        origin = find_status_panel(frame_bgr)
     if origin is None:
         return None
     sp = _parse_pair(frame_bgr, origin, SP_ROI, min_width=2)
-    weight = _parse_pair(frame_bgr, origin, WEIGHT_ROI, min_width=3)
-    if sp is None or weight is None:
+    if sp is None:
         return None
+    weight = _parse_pair(frame_bgr, origin, WEIGHT_ROI, min_width=3)
     return StatusPanelValues(
         sp=sp[0],
         sp_max=sp[1],
-        weight=weight[0],
-        weight_max=weight[1],
+        weight=None if weight is None else weight[0],
+        weight_max=None if weight is None else weight[1],
+        panel_origin=origin,
+    )
+
+
+def read_status_panel_currents(
+    frame_bgr: np.ndarray,
+    origin: tuple[int, int],
+    *,
+    sp_max: int,
+    weight_max: int | None,
+) -> StatusPanelValues | None:
+    """Parse only current SP / Weight at a known panel origin.
+
+    Digits after ``/`` are ignored. *sp_max* / *weight_max* come from a
+    previous full read.
+    """
+    sp = _parse_current(frame_bgr, origin, SP_ROI, min_width=2)
+    if sp is None:
+        return None
+    weight = _parse_current(frame_bgr, origin, WEIGHT_ROI, min_width=3)
+    return StatusPanelValues(
+        sp=sp,
+        sp_max=sp_max,
+        weight=weight,
+        weight_max=weight_max if weight is not None else None,
         panel_origin=origin,
     )
 
@@ -118,13 +155,37 @@ def _parse_pair(
     crop = _crop_roi(frame_bgr, origin, roi)
     if crop is None:
         return None
-    text = _read_digits(crop, min_width=min_width)
+    text = _read_digits(crop, min_width=min_width, stop_at_slash=False)
     if text is None or text.count("/") != 1:
         return None
     left, right = text.split("/", 1)
     if not left.isdigit() or not right.isdigit():
         return None
-    return int(left), int(right)
+    current, maximum = int(left), int(right)
+    if not _valid_pair(current, maximum):
+        return None
+    return current, maximum
+
+
+def _parse_current(
+    frame_bgr: np.ndarray,
+    origin: tuple[int, int],
+    roi: tuple[int, int, int, int],
+    *,
+    min_width: int,
+) -> int | None:
+    crop = _crop_roi(frame_bgr, origin, roi)
+    if crop is None:
+        return None
+    text = _read_digits(crop, min_width=min_width, stop_at_slash=True)
+    if text is None or not text.isdigit():
+        return None
+    return int(text)
+
+
+def _valid_pair(current: int, maximum: int) -> bool:
+    """Reject absurd OCR (same checks as Belarus statusui validateValues)."""
+    return maximum > 0 and 0 <= current <= maximum
 
 
 def _crop_roi(
@@ -142,10 +203,21 @@ def _crop_roi(
 
 
 def _to_ink_mask(bgr: np.ndarray) -> np.ndarray:
+    """Digit ink mask that ignores SP/Weight bar fill colors.
+
+    Near-black cores use local contrast vs a morphologically closed
+    background (fill/empty change with SP%% without becoming ink).
+    """
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    _unused, mask = cv2.threshold(
-        gray, BINARIZE_THRESHOLD, 255, cv2.THRESH_BINARY_INV
-    )
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 9))
+    background = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+    darker = cv2.subtract(background, gray)
+    near_black = gray <= BINARIZE_THRESHOLD
+    strong_contrast = darker >= 28
+    mask = np.zeros_like(gray, dtype=np.uint8)
+    mask[near_black & strong_contrast] = 255
+    # Pure black cores always count even if closing underestimates contrast.
+    mask[gray <= 16] = 255
     return mask
 
 
@@ -173,7 +245,6 @@ def _split_wide_glyph(glyph: np.ndarray) -> list[np.ndarray]:
             continue
         x += 1
     if not cuts:
-        # Two touching digits with no zero valley: cut near the midpoint.
         cuts = [w // 2]
     bounds = [0, *cuts, w]
     parts: list[np.ndarray] = []
@@ -187,12 +258,20 @@ def _split_wide_glyph(glyph: np.ndarray) -> list[np.ndarray]:
     return parts
 
 
-def _glyph_components(mask: np.ndarray, *, min_width: int) -> list[np.ndarray]:
-    # Bar chrome on the first/last rows can bridge digits; drop it.
+def _strip_bar_chrome(mask: np.ndarray) -> np.ndarray:
+    """Clear horizontal bar-border rows that would bridge adjacent glyphs."""
     cleaned = mask.copy()
-    cleaned[0, :] = 0
-    if cleaned.shape[0] > 1:
-        cleaned[-1, :] = 0
+    h, w = cleaned.shape
+    if h == 0 or w == 0:
+        return cleaned
+    min_chrome = max(3, int(w * 0.65))
+    row_ink = (cleaned > 0).sum(axis=1)
+    cleaned[row_ink >= min_chrome, :] = 0
+    return cleaned
+
+
+def _glyph_components(mask: np.ndarray, *, min_width: int) -> list[np.ndarray]:
+    cleaned = _strip_bar_chrome(mask)
     count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
         cleaned, connectivity=8
     )
@@ -202,7 +281,11 @@ def _glyph_components(mask: np.ndarray, *, min_width: int) -> list[np.ndarray]:
         if area < 3 or h < 5 or w < min_width:
             continue
         blob = cleaned[y : y + h, x : x + w].copy()
-        parts = _split_wide_glyph(blob) if w > MAX_GLYPH_WIDTH else [blob]
+        if w > MAX_GLYPH_WIDTH:
+            parts = _split_wide_glyph(blob)
+        else:
+            trimmed = _trim_empty(blob)
+            parts = [trimmed] if trimmed is not None else []
         for part in parts:
             if part.shape[0] < 5 or part.shape[1] < min_width:
                 continue
@@ -215,8 +298,13 @@ def _classify_glyph(glyph: np.ndarray) -> tuple[str | None, float]:
     templates = _load_digit_templates()
     best_ch: str | None = None
     best_score = -1.0
+    gh, gw = glyph.shape[:2]
     for ch, variants in templates.items():
         for tpl in variants:
+            th, tw = tpl.shape[:2]
+            # Belarus statusui: skip wildly different scales (dot vs digit).
+            if gw * 2 < tw or tw * 2 < gw or gh * 2 < th or th * 2 < gh:
+                continue
             pad_h = glyph.shape[0] + tpl.shape[0] + 4
             pad_w = glyph.shape[1] + tpl.shape[1] + 4
             pad = np.zeros((pad_h, pad_w), dtype=np.uint8)
@@ -232,14 +320,23 @@ def _classify_glyph(glyph: np.ndarray) -> tuple[str | None, float]:
     return best_ch, best_score
 
 
-def _read_digits(bgr: np.ndarray, *, min_width: int) -> str | None:
+def _read_digits(
+    bgr: np.ndarray,
+    *,
+    min_width: int,
+    stop_at_slash: bool,
+) -> str | None:
     mask = _to_ink_mask(bgr)
     chars: list[str] = []
     for glyph in _glyph_components(mask, min_width=min_width):
         ch, score = _classify_glyph(glyph)
-        # Fail closed: skipping a weak glyph silently drops digits (e.g. 430 → 40).
         if ch is None or score < DIGIT_MATCH_THRESHOLD:
             return None
+        if ch == "/":
+            if stop_at_slash:
+                break
+            chars.append(ch)
+            continue
         chars.append(ch)
     if not chars:
         return None

@@ -30,7 +30,11 @@ from pybot.runtime.workers.attack_loop import AttackLoop
 from pybot.runtime.workers.discovery_worker import DiscoveryWorker
 from pybot.runtime.workers.skill_timer_worker import SkillTimerWorker
 from pybot.runtime.workers.tracking_worker import TrackingWorker
-from pybot.config.clients import load_client_profile
+from pybot.config.clients import (
+    MemoryAddresses,
+    load_client_profile,
+    memory_reading_enabled,
+)
 from pybot.runtime.constants import WORKER_SHUTDOWN_TIMEOUT_S
 from pybot.runtime.workers.sit_on_low_sp_worker import SitOnLowSpWorker
 
@@ -170,16 +174,18 @@ def create_runtime_deps(
                 "Teleport is required to clear mobs before sitting."
             )
         profile = load_client_profile(ctx.config.client_profile)
-        if (
-            profile is None
-            or profile.memory.current_sp <= 0
-            or profile.memory.max_sp <= 0
-        ):
+        memory = MemoryAddresses() if profile is None else profile.memory
+        has_sp_memory = memory.current_sp > 0 and memory.max_sp > 0
+        # Server profiles need SP memory addresses. Generic uses empty addresses
+        # so GameMemoryPoller fills the same MemorySnapshot fields via vision.
+        if not has_sp_memory and memory_reading_enabled(ctx.config.client_profile):
             raise ValueError(
                 "Sit On Low Sp requires a client profile with currentSpAddress "
                 f"and maxSpAddress (profile={ctx.config.client_profile!r})."
             )
-        sit_worker = SitOnLowSpWorker(ctx, input_backend, profile.memory)
+        sit_worker = SitOnLowSpWorker(
+            ctx, input_backend, memory, hunt_mode=hunt_mode
+        )
         workers.append(("sit_sp", sit_worker.run))
 
     return RuntimeDependencies(

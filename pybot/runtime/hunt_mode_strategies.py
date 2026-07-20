@@ -50,7 +50,11 @@ class HuntModeStrategy(ABC):
 
     @property
     def discovery_confirmed_clear(self) -> bool:
-        """True when the latest discovery scan for this epoch found no living mobs."""
+        """True when the latest discovery scan saw zero living candidates.
+
+        Uses scan detections (pre-dedup), not post-reconcile alive tracks, so
+        corpse heat matched only to death ghosts still blocks teleport.
+        """
         with self._lock:
             return (
                 self._discovery_confirmed_clear

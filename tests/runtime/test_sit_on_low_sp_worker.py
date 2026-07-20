@@ -58,6 +58,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.capture.capture_roi.return_value = MagicMock(size=1)
         self.input = MagicMock(spec=ShadowInputBackend)
         self.memory = MemoryAddresses(current_sp=1, max_sp=2)
+        self.hunt_mode = MagicMock()
 
     def test_sitting_blocks_should_run_workers(self) -> None:
         self.assertTrue(self.ctx.should_run_workers())
@@ -99,7 +100,11 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             ),
         ]
         worker = SitOnLowSpWorker(
-            self.ctx, self.input, self.memory, poller=poller
+            self.ctx,
+            self.input,
+            self.memory,
+            hunt_mode=self.hunt_mode,
+            poller=poller,
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
 
@@ -121,10 +126,58 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertEqual(len(sit_presses), 2)
         self.assertFalse(self.ctx.sitting_event.is_set())
         self.assertTrue(self.ctx.discovery_wake.is_set())
+        # Sit teleports must clear tracking like hunt-mode teleports.
+        self.assertGreaterEqual(self.ctx.tracks.area_reset.call_count, 1)
+        self.assertGreaterEqual(self.hunt_mode.on_area_reset.call_count, 1)
 
     def test_thresholds(self) -> None:
-        self.assertAlmostEqual(SIT_LOW_SP_RATIO, 0.10)
+        self.assertAlmostEqual(SIT_LOW_SP_RATIO, 0.05)
         self.assertAlmostEqual(SIT_RESUME_SP_RATIO, 0.98)
+
+    def test_sit_teleport_clears_overlay_tracks(self) -> None:
+        poller = _FakePoller([SIT_LOW_SP_RATIO - 0.01, SIT_RESUME_SP_RATIO])
+        living = RawDetection(
+            x=10, y=10, confidence=0.9, candidate_scale=1.0, living=True
+        )
+        self.ctx.detector.discover_frame.side_effect = [
+            DiscoveryScanResult(
+                ok=True,
+                fail_reason="",
+                raw_count=1,
+                accepted_count=1,
+                detections=[living],
+                duration_ms=1,
+                elapsed_s=0.001,
+            ),
+            DiscoveryScanResult(
+                ok=True,
+                fail_reason="",
+                raw_count=0,
+                accepted_count=0,
+                detections=[],
+                duration_ms=1,
+                elapsed_s=0.001,
+            ),
+        ]
+        worker = SitOnLowSpWorker(
+            self.ctx,
+            self.input,
+            self.memory,
+            hunt_mode=self.hunt_mode,
+            poller=poller,
+        )
+        self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
+
+        def stop_after_recover() -> None:
+            while self.input.teleport_key.call_count < 3 and not self.ctx.is_stopped():
+                self.ctx.stop_event.wait(0.01)
+            self.ctx.stop_event.set()
+
+        threading.Thread(target=stop_after_recover, daemon=True).start()
+        worker.run()
+
+        self.ctx.overlay.set_track_positions.assert_called_with([])
+        self.ctx.overlay.set_track_stats.assert_any_call(track_count=0, alive_count=0)
 
 
 if __name__ == "__main__":

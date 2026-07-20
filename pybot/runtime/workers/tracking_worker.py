@@ -3,13 +3,14 @@
 Runs fast and independently of discovery. Each tick it captures a frame and
 follows every alive track with the LocalTracker (via ``ctx.tracker`` — a
 detector dedicated to tracking so it never blocks on the discovery scan's
-lock), writing fresh coordinates into the shared HuntTracks store. That store
-is the hand-off point: discovery reads those coordinates when it dedups.
+lock), writing fresh coordinates into the shared HuntTracks store.
 
-Tracking owns position, movement state, all opacity probes, unreachable
-removal, and liveness. Tracks are removed here when opacity death is confirmed,
-after too many consecutive misses, when the attack budget is exceeded, or never
-by discovery.
+Tracking is the sole writer of authoritative position and all track removal.
+Discovery publishes soft ``discovery_obs_*`` priors, ``discovery_absent``, and
+optional ``discovery_death`` (death-silhouette helper). On a local miss,
+tracking searches/snaps from the prior and drops on joint absence. When
+``discovery_death`` is set, tracking removes the track (ghosted). Otherwise
+tracking decides via opacity death, lost miss-limit, or unreachable.
 """
 
 from __future__ import annotations
@@ -76,6 +77,9 @@ class TrackingWorker:
                 attack_count=track.attack_count,
                 created_tick=track.created_tick,
                 now_tick=now_ms,
+                discovery_obs_x=track.discovery_obs_x,
+                discovery_obs_y=track.discovery_obs_y,
+                discovery_obs_tick=track.discovery_obs_tick,
             )
             for track in alive_tracks
         ]
@@ -104,12 +108,12 @@ class TrackingWorker:
                 f"{unreachable_ids}"
             )
 
-        # Wake discovery on any drop so it can recreate / confirm clear without
-        # waiting out the 1s cadence. Teleport clear also depends on this.
-        if (
-            (dead_ids or lost_ids or unreachable_ids)
-            and not ctx.discovery_suspend.is_set()
-        ):
+        # Deaths are communicated to discovery via removed_sites (dedup ghosts)
+        # so the next cadence scan will not recreate corpses. Do not wake
+        # discovery on death — that would immediately re-scan the body.
+        # Lost / unreachable still wake so discovery can confirm clear or
+        # recreate a still-living mob; hunt-mode teleport also wakes itself.
+        if (lost_ids or unreachable_ids) and not ctx.discovery_suspend.is_set():
             ctx.discovery_wake.set()
 
         self._update_overlay(now_ms)

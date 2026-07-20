@@ -70,3 +70,13 @@ class HuntWindowCapture:
         from pybot.recognition.capture import capture_region
 
         return capture_region(roi.x, roi.y, roi.w, roi.h)
+
+    def capture_client(self) -> np.ndarray | None:
+        """Capture the full game client (e.g. Basic Info status panel OCR)."""
+        from pybot.recognition.capture import capture_region
+
+        client = self.get_client_rect_screen()
+        if client is None:
+            return None
+        left, top, width, height = client
+        return capture_region(left, top, width, height)

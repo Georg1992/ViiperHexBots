@@ -179,8 +179,43 @@ def read_snapshot(
         kernel32.CloseHandle(handle)
 
 
+def read_vision_snapshot(hwnd: int) -> MemorySnapshot:
+    """Read SP/Weight from the open Basic Info panel into a ``MemorySnapshot``.
+
+    Same fields as memory reading (``sp``, ``sp_max``, ``weight``, ``weight_max``).
+    ``char_name`` is not available from vision.
+    """
+    from pybot.app.win32_util import client_rect_screen
+    from pybot.recognition.capture import capture_region
+    from pybot.recognition.ui.status_panel import read_status_panel
+
+    if not hwnd:
+        return MemorySnapshot(error="select a game window")
+    client = client_rect_screen(hwnd)
+    if client is None:
+        return MemorySnapshot(error="no client rect")
+    left, top, width, height = client
+    frame = capture_region(left, top, width, height)
+    if frame is None or frame.size == 0:
+        return MemorySnapshot(error="capture_empty")
+    values = read_status_panel(frame)
+    if values is None:
+        return MemorySnapshot(error="status_panel_unreadable")
+    return MemorySnapshot(
+        sp=values.sp,
+        sp_max=values.sp_max,
+        weight=values.weight,
+        weight_max=values.weight_max,
+        ok=True,
+    )
+
+
 class GameMemoryPoller:
-    """Caches module base per pid and produces ``MemorySnapshot`` values."""
+    """Produces ``MemorySnapshot`` from process memory or status-panel vision.
+
+    When *addresses* include SP offsets, reads memory. Otherwise (Generic)
+    OCR's the Basic Info panel into the same snapshot fields.
+    """
 
     def __init__(self) -> None:
         self._pid = 0
@@ -191,6 +226,11 @@ class GameMemoryPoller:
         self._base = 0
 
     def read(self, hwnd: int, addresses: MemoryAddresses) -> MemorySnapshot:
+        if addresses.current_sp > 0 and addresses.max_sp > 0:
+            return self._read_memory(hwnd, addresses)
+        return read_vision_snapshot(hwnd)
+
+    def _read_memory(self, hwnd: int, addresses: MemoryAddresses) -> MemorySnapshot:
         pid = pid_from_hwnd(hwnd)
         if pid <= 0:
             self.reset()

@@ -2,9 +2,17 @@
 
 Before sitting: teleport until a discovery scan sees no living mobs, idle 1s,
 then press sit. After SP recovers, stand and resume hunt.
+
+Each sit teleport clears tracking (same as hunt-mode teleport) so workers
+resume against the new screen only.
+
+SP comes from ``GameMemoryPoller`` → ``MemorySnapshot`` (memory addresses or
+Basic Info vision — same ``sp`` / ``sp_max`` fields either way).
 """
 
 from __future__ import annotations
+
+from typing import Protocol
 
 from pybot.app.process_memory import GameMemoryPoller
 from pybot.config.clients import MemoryAddresses
@@ -19,20 +27,26 @@ from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.workers.worker_contexts import SitOnLowSpWorkerContext
 
 
+class _HuntModeAreaReset(Protocol):
+    def on_area_reset(self) -> None: ...
+
+
 class SitOnLowSpWorker:
-    """When SP drops below 10%, clear the area, sit until SP ≥ 98%, then stand."""
+    """When SP drops below 5%, clear the area, sit until SP ≥ 98%, then stand."""
 
     def __init__(
         self,
         ctx: SitOnLowSpWorkerContext,
         input_backend: InputBackend,
         memory: MemoryAddresses,
+        hunt_mode: _HuntModeAreaReset,
         *,
         poller: GameMemoryPoller | None = None,
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
         self._memory = memory
+        self._hunt_mode = hunt_mode
         self._poller = poller or GameMemoryPoller()
         self._last_fail_log = ""
 
@@ -68,7 +82,7 @@ class SitOnLowSpWorker:
             reason = snap.error or "sp_unavailable"
             if reason != self._last_fail_log:
                 self._last_fail_log = reason
-                ctx.logger.behavior(f"[SIT] memory read failed: {reason}")
+                ctx.logger.behavior(f"[SIT] SP read failed: {reason}")
             return None
         self._last_fail_log = ""
         return snap.sp / snap.sp_max
@@ -131,6 +145,7 @@ class SitOnLowSpWorker:
                 continue
             if living == 0:
                 ctx.logger.behavior("[SIT] discovery sees no mobs")
+                self._reset_tracking_after_teleport("sit_clear")
                 return True
 
             ctx.logger.behavior(
@@ -141,7 +156,22 @@ class SitOnLowSpWorker:
             delay_s = ctx.config.teleport_duration_ms / 1000.0
             if not ctx.wait_unless_stopped(delay_s):
                 return False
+            # New screen — drop pre-teleport tracks so hunt resumes clean.
+            self._reset_tracking_after_teleport("sit_teleport")
         return False
+
+    def _reset_tracking_after_teleport(self, reason: str) -> None:
+        """Clear tracks/policy/overlay and hunt-mode area flags after a sit teleport.
+
+        Tracking is paused while sitting, so the overlay would otherwise keep
+        showing pre-teleport track markers until hunt workers resume.
+        """
+        ctx = self._ctx
+        ctx.area_reset(reason)
+        self._hunt_mode.on_area_reset()
+        ctx.overlay.set_track_stats(track_count=0, alive_count=0)
+        ctx.overlay.set_track_positions([])
+        ctx.logger.behavior(f"[SIT] tracking reset reason={reason}")
 
     def _scan_living_count(self) -> int | None:
         """Run one discovery scan; return filtered living count or None on failure."""

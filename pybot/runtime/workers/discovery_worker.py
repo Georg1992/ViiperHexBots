@@ -1,20 +1,21 @@
-"""Discovery loop — own thread, finds new mobs and drops off-screen tracks.
+"""Discovery loop — own thread, finds new mobs and signals track evidence.
 
 Schedule: every ``discovery_interval_ms`` (default 1s), and immediately when
 ``discovery_wake`` is set after a teleport settle delay. While
 ``discovery_suspend`` is set (claim → teleport key → delay), this worker does
 not scan — only waits for the post-delay wake.
 
-Creates tracks for mobs that aren't already tracked. Removes a track only when
-it is absent from the scan *and* its last position is outside the hunt ROI
-(left the search area). In-ROI discovery misses (cursor on mob, near player)
-do not kill tracks — local tracking owns those.
+One discovery pass (same frame):
+1. Living heatmap → silhouette scan (normal pipeline) for new / matched mobs.
+2. Death-silhouette check at known track centers (helper signal to tracking).
+3. Reconcile: create / match / mark absent / drop outside ROI.
 
-Correct coord hand-off: the known-object positions used for dedup/absence are
-sampled immediately before this worker captures its frame, so detections (from
-that frame) and the positions they're compared against share one time reference
-even though tracking is concurrently moving the live tracks. Reconcile also
-refuses creates when the area epoch advanced since that sample (teleport).
+Tracking owns position and all death removal (``discovery_death`` flag or
+opacity). Discovery never overwrites authoritative x/y.
+
+Teleport clear requires zero living scan candidates, not merely zero alive
+tracks after ghost matching. Capture-time position snapshots keep dedup and
+absence in the same spacetime as detections despite concurrent tracking.
 """
 
 from __future__ import annotations
@@ -106,12 +107,29 @@ class DiscoveryWorker:
                 ctx.logger.behavior("[DISCOVERY] capture returned empty frame")
             return
 
-        scan = ctx.detector.discover_frame(frame, roi)
+        # Living-only for new peaks; known tracks get alive+dead silhouette checks.
+        scan = ctx.detector.discover_frame(
+            frame,
+            roi,
+            known_tracks=existing_track_positions,
+        )
         if not scan.ok:
             self._hunt_mode.note_discovery_scan_failed(scan.fail_reason)
             return
 
         self._scan_count += 1
+
+        death_confirmed = scan.death_confirmed or []
+        if death_confirmed:
+            flagged = ctx.tracks.note_discovery_deaths(
+                death_confirmed,
+                area_epoch=area_epoch,
+            )
+            if flagged:
+                ctx.logger.behavior(
+                    f"[DISCOVERY] death noted for tracker: {flagged}"
+                )
+
         filtered = filter_scan_candidates(scan.detections, roi, ctx.config.cell_size_px)
         ctx.overlay.set_scan_living(len(filtered))
 
@@ -143,6 +161,7 @@ class DiscoveryWorker:
         verbose = (
             summary.added_count > 0
             or summary.removed_count > 0
+            or bool(death_confirmed)
             or self._scan_count <= 3
             or self._scan_count % 20 == 0
         )
@@ -158,14 +177,16 @@ class DiscoveryWorker:
                 f"raw={scan.raw_count} filtered={len(filtered)} "
                 f"added={summary.added_count} removed={summary.removed_count} "
                 f"matched={summary.matched_count} "
+                f"deaths={len(death_confirmed)} "
                 f"tracks={ctx.tracks.get_track_count()}"
             )
 
-        # Teleport clear uses post-reconcile alive tracks, not raw detections.
-        # Corpse/heat hits that only match death/unreachable sites must not block
-        # teleport after the mark is already gone.
+        # Teleport clear requires the scan itself to see no living candidates.
+        # Ghost-matched corpse heat (alive_after=0, matched>0) must still block
+        # clear — otherwise we teleport, wipe removed_sites, and recreate the
+        # corpse as a fresh track.
         self._hunt_mode.note_discovery_scan_completed(
-            living_count=summary.alive_after,
+            living_count=len(filtered),
             added_count=summary.added_count,
             area_epoch=area_epoch,
         )

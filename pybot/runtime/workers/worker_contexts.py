@@ -77,6 +77,7 @@ class SitOnLowSpWorkerContext(
     CanDetect,
     CanOverlay,
     CanWakeDiscovery,
+    CanAreaReset,
     Protocol,
 ):
     """Hunt runtime subset consumed by SitOnLowSpWorker."""

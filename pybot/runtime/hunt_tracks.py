@@ -13,10 +13,14 @@ from pybot.recognition.rules import (
     MobTrack,
     ReconcileSummary,
     apply_attack_event,
+    apply_discovery_reanchor,
     apply_movement_observation,
     apply_opacity_observation,
     apply_track_observation,
+    clear_discovery_observation,
     death_movement_thresholds,
+    has_discovery_observation,
+    note_discovery_death,
     is_alive,
     is_track_lost,
     is_track_unreachable_by_attacks,
@@ -212,8 +216,8 @@ class HuntTracks:
     def positions_snapshot(self, now_tick: int | None = None) -> list[tuple[int, int]]:
         """Positions discovery should treat as already known (alive + recent removals).
 
-        Includes alive tracks and recently removed death sites so discovery does
-        not immediately recreate a corpse hit as a new mob.
+        Includes alive tracks and recently removed sites (opacity death or
+        unreachable) so discovery does not immediately recreate a corpse.
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
@@ -228,14 +232,27 @@ class HuntTracks:
 
     def discovery_frame_snapshot(
         self, now_tick: int | None = None
-    ) -> tuple[int, list[tuple[int, int]], list[tuple[int, int, int]]]:
-        """Atomic sample for one discovery capture: epoch + dedup + alive positions."""
+    ) -> tuple[int, list[tuple[int, int]], list[tuple[int, int, int, float]]]:
+        """Atomic sample for one discovery capture: epoch + dedup + alive positions.
+
+        Alive entries are ``(track_id, x, y, scale)`` at capture time.
+        """
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
+            alive = [
+                (
+                    t.id,
+                    t.x,
+                    t.y,
+                    t.discovery_scale if t.discovery_scale > 0 else 1.0,
+                )
+                for t in self._tracks
+                if is_alive(t)
+            ]
             return (
                 self._area_epoch,
                 self._dedup_positions_locked(tick),
-                [(t.id, t.x, t.y) for t in self._tracks if is_alive(t)],
+                alive,
             )
 
     def tracking_frame_snapshot(
@@ -253,23 +270,23 @@ class HuntTracks:
         mob_name: str = "",
         now_tick: int | None = None,
         existing_positions: list[tuple[int, int]] | None = None,
-        existing_track_positions: list[tuple[int, int, int]] | None = None,
+        existing_track_positions: list[tuple[int, int, int]] | list[tuple[int, int, int, float]] | None = None,
         area_epoch: int | None = None,
         hunt_roi: HuntRoi | None = None,
     ) -> ReconcileSummary:
         """Discovery step: create new tracks; drop tracks that left the hunt ROI.
 
-        Unmatched tracks that are still inside ``hunt_roi`` are kept — discovery
-        often misses mobs under the cursor or near the player; tracking owns
-        those losses. When ``hunt_roi`` is omitted, discovery never removes
-        tracks (create / dedup only).
+        Unmatched tracks still inside ``hunt_roi`` are kept but marked
+        ``discovery_absent`` so tracking can drop them when it also misses.
+        Outside-ROI unmatched tracks are removed immediately. When ``hunt_roi``
+        is omitted, in-ROI absence marking still applies (no geometry filter).
 
         ``existing_positions`` are the known-object positions at frame-capture
         time. When omitted, the current live positions are used (callers that
         don't run tracking concurrently, e.g. tests).
 
-        ``existing_track_positions`` are alive (id, x, y) at frame-capture time
-        used to decide which tracks were not seen on this scan.
+        ``existing_track_positions`` are alive ``(id, x, y[, scale])`` at
+        frame-capture time used to decide which tracks were not seen on this scan.
 
         ``area_epoch`` is the epoch sampled with that frame. If the store's
         epoch has advanced (teleport / area_reset), this is a no-op so
@@ -311,20 +328,27 @@ class HuntTracks:
                 detector_config=self._detector_config_ref,
                 existing_track_positions=track_positions,
             )
-            removed_ids = list(summary.removed_ids or [])
+            unmatched_ids = set(summary.removed_ids or [])
+            # Capture-time coords for ROI geometry (same spacetime as match).
+            capture_xy = {
+                entry[0]: (entry[1], entry[2]) for entry in track_positions
+            }
             actual_removed: list[int] = []
-            for track_id in removed_ids:
+            for track_id in unmatched_ids:
                 track = self._get_track_by_id_locked(track_id)
                 if track is None:
                     continue
-                # Only drop tracks that have left the hunt search area.
-                # In-ROI discovery misses (cursor / near player) must not kill.
-                if hunt_roi is None or self._point_in_hunt_roi_locked(
-                    track.x, track.y, hunt_roi
+                sx, sy = capture_xy.get(track_id, (track.x, track.y))
+                # Outside hunt ROI → gone from the search area; drop now.
+                # Inside ROI → mark absent; tracking removes on a joint miss.
+                if hunt_roi is not None and not self._point_in_hunt_roi_locked(
+                    sx, sy, hunt_roi
                 ):
+                    self._record_removed_site_locked(sx, sy, tick)
+                    actual_removed.append(track_id)
                     continue
-                self._record_removed_site_locked(track.x, track.y, tick)
-                actual_removed.append(track_id)
+                track.discovery_absent = True
+                clear_discovery_observation(track)
             if actual_removed:
                 self._remove_tracks_locked(set(actual_removed))
             summary.removed_ids = actual_removed
@@ -337,6 +361,30 @@ class HuntTracks:
     @staticmethod
     def _point_in_hunt_roi_locked(x: int, y: int, roi: HuntRoi) -> bool:
         return roi.x <= x < roi.x + roi.w and roi.y <= y < roi.y + roi.h
+
+    def note_discovery_deaths(
+        self,
+        deaths: list[tuple[int, int, int]],
+        *,
+        area_epoch: int | None = None,
+    ) -> list[int]:
+        """Record discovery death-silhouette hits; tracking removes on next tick.
+
+        ``deaths`` entries are ``(track_id, x, y)`` — coords are unused for
+        removal (tracking uses current track position for the ghost). Returns
+        the ids that were flagged.
+        """
+        flagged: list[int] = []
+        with self._lock:
+            if area_epoch is not None and area_epoch != self._area_epoch:
+                return []
+            for track_id, _x, _y in deaths:
+                track = self._get_track_by_id_locked(track_id)
+                if track is None:
+                    continue
+                note_discovery_death(track)
+                flagged.append(track_id)
+            return flagged
 
     def apply_tracking(
         self,
@@ -360,15 +408,21 @@ class HuntTracks:
         with self._lock:
             if area_epoch is not None and area_epoch != self._area_epoch:
                 return [], [], []
+            joint_absent_ids: list[int] = []
             for result in results:
                 track = self._get_track_by_id_locked(result.track_id)
                 if track is None:
                     continue
-                if getattr(result, "dead", False):
+                if getattr(result, "dead", False) or track.discovery_death:
                     sample = self._kill_sample_attack_count_locked(track)
                     self._pending_attack_track_ids.discard(result.track_id)
                     self._record_kill_locked(sample)
-                    self._record_removed_site_locked(result.x, result.y, tick)
+                    # Discovery death uses store coords; opacity death uses result.
+                    if track.discovery_death:
+                        ghost_x, ghost_y = track.x, track.y
+                    else:
+                        ghost_x, ghost_y = result.x, result.y
+                    self._record_removed_site_locked(ghost_x, ghost_y, tick)
                     dead_ids.append(result.track_id)
                     continue
                 if result.found:
@@ -380,15 +434,41 @@ class HuntTracks:
                         move_threshold_px=move_px,
                         stop_threshold_px=stop_px,
                     )
+                    apply_track_observation(
+                        track,
+                        found=True,
+                        x=result.x,
+                        y=result.y,
+                        confidence=result.confidence,
+                        now_tick=tick,
+                    )
+                    if hasattr(result, "opacity_baseline"):
+                        apply_opacity_observation(
+                            track,
+                            opacity_baseline=result.opacity_baseline,
+                            opacity_baseline_samples=result.opacity_baseline_samples,
+                            opacity_decay_streak=result.opacity_decay_streak,
+                        )
+                    continue
+                if track.discovery_absent:
+                    # Discovery already reported no mob at these coords; local
+                    # tracker agrees → drop without waiting for the miss limit.
+                    joint_absent_ids.append(result.track_id)
+                    continue
+                if has_discovery_observation(track):
+                    # Local miss but discovery still sees the mob — snap once
+                    # when drifted from the prior; if already there, fall
+                    # through so lost_count can advance.
+                    if apply_discovery_reanchor(track, now_tick=tick):
+                        continue
                 apply_track_observation(
                     track,
-                    found=result.found,
+                    found=False,
                     x=result.x,
                     y=result.y,
                     confidence=result.confidence,
                     now_tick=tick,
                 )
-                # LocalTrackResult carries opacity state; test stubs (_hit) omit it.
                 if hasattr(result, "opacity_baseline"):
                     apply_opacity_observation(
                         track,
@@ -396,16 +476,32 @@ class HuntTracks:
                         opacity_baseline_samples=result.opacity_baseline_samples,
                         opacity_decay_streak=result.opacity_decay_streak,
                     )
+            # Discovery may flag death while a track is absent from this batch
+            # (e.g. empty follow list) — still remove on the tracking tick.
+            seen_ids = {int(getattr(r, "track_id", -1)) for r in results}
+            for track in self._tracks:
+                if track.id in seen_ids or track.id in dead_ids:
+                    continue
+                if not track.discovery_death:
+                    continue
+                sample = self._kill_sample_attack_count_locked(track)
+                self._pending_attack_track_ids.discard(track.id)
+                self._record_kill_locked(sample)
+                self._record_removed_site_locked(track.x, track.y, tick)
+                dead_ids.append(track.id)
             remove_ids = set(dead_ids)
+            remove_ids.update(joint_absent_ids)
             miss_limit = track_lost_miss_limit(self._detector_config())
-            lost_ids = [
+            lost_ids = list(joint_absent_ids) + [
                 t.id
                 for t in self._tracks
                 if t.id not in remove_ids and is_track_lost(t, miss_limit=miss_limit)
             ]
             # Lost tracks are not death sites — do not block rediscovery.
             remove_ids.update(lost_ids)
-            unreachable_ids = self._expire_unreachable_locked(tick, exclude_ids=remove_ids)
+            unreachable_ids = self._expire_unreachable_locked(
+                tick, exclude_ids=remove_ids
+            )
             remove_ids.update(unreachable_ids)
             if remove_ids:
                 self._remove_tracks_locked(remove_ids)
@@ -521,11 +617,11 @@ class HuntTracks:
     ) -> list[int]:
         """Drop tracks that exceeded the per-mob attack budget without dying.
 
-        Unlike confirmed opacity deaths, unreachable removals do not seed a
-        rediscovery ghost — the mob may still be alive. Attack-anchor counts
-        are cleared so discovery can recreate with a fresh budget.
+        Seeds a rediscovery ghost at the last position so discovery does not
+        immediately recreate the same site (often a corpse that opacity never
+        confirmed). Attack-anchor counts are cleared so a later recreate after
+        cooldown starts with a fresh budget.
         """
-        del now_tick
         skip = exclude_ids or set()
         limit = self._max_attacks_per_mob_before_unreachable_locked()
         unreachable_ids: list[int] = []
@@ -537,6 +633,7 @@ class HuntTracks:
             anchor = (track.attack_anchor_x, track.attack_anchor_y)
             self._attacks_by_anchor.pop(anchor, None)
             self._pending_attack_track_ids.discard(track.id)
+            self._record_removed_site_locked(track.x, track.y, now_tick)
             unreachable_ids.append(track.id)
         return unreachable_ids
 
