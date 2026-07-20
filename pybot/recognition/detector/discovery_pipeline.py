@@ -54,6 +54,11 @@ def _geometry_gate() -> Callable:
     return MobDetector._passes_discovery_geometry_gate
 
 
+def _noisy_extract() -> Callable:
+    from pybot.recognition.detector.detector import MobDetector
+    return MobDetector._noisy_extraction_signal
+
+
 def _silhouette_gate() -> Callable:
     from pybot.recognition.detector.detector import MobDetector
     return MobDetector._evaluate_silhouette_gate
@@ -79,6 +84,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "top_centers",
                     "_passes_discovery_geometry_gate",
                     "_evaluate_silhouette_gate",
+                    "_noisy_extraction_signal",
                     "_finalize_accepted",
                 ),
             ),
@@ -160,8 +166,10 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             "search around heat CC bbox (not sprite-inflated)",
             "palette binary_raw + dilate(1) -> CC overlapping heat",
             "horizontal MORPH_CLOSE bridge (silhouetteHorizontalBridgeCells)",
+            "if extract_area_ratio >= 2: shrink to descriptor window on body centroid",
             "tight bridged crop resized to descriptor size",
             "candidate_silhouette vs descriptor masks",
+            "noisy extract flag (bloated crop and/or soft/hard content noise)",
             "pass / fail per blob",
         ),
         sources=(
@@ -176,11 +184,22 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "connectedComponentsWithStats",
                     "silhouetteHorizontalBridgeCells",
                     "MORPH_CLOSE",
+                    "_shrink_bloated_extract_to_descriptor",
                     "extract_bbox",
                     "candidate_silhouette",
                     "best_silhouette_match",
                     "minSilhouetteRecall",
                     "minSilhouettePrecision",
+                ),
+            ),
+            SourceCheck(
+                _noisy_extract,
+                (
+                    "extract_area_ratio",
+                    "extract_bloated",
+                    "content_noisy",
+                    "soft_hard_ratio",
+                    "noisy_extract",
                 ),
             ),
         ),

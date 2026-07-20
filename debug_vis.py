@@ -216,9 +216,24 @@ def allocate_silhouette_panel(
             f"BLB{idx}: heat={check.heat_score:.3f}  jac={check.similarity:.2f}  "
             f"{status}  ref={check.matched_mask_index}"
         )
+        noise_bits: list[str] = []
+        if check.extract_bloated:
+            noise_bits.append("BLOAT")
+        if check.content_noisy:
+            noise_bits.append("CONTENT")
+        if noise_bits:
+            noise_tag = (
+                f"  {'+'.join(noise_bits)} "
+                f"aR={check.extract_area_ratio:.2f} s/h={check.soft_hard_ratio:.2f}"
+            )
+        else:
+            noise_tag = (
+                f"  aR={check.extract_area_ratio:.2f} s/h={check.soft_hard_ratio:.2f}"
+            )
         line2 = (
             f"  rec={check.recall:.2f}{rec_mark}/{min_recall:.2f}  "
             f"prec={check.precision:.2f}{prec_mark}/{min_precision:.2f}"
+            f"{noise_tag}"
         )
         if check.mask_similarities:
             score_bits = "/".join(f"{score:.2f}" for score in check.mask_similarities)
@@ -344,12 +359,19 @@ def draw_detection_overlay(frame: np.ndarray, result: DetectionResult) -> np.nda
         cv2.rectangle(overlay, (bx, by), (bx + bw, by + bh), color, thickness)
         cv2.circle(overlay, (cx, cy), 5, color, -1)
         tag = f"{idx}:" + ("ACC" if is_accepted else ("SIL" if check.passed else "FAIL"))
+        if check.extract_bloated:
+            tag += ":B"
+        if check.content_noisy:
+            tag += ":C"
         cv2.putText(
             overlay, tag, (bx, max(by - 6, 12)),
             cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1,
         )
+        size_tag = f"{bw}x{bh}"
+        if check.noisy_extract:
+            size_tag = f"{size_tag} NOISY"
         cv2.putText(
-            overlay, f"{bw}x{bh}", (bx, min(by + bh + 14, overlay.shape[0] - 4)),
+            overlay, size_tag, (bx, min(by + bh + 14, overlay.shape[0] - 4)),
             cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1,
         )
 

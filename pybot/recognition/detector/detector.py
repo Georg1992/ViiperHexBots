@@ -17,6 +17,7 @@ import numpy as np
 from pybot.recognition.detector.descriptors.descriptor import MobDescriptor
 from pybot.recognition.detector.descriptors.descriptor_builder import DESCRIPTOR_VERSION
 from pybot.recognition.detector.descriptors.layout_utils import (
+    HARD_OCCUPANCY,
     best_silhouette_match,
     candidate_silhouette,
 )
@@ -102,6 +103,12 @@ class SilhouetteCheck:
     matched_mask_index: int = 0
     mask_similarities: list[float] | None = None
     extract_bbox: tuple[int, int, int, int] | None = None
+    # Cleanup hooks: bloated crop and/or noisy silhouette content.
+    noisy_extract: bool = False
+    extract_bloated: bool = False
+    content_noisy: bool = False
+    extract_area_ratio: float = 0.0
+    soft_hard_ratio: float = 0.0
 
 
 @dataclass
@@ -240,6 +247,15 @@ class MobDetector:
             candidate_mask = (
                 candidate.reshape(-1).tolist() if candidate is not None else None
             )
+            (
+                noisy_extract,
+                extract_bloated,
+                content_noisy,
+                extract_area_ratio,
+                soft_hard_ratio,
+            ) = self._noisy_extraction_signal(
+                extract_bbox, descriptor, candidate,
+            )
             # Drawn/accept box = heat CC bbox (a35ef47 tight blob box).
             silhouette_checks.append(SilhouetteCheck(
                 center_x=cx,
@@ -253,6 +269,11 @@ class MobDetector:
                 matched_mask_index=matched_idx,
                 mask_similarities=scores,
                 extract_bbox=extract_bbox,
+                noisy_extract=noisy_extract,
+                extract_bloated=extract_bloated,
+                content_noisy=content_noisy,
+                extract_area_ratio=extract_area_ratio,
+                soft_hard_ratio=soft_hard_ratio,
             ))
             if not passed:
                 continue
@@ -331,6 +352,57 @@ class MobDetector:
         if aspect_ratio < (1.0 / aspect_band) or aspect_ratio > aspect_band:
             return False
         return True
+
+    def _noisy_extraction_signal(
+        self,
+        extract_bbox: tuple[int, int, int, int] | None,
+        descriptor: MobDescriptor,
+        candidate: np.ndarray | None,
+    ) -> tuple[bool, bool, bool, float, float]:
+        """Detect bloated crops and/or noisy silhouette *content*.
+
+        ``extract_bloated``: extract area >= 2× descriptor sprite area (search-window
+        fill from terrain merge). Large but clean crops (e.g. some Noxious) can be
+        bloated without being content-noisy.
+
+        ``content_noisy``: soft occupancy mass >= 2× hard mass on the 16×16 candidate.
+        A compact sprite has soft ≈ O(perimeter) ≈ O(sqrt(hard)), so soft/hard ≪ 1.
+        soft/hard >= 2 means the soft field dominates the hard body (terrain bleed /
+        confetti), independent of bbox size.
+
+        ``noisy_extract`` = bloated OR content_noisy. Cleanup hook only — no reject.
+        Returns
+        ``(noisy_extract, extract_bloated, content_noisy, extract_area_ratio, soft_hard_ratio)``.
+        """
+        extract_area_ratio = 0.0
+        extract_bloated = False
+        if extract_bbox is not None:
+            _x, _y, ew, eh = extract_bbox
+            if ew >= 1 and eh >= 1:
+                desc_area = float(descriptor.avg_width) * float(descriptor.avg_height)
+                extract_area_ratio = (float(ew) * float(eh)) / desc_area
+                extract_bloated = extract_area_ratio >= 2.0
+
+        soft_hard_ratio = 0.0
+        content_noisy = False
+        if candidate is not None and candidate.size > 0:
+            hard = candidate >= HARD_OCCUPANCY
+            soft = (candidate > 0) & ~hard
+            hard_n = int(hard.sum())
+            soft_n = int(soft.sum())
+            if hard_n > 0:
+                soft_hard_ratio = float(soft_n) / float(hard_n)
+                # Soft mass at least 2× hard: cannot be a compact 1-cell halo.
+                content_noisy = soft_hard_ratio >= 2.0
+
+        noisy_extract = extract_bloated or content_noisy
+        return (
+            noisy_extract,
+            extract_bloated,
+            content_noisy,
+            float(extract_area_ratio),
+            float(soft_hard_ratio),
+        )
 
     def _descriptor_silhouette_references(
         self,
@@ -488,14 +560,30 @@ class MobDetector:
         if comp_w < 4 or comp_h < 4:
             return False, 0.0, None, 0, [], None, 0.0, 0.0
 
-        extract_bbox = (
-            search_x + comp_left,
-            search_y + comp_top,
-            comp_w,
-            comp_h,
-        )
-        comp_mask = occupancy[comp_top:comp_bottom, comp_left:comp_right]
-        mob_region = search_region[comp_top:comp_bottom, comp_left:comp_right]
+        desc_area = float(desc_w) * float(desc_h)
+        extract_area_ratio = (float(comp_w) * float(comp_h)) / desc_area
+        if extract_area_ratio >= 2.0:
+            # Bloated crop (terrain-merged CC): re-frame to descriptor-sized
+            # window on the body centroid so silhouette sees a sprite-scale extract.
+            mob_region, comp_mask, extract_bbox = self._shrink_bloated_extract_to_descriptor(
+                search_region,
+                binary_raw,
+                best_mask,
+                desc_w,
+                desc_h,
+                search_x,
+                search_y,
+            )
+        else:
+            extract_bbox = (
+                search_x + comp_left,
+                search_y + comp_top,
+                comp_w,
+                comp_h,
+            )
+            comp_mask = occupancy[comp_top:comp_bottom, comp_left:comp_right]
+            mob_region = search_region[comp_top:comp_bottom, comp_left:comp_right]
+
         if mob_region.size == 0 or not np.any(comp_mask):
             return False, 0.0, None, 0, [], extract_bbox, 0.0, 0.0
 
@@ -535,6 +623,57 @@ class MobDetector:
             float(precision),
             float(recall),
         )
+
+    def _shrink_bloated_extract_to_descriptor(
+        self,
+        search_region: np.ndarray,
+        binary_raw: np.ndarray,
+        best_mask: np.ndarray,
+        desc_w: int,
+        desc_h: int,
+        search_x: int,
+        search_y: int,
+    ) -> tuple[np.ndarray, np.ndarray, tuple[int, int, int, int]]:
+        """Re-crop a terrain-bloated CC to a descriptor-sized window.
+
+        Centers on the body-CC centroid, keeps palette match in-window that
+        belongs to the connected component containing that centroid.
+        """
+        ys, xs = np.where(best_mask)
+        cy = int(round(float(ys.mean())))
+        cx = int(round(float(xs.mean())))
+        sh, sw = search_region.shape[:2]
+        left = max(0, cx - desc_w // 2)
+        top = max(0, cy - desc_h // 2)
+        right = min(sw, left + desc_w)
+        bottom = min(sh, top + desc_h)
+        left = max(0, right - desc_w)
+        top = max(0, bottom - desc_h)
+
+        mob_region = search_region[top:bottom, left:right]
+        window = best_mask[top:bottom, left:right] | binary_raw[top:bottom, left:right].astype(bool)
+        nlab, labels, _stats, _centroids = cv2.connectedComponentsWithStats(
+            window.astype(np.uint8), connectivity=8,
+        )
+        local_y = cy - top
+        local_x = cx - left
+        if (
+            nlab > 1
+            and 0 <= local_y < labels.shape[0]
+            and 0 <= local_x < labels.shape[1]
+            and int(labels[local_y, local_x]) > 0
+        ):
+            comp_mask = labels == int(labels[local_y, local_x])
+        else:
+            comp_mask = best_mask[top:bottom, left:right]
+
+        extract_bbox = (
+            search_x + left,
+            search_y + top,
+            right - left,
+            bottom - top,
+        )
+        return mob_region, comp_mask, extract_bbox
 
     # ------------------------------------------------------------------
     #  Per-point scoring  (kept for local_tracker — silhouette-based)
