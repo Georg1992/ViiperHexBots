@@ -64,6 +64,26 @@ def _silhouette_gate() -> Callable:
     return MobDetector._evaluate_silhouette_gate
 
 
+def _silhouette_search() -> Callable:
+    from pybot.recognition.detector.detector import MobDetector
+    return MobDetector._silhouette_search_window
+
+
+def _palette_cc() -> Callable:
+    from pybot.recognition.detector.detector import MobDetector
+    return MobDetector._best_overlapping_palette_component
+
+
+def _horizontal_bridge() -> Callable:
+    from pybot.recognition.detector.detector import MobDetector
+    return MobDetector._horizontal_bridge_occupancy
+
+
+def _maybe_deform() -> Callable:
+    from pybot.recognition.detector.detector import MobDetector
+    return MobDetector._maybe_deform_noisy_candidate
+
+
 def _finalize_accepted() -> Callable:
     from pybot.recognition.detector.detector import MobDetector
     return MobDetector._finalize_accepted
@@ -182,16 +202,39 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "binary_raw",
                     "minSpritePaletteMatch",
                     "dilate",
-                    "connectedComponentsWithStats",
-                    "silhouetteHorizontalBridgeCells",
-                    "MORPH_CLOSE",
                     "_shrink_bloated_extract_to_descriptor",
-                    "_deform_silhouette_occupancy",
                     "extract_bbox",
                     "candidate_silhouette",
                     "best_silhouette_match",
                     "minSilhouetteRecall",
                     "minSilhouettePrecision",
+                    "_maybe_deform_noisy_candidate",
+                ),
+            ),
+            SourceCheck(
+                _silhouette_search,
+                ("search_region", "comp_bbox", "desc_w", "desc_h"),
+            ),
+            SourceCheck(
+                _palette_cc,
+                ("connectedComponentsWithStats", "best_overlap", "best_label"),
+            ),
+            SourceCheck(
+                _horizontal_bridge,
+                (
+                    "silhouetteHorizontalBridgeCells",
+                    "MORPH_CLOSE",
+                    "bridge_px",
+                ),
+            ),
+            SourceCheck(
+                _maybe_deform,
+                (
+                    "_occupancy_soft_hard_ratio",
+                    "_CONTENT_NOISE_SOFT_HARD_RATIO",
+                    "minSilhouetteRecall",
+                    "_deform_silhouette_occupancy",
+                    "candidate_silhouette",
                 ),
             ),
             SourceCheck(

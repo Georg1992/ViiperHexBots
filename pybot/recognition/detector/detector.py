@@ -62,6 +62,55 @@ REQUIRED_CONFIG_KEYS = {
     "attacksTillDeathHistoryWindow",
 }
 
+# Geometry pre-gate: heat-CC area must be at least sil_frac / N of sprite area;
+# aspect may deviate by this multiplicative band vs descriptor aspect.
+_GEOMETRY_AREA_SIL_FRAC_DIVISOR = 4.0
+_GEOMETRY_ASPECT_BAND = 1.5
+
+# Extract / content-noise thresholds shared by silhouette gate control flow
+# and the post-gate noisy_extract cleanup hook.
+_EXTRACT_BLOAT_AREA_RATIO = 2.0
+_CONTENT_NOISE_SOFT_HARD_RATIO = 2.0
+
+# Silhouette crop / morph / deform sizing.
+_MIN_DESCRIPTOR_PX = 8
+_MIN_EXTRACT_COMPONENT_PX = 4
+_MIN_HORIZONTAL_BRIDGE_PX = 3
+_DEFORM_RADIUS_SILHOUETTE_CELLS = 2
+_MORPH_NEIGHBORHOOD_PX = 3
+
+
+def _descriptor_sprite_size_px(descriptor: MobDescriptor) -> tuple[int, int]:
+    return (
+        max(_MIN_DESCRIPTOR_PX, int(round(descriptor.avg_width))),
+        max(_MIN_DESCRIPTOR_PX, int(round(descriptor.avg_height))),
+    )
+
+
+def _occupancy_soft_hard_ratio(candidate: np.ndarray | None) -> float:
+    """Soft-cell count / hard-cell count on a silhouette occupancy grid."""
+    if candidate is None or candidate.size == 0:
+        return 0.0
+    hard = candidate >= HARD_OCCUPANCY
+    soft = (candidate > 0) & ~hard
+    hard_n = int(hard.sum())
+    if hard_n <= 0:
+        return 0.0
+    return float(int(soft.sum())) / float(hard_n)
+
+
+def _bbox_area_ratio(
+    bbox: tuple[int, int, int, int] | None,
+    descriptor: MobDescriptor,
+) -> float:
+    if bbox is None:
+        return 0.0
+    _x, _y, w, h = bbox
+    if w < 1 or h < 1:
+        return 0.0
+    desc_area = float(descriptor.avg_width) * float(descriptor.avg_height)
+    return (float(w) * float(h)) / desc_area
+
 
 @dataclass
 class DetectionCandidate:
@@ -238,6 +287,7 @@ class MobDetector:
                 extract_bbox,
                 precision,
                 recall,
+                bridged_extract_area_ratio,
             ) = self._evaluate_silhouette_gate(
                 frame_bgr,
                 descriptor,
@@ -254,7 +304,10 @@ class MobDetector:
                 extract_area_ratio,
                 soft_hard_ratio,
             ) = self._noisy_extraction_signal(
-                extract_bbox, descriptor, candidate,
+                extract_bbox,
+                descriptor,
+                candidate,
+                extract_area_ratio=bridged_extract_area_ratio,
             )
             # Drawn/accept box = heat CC bbox (a35ef47 tight blob box).
             silhouette_checks.append(SilhouetteCheck(
@@ -289,7 +342,8 @@ class MobDetector:
             ))
 
         gate_end = time.perf_counter()
-        accepted = self._finalize_accepted(candidates)
+        max_candidates = int(self.config["maxCandidates"])
+        accepted = self._finalize_accepted(candidates)[:max_candidates]
 
         elapsed = time.perf_counter() - start
         timing = {
@@ -303,7 +357,7 @@ class MobDetector:
         return DetectionResult(
             mob_name=mob_name.lower(),
             descriptor=descriptor,
-            candidates=candidates[: int(self.config["maxCandidates"])],
+            candidates=accepted,
             accepted=accepted,
             elapsed_s=elapsed,
             timing=timing,
@@ -322,9 +376,10 @@ class MobDetector:
     ) -> bool:
         """Reject heat CCs whose size/aspect cannot plausibly match the mob.
 
-        ``min_area_ratio = sil_frac / 4`` uses the descriptor's stable silhouette
-        occupancy as a lower bound on heat-CC area vs sprite area.
-        ``aspect_band = 3/2`` allows ±50% aspect slack vs descriptor sprite aspect.
+        ``min_area_ratio = sil_frac / _GEOMETRY_AREA_SIL_FRAC_DIVISOR`` uses the
+        descriptor's stable silhouette occupancy as a lower bound on heat-CC area
+        vs sprite area. ``_GEOMETRY_ASPECT_BAND`` allows ±50% aspect slack vs
+        descriptor sprite aspect.
         """
         _x, _y, hw, hh = comp_bbox
         if hw < 1 or hh < 1:
@@ -342,8 +397,8 @@ class MobDetector:
         if not stable_bits:
             return False
         sil_frac = float(np.mean(np.asarray(stable_bits, dtype=np.float32)))
-        min_area_ratio = sil_frac / 4.0
-        aspect_band = 3.0 / 2.0
+        min_area_ratio = sil_frac / _GEOMETRY_AREA_SIL_FRAC_DIVISOR
+        aspect_band = _GEOMETRY_ASPECT_BAND
 
         area_ratio = (float(hw) * float(hh)) / desc_area
         aspect_ratio = (float(hw) / float(hh)) / desc_aspect
@@ -358,42 +413,34 @@ class MobDetector:
         extract_bbox: tuple[int, int, int, int] | None,
         descriptor: MobDescriptor,
         candidate: np.ndarray | None,
+        *,
+        extract_area_ratio: float | None = None,
     ) -> tuple[bool, bool, bool, float, float]:
         """Detect bloated crops and/or noisy silhouette *content*.
 
-        ``extract_bloated``: extract area >= 2× descriptor sprite area (search-window
-        fill from terrain merge). Large but clean crops (e.g. some Noxious) can be
-        bloated without being content-noisy.
+        ``extract_bloated``: bridged palette-CC area >= ``_EXTRACT_BLOAT_AREA_RATIO``
+        × descriptor sprite area (terrain merge). Prefer the pre-shrink ratio from
+        the silhouette gate so BLOAT still flags after a successful descriptor
+        re-crop. Large but clean crops (e.g. some Noxious) can be bloated without
+        being content-noisy.
 
-        ``content_noisy``: soft occupancy mass >= 2× hard mass on the 16×16 candidate.
-        A compact sprite has soft ≈ O(perimeter) ≈ O(sqrt(hard)), so soft/hard ≪ 1.
-        soft/hard >= 2 means the soft field dominates the hard body (terrain bleed /
-        confetti), independent of bbox size.
+        ``content_noisy``: soft occupancy mass >= ``_CONTENT_NOISE_SOFT_HARD_RATIO``
+        × hard mass on the final candidate grid. A compact sprite has
+        soft ≈ O(perimeter) ≈ O(sqrt(hard)), so soft/hard ≪ 1. soft/hard >= 2
+        means the soft field dominates the hard body (terrain bleed / confetti),
+        independent of bbox size.
 
         ``noisy_extract`` = bloated OR content_noisy. Cleanup hook only — no reject.
         Returns
         ``(noisy_extract, extract_bloated, content_noisy, extract_area_ratio, soft_hard_ratio)``.
         """
-        extract_area_ratio = 0.0
-        extract_bloated = False
-        if extract_bbox is not None:
-            _x, _y, ew, eh = extract_bbox
-            if ew >= 1 and eh >= 1:
-                desc_area = float(descriptor.avg_width) * float(descriptor.avg_height)
-                extract_area_ratio = (float(ew) * float(eh)) / desc_area
-                extract_bloated = extract_area_ratio >= 2.0
+        if extract_area_ratio is None:
+            extract_area_ratio = _bbox_area_ratio(extract_bbox, descriptor)
+        extract_bloated = extract_area_ratio >= _EXTRACT_BLOAT_AREA_RATIO
 
-        soft_hard_ratio = 0.0
-        content_noisy = False
-        if candidate is not None and candidate.size > 0:
-            hard = candidate >= HARD_OCCUPANCY
-            soft = (candidate > 0) & ~hard
-            hard_n = int(hard.sum())
-            soft_n = int(soft.sum())
-            if hard_n > 0:
-                soft_hard_ratio = float(soft_n) / float(hard_n)
-                # Soft mass at least 2× hard: cannot be a compact 1-cell halo.
-                content_noisy = soft_hard_ratio >= 2.0
+        soft_hard_ratio = _occupancy_soft_hard_ratio(candidate)
+        # Soft mass at least 2× hard: cannot be a compact 1-cell halo.
+        content_noisy = soft_hard_ratio >= _CONTENT_NOISE_SOFT_HARD_RATIO
 
         noisy_extract = extract_bloated or content_noisy
         return (
@@ -436,6 +483,7 @@ class MobDetector:
         tuple[int, int, int, int] | None,
         float,
         float,
+        float,
     ]:
         """Silhouette gate matching a35ef47 crop style.
 
@@ -443,41 +491,19 @@ class MobDetector:
         palette CC, bridge nearby same-row palette fragments horizontally
         (descriptor-scaled), crop tightly, then resize to descriptor size.
         Returns (passed, jaccard, candidate, matched_idx, scores, extract_bbox,
-        precision, recall).
+        precision, recall, bridged_extract_area_ratio).
         """
+        fail = (False, 0.0, None, 0, [], None, 0.0, 0.0, 0.0)
         refs = self._descriptor_silhouette_references(descriptor)
         if not refs or not descriptor.match_palette_bgr:
-            return False, 0.0, None, 0, [], None, 0.0, 0.0
+            return fail
         gate_mask = descriptor.silhouette_masks[0]
-        x, y, w, h = bbox
-        desc_w = max(8, int(round(descriptor.avg_width)))
-        desc_h = max(8, int(round(descriptor.avg_height)))
-        fh, fw = frame_bgr.shape[:2]
+        desc_w, desc_h = _descriptor_sprite_size_px(descriptor)
 
-        # Search window: at least heat-CC size and at least descriptor size.
-        if comp_bbox is not None:
-            hx, hy, hw, hh = comp_bbox
-            ref_cx = hx + hw // 2
-            ref_cy = hy + hh // 2
-            ref_w = max(hw, desc_w)
-            ref_h = max(hh, desc_h)
-        else:
-            ref_cx = x + w // 2
-            ref_cy = y + h // 2
-            ref_w = max(w, desc_w)
-            ref_h = max(h, desc_h)
-
-        search_x = max(0, ref_cx - ref_w)
-        search_y = max(0, ref_cy - ref_h)
-        search_w = min(fw - search_x, ref_w * 2)
-        search_h = min(fh - search_y, ref_h * 2)
-
-        search_region = frame_bgr[search_y : search_y + search_h, search_x : search_x + search_w]
-        if search_region.size == 0:
-            return False, 0.0, None, 0, [], None, 0.0, 0.0
-
-        local_bbox_left = ref_cx - ref_w // 2 - search_x
-        local_bbox_top = ref_cy - ref_h // 2 - search_y
+        search = self._silhouette_search_window(frame_bgr, bbox, comp_bbox, desc_w, desc_h)
+        if search is None:
+            return fail
+        search_region, search_x, search_y, ref_w, ref_h, local_bbox_left, local_bbox_top = search
 
         palette_heat = sprite_palette_heatmap(
             search_region, descriptor.match_palette_bgr,
@@ -485,84 +511,38 @@ class MobDetector:
         )
         binary_raw = (palette_heat >= float(self.config["minSpritePaletteMatch"])).astype(np.uint8)
         if not np.any(binary_raw):
-            return False, 0.0, None, 0, [], None, 0.0, 0.0
+            return fail
 
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        binary = cv2.dilate(binary_raw, kernel, iterations=1)
-
-        _nl, labels, stats, _centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
-        if _nl <= 1:
-            return False, 0.0, None, 0, [], None, 0.0, 0.0
-
-        best_overlap = 0
-        best_label = 0
-        for lbl in range(1, _nl):
-            cl = int(stats[lbl, cv2.CC_STAT_LEFT])
-            ct = int(stats[lbl, cv2.CC_STAT_TOP])
-            cr = cl + int(stats[lbl, cv2.CC_STAT_WIDTH])
-            cb = ct + int(stats[lbl, cv2.CC_STAT_HEIGHT])
-            ol = max(cl, local_bbox_left)
-            ot = max(ct, local_bbox_top)
-            o_r = min(cr, local_bbox_left + ref_w)
-            o_b = min(cb, local_bbox_top + ref_h)
-            if ol < o_r and ot < o_b:
-                oa = (o_r - ol) * (o_b - ot)
-                if oa > best_overlap:
-                    best_overlap = oa
-                    best_label = lbl
-
-        if best_label == 0:
-            return False, 0.0, None, 0, [], None, 0.0, 0.0
-
-        best_mask = labels == best_label
-        ys, xs = np.where(best_mask)
-        if len(xs) == 0:
-            return False, 0.0, None, 0, [], None, 0.0, 0.0
-        comp_left = int(xs.min())
-        comp_right = int(xs.max()) + 1
-        comp_top = int(ys.min())
-        comp_bottom = int(ys.max()) + 1
-
-        # Horizontally bridge body-height palette fragments that the dilate-CC
-        # missed (patchy wings). Gap budget is N silhouette-grid cells mapped
-        # into sprite pixels: bridge_px ≈ cells * desc_w / grid_w.
-        # Geodesic grow stays inside the closed band so vertical terrain is not
-        # pulled in.
-        bridge_cells = max(1, int(self.config["silhouetteHorizontalBridgeCells"]))
-        bridge_px = max(
-            3,
-            int(round(bridge_cells * desc_w / float(gate_mask.width))),
+        k = _MORPH_NEIGHBORHOOD_PX
+        binary = cv2.dilate(
+            binary_raw,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)),
+            iterations=1,
         )
-        if bridge_px % 2 == 0:
-            bridge_px += 1
-        band = np.zeros_like(binary_raw)
-        band[comp_top:comp_bottom, :] = binary_raw[comp_top:comp_bottom, :]
-        closed = cv2.morphologyEx(
-            band,
-            cv2.MORPH_CLOSE,
-            cv2.getStructuringElement(cv2.MORPH_RECT, (bridge_px, 1)),
+        best_mask = self._best_overlapping_palette_component(
+            binary, local_bbox_left, local_bbox_top, ref_w, ref_h,
         )
-        grown = best_mask.astype(np.uint8)
-        grow_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        for _ in range(max(1, bridge_px // 2)):
-            grown = cv2.bitwise_and(cv2.dilate(grown, grow_kernel, iterations=1), closed)
-        occupancy = grown.astype(bool) | best_mask
+        if best_mask is None:
+            return fail
 
+        occupancy = self._horizontal_bridge_occupancy(
+            binary_raw, best_mask, desc_w, gate_mask.width,
+        )
         ys, xs = np.where(occupancy)
         if len(xs) == 0:
-            return False, 0.0, None, 0, [], None, 0.0, 0.0
+            return fail
         comp_left = int(xs.min())
         comp_right = int(xs.max()) + 1
         comp_top = int(ys.min())
         comp_bottom = int(ys.max()) + 1
         comp_w = comp_right - comp_left
         comp_h = comp_bottom - comp_top
-        if comp_w < 4 or comp_h < 4:
-            return False, 0.0, None, 0, [], None, 0.0, 0.0
+        if comp_w < _MIN_EXTRACT_COMPONENT_PX or comp_h < _MIN_EXTRACT_COMPONENT_PX:
+            return fail
 
         desc_area = float(desc_w) * float(desc_h)
         extract_area_ratio = (float(comp_w) * float(comp_h)) / desc_area
-        if extract_area_ratio >= 2.0:
+        if extract_area_ratio >= _EXTRACT_BLOAT_AREA_RATIO:
             # Bloated crop (terrain-merged CC): re-frame to descriptor-sized
             # window on the body centroid so silhouette sees a sprite-scale extract.
             mob_region, comp_mask, extract_bbox = self._shrink_bloated_extract_to_descriptor(
@@ -585,7 +565,7 @@ class MobDetector:
             mob_region = search_region[comp_top:comp_bottom, comp_left:comp_right]
 
         if mob_region.size == 0 or not np.any(comp_mask):
-            return False, 0.0, None, 0, [], extract_bbox, 0.0, 0.0
+            return False, 0.0, None, 0, [], extract_bbox, 0.0, 0.0, extract_area_ratio
 
         if mob_region.shape[1] != desc_w or mob_region.shape[0] != desc_h:
             mob_region = cv2.resize(mob_region, (desc_w, desc_h), interpolation=cv2.INTER_LINEAR)
@@ -607,29 +587,9 @@ class MobDetector:
             gate_mask.width, gate_mask.height,
             occupancy_mask=comp_mask,
         )
-        # Content-noisy candidates (soft mass dominates hard body): if the crude
-        # candidate already has enough recall (shape roughly right), replace
-        # occupancy with a deformable descriptor silhouette prior — upsample the
-        # best-matching ref and expand only into palette heat within 2 grid cells.
-        hard = candidate >= HARD_OCCUPANCY
-        soft = (candidate > 0) & ~hard
-        hard_n = int(hard.sum())
-        if hard_n > 0 and (float(soft.sum()) / float(hard_n)) >= 2.0:
-            _sim0, facing_idx, _scores0, _prec0, rec0 = best_silhouette_match(
-                candidate, refs,
-            )
-            if rec0 >= float(self.config["minSilhouetteRecall"]):
-                ref_avg, ref_stable = refs[facing_idx]
-                deformed_mask = self._deform_silhouette_occupancy(
-                    mob_region, descriptor, ref_avg, ref_stable,
-                )
-                candidate = candidate_silhouette(
-                    mob_region,
-                    palette,
-                    silhouette_distance,
-                    gate_mask.width, gate_mask.height,
-                    occupancy_mask=deformed_mask,
-                )
+        candidate = self._maybe_deform_noisy_candidate(
+            candidate, refs, mob_region, descriptor, palette, silhouette_distance, gate_mask,
+        )
 
         similarity, matched_idx, scores, precision, recall = best_silhouette_match(
             candidate, refs,
@@ -647,6 +607,148 @@ class MobDetector:
             extract_bbox,
             float(precision),
             float(recall),
+            float(extract_area_ratio),
+        )
+
+    def _silhouette_search_window(
+        self,
+        frame_bgr: np.ndarray,
+        bbox: tuple[int, int, int, int],
+        comp_bbox: tuple[int, int, int, int] | None,
+        desc_w: int,
+        desc_h: int,
+    ) -> tuple[np.ndarray, int, int, int, int, int, int] | None:
+        """Search around heat CC (or bbox): at least CC size and descriptor size."""
+        x, y, w, h = bbox
+        fh, fw = frame_bgr.shape[:2]
+        if comp_bbox is not None:
+            hx, hy, hw, hh = comp_bbox
+            ref_cx = hx + hw // 2
+            ref_cy = hy + hh // 2
+            ref_w = max(hw, desc_w)
+            ref_h = max(hh, desc_h)
+        else:
+            ref_cx = x + w // 2
+            ref_cy = y + h // 2
+            ref_w = max(w, desc_w)
+            ref_h = max(h, desc_h)
+
+        search_x = max(0, ref_cx - ref_w)
+        search_y = max(0, ref_cy - ref_h)
+        search_w = min(fw - search_x, ref_w * 2)
+        search_h = min(fh - search_y, ref_h * 2)
+        search_region = frame_bgr[search_y : search_y + search_h, search_x : search_x + search_w]
+        if search_region.size == 0:
+            return None
+        local_bbox_left = ref_cx - ref_w // 2 - search_x
+        local_bbox_top = ref_cy - ref_h // 2 - search_y
+        return (
+            search_region, search_x, search_y, ref_w, ref_h,
+            local_bbox_left, local_bbox_top,
+        )
+
+    def _best_overlapping_palette_component(
+        self,
+        binary: np.ndarray,
+        local_bbox_left: int,
+        local_bbox_top: int,
+        ref_w: int,
+        ref_h: int,
+    ) -> np.ndarray | None:
+        """Dilated palette CC with largest overlap against the heat reference box."""
+        _nl, labels, stats, _centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        if _nl <= 1:
+            return None
+
+        best_overlap = 0
+        best_label = 0
+        for lbl in range(1, _nl):
+            cl = int(stats[lbl, cv2.CC_STAT_LEFT])
+            ct = int(stats[lbl, cv2.CC_STAT_TOP])
+            cr = cl + int(stats[lbl, cv2.CC_STAT_WIDTH])
+            cb = ct + int(stats[lbl, cv2.CC_STAT_HEIGHT])
+            ol = max(cl, local_bbox_left)
+            ot = max(ct, local_bbox_top)
+            o_r = min(cr, local_bbox_left + ref_w)
+            o_b = min(cb, local_bbox_top + ref_h)
+            if ol < o_r and ot < o_b:
+                oa = (o_r - ol) * (o_b - ot)
+                if oa > best_overlap:
+                    best_overlap = oa
+                    best_label = lbl
+        if best_label == 0:
+            return None
+        best_mask = labels == best_label
+        if not np.any(best_mask):
+            return None
+        return best_mask
+
+    def _horizontal_bridge_occupancy(
+        self,
+        binary_raw: np.ndarray,
+        best_mask: np.ndarray,
+        desc_w: int,
+        gate_width: int,
+    ) -> np.ndarray:
+        """Bridge same-row palette fragments the dilate-CC missed (patchy wings).
+
+        Gap budget is N silhouette-grid cells mapped into sprite pixels:
+        bridge_px ≈ cells * desc_w / grid_w. Geodesic grow stays inside the
+        closed band so vertical terrain is not pulled in.
+        """
+        ys, xs = np.where(best_mask)
+        comp_top = int(ys.min())
+        comp_bottom = int(ys.max()) + 1
+        bridge_cells = max(1, int(self.config["silhouetteHorizontalBridgeCells"]))
+        bridge_px = max(
+            _MIN_HORIZONTAL_BRIDGE_PX,
+            int(round(bridge_cells * desc_w / float(gate_width))),
+        )
+        if bridge_px % 2 == 0:
+            bridge_px += 1
+        band = np.zeros_like(binary_raw)
+        band[comp_top:comp_bottom, :] = binary_raw[comp_top:comp_bottom, :]
+        closed = cv2.morphologyEx(
+            band,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (bridge_px, 1)),
+        )
+        grown = best_mask.astype(np.uint8)
+        k = _MORPH_NEIGHBORHOOD_PX
+        grow_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+        for _ in range(max(1, bridge_px // 2)):
+            grown = cv2.bitwise_and(cv2.dilate(grown, grow_kernel, iterations=1), closed)
+        return grown.astype(bool) | best_mask
+
+    def _maybe_deform_noisy_candidate(
+        self,
+        candidate: np.ndarray,
+        refs: list[tuple[np.ndarray, np.ndarray]],
+        mob_region: np.ndarray,
+        descriptor: MobDescriptor,
+        palette: np.ndarray,
+        silhouette_distance: float,
+        gate_mask,
+    ) -> np.ndarray:
+        """If soft/hard is noisy but recall is already ok, deform best ref into heat."""
+        soft_hard_ratio = _occupancy_soft_hard_ratio(candidate)
+        if soft_hard_ratio < _CONTENT_NOISE_SOFT_HARD_RATIO:
+            return candidate
+        _sim0, facing_idx, _scores0, _prec0, rec0 = best_silhouette_match(
+            candidate, refs,
+        )
+        if rec0 < float(self.config["minSilhouetteRecall"]):
+            return candidate
+        ref_avg, ref_stable = refs[facing_idx]
+        deformed_mask = self._deform_silhouette_occupancy(
+            mob_region, descriptor, ref_avg, ref_stable,
+        )
+        return candidate_silhouette(
+            mob_region,
+            palette,
+            silhouette_distance,
+            gate_mask.width, gate_mask.height,
+            occupancy_mask=deformed_mask,
         )
 
     def _deform_silhouette_occupancy(
@@ -659,8 +761,9 @@ class MobDetector:
         """Deform a gate silhouette ref into palette heat at descriptor resolution.
 
         Base is the hard stable ref upsampled to the crop. Expansion is allowed
-        only inside a band of radius ``2 × max(1, round(desc_w / gate_w))``
-        (two silhouette grid cells in sprite pixels) and only where
+        only inside a band of radius
+        ``_DEFORM_RADIUS_SILHOUETTE_CELLS × max(1, round(desc_w / gate_w))``
+        silhouette grid cells in sprite pixels and only where
         ``heat >= minSpritePaletteMatch``. The base shape is always kept.
         """
         h, w = region_bgr.shape[:2]
@@ -684,14 +787,15 @@ class MobDetector:
 
         gate_w = int(ref.shape[1])
         cell_px = max(1, int(round(w / float(gate_w))))
-        radius_px = 2 * cell_px
+        radius_px = _DEFORM_RADIUS_SILHOUETTE_CELLS * cell_px
         ksize = 2 * radius_px + 1
         band_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
         band = cv2.dilate(base.astype(np.uint8), band_kernel, iterations=1).astype(bool)
         allowed = (band & signal) | base
 
         grown = base.astype(np.uint8)
-        grow_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        k = _MORPH_NEIGHBORHOOD_PX
+        grow_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
         allowed_u8 = allowed.astype(np.uint8)
         for _ in range(radius_px):
             nxt = cv2.bitwise_and(cv2.dilate(grown, grow_kernel, iterations=1), allowed_u8)
@@ -767,8 +871,8 @@ class MobDetector:
 
         Returns (accepted, bbox, similarity).  Used by local_tracker.
         """
-        w = max(8, int(round(descriptor.avg_width * scale)))
-        h = max(8, int(round(descriptor.avg_height * scale)))
+        w = max(_MIN_DESCRIPTOR_PX, int(round(descriptor.avg_width * scale)))
+        h = max(_MIN_DESCRIPTOR_PX, int(round(descriptor.avg_height * scale)))
         x = int(round(cx - w / 2))
         y = int(round(cy - h / 2))
         fh, fw = frame_bgr.shape[:2]
@@ -776,7 +880,7 @@ class MobDetector:
             return False, None, 0.0
 
         bbox = (x, y, w, h)
-        passed, sim, _cand, _idx, _scores, extract_bbox, _prec, _rec = (
+        passed, sim, _cand, _idx, _scores, extract_bbox, _prec, _rec, _area = (
             self._evaluate_silhouette_gate(
                 frame_bgr, descriptor, bbox, comp_bbox=bbox,
             )

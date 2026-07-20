@@ -23,7 +23,13 @@ _DIVERSITY_POWER = np.float32(2.0)
 _COVERAGE_SIZE_FRAC = 0.6
 # Near-duplicate blob suppress radius as a fraction of min(sprite w, h).
 _BLOB_DEDUP_SIZE_FRAC = 0.85
-
+# Ignore heat CCs smaller than this many pixels (noise speckles).
+_MIN_BLOB_COMPONENT_AREA = 6
+# Gaussian blur kernel ≈ this fraction of sprite size at work resolution.
+_GAUSSIAN_BLUR_SIZE_FRAC = 0.8
+# Edge-density mixes as 0.5 + 0.5 * normalized edge map.
+_EDGE_DENSITY_BASE = np.float32(0.5)
+_EDGE_DENSITY_WEIGHT = np.float32(0.5)
 
 def _cluster_match(bgr_f: np.ndarray, cluster: ColorCluster) -> np.ndarray:
     center = np.array(cluster.bgr, dtype=np.float32)
@@ -327,10 +333,10 @@ class HeatmapDetector:
     ) -> np.ndarray:
         gray = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2GRAY)
         edge_density = box_blurred_edge_density(gray)
-        sprite = sprite * (np.float32(0.5) + np.float32(0.5) * edge_density)
+        sprite = sprite * (_EDGE_DENSITY_BASE + _EDGE_DENSITY_WEIGHT * edge_density)
 
-        w = max(3, int(round(descriptor.avg_width * 0.8 / downscale)) | 1)
-        h = max(3, int(round(descriptor.avg_height * 0.8 / downscale)) | 1)
+        w = max(3, int(round(descriptor.avg_width * _GAUSSIAN_BLUR_SIZE_FRAC / downscale)) | 1)
+        h = max(3, int(round(descriptor.avg_height * _GAUSSIAN_BLUR_SIZE_FRAC / downscale)) | 1)
         final = cv2.GaussianBlur(sprite, (w, h), 0)
 
         if downscale > 1:
@@ -410,7 +416,7 @@ class HeatmapDetector:
 
         raw: list[tuple[int, int, float, tuple[int, int, int, int]]] = []
         for label in range(1, num_labels):
-            if stats[label, cv2.CC_STAT_AREA] < 6:
+            if stats[label, cv2.CC_STAT_AREA] < _MIN_BLOB_COMPONENT_AREA:
                 continue
             blob = self._blob_from_mask(heatmap, labels == label)
             if blob is not None:
@@ -425,7 +431,7 @@ class HeatmapDetector:
         mask: np.ndarray,
     ) -> tuple[int, int, float, tuple[int, int, int, int]] | None:
         area = int(mask.sum())
-        if area < 6:
+        if area < _MIN_BLOB_COMPONENT_AREA:
             return None
 
         vals = heatmap[mask]
