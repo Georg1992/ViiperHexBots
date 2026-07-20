@@ -23,8 +23,9 @@ from pybot.app.config_store import (
 from pybot.app.hotkey_manager import HotkeyManager
 from pybot.app.log_pipe import LogPipe
 from pybot.app.overlay import Win32HuntOverlay
-from pybot.mobs.catalog import ensure_mob_assets, load_mob_catalog
+from pybot.mobs.catalog import load_mob_catalog
 from pybot.app.session_log import AppSessionLog
+from pybot.app.startup_splash import preload_mob_descriptors
 from pybot.app.viiper_manager import ViiperManager
 from pybot.app.win32_util import (
     enum_game_windows,
@@ -90,14 +91,9 @@ class MainWindow:
         self.log_pipe.set_status_widgets(self.input_status, self.input_hint)
         self.log_pipe.set_overlay_callback(self._maybe_pipe_to_overlay)
 
-        # Async VIIPER init + mob descriptor prep (never block the UI thread)
+        # Async VIIPER init (descriptors were prepared on the splash before this window)
         self.log_pipe.log("ViiperHexBots started (Python)")
         self.log_pipe.log("Starting VIIPER before game launch...")
-        threading.Thread(
-            target=lambda: ensure_mob_assets(log_fn=self.log_pipe.log),
-            daemon=True,
-            name="mob-asset-prep",
-        ).start()
         threading.Thread(target=self.lifecycle.init_viiper, daemon=True).start()
 
     # ── Pre-flight ──────────────────────────────────────────────────
@@ -677,6 +673,9 @@ class MainWindow:
 
 
 def main() -> None:
+    # Build/refresh descriptors before the main GUI so hunt never races a rebuild.
+    if not preload_mob_descriptors():
+        return
     MainWindow().run()
 
 

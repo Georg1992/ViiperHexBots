@@ -359,6 +359,29 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(self.tracks.get_track_count(), 0)
         self.assertEqual(self.tracks.area_epoch, 1)
 
+    def test_reconcile_aborts_when_area_epoch_advanced(self) -> None:
+        epoch = self.tracks.area_epoch
+        self.tracks.area_reset()
+        summary = self.tracks.reconcile_detections(
+            [det(100, 200)],
+            mob_name="horn",
+            now_tick=self.now,
+            area_epoch=epoch,
+        )
+        self.assertEqual(summary.added_count, 0)
+        self.assertEqual(self.tracks.get_track_count(), 0)
+        self.assertEqual(self.tracks.area_epoch, epoch + 1)
+
+    def test_clear_attack_pending_drops_inflight_mark(self) -> None:
+        track_id = self._create(874, 578)
+        self.tracks.mark_attack_pending(track_id)
+        self.tracks.clear_attack_pending(track_id)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        # Death sample must not credit a phantom pending click.
+        self.tracks.apply_tracking([_dead(track_id, x=874, y=578)], now_tick=self.now + 1)
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
+
     def test_thread_safe_concurrent_reads(self) -> None:
         self._create(874, 578)
         errors: list[str] = []

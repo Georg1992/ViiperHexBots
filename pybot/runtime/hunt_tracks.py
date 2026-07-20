@@ -100,6 +100,11 @@ class HuntTracks:
         with self._lock:
             self._pending_attack_track_ids.add(track_id)
 
+    def clear_attack_pending(self, track_id: int) -> None:
+        """Drop in-flight attack mark (e.g. input failed before the click landed)."""
+        with self._lock:
+            self._pending_attack_track_ids.discard(track_id)
+
     @property
     def area_epoch(self) -> int:
         with self._lock:
@@ -204,15 +209,32 @@ class HuntTracks:
         mob_name: str = "",
         now_tick: int | None = None,
         existing_positions: list[tuple[int, int]] | None = None,
+        area_epoch: int | None = None,
     ) -> ReconcileSummary:
         """Discovery step: create tracks for new mobs only (never updates/removes).
 
         ``existing_positions`` are the known-object positions at frame-capture
         time. When omitted, the current live positions are used (callers that
         don't run tracking concurrently, e.g. tests).
+
+        ``area_epoch`` is the epoch sampled with that frame. If the store's
+        epoch has advanced (teleport / area_reset), this is a no-op so
+        pre-reset detections cannot spawn tracks into the new area.
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
+            if area_epoch is not None and area_epoch != self._area_epoch:
+                empty = ReconcileSummary(
+                    tracks_before=len(self._tracks),
+                    tracks_after=len(self._tracks),
+                    alive_before=sum(1 for t in self._tracks if is_alive(t)),
+                    alive_after=sum(1 for t in self._tracks if is_alive(t)),
+                    created_ids=[],
+                    matched_count=0,
+                    added_count=0,
+                )
+                self._last_reconcile_summary = empty
+                return empty
             positions = (
                 existing_positions
                 if existing_positions is not None

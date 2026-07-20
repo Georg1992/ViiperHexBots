@@ -57,10 +57,14 @@ def descriptor_path(spr_stem: str, *, modified: bool = False) -> Path:
 
 
 def _descriptor_needs_rebuild(descriptor_path_file: Path) -> bool:
+    """True when the descriptor file is missing, unreadable, or below DESCRIPTOR_VERSION."""
     if not descriptor_path_file.is_file():
         return True
-    descriptor = MobDescriptor.load(descriptor_path_file)
-    return descriptor.version < DESCRIPTOR_VERSION
+    try:
+        descriptor = MobDescriptor.load(descriptor_path_file)
+    except Exception:
+        return True
+    return int(descriptor.version) < DESCRIPTOR_VERSION
 
 
 def _build_descriptor(asset_name: str, spr_stem: str, _logger) -> None:
@@ -71,13 +75,17 @@ def _build_descriptor(asset_name: str, spr_stem: str, _logger) -> None:
 
     if descriptor_path_file.is_file():
         _logger(
-            f"[AUTO-BUILD] {asset_name}: rebuilding stale descriptor "
-            f"({spr_stem}, version < {DESCRIPTOR_VERSION})..."
+            f"[AUTO-BUILD] {asset_name}: rebuilding stale/invalid descriptor "
+            f"({spr_stem}, need version {DESCRIPTOR_VERSION})..."
         )
     else:
         _logger(f"[AUTO-BUILD] {asset_name}: SPR/ACT found, building descriptor ({spr_stem})...")
     DescriptorBuilder(PROJECT_ROOT).build(spr_stem, force=True)
-    _logger(f"[AUTO-BUILD] {asset_name}: descriptor ready")
+    if _descriptor_needs_rebuild(descriptor_path_file):
+        raise RuntimeError(
+            f"descriptor still missing or below version {DESCRIPTOR_VERSION} after build"
+        )
+    _logger(f"[AUTO-BUILD] {asset_name}: descriptor ready (v{DESCRIPTOR_VERSION})")
 
 
 def _build_modified_descriptor(asset_name: str, spr_stem: str, _logger) -> None:
@@ -92,8 +100,8 @@ def _build_modified_descriptor(asset_name: str, spr_stem: str, _logger) -> None:
 
     if descriptor_path_file.is_file():
         _logger(
-            f"[AUTO-BUILD] {asset_name}: rebuilding stale modified descriptor "
-            f"({spr_stem}, version < {DESCRIPTOR_VERSION})..."
+            f"[AUTO-BUILD] {asset_name}: rebuilding stale/invalid modified descriptor "
+            f"({spr_stem}, need version {DESCRIPTOR_VERSION})..."
         )
     else:
         _logger(
@@ -104,7 +112,11 @@ def _build_modified_descriptor(asset_name: str, spr_stem: str, _logger) -> None:
         spr_stem,
         force=True,
     )
-    _logger(f"[AUTO-BUILD] {asset_name}: modified descriptor ready")
+    if _descriptor_needs_rebuild(descriptor_path_file):
+        raise RuntimeError(
+            f"modified descriptor still missing or below version {DESCRIPTOR_VERSION} after build"
+        )
+    _logger(f"[AUTO-BUILD] {asset_name}: modified descriptor ready (v{DESCRIPTOR_VERSION})")
 
 
 def _build_modified_mob(asset_name: str, spr_stem: str, _logger) -> None:
@@ -123,13 +135,35 @@ def _build_modified_mob(asset_name: str, spr_stem: str, _logger) -> None:
 
 
 def ensure_mob_assets(*, log_fn: Callable[[str], None] | None = None) -> None:
+    """Build or rebuild prod/modified descriptors that are missing or below DESCRIPTOR_VERSION."""
     _logger = log_fn or print
     if not MOBS_DIR.is_dir():
+        _logger(f"[AUTO-BUILD] mob assets folder missing: {MOBS_DIR}")
         return
-    for asset_name, spr_stem in _scan_asset_pairs():
+
+    pairs = _scan_asset_pairs()
+    if not pairs:
+        _logger(f"[AUTO-BUILD] no SPR/ACT pairs found under {MOBS_DIR}")
+        return
+
+    _logger(
+        f"[AUTO-BUILD] checking {len(pairs)} mob(s) "
+        f"(descriptor version {DESCRIPTOR_VERSION})..."
+    )
+    built = 0
+    skipped = 0
+    failed = 0
+    for asset_name, spr_stem in pairs:
+        path = descriptor_path(spr_stem, modified=False)
+        needed = _descriptor_needs_rebuild(path)
         try:
-            _build_descriptor(asset_name, spr_stem, _logger)
+            if needed:
+                _build_descriptor(asset_name, spr_stem, _logger)
+                built += 1
+            else:
+                skipped += 1
         except Exception as exc:
+            failed += 1
             _logger(f"[AUTO-BUILD] {asset_name}: build failed — {exc}")
         try:
             _build_modified_mob(asset_name, spr_stem, _logger)
@@ -139,6 +173,10 @@ def ensure_mob_assets(*, log_fn: Callable[[str], None] | None = None) -> None:
             _build_modified_descriptor(asset_name, spr_stem, _logger)
         except Exception as exc:
             _logger(f"[AUTO-BUILD] {asset_name}: modified descriptor failed — {exc}")
+
+    _logger(
+        f"[AUTO-BUILD] done — built/updated={built} up-to-date={skipped} failed={failed}"
+    )
 
 
 def load_mob_catalog(*, ensure_assets: bool = False) -> list[MobEntry]:

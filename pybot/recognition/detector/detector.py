@@ -54,7 +54,7 @@ REQUIRED_CONFIG_KEYS = {
     "deathOpacityMinBaseline",
     "deathOpacityDecayRatio",
     "deathOpacityConfirmTicks",
-    "deathRediscoveryDataMs",
+    "deathRediscoveryCooldownMs",
     "deathOpacityMoveThresholdPx",
     "deathOpacityStopThresholdPx",
     "deathOpacityMinTrackAgeMs",

@@ -25,7 +25,7 @@
   "deathOpacityMinBaseline": 0.20,
   "deathOpacityDecayRatio": 0.90,
   "deathOpacityConfirmTicks": 1,
-  "deathRediscoveryDataMs": 4000,
+  "deathRediscoveryCooldownMs": 4000,
   "deathOpacityMoveThresholdPx": 12,
   "deathOpacityStopThresholdPx": 6,
   "deathOpacityMinTrackAgeMs": 700,

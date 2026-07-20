@@ -5,9 +5,10 @@ wakes it) and creates tracks for mobs that aren't already tracked. It never
 moves or removes existing tracks — tracking (its own thread) owns that.
 
 Correct coord hand-off: the known-object positions used for dedup are sampled
-at the instant this worker captures its frame, so detections (from that frame)
-and the positions they're compared against share one time reference even though
-tracking is concurrently moving the live tracks.
+immediately before this worker captures its frame, so detections (from that
+frame) and the positions they're compared against share one time reference
+even though tracking is concurrently moving the live tracks. Reconcile also
+refuses creates when the area epoch advanced since that sample (teleport).
 """
 
 from __future__ import annotations
@@ -74,6 +75,13 @@ class DiscoveryWorker:
         if roi is None:
             return
 
+        # Sample known positions + area epoch immediately before capture so
+        # detections and dedup share one time reference while tracking moves
+        # live tracks concurrently.
+        now_ms = monotonic_ms()
+        existing_positions = ctx.tracks.positions_snapshot(now_ms)
+        area_epoch = ctx.tracks.area_epoch
+
         frame = ctx.capture.capture_roi(roi)
         if ctx.stop_event.is_set():
             return
@@ -84,18 +92,9 @@ class DiscoveryWorker:
                 ctx.logger.behavior("[DISCOVERY] capture returned empty frame")
             return
 
-        # Sample known positions at frame-capture time so dedup shares the
-        # frame's time reference (tracking is moving the live tracks concurrently).
-        now_ms = monotonic_ms()
-        existing_positions = ctx.tracks.positions_snapshot(now_ms)
-        area_epoch = ctx.tracks.area_epoch
-
         scan = ctx.detector.discover_frame(frame, roi)
         if not scan.ok:
             self._hunt_mode.note_discovery_scan_failed(scan.fail_reason)
-            return
-
-        if ctx.tracks.area_epoch != area_epoch:
             return
 
         self._scan_count += 1
@@ -113,12 +112,17 @@ class DiscoveryWorker:
             for item in filtered
         ]
 
+        # area_epoch gates create under the tracks lock so a teleport between
+        # detect and reconcile cannot spawn pre-reset ghosts into the new area.
         summary = ctx.tracks.reconcile_detections(
             detections,
             mob_name=ctx.config.mob_name,
             now_tick=now_ms,
             existing_positions=existing_positions,
+            area_epoch=area_epoch,
         )
+        if ctx.tracks.area_epoch != area_epoch:
+            return
 
         verbose = (
             summary.added_count > 0

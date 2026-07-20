@@ -81,6 +81,7 @@ class AttackLoop:
             self._input.move_mouse(click_x, click_y)
             self._input.skill_click(ctx.config.skill_scan_code)
         except Exception as exc:
+            ctx.tracks.clear_attack_pending(target_id)
             ctx.logger.behavior(
                 f"[ATTACK] input error id={target_id}: {exc}"
             )
