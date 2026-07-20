@@ -299,9 +299,7 @@ class HeatmapDetector:
         self.center_scales = [float(scale) for scale in config["centerScales"]]
         self.small_scale_min_frame_width = int(config["smallScaleMinFrameWidth"])
         self.small_scale_cutoff = float(config["smallScaleCutoff"])
-        self.max_sprite_palette_distance = float(config["maxSpritePaletteDistance"])
-        # Debug A/B: False restores production path without diversity.
-        self.use_palette_diversity = bool(config.get("usePaletteDiversity", True))
+        self.use_palette_diversity = bool(config["usePaletteDiversity"])
 
     def _center_scales(self, frame_width: int) -> list[float]:
         return [

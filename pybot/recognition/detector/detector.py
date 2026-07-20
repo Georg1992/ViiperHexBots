@@ -30,12 +30,12 @@ REQUIRED_CONFIG_KEYS = {
     "discoveryHeatmapDownscale",
     "discoveryHeatmapDownscaleMinSide",
     "maxSpritePaletteDistance",
-    "maxSilhouettePaletteDistance",
     "silhouettePaletteDistanceScale",
-    "silhouetteHorizontalBridgeScale",
+    "silhouetteHorizontalBridgeCells",
     "minSpritePaletteMatch",
     "minSilhouetteRecall",
     "minSilhouettePrecision",
+    "usePaletteDiversity",
     "topCandidateCenters",
     "minCenterHeat",
     "peakRelativeThreshold",
@@ -142,14 +142,14 @@ class MobDetector:
         self._descriptor_cache: dict[str, MobDescriptor] = {}
         self.discovery_heatmap_downscale = int(self.config["discoveryHeatmapDownscale"])
         self.discovery_heatmap_downscale_min_side = int(self.config["discoveryHeatmapDownscaleMinSide"])
-        self.local_track_search_radius_px = int(self.config.get("localTrackSearchRadiusPx", 120))
+        self.local_track_search_radius_px = int(self.config["localTrackSearchRadiusPx"])
 
     def apply_runtime_config(self, config: dict) -> None:
         self.config = dict(config)
         self.heatmap_detector = HeatmapDetector(self.config)
         self.discovery_heatmap_downscale = int(self.config["discoveryHeatmapDownscale"])
         self.discovery_heatmap_downscale_min_side = int(self.config["discoveryHeatmapDownscaleMinSide"])
-        self.local_track_search_radius_px = int(self.config.get("localTrackSearchRadiusPx", 120))
+        self.local_track_search_radius_px = int(self.config["localTrackSearchRadiusPx"])
 
     def descriptor_path(self, mob_name: str) -> Path:
         base = self.project_root / "assets" / "generated_descriptors"
@@ -334,23 +334,18 @@ class MobDetector:
         desc_h = max(8, int(round(descriptor.avg_height)))
         fh, fw = frame_bgr.shape[:2]
 
-        # Search window sized to the heat blob itself (a35ef47), not max(blob, sprite).
-        if comp_bbox is not None and comp_bbox[2] * comp_bbox[3] >= 500:
+        # Search window: at least heat-CC size and at least descriptor size.
+        if comp_bbox is not None:
             hx, hy, hw, hh = comp_bbox
             ref_cx = hx + hw // 2
             ref_cy = hy + hh // 2
-            ref_w = hw
-            ref_h = hh
-        elif w * h >= 500:
-            ref_cx = x + w // 2
-            ref_cy = y + h // 2
-            ref_w = w
-            ref_h = h
+            ref_w = max(hw, desc_w)
+            ref_h = max(hh, desc_h)
         else:
             ref_cx = x + w // 2
             ref_cy = y + h // 2
-            ref_w = desc_w
-            ref_h = desc_h
+            ref_w = max(w, desc_w)
+            ref_h = max(h, desc_h)
 
         search_x = max(0, ref_cx - ref_w)
         search_y = max(0, ref_cy - ref_h)
@@ -409,11 +404,14 @@ class MobDetector:
         comp_bottom = int(ys.max()) + 1
 
         # Horizontally bridge body-height palette fragments that the dilate-CC
-        # missed (patchy wings). Geodesic grow stays inside the closed band so
-        # vertical terrain blobs are not pulled in.
+        # missed (patchy wings). Gap budget is N silhouette-grid cells mapped
+        # into sprite pixels: bridge_px ≈ cells * desc_w / grid_w.
+        # Geodesic grow stays inside the closed band so vertical terrain is not
+        # pulled in.
+        bridge_cells = max(1, int(self.config["silhouetteHorizontalBridgeCells"]))
         bridge_px = max(
             3,
-            int(round(float(self.config["silhouetteHorizontalBridgeScale"]) * desc_w)),
+            int(round(bridge_cells * desc_w / float(gate_mask.width))),
         )
         if bridge_px % 2 == 0:
             bridge_px += 1
@@ -502,7 +500,7 @@ class MobDetector:
         cy: int,
         scale: float = 1.0,
     ) -> tuple[bool, tuple[int, int, int, int] | None, float]:
-        """Score a point in the frame using silhouette check.
+        """Score a point via the same silhouette gate as discovery.
 
         Returns (accepted, bbox, similarity).  Used by local_tracker.
         """
@@ -515,29 +513,12 @@ class MobDetector:
             return False, None, 0.0
 
         bbox = (x, y, w, h)
-
-        refs = self._descriptor_silhouette_references(descriptor)
-        if not refs or not descriptor.match_palette_bgr:
-            return False, None, 0.0
-
-        gate_mask = descriptor.silhouette_masks[0]
-        region = frame_bgr[y: y + h, x: x + w]
-        if region.size == 0:
-            return False, None, 0.0
-
-        pal = np.asarray(descriptor.match_palette_bgr, dtype=np.float32)
-        cand = candidate_silhouette(
-            region, pal,
-            float(descriptor.max_silhouette_palette_distance)
-            * float(self.config["silhouettePaletteDistanceScale"]),
-            gate_mask.width, gate_mask.height,
+        passed, sim, _cand, _idx, _scores, extract_bbox, _prec, _rec = (
+            self._evaluate_silhouette_gate(
+                frame_bgr, descriptor, bbox, comp_bbox=bbox,
+            )
         )
-        sim, _, _, precision, recall = best_silhouette_match(cand, refs)
-        accepted = (
-            recall >= float(self.config["minSilhouetteRecall"])
-            and precision >= float(self.config["minSilhouettePrecision"])
-        )
-        return accepted, bbox, float(sim)
+        return passed, extract_bbox if extract_bbox is not None else bbox, float(sim)
 
     # ------------------------------------------------------------------
     #  Tracking — delegates to local_tracker
