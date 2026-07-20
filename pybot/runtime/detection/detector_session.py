@@ -72,18 +72,11 @@ class DetectorSession:
         project_root: Path | None = None,
         *,
         detector_config: dict | None = None,
-        use_modified_descriptor: bool = False,
-        death_detection_enabled: bool = True,
     ) -> None:
         root = project_root or PROJECT_ROOT
         config = detector_config if detector_config is not None else load_detector_config()
         self._mob_name = mob_name.lower()
-        self._death_detection_enabled = death_detection_enabled
-        self._detector = MobDetector(
-            root,
-            config,
-            use_modified_descriptor=use_modified_descriptor,
-        )
+        self._detector = MobDetector(root, config)
         self._lock = threading.RLock()
 
     def is_busy(self) -> bool:
@@ -214,7 +207,6 @@ class DetectorSession:
                         track,
                         offset_x=roi.x,
                         offset_y=roi.y,
-                        death_detection_enabled=self._death_detection_enabled,
                     )
                 )
         duration_ms = int((time.perf_counter() - start) * 1000)

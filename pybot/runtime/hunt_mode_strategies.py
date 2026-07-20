@@ -33,6 +33,7 @@ class HuntModeStrategy(ABC):
         self._ctx = ctx
         self._input = input_backend
         self._discovery_area_epoch: int | None = None
+        self._discovery_confirmed_clear = False
         self._last_no_target_blocked_log_ms = 0
         self._last_no_target_wait_reason: str | None = None
         self._last_discovery_fail_reason = ""
@@ -47,6 +48,15 @@ class HuntModeStrategy(ABC):
         with self._lock:
             return self._discovery_area_epoch == self._ctx.tracks.area_epoch
 
+    @property
+    def discovery_confirmed_clear(self) -> bool:
+        """True when the latest discovery scan for this epoch found no living mobs."""
+        with self._lock:
+            return (
+                self._discovery_confirmed_clear
+                and self._discovery_area_epoch == self._ctx.tracks.area_epoch
+            )
+
     def on_area_reset(self) -> None:
         """Reset per-area state (discovery flag, log throttles).
 
@@ -54,6 +64,7 @@ class HuntModeStrategy(ABC):
         """
         with self._lock:
             self._discovery_area_epoch = None
+            self._discovery_confirmed_clear = False
             self._last_no_target_blocked_log_ms = 0
             self._last_no_target_wait_reason = None
         self._on_area_reset_unlocked()
@@ -69,11 +80,12 @@ class HuntModeStrategy(ABC):
         area_epoch: int,
     ) -> None:
         """Record a successful discovery scan for *area_epoch*."""
-        del living_count, added_count
+        del added_count
         with self._lock:
             if area_epoch != self._ctx.tracks.area_epoch:
                 return
             self._discovery_area_epoch = area_epoch
+            self._discovery_confirmed_clear = living_count == 0
 
     def note_discovery_scan_failed(self, reason: str) -> None:
         """Record a failed discovery scan."""
@@ -129,6 +141,7 @@ class HuntModeStrategy(ABC):
             "alive_count": area.alive_count,
             "area_clear": area.clear,
             "has_discovery_since_reset": self.discovery_since_reset,
+            "discovery_confirmed_clear": self.discovery_confirmed_clear,
         }
 
     def _log_no_target(
@@ -173,9 +186,17 @@ class TeleportStrategy(HuntModeStrategy):
         ctx = self._ctx
         context = self._build_no_target_context()
 
-        if not self.discovery_since_reset:
-            self._log_no_target_blocked("no_discovery_yet")
-            self._log_no_target("wait", "no_discovery_yet", context)
+        # Require a discovery scan that itself saw zero living mobs. Tracks can
+        # drop earlier (lost/unreachable) while mobs are still on screen; without
+        # this gate we would teleport on a stale "discovery ran once" flag.
+        if not self.discovery_confirmed_clear:
+            reason = (
+                "no_discovery_yet"
+                if not self.discovery_since_reset
+                else "discovery_not_clear"
+            )
+            self._log_no_target_blocked(reason)
+            self._log_no_target("wait", reason, context)
             return False
 
         area = ctx.tracks.get_area_clear_candidate()
@@ -188,6 +209,16 @@ class TeleportStrategy(HuntModeStrategy):
             self._log_no_target("wait", "no_teleport_key", context)
             return False
 
+        # Claim under the tracks lock before input so a concurrent discovery
+        # reconcile cannot spawn tracks into the area we are leaving.
+        if not ctx.tracks.try_claim_clear_for_teleport():
+            self._log_no_target_blocked("alive_tracks")
+            self._log_no_target("wait", "alive_tracks", context)
+            return False
+        ctx.policy.reset()
+        ctx.validation.log_area_reset("pre_teleport")
+        self.on_area_reset()
+
         ctx.logger.behavior(
             f"[MODE] teleport area_clear tracks={area.alive_count}"
         )
@@ -199,12 +230,12 @@ class TeleportStrategy(HuntModeStrategy):
             ctx.logger.behavior(
                 f"[MODE] teleport input error: {exc}"
             )
+            ctx.discovery_wake.set()
             return False
         ctx.overlay.increment_teleports()
         if not ctx.wait_unless_stopped(ctx.config.teleport_duration_ms / 1000.0):
+            ctx.discovery_wake.set()
             return False
-        ctx.area_reset("post_teleport")
-        self.on_area_reset()
         ctx.discovery_wake.set()
         return True
 

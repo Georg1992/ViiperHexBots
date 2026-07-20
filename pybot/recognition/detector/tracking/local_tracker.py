@@ -1,8 +1,8 @@
 """Local coordinate follower for already-discovered tracks.
 
 Scores at the last center first, searches nearby heatmap peaks when that
-misses, and measures opacity on every successful hit when death detection is
-enabled. Opacity decay confirms death; misses only advance the lost streak.
+misses, and measures opacity on every successful hit. Opacity decay confirms
+death; misses only advance the lost streak.
 """
 
 from __future__ import annotations
@@ -49,7 +49,6 @@ def track_local(
     offset_x: int = 0,
     offset_y: int = 0,
     search_radius_px: int | None = None,
-    death_detection_enabled: bool = False,
 ) -> LocalTrackResult:
     """Follow one known track near its last center."""
     track_id = int(track["trackId"])
@@ -120,7 +119,6 @@ def track_local(
         detector, frame_bgr, descriptor,
         track_id=track_id, bbox=hit_bbox, similarity=hit_sim,
         offset_x=offset_x, offset_y=offset_y,
-        death_detection_enabled=death_detection_enabled,
         created_tick=created_tick, now_tick=now_tick,
         opacity_baseline=opacity_baseline,
         opacity_baseline_samples=opacity_baseline_samples,
@@ -154,7 +152,6 @@ def _finalize_track_hit(
     bbox: tuple[int, int, int, int],
     similarity: float,
     offset_x: int, offset_y: int,
-    death_detection_enabled: bool,
     created_tick: int, now_tick: int,
     opacity_baseline: float,
     opacity_baseline_samples: int,
@@ -164,7 +161,7 @@ def _finalize_track_hit(
     x = bx + bw // 2 + offset_x
     y = by + bh // 2 + offset_y
 
-    if death_detection_enabled and _track_old_enough(
+    if _track_old_enough(
         detector.config,
         created_tick=created_tick,
         now_tick=now_tick,

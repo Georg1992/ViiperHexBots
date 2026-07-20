@@ -14,10 +14,10 @@ from pybot.recognition.spr_reader import SprReader
 
 class FrameRendererTintTests(unittest.TestCase):
     def test_default_act_tint_preserves_sprite_channels(self) -> None:
-        spr = SprReader(PROJECT_ROOT / "assets/modified_mobs/TharaFrog/thara_frog.spr").load()
-        act = ActReader(PROJECT_ROOT / "assets/modified_mobs/TharaFrog/thara_frog.act").load()
+        spr = SprReader(PROJECT_ROOT / "assets/mobs/TharaFrog/thara_frog.spr").load()
+        act = ActReader(PROJECT_ROOT / "assets/mobs/TharaFrog/thara_frog.act").load()
         layer = act.actions[0].frames[0].layers[0]
-        self.assertEqual(layer.color_tint, (255, 0, 0, 255))
+        self.assertEqual(layer.color_tint, (255, 255, 255, 255))
 
         raw = spr.get_frame(layer.spr_frame_index).rgba
         rendered = render_act_frame(spr, act.actions[0].frames[0])

@@ -35,6 +35,10 @@ class HuntModeController:
     def discovery_since_reset(self) -> bool:
         return self._strategy.discovery_since_reset
 
+    @property
+    def discovery_confirmed_clear(self) -> bool:
+        return self._strategy.discovery_confirmed_clear
+
     def on_area_reset(self) -> None:
         self._strategy.on_area_reset()
 

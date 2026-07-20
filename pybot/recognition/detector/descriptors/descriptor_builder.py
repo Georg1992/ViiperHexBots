@@ -127,15 +127,6 @@ class DescriptorBuilder:
     def output_dir(self, mob_name: str) -> Path:
         return self.project_root / "assets" / "generated_descriptors" / mob_name.lower()
 
-    def modified_output_dir(self, spr_stem: str) -> Path:
-        return (
-            self.project_root
-            / "assets"
-            / "generated_descriptors"
-            / "modified"
-            / spr_stem.lower()
-        )
-
     def build(self, mob_name: str, force: bool = False) -> MobDescriptor:
         mob_name = mob_name.lower()
         return self._build_from_asset_dir(
@@ -143,22 +134,6 @@ class DescriptorBuilder:
             self.asset_dir(mob_name),
             spr_stem=mob_name,
             output_dir=self.output_dir(mob_name),
-            force=force,
-        )
-
-    def build_modified(
-        self,
-        asset_name: str,
-        spr_stem: str,
-        force: bool = False,
-    ) -> MobDescriptor:
-        spr_stem = spr_stem.lower()
-        asset_dir = self.project_root / "assets" / "modified_mobs" / asset_name
-        return self._build_from_asset_dir(
-            spr_stem,
-            asset_dir,
-            spr_stem=spr_stem,
-            output_dir=self.modified_output_dir(spr_stem),
             force=force,
         )
 

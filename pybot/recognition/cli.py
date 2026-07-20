@@ -93,11 +93,7 @@ def _load_frame(args: argparse.Namespace) -> tuple[object, tuple[int, int], int]
 
 def cmd_build_descriptor(args: argparse.Namespace) -> int:
     builder = DescriptorBuilder(PROJECT_ROOT)
-    if args.modified:
-        asset_name = args.asset_name or args.mob
-        descriptor = builder.build_modified(asset_name, args.mob.lower(), force=args.force)
-    else:
-        descriptor = builder.build(args.mob.lower(), force=args.force)
+    descriptor = builder.build(args.mob.lower(), force=args.force)
     print(json.dumps({"ok": True, "descriptor": descriptor.to_dict()}, indent=2))
     return 0
 
@@ -317,15 +313,6 @@ def build_parser() -> argparse.ArgumentParser:
     build = sub.add_parser("build-descriptor", help="build mob descriptor from SPR/ACT")
     build.add_argument("--mob", required=True)
     build.add_argument("--force", action="store_true")
-    build.add_argument(
-        "--modified",
-        action="store_true",
-        help="build from assets/modified_mobs instead of assets/mobs",
-    )
-    build.add_argument(
-        "--asset-name",
-        help="modified_mobs folder name when it differs from --mob (e.g. DesertWolf)",
-    )
 
     detect = sub.add_parser("detect", help="detect mobs using descriptor heatmaps")
     detect.add_argument("--mob", required=True)

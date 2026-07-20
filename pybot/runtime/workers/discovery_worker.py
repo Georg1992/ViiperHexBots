@@ -1,12 +1,13 @@
-"""Discovery loop — own thread, finds NEW mobs only.
+"""Discovery loop — own thread, finds new mobs and drops unseen tracks.
 
 Runs a full scan every ``discovery_interval_ms`` (or immediately when a teleport
-wakes it) and creates tracks for mobs that aren't already tracked. It never
-moves or removes existing tracks — tracking (its own thread) owns that.
+wakes it). Creates tracks for mobs that aren't already tracked, and removes
+tracks whose capture-time position has no nearby detection (mob gone from
+screen). Tracking (its own thread) still owns live position updates.
 
-Correct coord hand-off: the known-object positions used for dedup are sampled
-immediately before this worker captures its frame, so detections (from that
-frame) and the positions they're compared against share one time reference
+Correct coord hand-off: the known-object positions used for dedup/absence are
+sampled immediately before this worker captures its frame, so detections (from
+that frame) and the positions they're compared against share one time reference
 even though tracking is concurrently moving the live tracks. Reconcile also
 refuses creates when the area epoch advanced since that sample (teleport).
 """
@@ -24,7 +25,7 @@ from pybot.runtime.workers.worker_contexts import DiscoveryWorkerContext
 
 
 class DiscoveryWorker:
-    """Single-threaded loop that scans and creates tracks for new mobs only."""
+    """Single-threaded loop that scans, creates new tracks, and drops absent ones."""
 
     def __init__(self, ctx: DiscoveryWorkerContext, hunt_mode) -> None:
         self._ctx = ctx
@@ -76,10 +77,11 @@ class DiscoveryWorker:
             return
 
         # Sample known positions + area epoch immediately before capture so
-        # detections and dedup share one time reference while tracking moves
-        # live tracks concurrently.
+        # detections and dedup/absence share one time reference while tracking
+        # moves live tracks concurrently.
         now_ms = monotonic_ms()
         existing_positions = ctx.tracks.positions_snapshot(now_ms)
+        existing_track_positions = ctx.tracks.alive_track_positions_snapshot(now_ms)
         area_epoch = ctx.tracks.area_epoch
 
         frame = ctx.capture.capture_roi(roi)
@@ -112,13 +114,14 @@ class DiscoveryWorker:
             for item in filtered
         ]
 
-        # area_epoch gates create under the tracks lock so a teleport between
-        # detect and reconcile cannot spawn pre-reset ghosts into the new area.
+        # area_epoch gates create/remove under the tracks lock so a teleport
+        # between detect and reconcile cannot spawn or clear into the new area.
         summary = ctx.tracks.reconcile_detections(
             detections,
             mob_name=ctx.config.mob_name,
             now_tick=now_ms,
             existing_positions=existing_positions,
+            existing_track_positions=existing_track_positions,
             area_epoch=area_epoch,
         )
         if ctx.tracks.area_epoch != area_epoch:
@@ -126,6 +129,7 @@ class DiscoveryWorker:
 
         verbose = (
             summary.added_count > 0
+            or summary.removed_count > 0
             or self._scan_count <= 3
             or self._scan_count % 20 == 0
         )
@@ -139,7 +143,8 @@ class DiscoveryWorker:
             ctx.logger.behavior(
                 f"[DISCOVERY] scan#{self._scan_count} "
                 f"raw={scan.raw_count} filtered={len(filtered)} "
-                f"added={summary.added_count} matched={summary.matched_count} "
+                f"added={summary.added_count} removed={summary.removed_count} "
+                f"matched={summary.matched_count} "
                 f"tracks={ctx.tracks.get_track_count()}"
             )
 

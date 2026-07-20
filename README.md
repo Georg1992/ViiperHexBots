@@ -78,9 +78,6 @@ ViiperHexBots/
   assets/
     mobs/                   Source SPR/ACT per mob (input)
     generated_descriptors/  Runtime descriptors, rebuilt on launch (gitignored)
-      <mob>/         Descriptor from assets/mobs
-      modified/<mob>/ Descriptor from assets/modified_mobs
-    modified_mobs/          Transformed SPR/ACT mirror (gitignored)
   clients/                  Per-server profiles (memory addresses, captcha)
   scripts/                  Descriptor build, test runners, dev tools
   tests/                    Pytest suite (runtime, recognition, app, architecture)

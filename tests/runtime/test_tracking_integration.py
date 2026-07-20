@@ -191,8 +191,8 @@ class TrackingIntegrationTests(unittest.TestCase):
         count_before = ctx.tracks.get_track_count()
 
         # Re-discover the same mobs slightly shifted (within one object radius):
-        # discovery is create-only, so it must NOT spawn duplicates and must NOT
-        # move existing tracks (tracking owns position).
+        # must NOT spawn duplicates and must NOT move existing tracks
+        # (tracking owns position).
         detections2 = [
             DiscoveryDetection(x=d.x + 5, y=d.y + 5, confidence=d.confidence, candidate_scale=d.candidate_scale, living=True)
             for d in scan.detections

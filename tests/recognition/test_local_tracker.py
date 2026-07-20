@@ -96,13 +96,7 @@ class LocalTrackerTests(unittest.TestCase):
             "y": anchor.center_y,
             "scale": anchor.candidate_scale,
         }
-        result = track_local(
-            detector,
-            self.roi,
-            "horn",
-            track,
-            death_detection_enabled=True,
-        )
+        result = track_local(detector, self.roi, "horn", track)
         self.assertTrue(result.found)
         self.assertFalse(result.dead)
 

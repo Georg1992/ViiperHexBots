@@ -16,7 +16,15 @@ def list_client_profiles(project_root: Path | None = None) -> list[str]:
     return names or ["Generic"]
 
 
+def memory_reading_enabled(profile_name: str) -> bool:
+    """Memory reading is on for server profiles, off for Generic."""
+    return profile_name.strip().lower() != "generic"
+
+
 def client_supports_memory(profile_name: str, project_root: Path | None = None) -> bool:
+    """True when the profile is not Generic and declares memory addresses."""
+    if not memory_reading_enabled(profile_name):
+        return False
     root = project_root or PROJECT_ROOT
     profile_path = root / "clients" / f"{profile_name}.json"
     if not profile_path.is_file():

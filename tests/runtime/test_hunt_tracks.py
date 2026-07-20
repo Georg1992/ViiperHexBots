@@ -80,9 +80,8 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(self.policy.select_target(tracks, self.now), 1)
 
     def test_discovery_dedups_existing_track_without_moving_it(self) -> None:
-        # Discovery is create-only: a detection near an existing track is
-        # recognised as the same object (no duplicate) but does NOT move it —
-        # tracking owns position.
+        # A detection near an existing track is recognised as the same object
+        # (no duplicate) but does NOT move it — tracking owns position.
         track_id = self._create(874, 578)
         matched = self.tracks.reconcile_detections(
             [det(900, 610, 0.71, 0.9)],
@@ -91,11 +90,54 @@ class HuntTracksRulesTests(unittest.TestCase):
         )
         self.assertEqual(matched.added_count, 0)
         self.assertEqual(matched.matched_count, 1)
+        self.assertEqual(matched.removed_count, 0)
         self.assertEqual(self.tracks.get_track_count(), 1)
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
         self.assertEqual(track.x, 874)
         self.assertEqual(track.y, 578)
+
+    def test_discovery_removes_track_absent_from_scan(self) -> None:
+        kept = self._create(874, 578)
+        gone = self.tracks.create_track(
+            "horn", 200, 200, 0.65, 0.9, now_tick=self.now
+        ).id
+        summary = self.tracks.reconcile_detections(
+            [det(874, 578, 0.75, 0.9)],
+            mob_name="horn",
+            now_tick=self.now + 100,
+        )
+        self.assertEqual(summary.added_count, 0)
+        self.assertEqual(summary.matched_count, 1)
+        self.assertEqual(summary.removed_count, 1)
+        self.assertEqual(summary.removed_ids, [gone])
+        self.assertIsNotNone(self.tracks.get_track_by_id(kept))
+        self.assertIsNone(self.tracks.get_track_by_id(gone))
+
+    def test_discovery_empty_scan_clears_all_tracks(self) -> None:
+        first = self._create(874, 578)
+        second = self.tracks.create_track(
+            "horn", 200, 200, 0.65, 0.9, now_tick=self.now
+        ).id
+        summary = self.tracks.reconcile_detections(
+            [],
+            mob_name="horn",
+            now_tick=self.now + 100,
+        )
+        self.assertEqual(summary.removed_count, 2)
+        self.assertEqual(set(summary.removed_ids or []), {first, second})
+        self.assertEqual(self.tracks.get_track_count(), 0)
+
+    def test_try_claim_clear_for_teleport_rejects_alive_tracks(self) -> None:
+        self._create(874, 578)
+        self.assertFalse(self.tracks.try_claim_clear_for_teleport())
+        self.assertEqual(self.tracks.get_track_count(), 1)
+        self.assertEqual(self.tracks.area_epoch, 0)
+
+    def test_try_claim_clear_for_teleport_advances_epoch(self) -> None:
+        self.assertTrue(self.tracks.try_claim_clear_for_teleport())
+        self.assertEqual(self.tracks.area_epoch, 1)
+        self.assertEqual(self.tracks.get_track_count(), 0)
 
     def test_tracking_refreshes_coords(self) -> None:
         track_id = self._create(874, 578)

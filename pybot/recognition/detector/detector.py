@@ -188,11 +188,8 @@ class MobDetector:
         self,
         project_root: Path,
         config: Optional[dict] = None,
-        *,
-        use_modified_descriptor: bool = False,
     ):
         self.project_root = project_root
-        self.use_modified_descriptor = use_modified_descriptor
         self.config = load_detector_config() if config is None else config
         self.heatmap_detector = HeatmapDetector(self.config)
         self._descriptor_cache: dict[str, MobDescriptor] = {}
@@ -208,11 +205,14 @@ class MobDetector:
         self.local_track_search_radius_px = int(self.config["localTrackSearchRadiusPx"])
 
     def descriptor_path(self, mob_name: str) -> Path:
-        base = self.project_root / "assets" / "generated_descriptors"
         stem = mob_name.lower()
-        if self.use_modified_descriptor:
-            return base / "modified" / stem / "descriptor.json"
-        return base / stem / "descriptor.json"
+        return (
+            self.project_root
+            / "assets"
+            / "generated_descriptors"
+            / stem
+            / "descriptor.json"
+        )
 
     def ensure_descriptor(self, mob_name: str) -> MobDescriptor:
         mob_name = mob_name.lower()
@@ -892,13 +892,12 @@ class MobDetector:
     # ------------------------------------------------------------------
 
     def track_local(self, frame_bgr, mob_name, track, *, offset_x=0, offset_y=0,
-                    search_radius_px=None, death_detection_enabled=False):
+                    search_radius_px=None):
         from pybot.recognition.detector.tracking.local_tracker import track_local as run_track_local
         return run_track_local(
             self, frame_bgr, mob_name, track,
             offset_x=offset_x, offset_y=offset_y,
             search_radius_px=search_radius_px,
-            death_detection_enabled=death_detection_enabled,
         )
 
     # ------------------------------------------------------------------

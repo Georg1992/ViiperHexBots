@@ -31,7 +31,7 @@ from pybot._protocols import (
 
 
 class HuntModeControllerContext(CanStop, CanLog, HasConfig,
-                                CanTrack, CanValidate,
+                                CanTrack, CanValidate, CanPolicy,
                                 CanWakeDiscovery,
                                 CanAreaReset, CanOverlay, Protocol):
     """Hunt runtime subset consumed by HuntModeController."""

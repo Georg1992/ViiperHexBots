@@ -87,13 +87,29 @@ class HuntTracks:
 
     def area_reset(self) -> None:
         with self._lock:
-            self._area_epoch += 1
-            self._tracks = []
-            self._next_id = 1
-            self._last_reconcile_summary = None
-            self._removed_sites = []
-            self._attacks_by_anchor = {}
-            self._pending_attack_track_ids = set()
+            self._area_reset_locked()
+
+    def try_claim_clear_for_teleport(self) -> bool:
+        """Atomically claim an empty area for teleport.
+
+        Returns False if any alive track exists. On True, advances the area
+        epoch and clears tracks immediately so a concurrent discovery scan
+        cannot create tracks into the area being left.
+        """
+        with self._lock:
+            if any(is_alive(track) for track in self._tracks):
+                return False
+            self._area_reset_locked()
+            return True
+
+    def _area_reset_locked(self) -> None:
+        self._area_epoch += 1
+        self._tracks = []
+        self._next_id = 1
+        self._last_reconcile_summary = None
+        self._removed_sites = []
+        self._attacks_by_anchor = {}
+        self._pending_attack_track_ids = set()
 
     def mark_attack_pending(self, track_id: int) -> None:
         """Mark a track as having an in-flight attack click (not yet recorded)."""
@@ -202,6 +218,13 @@ class HuntTracks:
         with self._lock:
             return self._dedup_positions_locked(tick)
 
+    def alive_track_positions_snapshot(
+        self, now_tick: int | None = None
+    ) -> list[tuple[int, int, int]]:
+        """Alive (track_id, x, y) at one instant for discovery absence matching."""
+        with self._lock:
+            return [(t.id, t.x, t.y) for t in self._tracks if is_alive(t)]
+
     def reconcile_detections(
         self,
         detections: list[DiscoveryDetection],
@@ -209,13 +232,17 @@ class HuntTracks:
         mob_name: str = "",
         now_tick: int | None = None,
         existing_positions: list[tuple[int, int]] | None = None,
+        existing_track_positions: list[tuple[int, int, int]] | None = None,
         area_epoch: int | None = None,
     ) -> ReconcileSummary:
-        """Discovery step: create tracks for new mobs only (never updates/removes).
+        """Discovery step: create new tracks; drop tracks absent from this scan.
 
         ``existing_positions`` are the known-object positions at frame-capture
         time. When omitted, the current live positions are used (callers that
         don't run tracking concurrently, e.g. tests).
+
+        ``existing_track_positions`` are alive (id, x, y) at frame-capture time
+        used to decide which tracks were not seen on this scan.
 
         ``area_epoch`` is the epoch sampled with that frame. If the store's
         epoch has advanced (teleport / area_reset), this is a no-op so
@@ -230,8 +257,10 @@ class HuntTracks:
                     alive_before=sum(1 for t in self._tracks if is_alive(t)),
                     alive_after=sum(1 for t in self._tracks if is_alive(t)),
                     created_ids=[],
+                    removed_ids=[],
                     matched_count=0,
                     added_count=0,
+                    removed_count=0,
                 )
                 self._last_reconcile_summary = empty
                 return empty
@@ -239,6 +268,11 @@ class HuntTracks:
                 existing_positions
                 if existing_positions is not None
                 else self._dedup_positions_locked(tick)
+            )
+            track_positions = (
+                existing_track_positions
+                if existing_track_positions is not None
+                else [(t.id, t.x, t.y) for t in self._tracks if is_alive(t)]
             )
             summary = TrackReconciler.reconcile(
                 self._tracks,
@@ -248,7 +282,22 @@ class HuntTracks:
                 now_tick=tick,
                 create_track_fn=self._create_track_locked,
                 detector_config=self._detector_config_ref,
+                existing_track_positions=track_positions,
             )
+            removed_ids = list(summary.removed_ids or [])
+            actual_removed: list[int] = []
+            for track_id in removed_ids:
+                track = self._get_track_by_id_locked(track_id)
+                if track is None:
+                    continue
+                self._record_removed_site_locked(track.x, track.y, tick)
+                actual_removed.append(track_id)
+            if actual_removed:
+                self._remove_tracks_locked(set(actual_removed))
+            summary.removed_ids = actual_removed
+            summary.removed_count = len(actual_removed)
+            summary.tracks_after = len(self._tracks)
+            summary.alive_after = sum(1 for t in self._tracks if is_alive(t))
             self._last_reconcile_summary = summary
             return summary
 

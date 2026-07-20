@@ -114,18 +114,13 @@ def create_runtime_deps(
     capture = HuntWindowCapture(config)
     # Two independent detectors: discovery's full scan and tracking's local
     # follow run on separate threads and must never contend on one detector lock.
-    use_modified = config.use_sprite_grf
     detector = DetectorSession(
         config.mob_name,
         detector_config=detector_config,
-        use_modified_descriptor=use_modified,
-        death_detection_enabled=False,
     )
     tracker = DetectorSession(
         config.mob_name,
         detector_config=detector_config,
-        use_modified_descriptor=use_modified,
-        death_detection_enabled=config.death_detection_enabled,
     )
     validation = HuntValidationLogger(
         logger,

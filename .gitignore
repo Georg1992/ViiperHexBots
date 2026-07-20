@@ -6,7 +6,6 @@ logs/debug_saves/
 logs/detect_debug/
 pybot/recognition/debug/
 assets/generated_descriptors/
-assets/modified_mobs/
 generated_descriptors/
 __pycache__/
 .pytest_cache/

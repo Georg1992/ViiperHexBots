@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from pybot.app.config_store import AppConfig, list_client_profiles
+from pybot.config.clients import memory_reading_enabled
 from pybot.config.runtime import resolve_mob_name
 from pybot.mobs.catalog import load_mob_catalog, mob_display_name
 from pybot.paths import PROJECT_ROOT
@@ -36,6 +37,10 @@ class AppConfigTests(unittest.TestCase):
     def test_client_profiles_exist(self) -> None:
         profiles = list_client_profiles(PROJECT_ROOT)
         self.assertIn("Generic", profiles)
+
+    def test_memory_reading_follows_profile(self) -> None:
+        self.assertFalse(memory_reading_enabled("Generic"))
+        self.assertTrue(memory_reading_enabled("HoneyRO"))
 
 
 class MobCatalogTests(unittest.TestCase):

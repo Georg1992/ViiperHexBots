@@ -5,6 +5,7 @@ from __future__ import annotations
 import configparser
 from pathlib import Path
 
+from pybot.config.clients import memory_reading_enabled
 from pybot.config.schema import AppSettings
 from pybot.paths import CONFIG_PATH
 
@@ -40,7 +41,9 @@ def load_settings(path: Path | None = None) -> AppSettings:
         window_title=parser.get("Window", "Title", fallback=""),
         window_process=parser.get("Window", "Process", fallback=""),
         client_profile=parser.get("Client", "Profile", fallback="Generic"),
-        use_memory_reading=parser.getint("Client", "UseMemoryReading", fallback=0) == 1,
+        use_memory_reading=memory_reading_enabled(
+            parser.get("Client", "Profile", fallback="Generic")
+        ),
         selected_monster=parser.getint("MonsterSettings", "SelectedMonster", fallback=1),
         search_range=parser.getint("Settings", "SearchRange", fallback=16),
         hunt_mode=parser.get("Settings", "HuntMode", fallback="teleport"),
@@ -51,8 +54,6 @@ def load_settings(path: Path | None = None) -> AppSettings:
         detect_captcha=parser.getint("Settings", "DetectCaptcha", fallback=0) == 1,
         hunt_log_overlay=parser.getint("Settings", "HuntLogOverlay", fallback=1) == 1,
         hunt_validation_log=parser.getint("Settings", "HuntValidationLog", fallback=1) == 1,
-        use_sprite_grf=parser.getint("Settings", "UseSpriteGrf", fallback=0) == 1,
-        death_detection_enabled=parser.getint("Settings", "DeathDetectionEnabled", fallback=1) == 1,
         warper_x=warper_x,
         warper_y=warper_y,
         warper_location=parser.getint("Warper", "warperLocation", fallback=0),
@@ -82,7 +83,10 @@ def save_settings(settings: AppSettings) -> None:
 
     _ensure_section(parser, "Client")
     parser["Client"]["Profile"] = settings.client_profile
-    parser["Client"]["UseMemoryReading"] = "1" if settings.use_memory_reading else "0"
+    # Derived from profile (Generic off, server profiles on); keep in sync on save.
+    parser["Client"]["UseMemoryReading"] = (
+        "1" if memory_reading_enabled(settings.client_profile) else "0"
+    )
 
     _ensure_section(parser, "MonsterSettings")
     parser["MonsterSettings"]["SelectedMonster"] = str(settings.selected_monster)
@@ -97,8 +101,8 @@ def save_settings(settings: AppSettings) -> None:
     parser["Settings"]["DetectCaptcha"] = "1" if settings.detect_captcha else "0"
     parser["Settings"]["HuntLogOverlay"] = "1" if settings.hunt_log_overlay else "0"
     parser["Settings"]["HuntValidationLog"] = "1" if settings.hunt_validation_log else "0"
-    parser["Settings"]["UseSpriteGrf"] = "1" if settings.use_sprite_grf else "0"
-    parser["Settings"]["DeathDetectionEnabled"] = "1" if settings.death_detection_enabled else "0"
+    parser["Settings"].pop("DeathDetectionEnabled", None)
+    parser["Settings"].pop("UseSpriteGrf", None)
 
     _ensure_section(parser, "Warper")
     if settings.warper_coords_set:

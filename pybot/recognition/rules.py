@@ -3,8 +3,9 @@
 Used by tests to lock the pipeline contract.
 
 Ownership:
-- **Discovery** creates tracks only (initial x/y, scale, mob_name). It never
-  updates coordinates or liveness on existing tracks.
+- **Discovery** creates tracks for new mobs and drops tracks whose capture-time
+  position has no nearby detection on that scan (mob gone from screen). It never
+  updates coordinates on existing tracks.
 - **Tracking** owns position, movement, opacity on visible hits (baseline + death),
   lost_count, unreachable removal, and death/lost removal for existing tracks.
 - **Attack** records attack_count / last_attack_tick only; it reads position
@@ -45,8 +46,10 @@ class ReconcileSummary:
     alive_before: int = 0
     alive_after: int = 0
     created_ids: list[int] | None = None
+    removed_ids: list[int] | None = None
     matched_count: int = 0
     added_count: int = 0
+    removed_count: int = 0
 
 
 @dataclass

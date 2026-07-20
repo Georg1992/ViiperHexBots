@@ -77,6 +77,27 @@ class HuntModeTests(unittest.TestCase):
         self.assertEqual(self.tracks.get_track_count(), 0)
         self.assertEqual(self.tracks.area_epoch, 1)
 
+    def test_blocks_teleport_until_discovery_confirms_clear(self) -> None:
+        # Discovery saw living mobs earlier; tracks later empty must not teleport
+        # until a scan reports living_count == 0.
+        self.mode.note_discovery_scan_completed(
+            living_count=2,
+            added_count=2,
+            area_epoch=self.tracks.area_epoch,
+        )
+        self.assertTrue(self.mode.discovery_since_reset)
+        self.assertFalse(self.mode.discovery_confirmed_clear)
+        teleported = self.mode.on_no_attackable_targets()
+        self.assertFalse(teleported)
+
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=self.tracks.area_epoch,
+        )
+        self.assertTrue(self.mode.discovery_confirmed_clear)
+        self.assertTrue(self.mode.on_no_attackable_targets())
+
     def test_blocks_teleport_until_post_teleport_discovery(self) -> None:
         self.mode.note_discovery_scan_completed(
             living_count=0,
@@ -86,6 +107,7 @@ class HuntModeTests(unittest.TestCase):
         self.assertTrue(self.mode.on_no_attackable_targets())
 
         self.assertFalse(self.mode.discovery_since_reset)
+        self.assertFalse(self.mode.discovery_confirmed_clear)
         teleported = self.mode.on_no_attackable_targets()
         self.assertFalse(teleported)
 
@@ -95,6 +117,7 @@ class HuntModeTests(unittest.TestCase):
             area_epoch=self.tracks.area_epoch,
         )
         self.assertTrue(self.mode.discovery_since_reset)
+        self.assertTrue(self.mode.discovery_confirmed_clear)
         self.assertTrue(self.mode.on_no_attackable_targets())
 
     def test_ignores_stale_discovery_after_area_reset(self) -> None:

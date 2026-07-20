@@ -15,11 +15,8 @@ from tkinter import messagebox, ttk
 
 from pybot.app.bot_lifecycle import BotLifecycleManager, BotState
 from pybot.app.bot_controller import DEFAULT_STOP_JOIN_TIMEOUT_S
-from pybot.app.config_store import (
-    AppConfig,
-    client_supports_memory,
-    list_client_profiles,
-)
+from pybot.app.config_store import AppConfig, list_client_profiles
+from pybot.config.clients import memory_reading_enabled
 from pybot.app.hotkey_manager import HotkeyManager
 from pybot.app.log_pipe import LogPipe
 from pybot.app.overlay import Win32HuntOverlay
@@ -152,34 +149,26 @@ class MainWindow:
             text="Launch the game after VIIPER is ready",
         )
         self.input_hint.pack(anchor="w", pady=(2, 0))
+        profile_row = ttk.Frame(status_input_frame)
+        profile_row.pack(anchor="w", fill="x", pady=(8, 0))
+        ttk.Label(profile_row, text="Client Profile:").pack(side=tk.LEFT)
+        self.client_combo = ttk.Combobox(
+            profile_row,
+            values=list_client_profiles(),
+            state="readonly",
+            width=14,
+        )
+        self.client_combo.set(self.config.client_profile)
+        self.client_combo.pack(side=tk.LEFT, padx=(6, 0))
+        self.client_combo.bind("<<ComboboxSelected>>", self.on_client_changed)
 
         # ── Setup ──────────────────────────────────────────────────
         setup_frame = ttk.LabelFrame(main, text="Setup", padding=8)
         setup_frame.grid(row=2, column=0, sticky="nsew", padx=(0, 8), pady=(8, 0))
-        ttk.Label(setup_frame, text="Client Profile:").grid(
-            row=0, column=0, sticky="w"
-        )
-        self.client_combo = ttk.Combobox(
-            setup_frame,
-            values=list_client_profiles(),
-            state="readonly",
-            width=18,
-        )
-        self.client_combo.set(self.config.client_profile)
-        self.client_combo.grid(row=0, column=1, sticky="w")
-        self.client_combo.bind("<<ComboboxSelected>>", self.on_client_changed)
-        self.memory_var = tk.BooleanVar(value=self.config.use_memory_reading)
-        self.memory_check = ttk.Checkbutton(
-            setup_frame,
-            text="Use memory reading",
-            variable=self.memory_var,
-            command=self.apply_memory_ui,
-        )
-        self.memory_check.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Label(setup_frame, text="Descriptor Mob:").grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(8, 0)
+            row=0, column=0, columnspan=2, sticky="w"
         )
-        mob_row = 3
+        mob_row = 1
         for index, mob in enumerate(self.mob_catalog, start=1):
             ttk.Radiobutton(
                 setup_frame,
@@ -188,22 +177,6 @@ class MainWindow:
                 value=index,
             ).grid(row=mob_row, column=0, columnspan=2, sticky="w")
             mob_row += 1
-        self.sprite_grf_var = tk.BooleanVar(value=self.config.use_sprite_grf)
-        self.sprite_grf_check = ttk.Checkbutton(
-            setup_frame,
-            text="Use sprite.grf (alternate mob tracking)",
-            variable=self.sprite_grf_var,
-        )
-        self.sprite_grf_check.grid(row=mob_row, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        mob_row += 1
-        self.death_detection_var = tk.BooleanVar(value=self.config.death_detection_enabled)
-        self.death_detection_check = ttk.Checkbutton(
-            setup_frame,
-            text="Death detection (opacity decay during tracking)",
-            variable=self.death_detection_var,
-        )
-        self.death_detection_check.grid(row=mob_row, column=0, columnspan=2, sticky="w", pady=(6, 0))
-
         # ── Keybindings ─────────────────────────────────────────────
         keys_frame = ttk.LabelFrame(main, text="Keybindings", padding=8)
         keys_frame.grid(row=2, column=1, sticky="nsew", pady=(8, 0))
@@ -366,7 +339,7 @@ class MainWindow:
         main.columnconfigure(1, weight=1)
         main.columnconfigure(2, weight=1)
         main.rowconfigure(4, weight=1)
-        self.apply_memory_ui()
+        self._sync_memory_reading_from_profile()
         self._update_search_label()
 
     def _labeled_entry(
@@ -448,16 +421,15 @@ class MainWindow:
 
     def on_client_changed(self, *_event) -> None:
         self.config.client_profile = self.client_combo.get()
-        self.apply_memory_ui()
-        self.log_pipe.log(f"Client profile: {self.config.client_profile}")
+        self._sync_memory_reading_from_profile()
+        memory = "on" if self.config.use_memory_reading else "off"
+        self.log_pipe.log(
+            f"Client profile: {self.config.client_profile} (memory reading {memory})"
+        )
 
-    def apply_memory_ui(self) -> None:
-        supports = client_supports_memory(self.client_combo.get())
-        if not supports:
-            self.memory_var.set(False)
-            self.memory_check.configure(state=tk.DISABLED)
-        else:
-            self.memory_check.configure(state=tk.NORMAL)
+    def _sync_memory_reading_from_profile(self) -> None:
+        """Memory reading follows the profile: Generic off, server profiles on."""
+        self.config.use_memory_reading = memory_reading_enabled(self.client_combo.get())
 
     def on_set_warper(self) -> None:
         """Capture current cursor position as warper coords."""
@@ -484,7 +456,7 @@ class MainWindow:
     def _sync_config_from_ui(self) -> None:
         """Read all UI widget values into self.config."""
         self.config.client_profile = self.client_combo.get()
-        self.config.use_memory_reading = self.memory_var.get()
+        self._sync_memory_reading_from_profile()
         self.config.selected_monster = self.mob_var.get()
         self.config.hunt_mode = self.hunt_mode_var.get()
         self.config.search_range = int(float(self.search_range.get()))
@@ -493,8 +465,6 @@ class MainWindow:
         self.config.take_fly_wings = self.fly_wings_var.get()
         self.config.detect_captcha = self.captcha_var.get()
         self.config.hunt_log_overlay = self.overlay_var.get()
-        self.config.use_sprite_grf = self.sprite_grf_var.get()
-        self.config.death_detection_enabled = self.death_detection_var.get()
         self.config.skill_button = self.skill_button.get().strip()
         raw = self.skill_delay.get().strip()
         self.config.skill_delay = int(raw) if raw else 0
@@ -633,11 +603,6 @@ class MainWindow:
         readonly = "disabled" if locked else "readonly"
         self.window_combo.configure(state=readonly)
         self.client_combo.configure(state=readonly)
-        self.memory_check.configure(
-            state=state
-            if client_supports_memory(self.client_combo.get())
-            else tk.DISABLED
-        )
         self.search_scale.configure(state=state)
         self.weight_scale.configure(state=state)
         for widget in (
