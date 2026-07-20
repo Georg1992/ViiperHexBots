@@ -49,6 +49,11 @@ def _top_centers() -> Callable:
     return HeatmapDetector.top_centers
 
 
+def _geometry_gate() -> Callable:
+    from pybot.recognition.detector.detector import MobDetector
+    return MobDetector._passes_discovery_geometry_gate
+
+
 def _silhouette_gate() -> Callable:
     from pybot.recognition.detector.detector import MobDetector
     return MobDetector._evaluate_silhouette_gate
@@ -72,6 +77,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "ensure_descriptor",
                     "build_sprite_heatmap",
                     "top_centers",
+                    "_passes_discovery_geometry_gate",
                     "_evaluate_silhouette_gate",
                     "_finalize_accepted",
                 ),
@@ -128,6 +134,22 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "_dedup_blobs_by_sprite_size",
                     "avg_width",
                     "avg_height",
+                ),
+            ),
+        ),
+    ),
+    PipelineStage(
+        title="Geometry pre-gate",
+        items=(
+            "geometry pre-gate (area + aspect vs descriptor)",
+        ),
+        sources=(
+            SourceCheck(
+                _geometry_gate,
+                (
+                    "sil_frac",
+                    "min_area_ratio",
+                    "aspect_band",
                 ),
             ),
         ),

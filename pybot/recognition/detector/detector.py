@@ -204,13 +204,23 @@ class MobDetector:
         blobs = self.heatmap_detector.top_centers(sprite_heatmap, descriptor)
         blobs_end = time.perf_counter()
 
-        # --- validate each blob via silhouette gate -------------------
+        # --- geometry pre-gate, then silhouette gate -------------------
         candidates: list[DetectionCandidate] = []
         silhouette_checks: list[SilhouetteCheck] = []
 
         for cx, cy, heat_score, comp_bbox in blobs:
             bx, by, bw, bh = comp_bbox
             bbox = (bx, by, bw, bh)
+
+            if not self._passes_discovery_geometry_gate(comp_bbox, descriptor):
+                silhouette_checks.append(SilhouetteCheck(
+                    center_x=cx,
+                    center_y=cy,
+                    heat_score=heat_score,
+                    passed=False,
+                    similarity=0.0,
+                ))
+                continue
 
             (
                 passed,
@@ -281,8 +291,46 @@ class MobDetector:
         )
 
     # ------------------------------------------------------------------
-    #  Silhouette gate  (component search + resize)
+    #  Geometry pre-gate + silhouette gate
     # ------------------------------------------------------------------
+
+    def _passes_discovery_geometry_gate(
+        self,
+        comp_bbox: tuple[int, int, int, int],
+        descriptor: MobDescriptor,
+    ) -> bool:
+        """Reject heat CCs whose size/aspect cannot plausibly match the mob.
+
+        ``min_area_ratio = sil_frac / 4`` uses the descriptor's stable silhouette
+        occupancy as a lower bound on heat-CC area vs sprite area.
+        ``aspect_band = 3/2`` allows ±50% aspect slack vs descriptor sprite aspect.
+        """
+        _x, _y, hw, hh = comp_bbox
+        if hw < 1 or hh < 1:
+            return False
+
+        desc_w = float(descriptor.avg_width)
+        desc_h = float(descriptor.avg_height)
+        desc_area = desc_w * desc_h
+        desc_aspect = desc_w / desc_h
+
+        stable_bits: list[bool] = []
+        for mask in descriptor.silhouette_masks:
+            if mask.stable_mask:
+                stable_bits.extend(mask.stable_mask)
+        if not stable_bits:
+            return False
+        sil_frac = float(np.mean(np.asarray(stable_bits, dtype=np.float32)))
+        min_area_ratio = sil_frac / 4.0
+        aspect_band = 3.0 / 2.0
+
+        area_ratio = (float(hw) * float(hh)) / desc_area
+        aspect_ratio = (float(hw) / float(hh)) / desc_aspect
+        if area_ratio < min_area_ratio:
+            return False
+        if aspect_ratio < (1.0 / aspect_band) or aspect_ratio > aspect_band:
+            return False
+        return True
 
     def _descriptor_silhouette_references(
         self,
