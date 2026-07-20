@@ -1,9 +1,14 @@
-"""Discovery loop — own thread, finds new mobs and drops unseen tracks.
+"""Discovery loop — own thread, finds new mobs and drops off-screen tracks.
 
-Runs a full scan every ``discovery_interval_ms`` (or immediately when a teleport
-wakes it). Creates tracks for mobs that aren't already tracked, and removes
-tracks whose capture-time position has no nearby detection (mob gone from
-screen). Tracking (its own thread) still owns live position updates.
+Schedule: every ``discovery_interval_ms`` (default 1s), and immediately when
+``discovery_wake`` is set after a teleport settle delay. While
+``discovery_suspend`` is set (claim → teleport key → delay), this worker does
+not scan — only waits for the post-delay wake.
+
+Creates tracks for mobs that aren't already tracked. Removes a track only when
+it is absent from the scan *and* its last position is outside the hunt ROI
+(left the search area). In-ROI discovery misses (cursor on mob, near player)
+do not kill tracks — local tracking owns those.
 
 Correct coord hand-off: the known-object positions used for dedup/absence are
 sampled immediately before this worker captures its frame, so detections (from
@@ -42,12 +47,20 @@ class DiscoveryWorker:
                 if not ctx.should_run_workers():
                     ctx.wait_while_stopped_or_paused(interval_s)
                     continue
-                # Teleport sets discovery_wake for an immediate post-reset scan.
-                # Otherwise wait discovery_interval_ms (default 1s) between scans.
+                if ctx.discovery_suspend.is_set():
+                    # Teleport in flight: ignore the 1s cadence; wait for wake.
+                    if not self._wait_for_discovery_wake(interval_s):
+                        continue
+                    ctx.discovery_wake.clear()
+                    if ctx.discovery_suspend.is_set() or not ctx.should_run_workers():
+                        continue
+                    self._scan()
+                    continue
+                # Normal cadence, or immediate scan when teleport releases wake.
                 woke = self._wait_for_discovery_wake(interval_s)
                 if woke:
                     ctx.discovery_wake.clear()
-                if not ctx.should_run_workers():
+                if not ctx.should_run_workers() or ctx.discovery_suspend.is_set():
                     continue
                 self._scan()
             except Exception:
@@ -68,7 +81,7 @@ class DiscoveryWorker:
 
     def _scan(self) -> None:
         ctx = self._ctx
-        if ctx.stop_event.is_set():
+        if ctx.stop_event.is_set() or ctx.discovery_suspend.is_set():
             return
         if not ctx.capture.is_valid():
             return
@@ -76,13 +89,12 @@ class DiscoveryWorker:
         if roi is None:
             return
 
-        # Sample known positions + area epoch immediately before capture so
-        # detections and dedup/absence share one time reference while tracking
-        # moves live tracks concurrently.
+        # One atomic sample before capture so detections, dedup, and absence
+        # share one time reference while tracking moves live tracks.
         now_ms = monotonic_ms()
-        existing_positions = ctx.tracks.positions_snapshot(now_ms)
-        existing_track_positions = ctx.tracks.alive_track_positions_snapshot(now_ms)
-        area_epoch = ctx.tracks.area_epoch
+        area_epoch, existing_positions, existing_track_positions = (
+            ctx.tracks.discovery_frame_snapshot(now_ms)
+        )
 
         frame = ctx.capture.capture_roi(roi)
         if ctx.stop_event.is_set():
@@ -123,8 +135,9 @@ class DiscoveryWorker:
             existing_positions=existing_positions,
             existing_track_positions=existing_track_positions,
             area_epoch=area_epoch,
+            hunt_roi=roi,
         )
-        if ctx.tracks.area_epoch != area_epoch:
+        if ctx.tracks.area_epoch != area_epoch or ctx.discovery_suspend.is_set():
             return
 
         verbose = (
@@ -148,8 +161,11 @@ class DiscoveryWorker:
                 f"tracks={ctx.tracks.get_track_count()}"
             )
 
+        # Teleport clear uses post-reconcile alive tracks, not raw detections.
+        # Corpse/heat hits that only match death/unreachable sites must not block
+        # teleport after the mark is already gone.
         self._hunt_mode.note_discovery_scan_completed(
-            living_count=len(filtered),
+            living_count=summary.alive_after,
             added_count=summary.added_count,
             area_epoch=area_epoch,
         )

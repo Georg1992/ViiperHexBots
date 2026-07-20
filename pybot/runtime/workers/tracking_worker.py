@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import traceback
 
-from pybot.recognition.rules import is_alive
 from pybot.runtime.constants import LOG_REPEAT_INTERVAL_MS, WORKER_POLL_INTERVAL_S
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.detection.detector_session import StateTrackSnapshot
@@ -60,6 +59,7 @@ class TrackingWorker:
             return
 
         now_ms = monotonic_ms()
+        area_epoch, alive_tracks = ctx.tracks.tracking_frame_snapshot(now_ms)
         snapshots = [
             StateTrackSnapshot(
                 track_id=track.id,
@@ -70,12 +70,14 @@ class TrackingWorker:
                 opacity_baseline_samples=track.opacity_baseline_samples,
                 opacity_decay_streak=track.opacity_decay_streak,
                 moving=track.moving,
+                vel_x=track.vel_x,
+                vel_y=track.vel_y,
+                lost_count=track.lost_count,
                 attack_count=track.attack_count,
                 created_tick=track.created_tick,
                 now_tick=now_ms,
             )
-            for track in ctx.tracks.tracks_for_policy(now_ms)
-            if is_alive(track)
+            for track in alive_tracks
         ]
 
         results = []
@@ -86,6 +88,7 @@ class TrackingWorker:
         dead_ids, lost_ids, unreachable_ids = ctx.tracks.apply_tracking(
             results,
             now_tick=now_ms,
+            area_epoch=area_epoch,
         )
         if dead_ids:
             ctx.logger.behavior(
@@ -100,6 +103,14 @@ class TrackingWorker:
                 f"[TRACK] dropped {len(unreachable_ids)} unreachable track(s): "
                 f"{unreachable_ids}"
             )
+
+        # Wake discovery on any drop so it can recreate / confirm clear without
+        # waiting out the 1s cadence. Teleport clear also depends on this.
+        if (
+            (dead_ids or lost_ids or unreachable_ids)
+            and not ctx.discovery_suspend.is_set()
+        ):
+            ctx.discovery_wake.set()
 
         self._update_overlay(now_ms)
 

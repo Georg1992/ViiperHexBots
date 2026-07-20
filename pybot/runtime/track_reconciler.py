@@ -1,9 +1,7 @@
-"""Discovery reconciliation — create new tracks and drop absent ones.
+"""Discovery reconciliation — create new tracks; list off-screen absences.
 
-Discovery finds NEW mobs and also reports which existing tracks were not seen
-on the same scan (capture-time positions with no nearby detection). Position
-updates still belong to tracking (LocalTracker); this service never moves
-existing tracks.
+Discovery finds NEW mobs. Position updates still belong to tracking
+(LocalTracker); this service never moves existing tracks.
 
 Dedup uses ``existing_positions`` — known-object (x, y) at frame-capture time
 (alive tracks plus recent removal sites). Absence uses
@@ -11,7 +9,8 @@ Dedup uses ``existing_positions`` — known-object (x, y) at frame-capture time
 instant. A detection within one object radius of a known position (or of a
 track just created earlier in this same scan) is skipped; only genuinely new
 detections create a track. Alive tracks with no matching detection are listed
-for removal by the caller.
+in ``removed_ids``; the caller decides which of those actually left the hunt
+ROI and may be dropped.
 """
 
 from __future__ import annotations

@@ -30,7 +30,9 @@ from pybot.runtime.workers.attack_loop import AttackLoop
 from pybot.runtime.workers.discovery_worker import DiscoveryWorker
 from pybot.runtime.workers.skill_timer_worker import SkillTimerWorker
 from pybot.runtime.workers.tracking_worker import TrackingWorker
+from pybot.config.clients import load_client_profile
 from pybot.runtime.constants import WORKER_SHUTDOWN_TIMEOUT_S
+from pybot.runtime.workers.sit_on_low_sp_worker import SitOnLowSpWorker
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -152,9 +154,33 @@ def create_runtime_deps(
         ("discovery", discovery.run),
         ("attack", attack.run),
     ]
-    if ctx.config.skill_timer_scan_code and ctx.config.skill_timer_interval_ms > 0:
+    if any(t.scan_code and t.interval_ms > 0 for t in ctx.config.skill_timers):
         skill_timer = SkillTimerWorker(ctx, input_backend)
         workers.append(("skill_timer", skill_timer.run))
+    if ctx.config.sit_on_low_sp:
+        if ctx.config.sit_on_low_sp_scan_code <= 0:
+            raise ValueError(
+                "Sit On Low Sp is On but the sit key is invalid "
+                f"(button={ctx.config.sit_on_low_sp_button!r})."
+            )
+        if ctx.config.teleport_scan_code <= 0:
+            raise ValueError(
+                "Sit On Low Sp is On but the teleport key is invalid "
+                f"(button={ctx.config.teleport_button!r}). "
+                "Teleport is required to clear mobs before sitting."
+            )
+        profile = load_client_profile(ctx.config.client_profile)
+        if (
+            profile is None
+            or profile.memory.current_sp <= 0
+            or profile.memory.max_sp <= 0
+        ):
+            raise ValueError(
+                "Sit On Low Sp requires a client profile with currentSpAddress "
+                f"and maxSpAddress (profile={ctx.config.client_profile!r})."
+            )
+        sit_worker = SitOnLowSpWorker(ctx, input_backend, profile.memory)
+        workers.append(("sit_sp", sit_worker.run))
 
     return RuntimeDependencies(
         ctx=ctx,

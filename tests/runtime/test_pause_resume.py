@@ -14,6 +14,24 @@ from pybot.runtime.workers.discovery_worker import DiscoveryWorker
 
 
 class HuntRuntimeContextPauseTests(unittest.TestCase):
+    def test_should_run_workers_respects_sitting(self) -> None:
+        ctx = HuntRuntimeContext(
+            config=MagicMock(),
+            logger=MagicMock(),
+            tracks=MagicMock(),
+            policy=MagicMock(),
+            capture=MagicMock(),
+            detector=MagicMock(),
+            tracker=MagicMock(),
+            validation=MagicMock(),
+            control=MagicMock(),
+        )
+        self.assertTrue(ctx.should_run_workers())
+        ctx.begin_sit_regen()
+        self.assertFalse(ctx.should_run_workers())
+        ctx.end_sit_regen()
+        self.assertTrue(ctx.should_run_workers())
+
     def test_should_run_workers_respects_pause(self) -> None:
         ctx = HuntRuntimeContext(
             config=MagicMock(),
@@ -90,6 +108,7 @@ class DiscoveryWorkerPauseTests(unittest.TestCase):
         ctx.pause_event = threading.Event()
         ctx.discovery_wake = threading.Event()
         ctx.discovery_wake.set()
+        ctx.discovery_suspend = threading.Event()
         ctx.resume_gate = threading.Event()
         ctx.should_run_workers.return_value = False
         ctx.config.discovery_interval_ms = 1000

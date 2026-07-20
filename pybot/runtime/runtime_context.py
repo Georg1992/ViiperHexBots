@@ -34,19 +34,40 @@ class HuntRuntimeContext:
     pause_event: threading.Event = field(default_factory=threading.Event)
     resume_gate: threading.Event = field(default_factory=threading.Event)
     discovery_wake: threading.Event = field(default_factory=threading.Event)
+    # Set for the whole claim → teleport key → settle delay window so the
+    # 1s discovery cadence cannot scan mid-teleport and falsely confirm clear.
+    discovery_suspend: threading.Event = field(default_factory=threading.Event)
+    # Set while regenerating SP (sit) — hunting + skill timers idle until clear.
+    sitting_event: threading.Event = field(default_factory=threading.Event)
 
     def should_run_workers(self) -> bool:
-        return not self.stop_event.is_set() and not self.pause_event.is_set()
+        return (
+            not self.stop_event.is_set()
+            and not self.pause_event.is_set()
+            and not self.sitting_event.is_set()
+        )
 
     def mark_running(self) -> None:
         """Workers may run; wake any thread blocked in ``wait_while_stopped_or_paused``."""
         self.pause_event.clear()
-        self.resume_gate.set()
+        if not self.sitting_event.is_set():
+            self.resume_gate.set()
 
     def mark_paused(self) -> None:
         """Workers must idle until ``mark_running``."""
         self.pause_event.set()
         self.resume_gate.clear()
+
+    def begin_sit_regen(self) -> None:
+        """Pause hunting/timers for SP regeneration (independent of user pause)."""
+        self.sitting_event.set()
+        self.resume_gate.clear()
+
+    def end_sit_regen(self) -> None:
+        """Resume hunting/timers after sit regen completes."""
+        self.sitting_event.clear()
+        if not self.pause_event.is_set() and not self.stop_event.is_set():
+            self.resume_gate.set()
 
     def is_stopped(self) -> bool:
         return self.stop_event.is_set()

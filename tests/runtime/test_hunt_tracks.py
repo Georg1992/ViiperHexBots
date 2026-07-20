@@ -97,15 +97,42 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(track.x, 874)
         self.assertEqual(track.y, 578)
 
-    def test_discovery_removes_track_absent_from_scan(self) -> None:
+    def test_discovery_keeps_absent_track_inside_hunt_roi(self) -> None:
+        # Discovery often misses mobs under the cursor / near the player.
+        # In-ROI absence must not kill the track.
+        from pybot.runtime.capture.window_roi import HuntRoi
+
         kept = self._create(874, 578)
-        gone = self.tracks.create_track(
-            "horn", 200, 200, 0.65, 0.9, now_tick=self.now
+        also_inside = self.tracks.create_track(
+            "horn", 900, 600, 0.65, 0.9, now_tick=self.now
         ).id
+        roi = HuntRoi(x=0, y=0, w=2000, h=2000)
         summary = self.tracks.reconcile_detections(
             [det(874, 578, 0.75, 0.9)],
             mob_name="horn",
             now_tick=self.now + 100,
+            hunt_roi=roi,
+        )
+        self.assertEqual(summary.added_count, 0)
+        self.assertEqual(summary.matched_count, 1)
+        self.assertEqual(summary.removed_count, 0)
+        self.assertIsNotNone(self.tracks.get_track_by_id(kept))
+        self.assertIsNotNone(self.tracks.get_track_by_id(also_inside))
+
+    def test_discovery_removes_track_only_when_outside_hunt_roi(self) -> None:
+        from pybot.runtime.capture.window_roi import HuntRoi
+
+        kept = self._create(874, 578)
+        gone = self.tracks.create_track(
+            "horn", 50, 50, 0.65, 0.9, now_tick=self.now
+        ).id
+        # ROI covers the kept mob but not (50,50).
+        roi = HuntRoi(x=800, y=500, w=200, h=200)
+        summary = self.tracks.reconcile_detections(
+            [det(874, 578, 0.75, 0.9)],
+            mob_name="horn",
+            now_tick=self.now + 100,
+            hunt_roi=roi,
         )
         self.assertEqual(summary.added_count, 0)
         self.assertEqual(summary.matched_count, 1)
@@ -114,7 +141,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertIsNotNone(self.tracks.get_track_by_id(kept))
         self.assertIsNone(self.tracks.get_track_by_id(gone))
 
-    def test_discovery_empty_scan_clears_all_tracks(self) -> None:
+    def test_discovery_without_roi_does_not_remove_absent_tracks(self) -> None:
         first = self._create(874, 578)
         second = self.tracks.create_track(
             "horn", 200, 200, 0.65, 0.9, now_tick=self.now
@@ -124,9 +151,10 @@ class HuntTracksRulesTests(unittest.TestCase):
             mob_name="horn",
             now_tick=self.now + 100,
         )
-        self.assertEqual(summary.removed_count, 2)
-        self.assertEqual(set(summary.removed_ids or []), {first, second})
-        self.assertEqual(self.tracks.get_track_count(), 0)
+        self.assertEqual(summary.removed_count, 0)
+        self.assertEqual(self.tracks.get_track_count(), 2)
+        self.assertIsNotNone(self.tracks.get_track_by_id(first))
+        self.assertIsNotNone(self.tracks.get_track_by_id(second))
 
     def test_try_claim_clear_for_teleport_rejects_alive_tracks(self) -> None:
         self._create(874, 578)
@@ -166,6 +194,20 @@ class HuntTracksRulesTests(unittest.TestCase):
             _, lost_ids, _ = self.tracks.apply_tracking([_miss(track_id)], now_tick=self.now + i)
         self.assertIn(track_id, lost_ids)
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
+
+    def test_lost_track_does_not_block_discovery_rediscovery(self) -> None:
+        track_id = self._create(874, 578)
+        miss_limit = int(load_detector_config()["trackLostMissLimit"])
+        for i in range(miss_limit):
+            self.tracks.apply_tracking([_miss(track_id)], now_tick=self.now + i)
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
+        summary = self.tracks.reconcile_detections(
+            [det(874, 578, 0.75, 0.9)],
+            mob_name="horn",
+            now_tick=self.now + miss_limit + 1,
+        )
+        self.assertEqual(summary.added_count, 1)
+        self.assertEqual(summary.alive_after, 1)
 
     def test_tracking_death_removes_track_immediately(self) -> None:
         track_id = self._create(874, 578)
@@ -234,22 +276,48 @@ class HuntTracksRulesTests(unittest.TestCase):
         assert second_track is not None
         self.assertEqual(second_track.attack_count, 0)
 
-    def test_unreachable_site_blocks_discovery_rediscovery(self) -> None:
+    def test_unreachable_allows_immediate_discovery_rediscovery(self) -> None:
         tracks = HuntTracks(load_detector_config(), skill_delay_ms=3000)
         track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
         tracks.apply_attack_event(track_id, now_tick=self.now + 1)
         tracks.apply_attack_event(track_id, now_tick=self.now + 2)
         tracks.apply_tracking([], now_tick=self.now + 2)
+        self.assertIsNone(tracks.get_track_by_id(track_id))
         summary = tracks.reconcile_detections(
             [det(874, 578, 0.75, 0.9)],
             mob_name="horn",
             now_tick=self.now + 100,
         )
-        self.assertEqual(summary.added_count, 0)
-        self.assertEqual(summary.matched_count, 1)
-        self.assertEqual(tracks.get_track_count(), 0)
+        self.assertEqual(summary.added_count, 1)
+        self.assertEqual(summary.alive_after, 1)
+        created = summary.created_ids or []
+        self.assertEqual(len(created), 1)
+        recreated = tracks.get_track_by_id(created[0])
+        assert recreated is not None
+        # Unreachable clears the attack anchor so rediscovery starts fresh.
+        self.assertEqual(recreated.attack_count, 0)
 
-    def test_mob_attack_count_inherits_after_track_recreation(self) -> None:
+    def test_stale_tracking_after_area_reset_is_ignored(self) -> None:
+        track_id = self._create(874, 578)
+        epoch = self.tracks.area_epoch
+        self.tracks.area_reset()
+        new_id = self.tracks.create_track(
+            "horn", 900, 600, 0.7, 0.9, now_tick=self.now + 1
+        ).id
+        self.assertEqual(new_id, track_id)  # ids reuse after reset
+        dead_ids, lost_ids, unreachable_ids = self.tracks.apply_tracking(
+            [_dead(track_id, 874, 578)],
+            now_tick=self.now + 2,
+            area_epoch=epoch,
+        )
+        self.assertEqual(dead_ids, [])
+        self.assertEqual(lost_ids, [])
+        self.assertEqual(unreachable_ids, [])
+        surviving = self.tracks.get_track_by_id(new_id)
+        assert surviving is not None
+        self.assertEqual((surviving.x, surviving.y), (900, 600))
+
+    def test_mob_attack_count_inherits_after_death_recreation(self) -> None:
         config = {
             **load_detector_config(),
             "deathRediscoveryCooldownMs": 1000,
@@ -258,7 +326,10 @@ class HuntTracksRulesTests(unittest.TestCase):
         track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
         for i in range(2):
             tracks.apply_attack_event(track_id, now_tick=self.now + i + 1)
-        tracks.apply_tracking([], now_tick=self.now + 2)
+        tracks.apply_tracking(
+            [_dead(track_id, 874, 578)],
+            now_tick=self.now + 2,
+        )
         self.assertIsNone(tracks.get_track_by_id(track_id))
         summary = tracks.reconcile_detections(
             [det(874, 578, 0.75, 0.9)],
@@ -380,20 +451,6 @@ class HuntTracksRulesTests(unittest.TestCase):
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
         self.assertEqual(track.lost_count, 0)
-
-    def test_lost_site_blocks_discovery_rediscovery(self) -> None:
-        track_id = self._create(874, 578)
-        miss_limit = int(load_detector_config()["trackLostMissLimit"])
-        for i in range(miss_limit):
-            self.tracks.apply_tracking([_miss(track_id)], now_tick=self.now + i)
-        summary = self.tracks.reconcile_detections(
-            [det(874, 578, 0.75, 0.9)],
-            mob_name="horn",
-            now_tick=self.now + 100,
-        )
-        self.assertEqual(summary.added_count, 0)
-        self.assertEqual(summary.matched_count, 1)
-        self.assertEqual(self.tracks.get_track_count(), 0)
 
     def test_area_reset_clears_tracks(self) -> None:
         self._create(874, 578)

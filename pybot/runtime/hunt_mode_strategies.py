@@ -1,4 +1,4 @@
-"""Hunt mode strategies — Teleport and Walk (Strategy pattern).
+"""Hunt mode strategies — Teleport, Hybrid (placeholder), and Walk.
 
 Each strategy encapsulates the no-target behaviour for a hunt mode,
 extracted from HuntModeController to satisfy the Open/Closed Principle.
@@ -186,15 +186,18 @@ class TeleportStrategy(HuntModeStrategy):
         ctx = self._ctx
         context = self._build_no_target_context()
 
-        # Require a discovery scan that itself saw zero living mobs. Tracks can
-        # drop earlier (lost/unreachable) while mobs are still on screen; without
-        # this gate we would teleport on a stale "discovery ran once" flag.
+        # Require a discovery scan that left zero alive tracks. Tracks can drop
+        # earlier (lost) while mobs are still on screen; without this gate we
+        # would teleport on a stale "discovery ran once" flag.
         if not self.discovery_confirmed_clear:
             reason = (
                 "no_discovery_yet"
                 if not self.discovery_since_reset
                 else "discovery_not_clear"
             )
+            # Don't sit on the 1s discovery cadence — ask for a scan now.
+            if not ctx.discovery_suspend.is_set():
+                ctx.discovery_wake.set()
             self._log_no_target_blocked(reason)
             self._log_no_target("wait", reason, context)
             return False
@@ -209,9 +212,15 @@ class TeleportStrategy(HuntModeStrategy):
             self._log_no_target("wait", "no_teleport_key", context)
             return False
 
+        # Suspend discovery before claim so the 1s cadence cannot scan during
+        # teleport settle and confirm clear on a loading/empty frame.
+        ctx.discovery_suspend.set()
+        ctx.discovery_wake.clear()
+
         # Claim under the tracks lock before input so a concurrent discovery
         # reconcile cannot spawn tracks into the area we are leaving.
         if not ctx.tracks.try_claim_clear_for_teleport():
+            ctx.discovery_suspend.clear()
             self._log_no_target_blocked("alive_tracks")
             self._log_no_target("wait", "alive_tracks", context)
             return False
@@ -230,14 +239,28 @@ class TeleportStrategy(HuntModeStrategy):
             ctx.logger.behavior(
                 f"[MODE] teleport input error: {exc}"
             )
-            ctx.discovery_wake.set()
+            self._release_discovery_after_teleport()
             return False
         ctx.overlay.increment_teleports()
         if not ctx.wait_unless_stopped(ctx.config.teleport_duration_ms / 1000.0):
-            ctx.discovery_wake.set()
+            self._release_discovery_after_teleport()
             return False
-        ctx.discovery_wake.set()
+        self._release_discovery_after_teleport()
         return True
+
+    def _release_discovery_after_teleport(self) -> None:
+        """Allow discovery again and wake it for the post-settle scan."""
+        ctx = self._ctx
+        ctx.discovery_suspend.clear()
+        ctx.discovery_wake.set()
+
+
+class HybridStrategy(HuntModeStrategy):
+    """Placeholder hunt mode — no hybrid behaviour yet."""
+
+    def _handle_no_targets_impl(self) -> bool:
+        self._log_no_target("wait", "hybrid_not_implemented")
+        return False
 
 
 class WalkStrategy(HuntModeStrategy):

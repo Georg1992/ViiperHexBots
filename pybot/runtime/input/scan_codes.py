@@ -24,6 +24,8 @@ def key_name_to_scan_code(key_name: str) -> int:
         vk = 0x09
     elif name.lower() == "escape":
         vk = 0x1B
+    elif name.lower() == "insert":
+        vk = 0x2D
     else:
         return 0
     scan_code = user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)

@@ -26,6 +26,7 @@ from pybot.recognition.rules import (
 )
 
 from pybot.runtime.track_reconciler import TrackReconciler
+from pybot.runtime.capture.window_roi import HuntRoi
 from pybot.recognition.detector.detector import load_detector_config
 
 
@@ -211,8 +212,8 @@ class HuntTracks:
     def positions_snapshot(self, now_tick: int | None = None) -> list[tuple[int, int]]:
         """Positions discovery should treat as already known (alive + recent removals).
 
-        Includes alive tracks and recently removed sites (dead or unreachable) so
-        discovery does not immediately recreate the same mob.
+        Includes alive tracks and recently removed death sites so discovery does
+        not immediately recreate a corpse hit as a new mob.
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
@@ -225,6 +226,26 @@ class HuntTracks:
         with self._lock:
             return [(t.id, t.x, t.y) for t in self._tracks if is_alive(t)]
 
+    def discovery_frame_snapshot(
+        self, now_tick: int | None = None
+    ) -> tuple[int, list[tuple[int, int]], list[tuple[int, int, int]]]:
+        """Atomic sample for one discovery capture: epoch + dedup + alive positions."""
+        tick = now_tick if now_tick is not None else monotonic_ms()
+        with self._lock:
+            return (
+                self._area_epoch,
+                self._dedup_positions_locked(tick),
+                [(t.id, t.x, t.y) for t in self._tracks if is_alive(t)],
+            )
+
+    def tracking_frame_snapshot(
+        self, now_tick: int | None = None
+    ) -> tuple[int, list[MobTrack]]:
+        """Atomic sample for one tracking pass: epoch + deep-copied alive tracks."""
+        with self._lock:
+            alive = [copy.deepcopy(t) for t in self._tracks if is_alive(t)]
+            return self._area_epoch, alive
+
     def reconcile_detections(
         self,
         detections: list[DiscoveryDetection],
@@ -234,8 +255,14 @@ class HuntTracks:
         existing_positions: list[tuple[int, int]] | None = None,
         existing_track_positions: list[tuple[int, int, int]] | None = None,
         area_epoch: int | None = None,
+        hunt_roi: HuntRoi | None = None,
     ) -> ReconcileSummary:
-        """Discovery step: create new tracks; drop tracks absent from this scan.
+        """Discovery step: create new tracks; drop tracks that left the hunt ROI.
+
+        Unmatched tracks that are still inside ``hunt_roi`` are kept — discovery
+        often misses mobs under the cursor or near the player; tracking owns
+        those losses. When ``hunt_roi`` is omitted, discovery never removes
+        tracks (create / dedup only).
 
         ``existing_positions`` are the known-object positions at frame-capture
         time. When omitted, the current live positions are used (callers that
@@ -290,6 +317,12 @@ class HuntTracks:
                 track = self._get_track_by_id_locked(track_id)
                 if track is None:
                     continue
+                # Only drop tracks that have left the hunt search area.
+                # In-ROI discovery misses (cursor / near player) must not kill.
+                if hunt_roi is None or self._point_in_hunt_roi_locked(
+                    track.x, track.y, hunt_roi
+                ):
+                    continue
                 self._record_removed_site_locked(track.x, track.y, tick)
                 actual_removed.append(track_id)
             if actual_removed:
@@ -301,21 +334,32 @@ class HuntTracks:
             self._last_reconcile_summary = summary
             return summary
 
+    @staticmethod
+    def _point_in_hunt_roi_locked(x: int, y: int, roi: HuntRoi) -> bool:
+        return roi.x <= x < roi.x + roi.w and roi.y <= y < roi.y + roi.h
+
     def apply_tracking(
         self,
         results,
         *,
         now_tick: int | None = None,
+        area_epoch: int | None = None,
     ) -> tuple[list[int], list[int], list[int]]:
         """Tracking step: refresh coordinates from LocalTracker and drop lost/dead tracks.
 
         ``results`` is any iterable of objects exposing ``track_id``, ``found``,
         ``x``, ``y`` and ``confidence`` (e.g. ``LocalTrackResult``). Returns
         ``(dead_ids, lost_ids, unreachable_ids)`` for tracks removed this tick.
+
+        ``area_epoch`` is the epoch sampled with the tracking frame. If the store
+        advanced (teleport / area_reset) while local follow was running, discard
+        the whole batch so stale ids cannot mutate post-reset tracks.
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
         dead_ids: list[int] = []
         with self._lock:
+            if area_epoch is not None and area_epoch != self._area_epoch:
+                return [], [], []
             for result in results:
                 track = self._get_track_by_id_locked(result.track_id)
                 if track is None:
@@ -359,10 +403,7 @@ class HuntTracks:
                 for t in self._tracks
                 if t.id not in remove_ids and is_track_lost(t, miss_limit=miss_limit)
             ]
-            for track_id in lost_ids:
-                lost_track = self._get_track_by_id_locked(track_id)
-                if lost_track is not None:
-                    self._record_removed_site_locked(lost_track.x, lost_track.y, tick)
+            # Lost tracks are not death sites — do not block rediscovery.
             remove_ids.update(lost_ids)
             unreachable_ids = self._expire_unreachable_locked(tick, exclude_ids=remove_ids)
             remove_ids.update(unreachable_ids)
@@ -478,7 +519,13 @@ class HuntTracks:
         *,
         exclude_ids: set[int] | None = None,
     ) -> list[int]:
-        """Drop tracks that exceeded the per-mob attack budget without dying."""
+        """Drop tracks that exceeded the per-mob attack budget without dying.
+
+        Unlike confirmed opacity deaths, unreachable removals do not seed a
+        rediscovery ghost — the mob may still be alive. Attack-anchor counts
+        are cleared so discovery can recreate with a fresh budget.
+        """
+        del now_tick
         skip = exclude_ids or set()
         limit = self._max_attacks_per_mob_before_unreachable_locked()
         unreachable_ids: list[int] = []
@@ -487,7 +534,9 @@ class HuntTracks:
                 continue
             if not is_track_unreachable_by_attacks(track, limit):
                 continue
-            self._record_removed_site_locked(track.x, track.y, now_tick)
+            anchor = (track.attack_anchor_x, track.attack_anchor_y)
+            self._attacks_by_anchor.pop(anchor, None)
+            self._pending_attack_track_ids.discard(track.id)
             unreachable_ids.append(track.id)
         return unreachable_ids
 

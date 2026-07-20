@@ -41,6 +41,13 @@ class AppConfigTests(unittest.TestCase):
     def test_memory_reading_follows_profile(self) -> None:
         self.assertFalse(memory_reading_enabled("Generic"))
         self.assertTrue(memory_reading_enabled("HoneyRO"))
+        self.assertTrue(memory_reading_enabled("Revenant"))
+
+    def test_revenant_profile_has_memory_addresses(self) -> None:
+        from pybot.config.clients import client_supports_memory
+
+        self.assertIn("Revenant", list_client_profiles(PROJECT_ROOT))
+        self.assertTrue(client_supports_memory("Revenant", PROJECT_ROOT))
 
 
 class MobCatalogTests(unittest.TestCase):

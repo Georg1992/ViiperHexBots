@@ -7,6 +7,16 @@ from pathlib import Path
 
 from pybot.paths import CONFIG_PATH
 
+MAX_SKILL_TIMERS = 6
+
+
+@dataclass
+class SkillTimerSetting:
+    """One periodic skill-timer key press."""
+
+    button: str = ""
+    interval_s: int = 20
+
 
 @dataclass
 class AppSettings:
@@ -41,11 +51,13 @@ class AppSettings:
     skill_button: str = "e"
     skill_delay: int = 500
     teleport_button: str = "q"
+    teleport_delay: int = 800
     save_point_button: str = ""
     sp_button: str = ""
     open_storage_button: str = ""
-    skill_timer_button: str = ""
-    skill_timer_interval: int = 20
+    skill_timers: list[SkillTimerSetting] = field(default_factory=list)
+    sit_on_low_sp: bool = False
+    sit_on_low_sp_button: str = "insert"
 
     @property
     def warper_coords_set(self) -> bool:

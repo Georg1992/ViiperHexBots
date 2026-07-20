@@ -40,32 +40,36 @@ class WindowEntry:
     hwnd: int
     title: str
     process: str
+    pid: int
     minimized: bool
 
     @property
     def display_text(self) -> str:
+        # Include pid so two clients with the same title/exe stay distinct in
+        # the combobox and memory reading can bind to the selected process.
         prefix = "[MIN] " if self.minimized else ""
-        return f"{prefix}{self.title} ({self.process})"
+        return f"{prefix}{self.title} ({self.process}) pid={self.pid}"
 
 
-def _window_process(hwnd: int) -> str:
+def _window_process_and_pid(hwnd: int) -> tuple[str, int]:
     process_id = wintypes.DWORD()
     tid = user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
     if not tid or process_id.value == 0:
-        return ""
-    handle = kernel32.OpenProcess(0x1000, False, process_id.value)
+        return "", 0
+    pid = int(process_id.value)
+    handle = kernel32.OpenProcess(0x1000, False, pid)
     if not handle:
-        return ""
+        return "", pid
     try:
         buffer = ctypes.create_unicode_buffer(260)
         if kernel32.QueryFullProcessImageNameW(
             handle, 0, buffer, ctypes.byref(wintypes.DWORD(260))
         ):
             name = buffer.value.rsplit("\\", 1)[-1]
-            return name
+            return name, pid
     finally:
         kernel32.CloseHandle(handle)
-    return ""
+    return "", pid
 
 
 def enum_game_windows(*, exclude_hwnd: int = 0) -> list[WindowEntry]:
@@ -83,8 +87,8 @@ def enum_game_windows(*, exclude_hwnd: int = 0) -> list[WindowEntry]:
             title_buf = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, title_buf, length + 1)
             title = title_buf.value.strip()
-            process = _window_process(hwnd)
-            if not title or not process:
+            process, pid = _window_process_and_pid(hwnd)
+            if not title or not process or pid <= 0:
                 return True
             if process.lower() == "explorer.exe":
                 return True
@@ -94,7 +98,13 @@ def enum_game_windows(*, exclude_hwnd: int = 0) -> list[WindowEntry]:
             if user32.GetWindowPlacement(hwnd, ctypes.byref(placement)):
                 minimized = placement.showCmd == SW_SHOWMINIMIZED
             entries.append(
-                WindowEntry(hwnd=hwnd, title=title, process=process, minimized=minimized)
+                WindowEntry(
+                    hwnd=hwnd,
+                    title=title,
+                    process=process,
+                    pid=pid,
+                    minimized=minimized,
+                )
             )
         except Exception:
             pass  # skip windows that cause enumeration errors
@@ -110,6 +120,23 @@ def enum_game_windows(*, exclude_hwnd: int = 0) -> list[WindowEntry]:
 
 def window_exists(hwnd: int) -> bool:
     return bool(hwnd) and bool(user32.IsWindow(hwnd))
+
+
+def client_rect_screen(hwnd: int) -> tuple[int, int, int, int] | None:
+    """Return ``(left, top, width, height)`` of *hwnd*'s client area in screen coords."""
+    if not window_exists(hwnd):
+        return None
+    client_rect = wintypes.RECT()
+    if not user32.GetClientRect(hwnd, ctypes.byref(client_rect)):
+        return None
+    origin = wintypes.POINT(0, 0)
+    if not user32.ClientToScreen(hwnd, ctypes.byref(origin)):
+        return None
+    width = client_rect.right - client_rect.left
+    height = client_rect.bottom - client_rect.top
+    if width <= 0 or height <= 0:
+        return None
+    return int(origin.x), int(origin.y), int(width), int(height)
 
 
 def restore_and_activate(hwnd: int) -> bool:

@@ -1,6 +1,6 @@
-"""Periodic skill timer key press — Reads the configured skill timer button and interval from the runtime
-config and presses that key at the configured interval while the bot
-is running in live mode.
+"""Periodic skill timer key presses — one worker for all configured timers.
+
+Timers press the key only (no mouse click), same as teleport_key.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from pybot.runtime.workers.worker_contexts import SkillTimerWorkerContext
 
 
 class SkillTimerWorker:
-    """Presses the skill timer key at a fixed interval."""
+    """Presses each skill-timer key at its own interval (key only, no click)."""
 
     def __init__(
         self,
@@ -20,20 +20,24 @@ class SkillTimerWorker:
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
-        self._last_press_ms = 0
+        self._last_press_ms: dict[int, int] = {}
 
     def run(self) -> None:
         ctx = self._ctx
-        timer_scan_code = ctx.config.skill_timer_scan_code
-        interval_ms = ctx.config.skill_timer_interval_ms
-
-        if not timer_scan_code or interval_ms <= 0:
+        timers = [
+            t
+            for t in ctx.config.skill_timers
+            if t.scan_code and t.interval_ms > 0
+        ]
+        if not timers:
             return
 
-        ctx.logger.behavior(
-            f"[TIMER] skill timer started interval={interval_ms}ms "
-            f"scanCode={timer_scan_code}"
-        )
+        for timer in timers:
+            ctx.logger.behavior(
+                f"[TIMER] started key={timer.button} interval={timer.interval_ms}ms "
+                f"scanCode={timer.scan_code}"
+            )
+            self._last_press_ms[timer.scan_code] = 0
 
         while not ctx.is_stopped():
             try:
@@ -42,12 +46,20 @@ class SkillTimerWorker:
                     continue
 
                 now = monotonic_ms()
-                if now - self._last_press_ms >= interval_ms:
-                    self._input.skill_click(timer_scan_code)
-                    self._last_press_ms = now
+                next_wait_ms = 1000
+                for timer in timers:
+                    last = self._last_press_ms.get(timer.scan_code, 0)
+                    elapsed = now - last
+                    if elapsed >= timer.interval_ms:
+                        self._input.teleport_key(timer.scan_code)
+                        self._last_press_ms[timer.scan_code] = now
+                        remaining = timer.interval_ms
+                    else:
+                        remaining = timer.interval_ms - elapsed
+                    next_wait_ms = min(next_wait_ms, remaining)
 
-                remaining = interval_ms - (now - self._last_press_ms)
-                ctx.stop_event.wait(max(0.25, remaining / 1000.0))
+                ctx.stop_event.wait(max(0.25, next_wait_ms / 1000.0))
             except Exception:
                 import traceback
+
                 ctx.logger.behavior(f"[TIMER] tick error:\n{traceback.format_exc()}")

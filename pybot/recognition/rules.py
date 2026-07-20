@@ -74,6 +74,8 @@ class MobTrack:
     opacity_baseline_samples: int = 0
     opacity_decay_streak: int = 0
     moving: bool = False
+    vel_x: float = 0.0
+    vel_y: float = 0.0
     attack_anchor_x: int = 0
     attack_anchor_y: int = 0
 
@@ -229,16 +231,31 @@ def apply_track_observation(
     confidence: float,
     now_tick: int,
 ) -> None:
-    """Tracking owns position + liveness. Fresh coords on hit, miss count on loss."""
+    """Tracking owns position + liveness. Fresh coords on hit; coast only while moving."""
     if found:
+        dx = float(x - track.x)
+        dy = float(y - track.y)
+        track.vel_x = (0.65 * track.vel_x) + (0.35 * dx)
+        track.vel_y = (0.65 * track.vel_y) + (0.35 * dy)
         track.x = x
         track.y = y
         track.updated_tick = now_tick
         track.lost_count = 0
         if confidence > 0:
             track.confidence = confidence
+        return
+
+    # Coast only when movement is established — residual EMA on a stationary
+    # miss otherwise jumps the search window and looks like lag/racing.
+    if track.moving:
+        track.x += int(round(track.vel_x))
+        track.y += int(round(track.vel_y))
+        track.vel_x *= 0.9
+        track.vel_y *= 0.9
     else:
-        track.lost_count += 1
+        track.vel_x *= 0.5
+        track.vel_y *= 0.5
+    track.lost_count += 1
 
 
 def apply_opacity_observation(

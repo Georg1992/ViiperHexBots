@@ -3,11 +3,46 @@
 from __future__ import annotations
 
 import configparser
+import json
 from pathlib import Path
 
 from pybot.config.clients import memory_reading_enabled
-from pybot.config.schema import AppSettings
+from pybot.config.schema import MAX_SKILL_TIMERS, AppSettings, SkillTimerSetting
 from pybot.paths import CONFIG_PATH
+
+
+def _load_skill_timers(parser: configparser.ConfigParser) -> list[SkillTimerSetting]:
+    raw = parser.get("Keybindings", "SkillTimers", fallback="").strip()
+    if raw:
+        try:
+            items = json.loads(raw)
+        except json.JSONDecodeError:
+            items = []
+        timers: list[SkillTimerSetting] = []
+        if isinstance(items, list):
+            for item in items[:MAX_SKILL_TIMERS]:
+                if not isinstance(item, dict):
+                    continue
+                button = str(item.get("key") or item.get("button") or "").strip()
+                interval = int(item.get("delay") or item.get("interval_s") or 20)
+                timers.append(SkillTimerSetting(button=button, interval_s=max(1, interval)))
+        return timers
+
+    # Migrate legacy single-timer keys.
+    button = parser.get("Keybindings", "SkillTimerButton", fallback="").strip()
+    interval = parser.getint("Keybindings", "SkillTimerInterval", fallback=20)
+    if button:
+        return [SkillTimerSetting(button=button, interval_s=max(1, interval))]
+    return []
+
+
+def _save_skill_timers(timers: list[SkillTimerSetting]) -> str:
+    payload = [
+        {"key": t.button, "delay": int(t.interval_s)}
+        for t in timers[:MAX_SKILL_TIMERS]
+        if t.button.strip()
+    ]
+    return json.dumps(payload, separators=(",", ":"))
 
 
 def _read_ini(path: Path) -> configparser.ConfigParser:
@@ -60,11 +95,16 @@ def load_settings(path: Path | None = None) -> AppSettings:
         skill_button=parser.get("Keybindings", "SkillButton", fallback="e"),
         skill_delay=parser.getint("Keybindings", "SkillDelay", fallback=500),
         teleport_button=parser.get("Keybindings", "TeleportButton", fallback="q"),
+        teleport_delay=parser.getint("Keybindings", "TeleportDelay", fallback=800),
         save_point_button=parser.get("Keybindings", "SavePointButton", fallback=""),
         sp_button=parser.get("Keybindings", "SPButton", fallback=""),
         open_storage_button=parser.get("Keybindings", "OpenStorageButton", fallback=""),
-        skill_timer_button=parser.get("Keybindings", "SkillTimerButton", fallback=""),
-        skill_timer_interval=parser.getint("Keybindings", "SkillTimerInterval", fallback=20),
+        skill_timers=_load_skill_timers(parser),
+        sit_on_low_sp=parser.getint("Keybindings", "SitOnLowSp", fallback=0) == 1,
+        sit_on_low_sp_button=(
+            parser.get("Keybindings", "SitOnLowSpButton", fallback="insert").strip()
+            or "insert"
+        ),
     )
 
 
@@ -118,11 +158,15 @@ def save_settings(settings: AppSettings) -> None:
     parser["Keybindings"]["SkillButton"] = settings.skill_button
     parser["Keybindings"]["SkillDelay"] = str(settings.skill_delay)
     parser["Keybindings"]["TeleportButton"] = settings.teleport_button
+    parser["Keybindings"]["TeleportDelay"] = str(settings.teleport_delay)
     parser["Keybindings"]["SavePointButton"] = settings.save_point_button
     parser["Keybindings"]["SPButton"] = settings.sp_button
     parser["Keybindings"]["OpenStorageButton"] = settings.open_storage_button
-    parser["Keybindings"]["SkillTimerButton"] = settings.skill_timer_button
-    parser["Keybindings"]["SkillTimerInterval"] = str(settings.skill_timer_interval)
+    parser["Keybindings"]["SkillTimers"] = _save_skill_timers(settings.skill_timers)
+    parser["Keybindings"].pop("SkillTimerButton", None)
+    parser["Keybindings"].pop("SkillTimerInterval", None)
+    parser["Keybindings"]["SitOnLowSpButton"] = settings.sit_on_low_sp_button
+    parser["Keybindings"]["SitOnLowSp"] = "1" if settings.sit_on_low_sp else "0"
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:

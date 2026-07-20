@@ -44,7 +44,7 @@ class HuntModeControllerContext(CanStop, CanLog, HasConfig,
 
 class TrackingWorkerContext(CanStop, CanLog,
                             CanCapture, CanTrackLocal, CanTrack,
-                            CanOverlay, Protocol):
+                            CanWakeDiscovery, CanOverlay, Protocol):
     """Hunt runtime subset consumed by TrackingWorker."""
     pass
 
@@ -67,3 +67,20 @@ class AttackLoopContext(CanStop, CanLog, HasConfig,
 class SkillTimerWorkerContext(CanStop, CanLog, HasConfig, Protocol):
     """Hunt runtime subset consumed by SkillTimerWorker."""
     pass
+
+
+class SitOnLowSpWorkerContext(
+    CanStop,
+    CanLog,
+    HasConfig,
+    CanCapture,
+    CanDetect,
+    CanOverlay,
+    CanWakeDiscovery,
+    Protocol,
+):
+    """Hunt runtime subset consumed by SitOnLowSpWorker."""
+
+    def begin_sit_regen(self) -> None: ...
+    def end_sit_regen(self) -> None: ...
+    def wait_unless_stopped(self, timeout_s: float) -> bool: ...

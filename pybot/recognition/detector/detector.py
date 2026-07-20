@@ -45,6 +45,7 @@ REQUIRED_CONFIG_KEYS = {
     "smallScaleCutoff",
     "centerScales",
     "localTrackSearchRadiusPx",
+    "localTrackMovingSearchRadiusPx",
     "discoveryClusterRadiusPx",
     "trackDedupRadiusPx",
     "trackLostMissLimit",
@@ -196,6 +197,9 @@ class MobDetector:
         self.discovery_heatmap_downscale = int(self.config["discoveryHeatmapDownscale"])
         self.discovery_heatmap_downscale_min_side = int(self.config["discoveryHeatmapDownscaleMinSide"])
         self.local_track_search_radius_px = int(self.config["localTrackSearchRadiusPx"])
+        self.local_track_moving_search_radius_px = int(
+            self.config["localTrackMovingSearchRadiusPx"]
+        )
 
     def apply_runtime_config(self, config: dict) -> None:
         self.config = dict(config)
@@ -203,6 +207,9 @@ class MobDetector:
         self.discovery_heatmap_downscale = int(self.config["discoveryHeatmapDownscale"])
         self.discovery_heatmap_downscale_min_side = int(self.config["discoveryHeatmapDownscaleMinSide"])
         self.local_track_search_radius_px = int(self.config["localTrackSearchRadiusPx"])
+        self.local_track_moving_search_radius_px = int(
+            self.config["localTrackMovingSearchRadiusPx"]
+        )
 
     def descriptor_path(self, mob_name: str) -> Path:
         stem = mob_name.lower()

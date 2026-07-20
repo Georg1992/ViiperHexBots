@@ -48,6 +48,9 @@ class StateTrackSnapshot:
     opacity_baseline_samples: int = 0
     opacity_decay_streak: int = 0
     moving: bool = False
+    vel_x: float = 0.0
+    vel_y: float = 0.0
+    lost_count: int = 0
     attack_count: int = 0
     created_tick: int = 0
     now_tick: int = 0
@@ -197,6 +200,9 @@ class DetectorSession:
                 track["opacityBaselineSamples"] = snapshot.opacity_baseline_samples
                 track["opacityDecayStreak"] = snapshot.opacity_decay_streak
                 track["moving"] = snapshot.moving
+                track["velX"] = snapshot.vel_x
+                track["velY"] = snapshot.vel_y
+                track["lostCount"] = snapshot.lost_count
                 track["attackCount"] = snapshot.attack_count
                 track["createdTick"] = snapshot.created_tick
                 track["nowTick"] = snapshot.now_tick

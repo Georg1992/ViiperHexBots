@@ -1,8 +1,9 @@
 """Local coordinate follower for already-discovered tracks.
 
-Scores at the last center first, searches nearby heatmap peaks when that
-misses, and measures opacity on every successful hit. Opacity decay confirms
-death; misses only advance the lost streak.
+Scores at the predicted center first, searches nearby heatmap peaks when that
+misses, and measures opacity on successful hits. Baseline calibration runs
+while walking; opacity-death confirmation only while stationary. Misses advance
+the lost streak (the store coasts position only when ``moving``).
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ def track_local(
     offset_y: int = 0,
     search_radius_px: int | None = None,
 ) -> LocalTrackResult:
-    """Follow one known track near its last center."""
+    """Follow one known track near its last / predicted center."""
     track_id = int(track["trackId"])
     cx = int(track["x"])
     cy = int(track["y"])
@@ -60,11 +61,20 @@ def track_local(
     opacity_decay_streak = int(track.get("opacityDecayStreak", 0))
     created_tick = int(track.get("createdTick", 0))
     now_tick = int(track.get("nowTick", 0))
-    radius = (
-        int(search_radius_px)
-        if search_radius_px is not None
-        else int(detector.local_track_search_radius_px)
-    )
+    moving = bool(track.get("moving", False))
+    vel_x = float(track.get("velX", 0.0))
+    vel_y = float(track.get("velY", 0.0))
+
+    if search_radius_px is not None:
+        radius = int(search_radius_px)
+    elif moving:
+        radius = int(detector.local_track_moving_search_radius_px)
+    else:
+        radius = int(detector.local_track_search_radius_px)
+
+    # Search one step ahead of a walker; store position still coasts only on miss.
+    search_x = int(round(cx + vel_x)) if moving else cx
+    search_y = int(round(cy + vel_y)) if moving else cy
 
     descriptor = detector.ensure_descriptor(mob_name)
 
@@ -72,17 +82,15 @@ def track_local(
     screen_cy = cy + offset_y
 
     accepted, center_bbox, sim = detector.score_at(
-        frame_bgr, descriptor, cx, cy, scale,
+        frame_bgr, descriptor, search_x, search_y, scale,
     )
     center_hit = accepted and center_bbox is not None
 
-    peak_x = cx
-    peak_y = cy
     peak_bbox = None
     peak_sim = 0.0
     if not center_hit:
         peak = _find_local_peak(
-            detector, frame_bgr, descriptor, cx, cy, scale,
+            detector, frame_bgr, descriptor, search_x, search_y, scale,
             search_radius_px=radius,
         )
         if peak is None:
@@ -123,6 +131,7 @@ def track_local(
         opacity_baseline=opacity_baseline,
         opacity_baseline_samples=opacity_baseline_samples,
         opacity_decay_streak=opacity_decay_streak,
+        moving=moving,
     )
 
 
@@ -156,11 +165,15 @@ def _finalize_track_hit(
     opacity_baseline: float,
     opacity_baseline_samples: int,
     opacity_decay_streak: int,
+    moving: bool,
 ) -> LocalTrackResult:
     bx, by, bw, bh = bbox
     x = bx + bw // 2 + offset_x
     y = by + bh // 2 + offset_y
 
+    # Calibrate opacity even while walking so death can fire as soon as the
+    # mob stops. Walk/blur frames still look like decay — only *confirm* death
+    # while stationary.
     if _track_old_enough(
         detector.config,
         created_tick=created_tick,
@@ -183,7 +196,7 @@ def _finalize_track_hit(
                 config=detector.config,
             )
             opacity_decay_streak = 0
-        else:
+        elif not moving:
             opacity_baseline, opacity_baseline_samples, opacity_decay_streak, dead = (
                 evaluate_opacity_death(
                     opacity_score=opacity_score,

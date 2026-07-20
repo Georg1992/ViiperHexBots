@@ -31,6 +31,7 @@ class CanStop(Protocol):
     def pause_event(self) -> threading.Event: ...
     def is_stopped(self) -> bool: ...
     def should_run_workers(self) -> bool: ...
+    def wait_while_stopped_or_paused(self, timeout_s: float) -> bool: ...
 
 
 class CanLog(Protocol):
@@ -88,9 +89,13 @@ class CanAreaReset(Protocol):
 
 
 class CanWakeDiscovery(Protocol):
-    """Discovery-wake signalling event."""
+    """Discovery scheduling signals (wake + teleport settle suspend)."""
+
     @property
     def discovery_wake(self) -> threading.Event: ...
+
+    @property
+    def discovery_suspend(self) -> threading.Event: ...
 
 
 class CanOverlay(Protocol):

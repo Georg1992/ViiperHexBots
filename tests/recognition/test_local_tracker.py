@@ -87,6 +87,24 @@ class LocalTrackerTests(unittest.TestCase):
         dist = abs(result.x - anchor.center_x) + abs(result.y - anchor.center_y)
         self.assertLess(dist, 50)
 
+    def test_moving_search_uses_wider_default_radius(self) -> None:
+        detector = self._detector()
+        anchor = self._living_anchor(detector)
+        # Offset beyond the stationary radius but inside the moving radius.
+        offset = detector.local_track_search_radius_px + 25
+        self.assertLess(offset, detector.local_track_moving_search_radius_px)
+        track = {
+            "trackId": 5,
+            "x": anchor.center_x + offset,
+            "y": anchor.center_y,
+            "scale": anchor.candidate_scale,
+            "moving": True,
+        }
+        result = track_local(detector, self.roi, "horn", track)
+        self.assertTrue(result.found)
+        dist = abs(result.x - anchor.center_x) + abs(result.y - anchor.center_y)
+        self.assertLess(dist, 50)
+
     def test_finds_mob_with_death_detection_at_center(self) -> None:
         detector = self._detector()
         anchor = self._living_anchor(detector)

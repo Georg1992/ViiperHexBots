@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 from pybot.runtime.capture.hunt_capture import HuntWindowCapture
 from pybot.paths import PROJECT_ROOT
+from pybot.recognition.rules import DiscoveryDetection
 from pybot.runtime.config import HuntRuntimeConfig
 from pybot.runtime.control import RuntimeControl
 from pybot.runtime.hunt_mode import create_hunt_mode
@@ -17,6 +18,7 @@ from pybot.runtime.logging import HuntLogger
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.validation_log import HuntValidationLogger
 from pybot.runtime.detection.detector_session import DetectorSession
+from tests.runtime.test_hunt_tracks import _dead
 
 
 def make_config(**overrides) -> HuntRuntimeConfig:
@@ -76,6 +78,31 @@ class HuntModeTests(unittest.TestCase):
         self.assertTrue(teleported)
         self.assertEqual(self.tracks.get_track_count(), 0)
         self.assertEqual(self.tracks.area_epoch, 1)
+        # Post-settle: discovery may scan again; suspend must be clear + wake set.
+        self.assertFalse(self.ctx.discovery_suspend.is_set())
+        self.assertTrue(self.ctx.discovery_wake.is_set())
+
+    def test_suspends_discovery_during_teleport_delay(self) -> None:
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=self.tracks.area_epoch,
+        )
+        # Hold the settle wait so we can observe suspend mid-teleport.
+        gate = {"released": False}
+        original_wait = self.ctx.wait_unless_stopped
+
+        def _hold_settle(timeout_s: float) -> bool:
+            self.assertTrue(self.ctx.discovery_suspend.is_set())
+            self.assertFalse(self.ctx.discovery_wake.is_set())
+            gate["released"] = True
+            return original_wait(0.01)
+
+        self.ctx.wait_unless_stopped = _hold_settle  # type: ignore[method-assign]
+        self.assertTrue(self.mode.on_no_attackable_targets())
+        self.assertTrue(gate["released"])
+        self.assertFalse(self.ctx.discovery_suspend.is_set())
+        self.assertTrue(self.ctx.discovery_wake.is_set())
 
     def test_blocks_teleport_until_discovery_confirms_clear(self) -> None:
         # Discovery saw living mobs earlier; tracks later empty must not teleport
@@ -87,8 +114,10 @@ class HuntModeTests(unittest.TestCase):
         )
         self.assertTrue(self.mode.discovery_since_reset)
         self.assertFalse(self.mode.discovery_confirmed_clear)
+        self.ctx.discovery_wake.clear()
         teleported = self.mode.on_no_attackable_targets()
         self.assertFalse(teleported)
+        self.assertTrue(self.ctx.discovery_wake.is_set())
 
         self.mode.note_discovery_scan_completed(
             living_count=0,
@@ -97,6 +126,31 @@ class HuntModeTests(unittest.TestCase):
         )
         self.assertTrue(self.mode.discovery_confirmed_clear)
         self.assertTrue(self.mode.on_no_attackable_targets())
+
+    def test_death_site_ghost_detections_do_not_block_clear(self) -> None:
+        # After a kill, discovery may still heat the corpse site. Reconcile
+        # matches it as known-removed (no alive tracks) → clear for teleport.
+        now = monotonic_ms()
+        track_id = self.tracks.create_track(
+            "horn", 874, 578, 0.65, 0.9, now_tick=now
+        ).id
+        self.tracks.apply_tracking([_dead(track_id, 874, 578)], now_tick=now + 1)
+        summary = self.tracks.reconcile_detections(
+            [
+                DiscoveryDetection(
+                    x=874, y=578, confidence=0.75, candidate_scale=0.9, living=True
+                )
+            ],
+            mob_name="horn",
+            now_tick=now + 100,
+        )
+        self.assertEqual(summary.alive_after, 0)
+        self.mode.note_discovery_scan_completed(
+            living_count=summary.alive_after,
+            added_count=summary.added_count,
+            area_epoch=self.tracks.area_epoch,
+        )
+        self.assertTrue(self.mode.discovery_confirmed_clear)
 
     def test_blocks_teleport_until_post_teleport_discovery(self) -> None:
         self.mode.note_discovery_scan_completed(
@@ -148,6 +202,27 @@ class HuntModeTests(unittest.TestCase):
         teleported = self.mode.on_no_attackable_targets()
         # Track is still alive after attack (no pending state), so no teleport
         self.assertFalse(teleported)
+
+    def test_hybrid_placeholder_does_not_teleport(self) -> None:
+        self.config = make_config(hunt_mode="hybrid")
+        self.ctx = HuntRuntimeContext(
+            config=self.config,
+            logger=self.logger,
+            tracks=self.tracks,
+            policy=HuntPolicy(),
+            capture=MagicMock(spec=HuntWindowCapture),
+            detector=self.detector,
+            tracker=self.detector,
+            validation=HuntValidationLogger(self.logger, self.tracks, enabled=False),
+            control=RuntimeControl(None),
+        )
+        self.mode = create_hunt_mode(self.ctx, ShadowInputBackend())
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=self.tracks.area_epoch,
+        )
+        self.assertFalse(self.mode.on_no_attackable_targets())
 
 
 if __name__ == "__main__":

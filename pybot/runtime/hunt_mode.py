@@ -1,6 +1,6 @@
 """Hunt mode controller — thin delegator to Strategy pattern implementations.
 
-Modes (teleport / walk) are implemented as separate strategy classes
+Modes (teleport / hybrid / walk) are implemented as separate strategy classes
 in :mod:`pybot.runtime.hunt_mode_strategies`.  The controller simply
 forwards calls to the active strategy, keeping the OCP clean:
 new modes require only a new strategy class, no controller changes.
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pybot.runtime.hunt_mode_strategies import (
     HuntModeStrategy,
+    HybridStrategy,
     TeleportStrategy,
     WalkStrategy,
 )
@@ -20,12 +21,13 @@ from pybot.runtime.workers.worker_contexts import HuntModeControllerContext
 class HuntModeController:
     """Thin delegator that forwards to a :class:`HuntModeStrategy`.
 
-    Mode-specific behaviour (teleport, walk, …) lives in strategy
+    Mode-specific behaviour (teleport, hybrid, walk) lives in strategy
     classes.  The controller preserves the stable public API that
     workers and tests depend on.
     """
 
     MODE_TELEPORT = "teleport"
+    MODE_HYBRID = "hybrid"
     MODE_WALK = "walk"
 
     def __init__(self, strategy: HuntModeStrategy) -> None:
@@ -68,11 +70,17 @@ def create_hunt_mode(
 
     Selects the strategy based on ``ctx.config.hunt_mode``:
 
+    * ``"teleport"`` → :class:`TeleportStrategy`
+    * ``"hybrid"`` → :class:`HybridStrategy` (placeholder)
     * ``"walk"`` → :class:`WalkStrategy`
-    * anything else (default ``"teleport"``) → :class:`TeleportStrategy`
     """
-    if ctx.config.hunt_mode == HuntModeController.MODE_WALK:
-        strategy = WalkStrategy(ctx, input_backend)
-    else:
+    mode = ctx.config.hunt_mode
+    if mode == HuntModeController.MODE_WALK:
+        strategy: HuntModeStrategy = WalkStrategy(ctx, input_backend)
+    elif mode == HuntModeController.MODE_HYBRID:
+        strategy = HybridStrategy(ctx, input_backend)
+    elif mode == HuntModeController.MODE_TELEPORT:
         strategy = TeleportStrategy(ctx, input_backend)
+    else:
+        raise ValueError(f"unknown hunt mode: {mode!r}")
     return HuntModeController(strategy)
