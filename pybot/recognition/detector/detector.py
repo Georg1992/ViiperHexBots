@@ -599,13 +599,38 @@ class MobDetector:
             float(descriptor.max_silhouette_palette_distance)
             * float(self.config["silhouettePaletteDistanceScale"])
         )
+        palette = np.asarray(descriptor.match_palette_bgr, dtype=np.float32)
         candidate = candidate_silhouette(
             mob_region,
-            np.asarray(descriptor.match_palette_bgr, dtype=np.float32),
+            palette,
             silhouette_distance,
             gate_mask.width, gate_mask.height,
             occupancy_mask=comp_mask,
         )
+        # Content-noisy candidates (soft mass dominates hard body): if the crude
+        # candidate already has enough recall (shape roughly right), replace
+        # occupancy with a deformable descriptor silhouette prior — upsample the
+        # best-matching ref and expand only into palette heat within 2 grid cells.
+        hard = candidate >= HARD_OCCUPANCY
+        soft = (candidate > 0) & ~hard
+        hard_n = int(hard.sum())
+        if hard_n > 0 and (float(soft.sum()) / float(hard_n)) >= 2.0:
+            _sim0, facing_idx, _scores0, _prec0, rec0 = best_silhouette_match(
+                candidate, refs,
+            )
+            if rec0 >= float(self.config["minSilhouetteRecall"]):
+                ref_avg, ref_stable = refs[facing_idx]
+                deformed_mask = self._deform_silhouette_occupancy(
+                    mob_region, descriptor, ref_avg, ref_stable,
+                )
+                candidate = candidate_silhouette(
+                    mob_region,
+                    palette,
+                    silhouette_distance,
+                    gate_mask.width, gate_mask.height,
+                    occupancy_mask=deformed_mask,
+                )
+
         similarity, matched_idx, scores, precision, recall = best_silhouette_match(
             candidate, refs,
         )
@@ -623,6 +648,57 @@ class MobDetector:
             float(precision),
             float(recall),
         )
+
+    def _deform_silhouette_occupancy(
+        self,
+        region_bgr: np.ndarray,
+        descriptor: MobDescriptor,
+        ref_avg: np.ndarray,
+        ref_stable: np.ndarray,
+    ) -> np.ndarray:
+        """Deform a gate silhouette ref into palette heat at descriptor resolution.
+
+        Base is the hard stable ref upsampled to the crop. Expansion is allowed
+        only inside a band of radius ``2 × max(1, round(desc_w / gate_w))``
+        (two silhouette grid cells in sprite pixels) and only where
+        ``heat >= minSpritePaletteMatch``. The base shape is always kept.
+        """
+        h, w = region_bgr.shape[:2]
+        empty = np.zeros((h, w), dtype=bool)
+        ref = np.asarray(ref_avg, dtype=np.float32)
+        stable = np.asarray(ref_stable, dtype=bool).reshape(ref.shape)
+        base_small = ((ref >= HARD_OCCUPANCY) & stable).astype(np.uint8)
+        if not np.any(base_small):
+            return empty
+
+        base = cv2.resize(
+            base_small, (w, h), interpolation=cv2.INTER_NEAREST,
+        ).astype(bool)
+        heat = sprite_palette_heatmap(
+            region_bgr,
+            descriptor.match_palette_bgr,
+            float(descriptor.max_sprite_palette_distance),
+        )
+        match_thr = float(self.config["minSpritePaletteMatch"])
+        signal = heat >= match_thr
+
+        gate_w = int(ref.shape[1])
+        cell_px = max(1, int(round(w / float(gate_w))))
+        radius_px = 2 * cell_px
+        ksize = 2 * radius_px + 1
+        band_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+        band = cv2.dilate(base.astype(np.uint8), band_kernel, iterations=1).astype(bool)
+        allowed = (band & signal) | base
+
+        grown = base.astype(np.uint8)
+        grow_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        allowed_u8 = allowed.astype(np.uint8)
+        for _ in range(radius_px):
+            nxt = cv2.bitwise_and(cv2.dilate(grown, grow_kernel, iterations=1), allowed_u8)
+            if np.array_equal(nxt, grown):
+                break
+            grown = nxt
+        return grown.astype(bool)
 
     def _shrink_bloated_extract_to_descriptor(
         self,
