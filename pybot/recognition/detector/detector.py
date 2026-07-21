@@ -36,6 +36,7 @@ REQUIRED_CONFIG_KEYS = {
     "minSpritePaletteMatch",
     "minSilhouetteRecall",
     "minSilhouettePrecision",
+    "minSilhouetteJaccard",
     "usePaletteDiversity",
     "topCandidateCenters",
     "minCenterHeat",
@@ -65,9 +66,12 @@ REQUIRED_CONFIG_KEYS = {
 }
 
 # Geometry pre-gate: heat-CC area must be at least sil_frac / N of sprite area;
-# aspect may deviate by this multiplicative band vs descriptor aspect.
+# aspect vs descriptor may sit in [_GEOMETRY_ASPECT_MIN_RATIO, _GEOMETRY_ASPECT_MAX_RATIO].
 _GEOMETRY_AREA_SIL_FRAC_DIVISOR = 4.0
-_GEOMETRY_ASPECT_BAND = 1.5
+# Tall character-like CCs (Hunter on gray desert) sit ~0.68; real desert-wolf
+# heat blobs can stretch ~1.68 wide. Keep those bounds asymmetric.
+_GEOMETRY_ASPECT_MIN_RATIO = 0.70
+_GEOMETRY_ASPECT_MAX_RATIO = 1.75
 
 # Extract / content-noise thresholds shared by silhouette gate control flow
 # and the post-gate noisy_extract cleanup hook.
@@ -472,8 +476,8 @@ class MobDetector:
 
         ``min_area_ratio = sil_frac / _GEOMETRY_AREA_SIL_FRAC_DIVISOR`` uses the
         descriptor's stable silhouette occupancy as a lower bound on heat-CC area
-        vs sprite area. ``_GEOMETRY_ASPECT_BAND`` allows ±50% aspect slack vs
-        descriptor sprite aspect.
+        vs sprite area. Aspect vs descriptor sprite aspect must stay inside
+        ``[_GEOMETRY_ASPECT_MIN_RATIO, _GEOMETRY_ASPECT_MAX_RATIO]``.
         """
         _x, _y, hw, hh = comp_bbox
         if hw < 1 or hh < 1:
@@ -492,13 +496,12 @@ class MobDetector:
             return False
         sil_frac = float(np.mean(np.asarray(stable_bits, dtype=np.float32)))
         min_area_ratio = sil_frac / _GEOMETRY_AREA_SIL_FRAC_DIVISOR
-        aspect_band = _GEOMETRY_ASPECT_BAND
 
         area_ratio = (float(hw) * float(hh)) / desc_area
         aspect_ratio = (float(hw) / float(hh)) / desc_aspect
         if area_ratio < min_area_ratio:
             return False
-        if aspect_ratio < (1.0 / aspect_band) or aspect_ratio > aspect_band:
+        if aspect_ratio < _GEOMETRY_ASPECT_MIN_RATIO or aspect_ratio > _GEOMETRY_ASPECT_MAX_RATIO:
             return False
         return True
 
@@ -578,6 +581,7 @@ class MobDetector:
         """
         min_recall = float(self.config["minSilhouetteRecall"])
         min_precision = float(self.config["minSilhouettePrecision"])
+        min_jaccard = float(self.config["minSilhouetteJaccard"])
         if living_candidate is not None:
             death_refs = self._descriptor_silhouette_references(death_masks)
             if not death_refs:
@@ -585,7 +589,11 @@ class MobDetector:
             death_sim, _idx, _scores, death_prec, death_rec = best_silhouette_match(
                 living_candidate, death_refs,
             )
-            death_passed = death_rec >= min_recall and death_prec >= min_precision
+            death_passed = (
+                death_rec >= min_recall
+                and death_prec >= min_precision
+                and death_sim >= min_jaccard
+            )
             return float(death_sim), bool(death_passed)
 
         death_passed, death_sim, *_rest = self._evaluate_silhouette_gate(
@@ -733,9 +741,12 @@ class MobDetector:
         similarity, matched_idx, scores, precision, recall = best_silhouette_match(
             candidate, refs,
         )
+        # Dual coverage floors (precision/recall) plus a soft-Jaccard co-floor so
+        # barely-passing palette fills (e.g. player sprites) cannot clear the gate.
         passed = (
             recall >= float(self.config["minSilhouetteRecall"])
             and precision >= float(self.config["minSilhouettePrecision"])
+            and similarity >= float(self.config["minSilhouetteJaccard"])
         )
         return (
             passed,

@@ -515,10 +515,10 @@ class DescriptorBuilder:
         config_path = Path(__file__).resolve().parent.parent / "detector_config.json"
         return json.loads(config_path.read_text(encoding="utf-8"))
 
-    def _min_silhouette_similarity(self) -> float:
-        value = float(self._load_detector_config()["minSilhouetteSimilarity"])
+    def _gate_ref_unique_iou(self) -> float:
+        value = float(self._load_detector_config()["gateRefUniqueIoU"])
         if not 0.0 < value <= 1.0:
-            raise ValueError("minSilhouetteSimilarity must be in (0, 1]")
+            raise ValueError("gateRefUniqueIoU must be in (0, 1]")
         return value
 
     def _estimate_palette_distances(
@@ -980,10 +980,10 @@ class DescriptorBuilder:
         """Pick 4, 6, or 8 diverse gate refs from living frames.
 
         Count is derived at build time:
-        - Stand/walk frame diversity (soft-Jaccard vs minSilhouetteSimilarity)
+        - Stand/walk frame diversity (soft-Jaccard vs gateRefUniqueIoU)
           snapped to 4/6/8 — covers wing-beat variety (creamies).
         - Plus 0/2/4 if jump-row facing averages differ from stand/walk by more
-          than half the gate margin — covers distinct jump postures (thara).
+          than half the unique-IoU margin — covers distinct jump postures (thara).
         Refs are farthest-first among coherent single-body frames (multi-body
         ACT frames and non-trivial detached islands are excluded).
         """
@@ -997,8 +997,8 @@ class DescriptorBuilder:
                 f"need at least {MIN_GATE_SILHOUETTE_MASKS} coherent living "
                 f"silhouettes for gate refs, found {len(coherent)}"
             )
-        min_sil = self._min_silhouette_similarity()
-        target = self._gate_ref_count(spr_file, act_file, facing_pairs, min_sil)
+        unique_iou = self._gate_ref_unique_iou()
+        target = self._gate_ref_count(spr_file, act_file, facing_pairs, unique_iou)
         target = min(target, len(coherent))
         order = self._farthest_first_mask_order(coherent)
         return [coherent[idx] for idx in order[:target]]
@@ -1028,7 +1028,7 @@ class DescriptorBuilder:
         spr_file,
         act_file,
         facing_pairs: tuple[tuple[int, int], ...],
-        min_sil: float,
+        unique_iou: float,
     ) -> int:
         stand_pairs = tuple(
             pair for pair in facing_pairs if pair[0] < STAND_WALK_ACTION_COUNT
@@ -1039,12 +1039,12 @@ class DescriptorBuilder:
         stand_masks = self._build_frame_silhouette_masks(
             spr_file, act_file, stand_pairs,
         )
-        stand_unique = self._count_unique_masks(stand_masks, min_sil)
+        stand_unique = self._count_unique_masks(stand_masks, unique_iou)
         stand_k = self._snap_gate_ref_count(stand_unique)
         if stand_k >= GATE_SILHOUETTE_REF_COUNTS[-1]:
             return GATE_SILHOUETTE_REF_COUNTS[-1]
         bonus = self._jump_pose_ref_bonus(
-            spr_file, act_file, stand_pairs, jump_pairs, min_sil,
+            spr_file, act_file, stand_pairs, jump_pairs, unique_iou,
         )
         return min(GATE_SILHOUETTE_REF_COUNTS[-1], stand_k + bonus)
 
@@ -1063,13 +1063,13 @@ class DescriptorBuilder:
         act_file,
         stand_pairs: tuple[tuple[int, int], ...],
         jump_pairs: tuple[tuple[int, int], ...],
-        min_sil: float,
+        unique_iou: float,
     ) -> int:
         """0, 2, or 4 extra refs when jump facings differ from stand/walk."""
         if not stand_pairs or not jump_pairs:
             return 0
-        # Halfway from identical (1.0) to the gate fail margin (min_sil).
-        distinct_iou = 1.0 - (1.0 - min_sil) * 0.5
+        # Halfway from identical (1.0) to the unique-pose merge margin.
+        distinct_iou = 1.0 - (1.0 - unique_iou) * 0.5
         distinct_facings = 0
         for index in range(min(len(stand_pairs), len(jump_pairs))):
             stand_avg = self._pair_average_silhouette(

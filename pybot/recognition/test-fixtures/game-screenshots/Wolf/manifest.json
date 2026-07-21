@@ -1,0 +1,10 @@
+{
+  "mob": "desert_wolf",
+  "folder": "Wolf",
+  "description": "Desert Wolf detection fixtures. Leading digit is mob count. *_Gray* = gray world textures. 0* = negatives (no wolves; character-only false-positive cases).",
+  "strictAcceptCount": true,
+  "fixtureCount": 5,
+  "normalFixtureCount": 0,
+  "grayFixtureCount": 5,
+  "filenamePattern": "^(\\d+)Wolf(?:_Gray\\d*)?\\.png$"
+}
