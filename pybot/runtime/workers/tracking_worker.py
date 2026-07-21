@@ -5,12 +5,12 @@ follows every alive track with the LocalTracker (via ``ctx.tracker`` — a
 detector dedicated to tracking so it never blocks on the discovery scan's
 lock), writing fresh coordinates into the shared HuntTracks store.
 
-Tracking is the sole writer of authoritative position and all track removal.
+Tracking is the sole writer of authoritative position and in-ROI removal.
 Discovery publishes soft ``discovery_obs_*`` priors, ``discovery_absent``, and
-optional ``discovery_death`` (death-silhouette helper). On a local miss,
+optional ``discovery_death`` (+ frozen death-site coords). On a local miss,
 tracking searches/snaps from the prior and drops on joint absence. When
-``discovery_death`` is set, tracking removes the track (ghosted). Otherwise
-tracking decides via opacity death, lost miss-limit, or unreachable.
+``discovery_death`` is set or opacity confirms, tracking removes and ghosts.
+Otherwise: lost miss-limit or unreachable. Discovery never removes for death.
 """
 
 from __future__ import annotations

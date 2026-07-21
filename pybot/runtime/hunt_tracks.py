@@ -370,19 +370,18 @@ class HuntTracks:
     ) -> list[int]:
         """Record discovery death-silhouette hits; tracking removes on next tick.
 
-        ``deaths`` entries are ``(track_id, x, y)`` — coords are unused for
-        removal (tracking uses current track position for the ghost). Returns
-        the ids that were flagged.
+        ``deaths`` entries are ``(track_id, screen_x, screen_y)`` — the death
+        site is frozen for the rediscovery ghost. Returns flagged ids.
         """
         flagged: list[int] = []
         with self._lock:
             if area_epoch is not None and area_epoch != self._area_epoch:
                 return []
-            for track_id, _x, _y in deaths:
+            for track_id, x, y in deaths:
                 track = self._get_track_by_id_locked(track_id)
                 if track is None:
                     continue
-                note_discovery_death(track)
+                note_discovery_death(track, x=int(x), y=int(y))
                 flagged.append(track_id)
             return flagged
 
@@ -417,11 +416,16 @@ class HuntTracks:
                     sample = self._kill_sample_attack_count_locked(track)
                     self._pending_attack_track_ids.discard(result.track_id)
                     self._record_kill_locked(sample)
-                    # Discovery death uses store coords; opacity death uses result.
-                    if track.discovery_death:
-                        ghost_x, ghost_y = track.x, track.y
-                    else:
+                    # Opacity hit coords when available; else frozen discovery site.
+                    if getattr(result, "dead", False):
                         ghost_x, ghost_y = result.x, result.y
+                    elif track.discovery_death:
+                        ghost_x, ghost_y = (
+                            track.discovery_death_x,
+                            track.discovery_death_y,
+                        )
+                    else:
+                        ghost_x, ghost_y = track.x, track.y
                     self._record_removed_site_locked(ghost_x, ghost_y, tick)
                     dead_ids.append(result.track_id)
                     continue
@@ -487,7 +491,11 @@ class HuntTracks:
                 sample = self._kill_sample_attack_count_locked(track)
                 self._pending_attack_track_ids.discard(track.id)
                 self._record_kill_locked(sample)
-                self._record_removed_site_locked(track.x, track.y, tick)
+                self._record_removed_site_locked(
+                    track.discovery_death_x,
+                    track.discovery_death_y,
+                    tick,
+                )
                 dead_ids.append(track.id)
             remove_ids = set(dead_ids)
             remove_ids.update(joint_absent_ids)

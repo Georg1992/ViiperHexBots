@@ -66,15 +66,25 @@ class BotController:
         if self._runtime is not None:
             self._runtime.stop()
 
-    def stop(self, *, join_timeout: float = DEFAULT_STOP_JOIN_TIMEOUT_S) -> None:
+    def stop(self, *, join_timeout: float = DEFAULT_STOP_JOIN_TIMEOUT_S) -> bool:
+        """Stop the hunt runtime and join its thread.
+
+        Returns True when the hunt thread has exited. If the join times out the
+        controller keeps its handles so ``running`` stays True and a later
+        ``stop`` / start-await can finish the shutdown — never overlap two hunts.
+        """
         self.request_stop()
-        if self._thread is not None:
-            self._thread.join(timeout=join_timeout)
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=join_timeout)
+            if thread.is_alive():
+                return False
         self._thread = None
         self._runtime = None
         control_file = SESSIONS_DIR / self._session_id / "control.json"
         if control_file.is_file():
             control_file.unlink(missing_ok=True)
+        return True
 
     def pause(self) -> None:
         if self._runtime is not None:

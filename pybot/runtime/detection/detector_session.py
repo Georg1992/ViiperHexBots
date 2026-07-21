@@ -167,11 +167,12 @@ class DetectorSession:
             for candidate in result.accepted
         ]
         death_confirmed: list[tuple[int, int, int]] = []
-        for track_id, _fx, _fy in result.death_confirmed or ():
-            screen = screen_by_id.get(int(track_id))
-            if screen is None:
+        for track_id, fx, fy in result.death_confirmed or ():
+            tid = int(track_id)
+            if tid not in screen_by_id:
                 continue
-            death_confirmed.append((int(track_id), screen[0], screen[1]))
+            # Freeze the death blob center (not live track coords) for the ghost.
+            death_confirmed.append((tid, int(fx) + roi.x, int(fy) + roi.y))
         return DiscoveryScanResult(
             ok=True,
             fail_reason="",

@@ -27,7 +27,7 @@ from pybot.recognition.detector.descriptors.palette_groups import (
     split_palette_groups_by_required,
 )
 
-DESCRIPTOR_VERSION = 33
+DESCRIPTOR_VERSION = 37
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -43,10 +43,12 @@ GATE_SILHOUETTE_REF_COUNTS = (
     MIN_GATE_SILHOUETTE_MASKS + MIN_GATE_SILHOUETTE_MASKS // 2,
     STAND_WALK_ACTION_COUNT,
 )
-# Death clips occupy the last 8 ACT actions on standard mob sheets (≥24 actions).
-DEAD_ACTION_COUNT = 8
+# Act Editor animation indexes are not stored in the ACT binary. Monster sheets
+# group actions in 8 directional clips per animation; the last group is Die.
+ACTIONS_PER_ANIMATION = 8
+DEAD_ACTION_COUNT = ACTIONS_PER_ANIMATION
 MIN_ACTIONS_FOR_DEATH = LIVING_FACING_ACTION_LIMIT + DEAD_ACTION_COUNT
-MIN_DEATH_GATE_SILHOUETTE_MASKS = 4
+MIN_DEATH_GATE_SILHOUETTE_MASKS = 6
 MATCH_PALETTE_MAX_COLORS = 32
 MATCH_PALETTE_MAX_ACCENT_COLORS = 8
 # Palette shades present in at least this fraction of opaque frames are
@@ -220,7 +222,9 @@ class DescriptorBuilder:
             spr_file, act_file, facing_pairs, frame_silhouette_masks,
         )
         death_silhouette_masks = self._build_death_gate_silhouette_masks(
-            spr_file, act_file,
+            spr_file,
+            act_file,
+            living_masks=frame_silhouette_masks,
         )
 
         descriptor = MobDescriptor(
@@ -857,8 +861,16 @@ class DescriptorBuilder:
 
     @staticmethod
     def _death_action_indices(action_count: int) -> tuple[int, ...]:
-        """Last DEAD_ACTION_COUNT ACT actions when the sheet is large enough."""
+        """ACT actions for Act Editor animation index Die (last 8-dir group).
+
+        Names like Idle/Walk/Attack/Die are Act Editor labels only — the file
+        stores ordered clips. Monster Die is always the final animation group:
+        ``action_count // 8 - 1``, covering the last ``ACTIONS_PER_ANIMATION``
+        directional actions.
+        """
         if action_count < MIN_ACTIONS_FOR_DEATH:
+            return ()
+        if action_count % ACTIONS_PER_ANIMATION != 0:
             return ()
         start = action_count - DEAD_ACTION_COUNT
         return tuple(range(start, action_count))
@@ -869,19 +881,11 @@ class DescriptorBuilder:
         act_file,
         action_indices: tuple[int, ...],
     ) -> list[SilhouetteMask]:
-        """Late non-empty frames from death ACT actions (corpse / fade shapes)."""
+        """All non-empty frames from each Die directional action."""
         masks: list[SilhouetteMask] = []
         for action_index in action_indices:
-            if action_index >= len(act_file.actions):
-                continue
-            action = act_file.actions[action_index]
-            total = len(action.frames)
-            if total <= 0:
-                continue
-            # Last half of the clip — early death frames still look living.
-            frame_start = total // 2
             frames = self._collect_frames(
-                spr_file, act_file, (action_index,), frame_start=frame_start,
+                spr_file, act_file, (action_index,), frame_start=0,
             )
             for bgra in frames:
                 masks.append(self._build_silhouette_mask([bgra]))
@@ -891,13 +895,18 @@ class DescriptorBuilder:
         self,
         spr_file,
         act_file,
+        *,
+        living_masks: list[SilhouetteMask],
     ) -> list[SilhouetteMask]:
-        """Select a small diverse set of death/corpse silhouette refs.
+        """Pick Die-frame masks farthest from living and from each other.
 
-        Empty when the ACT sheet has no death rows (under 24 actions) or when
-        late death frames are fully transparent. Prefers coherent single-body
-        masks; falls back to any late-frame masks when coherence is sparse.
+        Pool = all non-empty frames from the last 8 Die actions. Selection is
+        greedy farthest-first against living silhouettes as fixed anchors, then
+        against already chosen death refs — so each pick is unlike living poses
+        and unlike the other death refs.
         """
+        if not living_masks:
+            return []
         action_indices = self._death_action_indices(len(act_file.actions))
         if not action_indices:
             return []
@@ -913,8 +922,53 @@ class DescriptorBuilder:
         target = min(MIN_DEATH_GATE_SILHOUETTE_MASKS, len(pool))
         if target <= 0:
             return []
-        order = self._farthest_first_mask_order(pool)
+        order = self._farthest_from_anchors_mask_order(pool, living_masks)
         return [pool[idx] for idx in order[:target]]
+
+    def _farthest_from_anchors_mask_order(
+        self,
+        masks: list[SilhouetteMask],
+        anchors: list[SilhouetteMask],
+    ) -> list[int]:
+        """Greedy order: each pick minimizes max soft-Jaccard to anchors+kept."""
+        if not masks:
+            return []
+        avgs = [np.asarray(mask.avg_mask, dtype=np.float32) for mask in masks]
+        anchor_avgs = [
+            np.asarray(mask.avg_mask, dtype=np.float32) for mask in anchors
+        ]
+        # Precompute max similarity of each candidate to any living anchor.
+        living_sim = [
+            max(self._soft_jaccard(avg, anchor) for anchor in anchor_avgs)
+            for avg in avgs
+        ]
+        n = len(masks)
+        pair_iou = np.eye(n, dtype=np.float64)
+        for i in range(n):
+            for j in range(i + 1, n):
+                value = self._soft_jaccard(avgs[i], avgs[j])
+                pair_iou[i, j] = value
+                pair_iou[j, i] = value
+
+        first = int(np.argmin(np.asarray(living_sim, dtype=np.float64)))
+        selected: list[int] = [first]
+        remaining = set(range(n)) - {first}
+        while remaining:
+            best_c = -1
+            best_max_iou = 2.0
+            for candidate in remaining:
+                max_to_selected = max(
+                    float(pair_iou[candidate, s]) for s in selected
+                )
+                max_iou = max(living_sim[candidate], max_to_selected)
+                if max_iou < best_max_iou:
+                    best_max_iou = max_iou
+                    best_c = candidate
+            if best_c < 0:
+                break
+            selected.append(best_c)
+            remaining.remove(best_c)
+        return selected
 
     def _build_gate_silhouette_masks(
         self,

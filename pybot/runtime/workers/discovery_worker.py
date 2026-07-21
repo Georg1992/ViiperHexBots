@@ -6,12 +6,13 @@ Schedule: every ``discovery_interval_ms`` (default 1s), and immediately when
 not scan — only waits for the post-delay wake.
 
 One discovery pass (same frame):
-1. Living heatmap → silhouette scan (normal pipeline) for new / matched mobs.
-2. Death-silhouette check at known track centers (helper signal to tracking).
-3. Reconcile: create / match / mark absent / drop outside ROI.
+1. Living heatmap → silhouette scan for new / matched mobs (living refs only).
+2. Known-track peaks: living vs death silhouette; death wins → ``discovery_death``.
+3. Reconcile: create / match / mark in-ROI absent / drop outside-ROI only.
 
-Tracking owns position and all death removal (``discovery_death`` flag or
-opacity). Discovery never overwrites authoritative x/y.
+Tracking owns authoritative position and all in-ROI death/lost/unreachable
+removal (``discovery_death`` flag or opacity). Discovery never overwrites
+authoritative x/y and never removes for death.
 
 Teleport clear requires zero living scan candidates, not merely zero alive
 tracks after ghost matching. Capture-time position snapshots keep dedup and
@@ -31,7 +32,7 @@ from pybot.runtime.workers.worker_contexts import DiscoveryWorkerContext
 
 
 class DiscoveryWorker:
-    """Single-threaded loop that scans, creates new tracks, and drops absent ones."""
+    """Scans for living mobs, flags discovery deaths, creates/matches tracks."""
 
     def __init__(self, ctx: DiscoveryWorkerContext, hunt_mode) -> None:
         self._ctx = ctx

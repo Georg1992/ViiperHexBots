@@ -254,8 +254,10 @@ class MobDetector:
         """Heatmap discovery with optional known-track dual silhouette check.
 
         * First scan (no ``known_tracks``): living silhouette gate only.
-        * Later scans: heatmap blobs near known tracks are extracted and checked
-          with living *and* death silhouettes; other blobs stay living-only.
+        * Later scans: heatmap blobs near known tracks are extracted and scored
+          against living and death silhouettes; death is confirmed only when the
+          death match passes the gate and beats the living similarity. Other
+          blobs stay living-only.
         """
         start = time.perf_counter()
         descriptor = self.ensure_descriptor(mob_name)
@@ -369,9 +371,25 @@ class MobDetector:
                     ))
                 continue
 
-            # Known track peak: same extract, living + death silhouettes.
+            # Known track: score same extract vs living and death; death must win.
             track_id, _kx, _ky, _scale = known_hit
-            if passed:
+            living_sim = float(similarity)
+            death_sim = 0.0
+            death_passed = False
+            if death_masks:
+                death_sim, death_passed = self._score_death_vs_living_extract(
+                    frame_bgr,
+                    descriptor,
+                    bbox,
+                    comp_bbox=comp_bbox,
+                    death_masks=death_masks,
+                    living_candidate=candidate,
+                )
+            death_wins = death_passed and death_sim > living_sim
+            if death_wins and int(track_id) not in claimed_death_tracks:
+                claimed_death_tracks.add(int(track_id))
+                death_confirmed.append((int(track_id), int(cx), int(cy)))
+            elif passed:
                 candidates.append(DetectionCandidate(
                     mob_name=descriptor.mob_name,
                     center_x=cx, center_y=cy,
@@ -381,22 +399,6 @@ class MobDetector:
                     accepted=True,
                     rejection_reason="",
                 ))
-            death_passed = False
-            if death_masks:
-                death_passed, _death_sim, *_rest = self._evaluate_silhouette_gate(
-                    frame_bgr,
-                    descriptor,
-                    bbox,
-                    comp_bbox=comp_bbox,
-                    masks=death_masks,
-                )
-            if (
-                death_passed
-                and not passed
-                and int(track_id) not in claimed_death_tracks
-            ):
-                claimed_death_tracks.add(int(track_id))
-                death_confirmed.append((int(track_id), int(cx), int(cy)))
 
         gate_end = time.perf_counter()
         max_candidates = int(self.config["maxCandidates"])
@@ -558,6 +560,42 @@ class MobDetector:
                 np.array(mask.stable_mask, dtype=bool).reshape(mask.height, mask.width),
             ))
         return refs
+
+    def _score_death_vs_living_extract(
+        self,
+        frame_bgr: np.ndarray,
+        descriptor: MobDescriptor,
+        bbox: tuple[int, int, int, int],
+        *,
+        comp_bbox: tuple[int, int, int, int] | None,
+        death_masks: list,
+        living_candidate: np.ndarray | None,
+    ) -> tuple[float, bool]:
+        """Score death refs on the living extract (or a death-gate extract).
+
+        Returns ``(death_similarity, death_gate_passed)``. Prefer the living
+        candidate mask so living vs death compare the same silhouette crop.
+        """
+        min_recall = float(self.config["minSilhouetteRecall"])
+        min_precision = float(self.config["minSilhouettePrecision"])
+        if living_candidate is not None:
+            death_refs = self._descriptor_silhouette_references(death_masks)
+            if not death_refs:
+                return 0.0, False
+            death_sim, _idx, _scores, death_prec, death_rec = best_silhouette_match(
+                living_candidate, death_refs,
+            )
+            death_passed = death_rec >= min_recall and death_prec >= min_precision
+            return float(death_sim), bool(death_passed)
+
+        death_passed, death_sim, *_rest = self._evaluate_silhouette_gate(
+            frame_bgr,
+            descriptor,
+            bbox,
+            comp_bbox=comp_bbox,
+            masks=death_masks,
+        )
+        return float(death_sim), bool(death_passed)
 
     def _evaluate_silhouette_gate(
         self,

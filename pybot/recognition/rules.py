@@ -4,17 +4,21 @@ Used by tests to lock the pipeline contract.
 
 Ownership:
 - **Discovery** creates tracks for new mobs, marks in-ROI unmatched tracks as
-  ``discovery_absent``, removes outside-ROI unmatched tracks, on match
-  publishes a soft position prior (``discovery_obs_*``), and may set
-  ``discovery_death`` when a death silhouette confirms at track coords.
-  It never overwrites authoritative ``x``/``y`` and never removes on death —
-  tracking owns removal.
+  ``discovery_absent``, may drop unmatched tracks that are already outside the
+  hunt ROI (left the search area), on match publishes a soft position prior
+  (``discovery_obs_*``), and may set ``discovery_death`` (+ death-site coords)
+  when a death silhouette wins over living at a known track. It never
+  overwrites authoritative ``x``/``y`` and never removes for death — tracking
+  owns in-ROI death/lost/unreachable removal.
 - **Tracking** is the sole writer of authoritative position, movement, opacity
-  death, lost_count, unreachable removal, and death/lost removal. It consumes
-  discovery priors on miss, drops on joint absence, and removes tracks when
-  ``discovery_death`` is set (or opacity confirms).
+  death, lost_count, unreachable removal, and in-ROI death/lost removal. It
+  consumes discovery priors on miss, drops on joint absence, and removes
+  tracks when ``discovery_death`` is set (ghost at the recorded death site)
+  or opacity confirms (ghost at the opacity hit).
 - **Attack** records attack_count / last_attack_tick only; it reads position
   snapshots for clicks but must not mutate tracking fields or remove tracks.
+- Death-flagged tracks are excluded from living discovery match/create so a
+  sticky ``discovery_death`` cannot consume a nearby living detection.
 """
 
 from __future__ import annotations
@@ -91,8 +95,11 @@ class MobTrack:
     discovery_obs_x: int = 0
     discovery_obs_y: int = 0
     discovery_obs_tick: int = 0
-    # Discovery helper: death silhouette confirmed at this track. Tracking removes.
+    # Discovery helper: death silhouette won over living. Tracking removes.
     discovery_death: bool = False
+    # Screen coords of the death site at confirmation (ghost / anti-rediscovery).
+    discovery_death_x: int = 0
+    discovery_death_y: int = 0
 
     @classmethod
     def from_discovery(
@@ -257,9 +264,11 @@ def apply_discovery_observation(
     track.discovery_absent = False
 
 
-def note_discovery_death(track: MobTrack) -> None:
-    """Discovery helper signal: death silhouette confirmed; tracking will remove."""
+def note_discovery_death(track: MobTrack, *, x: int, y: int) -> None:
+    """Discovery helper: death won at ``(x, y)``; tracking will remove + ghost."""
     track.discovery_death = True
+    track.discovery_death_x = int(x)
+    track.discovery_death_y = int(y)
     track.discovery_absent = False
     clear_discovery_observation(track)
 

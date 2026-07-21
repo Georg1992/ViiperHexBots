@@ -300,7 +300,16 @@ class BotLifecycleManager:
         destroy_overlay: bool = True,
     ) -> None:
         def _join() -> None:
-            bot.stop(join_timeout=DEFAULT_STOP_JOIN_TIMEOUT_S)
+            # Retry until the hunt thread exits — do not start another hunt over it.
+            stopped = bot.stop(join_timeout=DEFAULT_STOP_JOIN_TIMEOUT_S)
+            if not stopped:
+                stopped = bot.stop(join_timeout=DEFAULT_STOP_JOIN_TIMEOUT_S)
+            if not stopped:
+                self._on_log(
+                    "[STATE] Hunt thread still alive after stop join — "
+                    "restart will wait for it"
+                )
+                bot.stop(join_timeout=DEFAULT_STOP_JOIN_TIMEOUT_S * 2)
             if destroy_overlay:
                 self._post_to_main(self._destroy_hunt_overlay)
 
@@ -312,8 +321,10 @@ class BotLifecycleManager:
         self._stop_joiner.start()
 
     def _await_prior_stop_joiner(self) -> None:
+        """Block until the previous hunt fully stopped (required before restart)."""
         if self._stop_joiner is not None and self._stop_joiner.is_alive():
-            self._stop_joiner.join(timeout=DEFAULT_STOP_JOIN_TIMEOUT_S)
+            # Stop may need more than one join window if workers were busy.
+            self._stop_joiner.join(timeout=DEFAULT_STOP_JOIN_TIMEOUT_S * 2)
         self._stop_joiner = None
 
     def pause(self) -> None:

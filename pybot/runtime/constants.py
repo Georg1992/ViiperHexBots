@@ -15,6 +15,8 @@ SIT_LOW_SP_RATIO = 0.05
 SIT_RESUME_SP_RATIO = 0.98
 SIT_SP_POLL_INTERVAL_S = 0.25
 SIT_IDLE_BEFORE_SIT_S = 1.0
+# Minimum gap between distinct skill-timer key presses when several are due.
+SKILL_TIMER_STAGGER_MS = 500
 
 __all__ = [
     "HUNT_DISCOVERY_INTERVAL_MS",
@@ -30,4 +32,5 @@ __all__ = [
     "SIT_RESUME_SP_RATIO",
     "SIT_SP_POLL_INTERVAL_S",
     "SIT_IDLE_BEFORE_SIT_S",
+    "SKILL_TIMER_STAGGER_MS",
 ]

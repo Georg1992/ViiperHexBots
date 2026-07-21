@@ -350,11 +350,13 @@ class HuntTracksRulesTests(unittest.TestCase):
 
     def test_discovery_death_flag_removed_by_tracking(self) -> None:
         track_id = self._create(874, 578)
-        flagged = self.tracks.note_discovery_deaths([(track_id, 874, 578)])
+        flagged = self.tracks.note_discovery_deaths([(track_id, 880, 590)])
         self.assertEqual(flagged, [track_id])
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
         self.assertTrue(track.discovery_death)
+        self.assertEqual(track.discovery_death_x, 880)
+        self.assertEqual(track.discovery_death_y, 590)
         dead_ids, lost_ids, unreachable_ids = self.tracks.apply_tracking(
             [_miss(track_id)],
             now_tick=self.now + 1,
@@ -363,14 +365,30 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(lost_ids, [])
         self.assertEqual(unreachable_ids, [])
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
+        # Ghost uses frozen death site, not drifted track coords.
         summary = self.tracks.reconcile_detections(
-            [det(874, 578, 0.75, 0.9)],
+            [det(880, 590, 0.75, 0.9)],
             mob_name="horn",
             now_tick=self.now + 100,
         )
         self.assertEqual(summary.added_count, 0)
         self.assertEqual(summary.matched_count, 1)
         self.assertEqual(self.tracks.get_track_count(), 0)
+
+    def test_discovery_death_does_not_consume_nearby_living(self) -> None:
+        """Death-flagged track must not absorb a living detection in reconcile."""
+        dying_id = self._create(874, 578)
+        self.tracks.note_discovery_deaths([(dying_id, 874, 578)])
+        # Living mob within dedup radius of the dying track.
+        summary = self.tracks.reconcile_detections(
+            [det(900, 600, 0.8, 0.9)],
+            mob_name="horn",
+            now_tick=self.now + 10,
+        )
+        self.assertEqual(summary.added_count, 1)
+        self.assertEqual(summary.matched_count, 0)
+        self.assertEqual(self.tracks.get_track_count(), 2)
+        self.assertIsNotNone(self.tracks.get_track_by_id(dying_id))
 
     def test_death_site_expires_after_cooldown(self) -> None:
         config = {**load_detector_config(), "deathRediscoveryCooldownMs": 1000}
