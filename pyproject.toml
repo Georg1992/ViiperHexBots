@@ -12,6 +12,7 @@ dependencies = [
     "opencv-python>=4.8.0",
     "numpy>=1.24.0",
     "mss>=9.0.0",
+    "windnd>=1.0.7",
 ]
 
 [project.optional-dependencies]

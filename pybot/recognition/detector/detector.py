@@ -36,7 +36,6 @@ REQUIRED_CONFIG_KEYS = {
     "minSpritePaletteMatch",
     "minSilhouetteRecall",
     "minSilhouettePrecision",
-    "minSilhouetteJaccard",
     "usePaletteDiversity",
     "topCandidateCenters",
     "minCenterHeat",
@@ -65,18 +64,23 @@ REQUIRED_CONFIG_KEYS = {
     "attacksTillDeathHistoryWindow",
 }
 
-# Geometry pre-gate: heat-CC area must be at least sil_frac / N of sprite area;
-# aspect vs descriptor may sit in [_GEOMETRY_ASPECT_MIN_RATIO, _GEOMETRY_ASPECT_MAX_RATIO].
+# Geometry pre-gate: heat-CC area must sit in [min_area_ratio, max_area_ratio]
+# vs sprite area; aspect vs descriptor in
+# [_GEOMETRY_ASPECT_MIN_RATIO, _GEOMETRY_ASPECT_MAX_RATIO].
 _GEOMETRY_AREA_SIL_FRAC_DIVISOR = 4.0
+_GEOMETRY_AREA_MAX_RATIO = 2.0
 # Tall character-like CCs (Hunter on gray desert) sit ~0.68; real desert-wolf
 # heat blobs can stretch ~1.68 wide. Keep those bounds asymmetric.
-_GEOMETRY_ASPECT_MIN_RATIO = 0.70
+# Extract pre-shrink band shares these constants (Noxious extracts bottom ~0.688).
+_GEOMETRY_ASPECT_MIN_RATIO = 0.68
 _GEOMETRY_ASPECT_MAX_RATIO = 1.75
 
 # Extract / content-noise thresholds shared by silhouette gate control flow
 # and the post-gate noisy_extract cleanup hook.
 _EXTRACT_BLOAT_AREA_RATIO = 2.0
 _CONTENT_NOISE_SOFT_HARD_RATIO = 2.0
+# Full 16x16 hard fill = palette smear in a desc-sized window, not a sprite body.
+_SOLID_FILL_HARD_FRACTION = 0.95
 
 # Silhouette crop / morph / deform sizing.
 _MIN_DESCRIPTOR_PX = 8
@@ -476,30 +480,48 @@ class MobDetector:
 
         ``min_area_ratio = sil_frac / _GEOMETRY_AREA_SIL_FRAC_DIVISOR`` uses the
         descriptor's stable silhouette occupancy as a lower bound on heat-CC area
-        vs sprite area. Aspect vs descriptor sprite aspect must stay inside
+        vs sprite area. ``_GEOMETRY_AREA_MAX_RATIO`` caps terrain mega-blobs.
+        Aspect vs descriptor sprite aspect must stay inside
         ``[_GEOMETRY_ASPECT_MIN_RATIO, _GEOMETRY_ASPECT_MAX_RATIO]``.
         """
         _x, _y, hw, hh = comp_bbox
-        if hw < 1 or hh < 1:
-            return False
+        return self._passes_size_aspect_vs_descriptor(
+            int(hw), int(hh), descriptor, require_min_area=True,
+        )
 
-        desc_w = float(descriptor.avg_width)
-        desc_h = float(descriptor.avg_height)
-        desc_area = desc_w * desc_h
-        desc_aspect = desc_w / desc_h
-
+    def _descriptor_min_area_ratio(self, descriptor: MobDescriptor) -> float:
         stable_bits: list[bool] = []
         for mask in descriptor.silhouette_masks:
             if mask.stable_mask:
                 stable_bits.extend(mask.stable_mask)
         if not stable_bits:
-            return False
+            return 1.0
         sil_frac = float(np.mean(np.asarray(stable_bits, dtype=np.float32)))
-        min_area_ratio = sil_frac / _GEOMETRY_AREA_SIL_FRAC_DIVISOR
+        return sil_frac / _GEOMETRY_AREA_SIL_FRAC_DIVISOR
 
-        area_ratio = (float(hw) * float(hh)) / desc_area
-        aspect_ratio = (float(hw) / float(hh)) / desc_aspect
-        if area_ratio < min_area_ratio:
+    def _passes_size_aspect_vs_descriptor(
+        self,
+        width: int,
+        height: int,
+        descriptor: MobDescriptor,
+        *,
+        require_min_area: bool,
+        enforce_max_area: bool = True,
+    ) -> bool:
+        """Descriptor-relative area + aspect band shared by heat and extract."""
+        if width < 1 or height < 1:
+            return False
+        desc_w = float(descriptor.avg_width)
+        desc_h = float(descriptor.avg_height)
+        if desc_w <= 0.0 or desc_h <= 0.0:
+            return False
+        desc_area = desc_w * desc_h
+        desc_aspect = desc_w / desc_h
+        area_ratio = (float(width) * float(height)) / desc_area
+        aspect_ratio = (float(width) / float(height)) / desc_aspect
+        if require_min_area and area_ratio < self._descriptor_min_area_ratio(descriptor):
+            return False
+        if enforce_max_area and area_ratio > _GEOMETRY_AREA_MAX_RATIO:
             return False
         if aspect_ratio < _GEOMETRY_ASPECT_MIN_RATIO or aspect_ratio > _GEOMETRY_ASPECT_MAX_RATIO:
             return False
@@ -581,7 +603,6 @@ class MobDetector:
         """
         min_recall = float(self.config["minSilhouetteRecall"])
         min_precision = float(self.config["minSilhouettePrecision"])
-        min_jaccard = float(self.config["minSilhouetteJaccard"])
         if living_candidate is not None:
             death_refs = self._descriptor_silhouette_references(death_masks)
             if not death_refs:
@@ -589,11 +610,7 @@ class MobDetector:
             death_sim, _idx, _scores, death_prec, death_rec = best_silhouette_match(
                 living_candidate, death_refs,
             )
-            death_passed = (
-                death_rec >= min_recall
-                and death_prec >= min_precision
-                and death_sim >= min_jaccard
-            )
+            death_passed = death_rec >= min_recall and death_prec >= min_precision
             return float(death_sim), bool(death_passed)
 
         death_passed, death_sim, *_rest = self._evaluate_silhouette_gate(
@@ -689,7 +706,27 @@ class MobDetector:
 
         desc_area = float(desc_w) * float(desc_h)
         extract_area_ratio = (float(comp_w) * float(comp_h)) / desc_area
-        if extract_area_ratio >= _EXTRACT_BLOAT_AREA_RATIO:
+
+        # True palette extract (before any desc-sized re-frame): same aspect band
+        # as heat geometry. Min area applies; max is not enforced here so a
+        # terrain-merged CC can still shrink for rasterization after aspect OK.
+        if not self._passes_size_aspect_vs_descriptor(
+            comp_w,
+            comp_h,
+            descriptor,
+            require_min_area=True,
+            enforce_max_area=False,
+        ):
+            extract_bbox = (
+                search_x + comp_left,
+                search_y + comp_top,
+                comp_w,
+                comp_h,
+            )
+            return False, 0.0, None, 0, [], extract_bbox, 0.0, 0.0, extract_area_ratio
+
+        extract_bloated = extract_area_ratio >= _EXTRACT_BLOAT_AREA_RATIO
+        if extract_bloated:
             # Bloated crop (terrain-merged CC): re-frame to descriptor-sized
             # window on the body centroid so silhouette sees a sprite-scale extract.
             mob_region, comp_mask, extract_bbox = self._shrink_bloated_extract_to_descriptor(
@@ -741,13 +778,20 @@ class MobDetector:
         similarity, matched_idx, scores, precision, recall = best_silhouette_match(
             candidate, refs,
         )
-        # Dual coverage floors (precision/recall) plus a soft-Jaccard co-floor so
-        # barely-passing palette fills (e.g. player sprites) cannot clear the gate.
-        passed = (
+        hard_n = int((candidate >= HARD_OCCUPANCY).sum()) if candidate is not None else 0
+        grid_n = int(gate_mask.width) * int(gate_mask.height)
+        solid_fill = (
+            grid_n > 0 and (float(hard_n) / float(grid_n)) >= _SOLID_FILL_HARD_FRACTION
+        )
+        dual_ok = (
             recall >= float(self.config["minSilhouetteRecall"])
             and precision >= float(self.config["minSilhouettePrecision"])
-            and similarity >= float(self.config["minSilhouetteJaccard"])
         )
+        # Content veto: solid palette fill of the gate grid (color smear in a
+        # desc-sized window). Bloated CCs may still shrink after pre-shrink
+        # aspect passes; soft/hard noise still uses deform for patchy mobs and
+        # remains on SilhouetteCheck via _noisy_extraction_signal.
+        passed = bool(dual_ok and not solid_fill)
         return (
             passed,
             float(similarity),

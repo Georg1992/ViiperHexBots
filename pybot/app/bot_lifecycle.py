@@ -72,6 +72,9 @@ class BotLifecycleManager:
         self._start_thread: threading.Thread | None = None
         self._start_cancelled = False
         self._start_generation = 0
+        # Bumped when a new hunt owns the overlay so a late stop-joiner cannot
+        # destroy the overlay of a newer start.
+        self._overlay_epoch = 0
         self._main_queue: queue.Queue[Callable[[], None]] = queue.Queue()
         self._root.after(_MAIN_DISPATCH_MS, self._drain_main_queue)
 
@@ -131,15 +134,34 @@ class BotLifecycleManager:
         if self._stop_joiner is not None and self._stop_joiner.is_alive():
             self._stop_joiner.join(timeout=timeout)
 
+    def _is_current_start(self, generation: int) -> bool:
+        """True when *generation* is still the active, non-cancelled start."""
+        return (
+            generation == self._start_generation
+            and not self._start_cancelled
+            and self._state == BotState.STARTING
+        )
+
+    def _emit_state(self, state: BotState, *, generation: int | None = None) -> None:
+        """Notify UI of *state*, ignoring stale STARTING events after cancel."""
+        if generation is not None and generation != self._start_generation:
+            return
+        if state == BotState.STARTING and self._state != BotState.STARTING:
+            return
+        if self._on_state_change:
+            self._on_state_change(state)
+
     def start(
         self,
         config_snapshot: AppConfig,
         session_id: str,
     ) -> bool:
-        """Begin async hunt startup. Returns True when accepted."""
+        """Begin async hunt startup. Returns True when accepted.
+
+        A cancelled in-flight start thread may still be alive; this bumps the
+        start generation so that thread's finish is ignored and restart works.
+        """
         if self._state not in (BotState.OFF,):
-            return False
-        if self._start_thread is not None and self._start_thread.is_alive():
             return False
 
         self._start_cancelled = False
@@ -147,20 +169,25 @@ class BotLifecycleManager:
         generation = self._start_generation
         self._state = BotState.STARTING
         self._post_to_main(
-            lambda: self._on_state_change(BotState.STARTING)
-            if self._on_state_change
-            else None
+            lambda: self._emit_state(BotState.STARTING, generation=generation),
         )
 
         def _run_start() -> None:
+            posted_terminal = False
             try:
+                self._on_log("[STATE] Start: waiting for prior hunt to exit")
                 self._await_prior_stop_joiner()
-                if self._start_cancelled:
+                if not self._is_current_start(generation):
+                    return
+
+                self._on_log("[STATE] Start: ensuring VIIPER devices")
+                self._viiper.ensure_devices()
+                if not self._is_current_start(generation):
                     return
 
                 restore_and_activate(config_snapshot.window_id)
                 self._session.open(session_id=session_id)
-                if self._start_cancelled:
+                if not self._is_current_start(generation):
                     return
 
                 mob_name = mob_folder_by_index(
@@ -177,10 +204,17 @@ class BotLifecycleManager:
                     on_log=self._on_log,
                     overlay=runtime_overlay,
                 )
-                if self._start_cancelled:
+                if not self._is_current_start(generation):
                     return
 
+                self._on_log(f"[STATE] Start: launching hunt thread mob={mob_name}")
                 bot.start(mob_name=mob_name)
+                if not self._is_current_start(generation):
+                    if bot.running:
+                        bot.request_stop()
+                        self._start_stop_joiner(bot, destroy_overlay=False)
+                    return
+
                 self._post_to_main(
                     lambda: self._finish_start(
                         bot,
@@ -189,10 +223,17 @@ class BotLifecycleManager:
                         generation=generation,
                     ),
                 )
+                posted_terminal = True
             except Exception as exc:
                 self._post_to_main(
                     lambda err=exc: self._fail_start(err, generation=generation),
                 )
+                posted_terminal = True
+            finally:
+                if not posted_terminal:
+                    self._post_to_main(
+                        lambda: self._clear_stuck_starting(generation),
+                    )
 
         self._start_thread = threading.Thread(
             target=_run_start,
@@ -201,6 +242,16 @@ class BotLifecycleManager:
         )
         self._start_thread.start()
         return True
+
+    def _clear_stuck_starting(self, generation: int) -> None:
+        """If start aborted without finish/fail, do not leave UI stuck on Starting."""
+        if generation != self._start_generation:
+            return
+        if self._state != BotState.STARTING:
+            return
+        self._on_log("[STATE] Bot start aborted before hunt thread")
+        self._state = BotState.OFF
+        self._emit_state(BotState.OFF)
 
     def _finish_start(
         self,
@@ -222,20 +273,26 @@ class BotLifecycleManager:
                 self._start_stop_joiner(bot)
             if self._state == BotState.STARTING:
                 self._state = BotState.OFF
-                if self._on_state_change:
-                    self._on_state_change(BotState.OFF)
+                self._emit_state(BotState.OFF)
             return
 
         if not bot.running:
             self._on_log("[STATE] Bot start failed — hunt thread did not start")
             self._state = BotState.OFF
-            if self._on_state_change:
-                self._on_state_change(BotState.OFF)
+            self._emit_state(BotState.OFF)
             return
 
         self._bot = bot
         self._state = BotState.RUNNING
         self._arm_focus_grace()
+        self._overlay_epoch += 1
+
+        self._session.write_block(
+            "bot start",
+            f"hwnd={config_snapshot.window_id}\n"
+            f"mobIndex={config_snapshot.selected_monster}\n"
+            f"huntSession={session_id}",
+        )
 
         if config_snapshot.hunt_log_overlay and config_snapshot.window_id:
             ok = self._hunt_overlay.create(
@@ -248,14 +305,7 @@ class BotLifecycleManager:
                 self._on_log(f"[OVERLAY] failed: {self._hunt_overlay.last_error()}")
 
         self._root.after(100, self._schedule_overlay_tick)
-        self._session.write_block(
-            "bot start",
-            f"hwnd={config_snapshot.window_id}\n"
-            f"mobIndex={config_snapshot.selected_monster}\n"
-            f"huntSession={session_id}",
-        )
-        if self._on_state_change:
-            self._on_state_change(BotState.RUNNING)
+        self._emit_state(BotState.RUNNING)
         self._root.after(300, self._poll_focus)
         self._on_log("[STATE] Hunt runtime started")
 
@@ -266,8 +316,7 @@ class BotLifecycleManager:
             return
         self._on_log(f"[STATE] Bot start failed: {exc}")
         self._state = BotState.OFF
-        if self._on_state_change:
-            self._on_state_change(BotState.OFF)
+        self._emit_state(BotState.OFF)
 
     def stop(self) -> None:
         if self._state == BotState.OFF and self._bot is None:
@@ -280,17 +329,22 @@ class BotLifecycleManager:
         if bot is not None:
             bot.request_stop()
 
+        overlay_epoch = self._overlay_epoch
         self._bot = None
         self._state = BotState.OFF
         self._hunt_overlay.reset_stats()
         if bot is None:
             self._hunt_overlay.destroy()
-        if self._on_state_change:
-            self._on_state_change(BotState.OFF)
+        self._emit_state(BotState.OFF)
         if bot is not None:
-            self._start_stop_joiner(bot)
+            self._start_stop_joiner(bot, overlay_epoch=overlay_epoch)
 
-    def _destroy_hunt_overlay(self) -> None:
+    def _destroy_hunt_overlay_if_epoch(self, overlay_epoch: int) -> None:
+        """Destroy overlay only if no newer hunt has claimed it."""
+        if overlay_epoch != self._overlay_epoch:
+            return
+        if self._state != BotState.OFF:
+            return
         self._hunt_overlay.destroy()
 
     def _start_stop_joiner(
@@ -298,7 +352,10 @@ class BotLifecycleManager:
         bot: BotController,
         *,
         destroy_overlay: bool = True,
+        overlay_epoch: int | None = None,
     ) -> None:
+        epoch = self._overlay_epoch if overlay_epoch is None else overlay_epoch
+
         def _join() -> None:
             # Retry until the hunt thread exits — do not start another hunt over it.
             stopped = bot.stop(join_timeout=DEFAULT_STOP_JOIN_TIMEOUT_S)
@@ -311,7 +368,9 @@ class BotLifecycleManager:
                 )
                 bot.stop(join_timeout=DEFAULT_STOP_JOIN_TIMEOUT_S * 2)
             if destroy_overlay:
-                self._post_to_main(self._destroy_hunt_overlay)
+                self._post_to_main(
+                    lambda: self._destroy_hunt_overlay_if_epoch(epoch),
+                )
 
         self._stop_joiner = threading.Thread(
             target=_join,
@@ -322,10 +381,17 @@ class BotLifecycleManager:
 
     def _await_prior_stop_joiner(self) -> None:
         """Block until the previous hunt fully stopped (required before restart)."""
-        if self._stop_joiner is not None and self._stop_joiner.is_alive():
-            # Stop may need more than one join window if workers were busy.
-            self._stop_joiner.join(timeout=DEFAULT_STOP_JOIN_TIMEOUT_S * 2)
-        self._stop_joiner = None
+        joiner = self._stop_joiner
+        if joiner is not None and joiner.is_alive():
+            # Match the stop-joiner's worst-case join budget (3 + 3 + 6)s.
+            joiner.join(timeout=DEFAULT_STOP_JOIN_TIMEOUT_S * 4)
+            if joiner.is_alive():
+                self._on_log(
+                    "[STATE] Prior hunt stop still running — continuing restart wait"
+                )
+                joiner.join(timeout=DEFAULT_STOP_JOIN_TIMEOUT_S * 4)
+        if self._stop_joiner is joiner:
+            self._stop_joiner = None
 
     def pause(self) -> None:
         if self._state != BotState.RUNNING:
@@ -335,8 +401,7 @@ class BotLifecycleManager:
         self._state = BotState.PAUSED
         self._on_log("[STATE] Bot paused")
         self._session.write_focus_change("paused (focus lost)")
-        if self._on_state_change:
-            self._on_state_change(BotState.PAUSED)
+        self._emit_state(BotState.PAUSED)
 
     def resume(self) -> None:
         if self._state != BotState.PAUSED:
@@ -347,8 +412,7 @@ class BotLifecycleManager:
         self._arm_focus_grace()
         self._on_log("[STATE] Bot resumed")
         self._session.write_focus_change("resumed")
-        if self._on_state_change:
-            self._on_state_change(BotState.RUNNING)
+        self._emit_state(BotState.RUNNING)
         self._root.after(300, self._poll_focus)
 
     def set_search_range_cells(self, cells: int) -> None:

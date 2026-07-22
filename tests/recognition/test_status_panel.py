@@ -28,6 +28,9 @@ FIXTURE_CASES: tuple[tuple[str, int, int, int, int], ...] = (
     ("W9.png", 430, 430, 297, 2730),
     ("W4.png", 430, 430, 294, 2730),
     ("W1.png", 430, 430, 291, 2730),
+    ("RedWeight.png", 107, 435, 2457, 2730),
+    # Trailing ``t`` of ``Weight`` sits in the ROI; must not become a leading 1.
+    ("FalseWeight.png", 249, 485, 427, 2730),
 )
 
 

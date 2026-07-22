@@ -79,6 +79,8 @@ def silhouette_match(
     ``H`` is hard candidate occupancy (``>= HARD_OCCUPANCY``).
 
     Soft-gray outside the ref is not charged as false mass; solid fill-in is.
+    Tall wrong-shape extracts (e.g. player sprite) are rejected earlier by
+    extract-aspect geometry before this 16x16 score runs.
 
     .. math::
 

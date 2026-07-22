@@ -31,6 +31,9 @@ DIGIT_MATCH_THRESHOLD = 0.85
 BINARIZE_THRESHOLD = 45
 # Single glyphs are typically 3–6px wide; wider blobs are touching digits.
 MAX_GLYPH_WIDTH = 7
+# Real digit boxes sit ~1px apart; label leftovers (e.g. trailing ``t`` of
+# ``Weight``) sit farther left with a wide gap before the value digits.
+MAX_LEADING_ORPHAN_GAP_PX = 6
 
 # Full Basic Info panel size (for overlay placement).
 PANEL_WIDTH = 219
@@ -39,8 +42,10 @@ PANEL_HEIGHT = 143
 # Value ROIs relative to the full Basic Info panel origin (x, y, w, h).
 # Padded so ±2px header/origin jitter still keeps full glyph height/width.
 # Weight starts after the ``Weight :`` colon so label ink is not classified.
+# Left edge includes 4-digit current weight (heavy/red); keep clear of colon under ±2 jitter.
 SP_ROI = (50, 66, 110, 16)
-WEIGHT_ROI = (88, 116, 60, 14)
+# Width 66 keeps 4-digit current+max under ±2px origin jitter (e.g. FalseWeight).
+WEIGHT_ROI = (85, 116, 66, 14)
 
 
 @dataclass(frozen=True)
@@ -207,6 +212,7 @@ def _to_ink_mask(bgr: np.ndarray) -> np.ndarray:
 
     Near-black cores use local contrast vs a morphologically closed
     background (fill/empty change with SP%% without becoming ink).
+    Overweight weight text is saturated red on the same light panel.
     """
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 9))
@@ -218,6 +224,10 @@ def _to_ink_mask(bgr: np.ndarray) -> np.ndarray:
     mask[near_black & strong_contrast] = 255
     # Pure black cores always count even if closing underestimates contrast.
     mask[gray <= 16] = 255
+    # Overweight Weight digits: saturated red (e.g. BGR 0,0,240), not near-black.
+    blue, green, red = cv2.split(bgr)
+    red_ink = (red >= 180) & (green <= 80) & (blue <= 80)
+    mask[red_ink] = 255
     return mask
 
 
@@ -270,6 +280,20 @@ def _strip_bar_chrome(mask: np.ndarray) -> np.ndarray:
     return cleaned
 
 
+def _drop_leading_orphan_glyphs(
+    comps: list[tuple[int, np.ndarray]],
+) -> list[tuple[int, np.ndarray]]:
+    """Drop left-side label fragments separated from the digit cluster by a gap."""
+    while len(comps) >= 2:
+        x0, glyph0 = comps[0]
+        x1, _glyph1 = comps[1]
+        gap = x1 - (x0 + glyph0.shape[1])
+        if gap <= MAX_LEADING_ORPHAN_GAP_PX:
+            break
+        comps = comps[1:]
+    return comps
+
+
 def _glyph_components(mask: np.ndarray, *, min_width: int) -> list[np.ndarray]:
     cleaned = _strip_bar_chrome(mask)
     count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
@@ -291,6 +315,7 @@ def _glyph_components(mask: np.ndarray, *, min_width: int) -> list[np.ndarray]:
                 continue
             comps.append((int(x), part))
     comps.sort(key=lambda item: item[0])
+    comps = _drop_leading_orphan_glyphs(comps)
     return [glyph for _x, glyph in comps]
 
 
@@ -327,9 +352,17 @@ def _read_digits(
     stop_at_slash: bool,
 ) -> str | None:
     mask = _to_ink_mask(bgr)
+    classified: list[tuple[str | None, float]] = [
+        _classify_glyph(glyph)
+        for glyph in _glyph_components(mask, min_width=min_width)
+    ]
+    # Drop trailing edge chrome that fails the digit threshold (wider ROI / jitter).
+    while classified and (
+        classified[-1][0] is None or classified[-1][1] < DIGIT_MATCH_THRESHOLD
+    ):
+        classified.pop()
     chars: list[str] = []
-    for glyph in _glyph_components(mask, min_width=min_width):
-        ch, score = _classify_glyph(glyph)
+    for ch, score in classified:
         if ch is None or score < DIGIT_MATCH_THRESHOLD:
             return None
         if ch == "/":

@@ -7,8 +7,47 @@ import json
 from pathlib import Path
 
 from pybot.config.clients import memory_reading_enabled
-from pybot.config.schema import MAX_SKILL_TIMERS, AppSettings, SkillTimerSetting
+from pybot.config.schema import (
+    MAX_OPEN_STORAGE_STEPS,
+    MAX_SKILL_TIMERS,
+    AppSettings,
+    KeyChainStep,
+    SkillTimerSetting,
+)
 from pybot.paths import CONFIG_PATH
+
+
+def _load_open_storage_chain(parser: configparser.ConfigParser) -> list[KeyChainStep]:
+    raw = parser.get("Keybindings", "OpenStorageChain", fallback="").strip()
+    if raw:
+        try:
+            items = json.loads(raw)
+        except json.JSONDecodeError:
+            items = []
+        steps: list[KeyChainStep] = []
+        if isinstance(items, list):
+            for item in items[:MAX_OPEN_STORAGE_STEPS]:
+                if not isinstance(item, dict):
+                    continue
+                button = str(item.get("key") or item.get("button") or "").strip()
+                delay = int(item.get("delay") or item.get("delay_ms") or 0)
+                steps.append(KeyChainStep(button=button, delay_ms=max(0, delay)))
+        return steps
+
+    # Migrate legacy single OpenStorageButton.
+    legacy = parser.get("Keybindings", "OpenStorageButton", fallback="").strip()
+    if legacy:
+        return [KeyChainStep(button=legacy, delay_ms=0)]
+    return []
+
+
+def _save_open_storage_chain(steps: list[KeyChainStep]) -> str:
+    payload = [
+        {"key": s.button, "delay": int(s.delay_ms)}
+        for s in steps[:MAX_OPEN_STORAGE_STEPS]
+        if s.button.strip()
+    ]
+    return json.dumps(payload, separators=(",", ":"))
 
 
 def _load_skill_timers(parser: configparser.ConfigParser) -> list[SkillTimerSetting]:
@@ -79,11 +118,15 @@ def load_settings(path: Path | None = None) -> AppSettings:
         use_memory_reading=memory_reading_enabled(
             parser.get("Client", "Profile", fallback="Generic")
         ),
+        visual_status_reading=parser.getint(
+            "Client", "VisualStatusReading", fallback=1
+        )
+        == 1,
         selected_monster=parser.getint("MonsterSettings", "SelectedMonster", fallback=1),
         search_range=parser.getint("Settings", "SearchRange", fallback=16),
         hunt_mode=parser.get("Settings", "HuntMode", fallback="teleport"),
         time_on_location=parser.getint("Settings", "TimeOnLocation", fallback=20),
-        weight_modifier=parser.getint("Settings", "WeightModifier", fallback=49),
+        weight_modifier=parser.getint("Settings", "WeightModifier", fallback=80),
         take_fly_wings=parser.getint("Settings", "TakeFlyWings", fallback=0) == 1,
         fly_wings_amount=parser.getint("Settings", "FlyWingsAmount", fallback=100),
         detect_captcha=parser.getint("Settings", "DetectCaptcha", fallback=0) == 1,
@@ -98,7 +141,7 @@ def load_settings(path: Path | None = None) -> AppSettings:
         teleport_delay=parser.getint("Keybindings", "TeleportDelay", fallback=800),
         save_point_button=parser.get("Keybindings", "SavePointButton", fallback=""),
         sp_button=parser.get("Keybindings", "SPButton", fallback=""),
-        open_storage_button=parser.get("Keybindings", "OpenStorageButton", fallback=""),
+        open_storage_chain=_load_open_storage_chain(parser),
         skill_timers=_load_skill_timers(parser),
         sit_on_low_sp=parser.getint("Keybindings", "SitOnLowSp", fallback=0) == 1,
         sit_on_low_sp_button=(
@@ -126,6 +169,9 @@ def save_settings(settings: AppSettings) -> None:
     # Derived from profile (Generic off, server profiles on); keep in sync on save.
     parser["Client"]["UseMemoryReading"] = (
         "1" if memory_reading_enabled(settings.client_profile) else "0"
+    )
+    parser["Client"]["VisualStatusReading"] = (
+        "1" if settings.visual_status_reading else "0"
     )
 
     _ensure_section(parser, "MonsterSettings")
@@ -161,7 +207,10 @@ def save_settings(settings: AppSettings) -> None:
     parser["Keybindings"]["TeleportDelay"] = str(settings.teleport_delay)
     parser["Keybindings"]["SavePointButton"] = settings.save_point_button
     parser["Keybindings"]["SPButton"] = settings.sp_button
-    parser["Keybindings"]["OpenStorageButton"] = settings.open_storage_button
+    parser["Keybindings"]["OpenStorageChain"] = _save_open_storage_chain(
+        settings.open_storage_chain
+    )
+    parser["Keybindings"].pop("OpenStorageButton", None)
     parser["Keybindings"]["SkillTimers"] = _save_skill_timers(settings.skill_timers)
     parser["Keybindings"].pop("SkillTimerButton", None)
     parser["Keybindings"].pop("SkillTimerInterval", None)

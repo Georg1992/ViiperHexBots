@@ -14,12 +14,25 @@ _capture_lock = threading.Lock()
 
 
 def reset_capture_session() -> None:
-    """Drop the shared mss session (e.g. after a failed grab or runtime restart)."""
-    global _sct
-    with _capture_lock:
-        if _sct is not None:
-            _sct.close()
-            _sct = None
+    """Drop the shared mss session (e.g. after a failed grab or runtime restart).
+
+    If a previous hunt's capture thread is stuck holding the lock, rotate to a
+    fresh lock so the next hunt is not blocked forever.
+    """
+    global _sct, _capture_lock
+    lock = _capture_lock
+    acquired = lock.acquire(timeout=0.5)
+    try:
+        if acquired and _sct is not None:
+            try:
+                _sct.close()
+            except Exception:
+                pass
+        _sct = None
+    finally:
+        if acquired:
+            lock.release()
+        _capture_lock = threading.Lock()
 
 
 def capture_region(x: int, y: int, width: int, height: int) -> np.ndarray | None:

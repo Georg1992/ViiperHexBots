@@ -236,6 +236,7 @@ VK_TO_MODIFIER: dict[int, int] = {
     0xA3: MOD_RIGHT_CTRL,   # VK_RCONTROL
     0xA4: MOD_LEFT_ALT,     # VK_LMENU
     0xA5: MOD_RIGHT_ALT,    # VK_RMENU
+    0x12: MOD_LEFT_ALT,     # VK_MENU (MapVirtualKey of Alt scan code 56)
     0x5B: MOD_LEFT_GUI,     # VK_LWIN
     0x5C: MOD_RIGHT_GUI,    # VK_RWIN
 }

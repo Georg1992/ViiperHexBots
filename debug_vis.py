@@ -170,7 +170,6 @@ def allocate_silhouette_panel(
     *,
     min_recall: float,
     min_precision: float,
-    min_jaccard: float,
 ) -> np.ndarray:
     gate_masks = descriptor.silhouette_masks
     check_count = len(silhouette_checks)
@@ -185,7 +184,7 @@ def allocate_silhouette_panel(
     cv2.putText(
         panel,
         f"gate: rec>={min_recall:.2f}  prec>={min_precision:.2f}  "
-        f"jac>={min_jaccard:.2f}",
+        f"(prod occupancy)",
         (10, 42),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.38,
@@ -218,13 +217,10 @@ def allocate_silhouette_panel(
         status = "PASS" if check.passed else "FAIL"
         rec_ok = check.recall >= min_recall
         prec_ok = check.precision >= min_precision
-        jac_ok = check.similarity >= min_jaccard
         rec_mark = "+" if rec_ok else "-"
         prec_mark = "+" if prec_ok else "-"
-        jac_mark = "+" if jac_ok else "-"
         line1 = (
-            f"BLB{idx}: heat={check.heat_score:.3f}  "
-            f"jac={check.similarity:.2f}{jac_mark}/{min_jaccard:.2f}  "
+            f"BLB{idx}: heat={check.heat_score:.3f}  jac={check.similarity:.2f}  "
             f"{status}  ref={check.matched_mask_index}"
         )
         noise_bits: list[str] = []
@@ -401,7 +397,7 @@ def draw_detection_overlay(frame: np.ndarray, result: DetectionResult) -> np.nda
     )
     cv2.putText(
         overlay,
-        "sil gate: recall AND precision AND jaccard (see right panel)",
+        "sil gate: recall AND precision (see right panel)",
         (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 200, 220), 1,
     )
     draw_timing_overlay(overlay, result.timing, y0=92)
@@ -602,7 +598,6 @@ def render_descriptor_info(
         (
             f"sil gate: rec>={float(config['minSilhouetteRecall']):.2f}  "
             f"prec>={float(config['minSilhouettePrecision']):.2f}  "
-            f"jac>={float(config['minSilhouetteJaccard']):.2f}  "
             f"(build gateRefUniqueIoU={float(config['gateRefUniqueIoU']):.2f})"
         ),
         "SIL render = prod gate occupancy (hard+stable core, cyan=soft halo)",
@@ -771,7 +766,6 @@ def main() -> None:
                 frame.shape[0],
                 min_recall=float(config["minSilhouetteRecall"]),
                 min_precision=float(config["minSilhouettePrecision"]),
-                min_jaccard=float(config["minSilhouetteJaccard"]),
             )
 
             combined_height = max(

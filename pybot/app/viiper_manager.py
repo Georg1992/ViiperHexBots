@@ -5,8 +5,10 @@ sets up virtual keyboard + mouse devices, and holds persistent
 device streams to keep them alive.
 
 VIIPER auto-removes devices if no stream connects within 5 seconds
-of creation. The manager opens and holds streams to prevent this.
-The backend can open its own independent streams later.
+of creation, and again ~5s after a stream disconnects. The manager
+holds streams after add; the hunt input backend must keep its streams
+open across Stop/Start (see ViiperBackend) so devices are not removed.
+``ensure_devices`` recreates keyboard/mouse if they were already lost.
 
 This replaces the old Go bridge (viiper-input.exe) entirely.
 """
@@ -110,12 +112,51 @@ class ViiperManager:
         self._log("Virtual keyboard and mouse ready")
         self._on_status("Input: Ready", "Virtual keyboard and mouse active — launch the game now")
 
+    def ensure_devices(self) -> None:
+        """Recreate keyboard/mouse if VIIPER auto-removed them.
+
+        Closing a device stream starts VIIPER's ~5s removal timer. Hunt stop
+        must keep streams open; this repairs the bus if devices were already
+        lost (or the server was restarted under us).
+        """
+        if not self._server_ready():
+            raise RuntimeError(
+                "VIIPER server is not running. Restart the bot application."
+            )
+        buses = self._api.bus_list()
+        if not buses:
+            self._log("No VIIPER bus — recreating keyboard and mouse...")
+            from pybot.runtime.input.viiper_backend import ViiperBackend
+
+            ViiperBackend.close_shared_streams()
+            self._close_streams()
+            self._setup_devices()
+            return
+
+        bus_id = min(buses)
+        devices = self._api.devices_list(bus_id)
+        types = {str(dev.get("type", "")) for dev in devices}
+        streams_ok = self._kb_stream is not None and self._mouse_stream is not None
+        if "keyboard" in types and "mouse" in types and streams_ok:
+            self.bus_id = bus_id
+            return
+
+        self._log("Virtual keyboard/mouse missing — recreating...")
+        from pybot.runtime.input.viiper_backend import ViiperBackend
+
+        ViiperBackend.close_shared_streams()
+        self._close_streams()
+        self._setup_devices()
+
     def shutdown(self) -> None:
         """Gracefully stop the VIIPER server."""
         if self._shutdown_done:
             return
         self._shutdown_done = True
         self._log("Stopping virtual keyboard and mouse...")
+        from pybot.runtime.input.viiper_backend import ViiperBackend
+
+        ViiperBackend.close_shared_streams()
         self._close_streams()
         self._kill_server()
         self._log("VIIPER stopped")

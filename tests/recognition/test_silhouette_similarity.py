@@ -176,7 +176,7 @@ class SilhouetteSimilarityTests(unittest.TestCase):
         score = silhouette_similarity(disk, reference, stable_mask)
         _jac, precision, recall = silhouette_match(disk, reference, stable_mask)
         self.assertLess(score, 0.50)
-        # Dual gate floors used at runtime (recall>=0.45, precision>=0.71).
+        # Dual gate floors used at runtime (see detector_config.json).
         self.assertFalse(recall >= 0.45 and precision >= 0.71)
 
     def test_matching_shape_clears_dual_gate_floors(self) -> None:

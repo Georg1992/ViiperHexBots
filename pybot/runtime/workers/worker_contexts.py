@@ -85,3 +85,21 @@ class SitOnLowSpWorkerContext(
     def begin_sit_regen(self) -> None: ...
     def end_sit_regen(self) -> None: ...
     def wait_unless_stopped(self, timeout_s: float) -> bool: ...
+
+
+class ItemsToStorageWorkerContext(
+    CanStop,
+    CanLog,
+    HasConfig,
+    CanCapture,
+    CanWakeDiscovery,
+    Protocol,
+):
+    """Hunt runtime subset consumed by ItemsToStorageWorker."""
+
+    wingcount: int
+    sitting_event: object
+
+    def begin_exclusive_ops(self) -> bool: ...
+    def end_exclusive_ops(self) -> None: ...
+    def wait_unless_stopped(self, timeout_s: float) -> bool: ...

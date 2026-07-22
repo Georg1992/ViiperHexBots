@@ -167,7 +167,8 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
     PipelineStage(
         title="Geometry pre-gate",
         items=(
-            "geometry pre-gate (area + aspect vs descriptor)",
+            "heat area in [sil_frac/4, 2.0] vs descriptor sprite area",
+            "heat aspect in [0.68, 1.75] vs descriptor aspect",
         ),
         sources=(
             SourceCheck(
@@ -175,7 +176,9 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                 (
                     "sil_frac",
                     "min_area_ratio",
-                    "aspect_band",
+                    "_GEOMETRY_AREA_MAX_RATIO",
+                    "_GEOMETRY_ASPECT_MIN_RATIO",
+                    "_GEOMETRY_ASPECT_MAX_RATIO",
                 ),
             ),
         ),
@@ -186,11 +189,14 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             "search around heat CC bbox (not sprite-inflated)",
             "palette binary_raw + dilate(1) -> CC overlapping heat",
             "horizontal MORPH_CLOSE bridge (silhouetteHorizontalBridgeCells)",
+            "pre-shrink extract: same min-area + aspect band as heat (fail-closed)",
             "if extract_area_ratio >= 2: shrink to descriptor window on body centroid",
             "if soft/hard >= 2 and cand0 recall >= minSilhouetteRecall: deform best ref into heat within 2 silhouette cells",
             "tight bridged crop resized to descriptor size",
             "candidate_silhouette vs descriptor masks",
-            "noisy extract flag (bloated crop and/or soft/hard content noise)",
+            "dual gate recall AND precision",
+            "reject solid-fill hard occupancy (>=95% of gate grid)",
+            "noisy extract flags (bloated / soft-hard) on SilhouetteCheck",
             "pass / fail per blob",
         ),
         sources=(
@@ -202,12 +208,14 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "binary_raw",
                     "minSpritePaletteMatch",
                     "dilate",
+                    "_passes_size_aspect_vs_descriptor",
                     "_shrink_bloated_extract_to_descriptor",
                     "extract_bbox",
                     "candidate_silhouette",
                     "best_silhouette_match",
                     "minSilhouetteRecall",
                     "minSilhouettePrecision",
+                    "_SOLID_FILL_HARD_FRACTION",
                     "_maybe_deform_noisy_candidate",
                 ),
             ),

@@ -245,6 +245,7 @@ class TeleportStrategy(HuntModeStrategy):
             )
             self._release_discovery_after_teleport()
             return False
+        ctx.note_teleport_for_wings()
         ctx.overlay.increment_teleports()
         if not ctx.wait_unless_stopped(ctx.config.teleport_duration_ms / 1000.0):
             self._release_discovery_after_teleport()

@@ -35,7 +35,11 @@ from pybot.config.clients import (
     load_client_profile,
     memory_reading_enabled,
 )
-from pybot.runtime.constants import WORKER_SHUTDOWN_TIMEOUT_S
+from pybot.runtime.constants import (
+    STORAGE_WEIGHT_MODIFIER_MIN,
+    WORKER_SHUTDOWN_TIMEOUT_S,
+)
+from pybot.runtime.workers.items_to_storage_worker import ItemsToStorageWorker
 from pybot.runtime.workers.sit_on_low_sp_worker import SitOnLowSpWorker
 
 
@@ -183,10 +187,33 @@ def create_runtime_deps(
                 "Sit On Low Sp requires a client profile with currentSpAddress "
                 f"and maxSpAddress (profile={ctx.config.client_profile!r})."
             )
+        if not has_sp_memory and not ctx.config.visual_status_reading:
+            raise ValueError(
+                "Sit On Low Sp on Generic requires Visual SP/Weight reading enabled."
+            )
         sit_worker = SitOnLowSpWorker(
             ctx, input_backend, memory, hunt_mode=hunt_mode
         )
         workers.append(("sit_sp", sit_worker.run))
+    # Storage deposit + GetFlyWings only when Open Storage keychain is assigned.
+    if ctx.config.open_storage_steps:
+        profile = load_client_profile(ctx.config.client_profile)
+        memory = MemoryAddresses() if profile is None else profile.memory
+        if ctx.config.weight_modifier >= STORAGE_WEIGHT_MODIFIER_MIN:
+            has_weight_memory = memory.current_weight > 0 and memory.max_weight > 0
+            if not has_weight_memory and memory_reading_enabled(
+                ctx.config.client_profile
+            ):
+                raise ValueError(
+                    "Open Storage requires a client profile with currentWeightAddress "
+                    f"and totalWeightAddress (profile={ctx.config.client_profile!r})."
+                )
+            if not has_weight_memory and not ctx.config.visual_status_reading:
+                raise ValueError(
+                    "Open Storage on Generic requires Visual SP/Weight reading enabled."
+                )
+        storage_worker = ItemsToStorageWorker(ctx, input_backend, memory)
+        workers.append(("storage", storage_worker.run))
 
     return RuntimeDependencies(
         ctx=ctx,
@@ -211,8 +238,10 @@ class HuntRuntime:
 
 
     def stop(self) -> None:
+        # Wake workers blocked on pause/sit gates so they observe stop_event.
         self._ctx.stop_event.set()
         self._ctx.discovery_wake.set()
+        self._ctx.resume_gate.set()
 
     def pause(self) -> None:
         self._ctx.mark_paused()
@@ -252,6 +281,7 @@ class HuntRuntime:
             ctx.logger.behavior(f"[PYBOT] stop signal={signum}")
             ctx.stop_event.set()
             ctx.discovery_wake.set()
+            ctx.resume_gate.set()
 
         # Signal handlers only work in the main thread; when running inside
         # BotController's daemon thread they raise ValueError on Windows.

@@ -47,12 +47,16 @@ class HuntRuntimeConfig:
     save_point_scan_code: int = 0
     sp_button: str = ""
     sp_scan_code: int = 0
-    open_storage_button: str = ""
-    open_storage_scan_code: int = 0
+    # (button, scan_code, delay_ms) for each assigned Open Storage chain step.
+    open_storage_steps: tuple[tuple[str, int, int], ...] = ()
+    weight_modifier: int = 80
+    take_fly_wings: bool = False
+    fly_wings_amount: int = 100
     sit_on_low_sp: bool = False
     sit_on_low_sp_button: str = "insert"
     sit_on_low_sp_scan_code: int = 0
     client_profile: str = "Generic"
+    visual_status_reading: bool = True
 
 
 def resolve_mob_name(
@@ -69,6 +73,21 @@ def resolve_mob_name(
         selected_monster=selected_monster,
         mob_name=mob_name,
     )
+
+
+def _open_storage_steps_from_settings(
+    settings: AppSettings,
+) -> tuple[tuple[str, int, int], ...]:
+    steps: list[tuple[str, int, int]] = []
+    for step in settings.open_storage_chain:
+        button = step.button.strip()
+        if not button:
+            continue
+        scan = key_name_to_scan_code(button)
+        if scan <= 0:
+            continue
+        steps.append((button, scan, max(0, int(step.delay_ms))))
+    return tuple(steps)
 
 
 def hunt_runtime_config_from_settings(
@@ -127,12 +146,15 @@ def hunt_runtime_config_from_settings(
         save_point_scan_code=key_name_to_scan_code(settings.save_point_button),
         sp_button=settings.sp_button,
         sp_scan_code=key_name_to_scan_code(settings.sp_button),
-        open_storage_button=settings.open_storage_button,
-        open_storage_scan_code=key_name_to_scan_code(settings.open_storage_button),
+        open_storage_steps=_open_storage_steps_from_settings(settings),
+        weight_modifier=settings.weight_modifier,
+        take_fly_wings=settings.take_fly_wings,
+        fly_wings_amount=settings.fly_wings_amount,
         sit_on_low_sp=settings.sit_on_low_sp,
         sit_on_low_sp_button=settings.sit_on_low_sp_button,
         sit_on_low_sp_scan_code=key_name_to_scan_code(settings.sit_on_low_sp_button),
         client_profile=settings.client_profile,
+        visual_status_reading=settings.visual_status_reading,
     )
 
 

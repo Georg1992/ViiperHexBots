@@ -10,7 +10,8 @@ from __future__ import annotations
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 from pybot.app.bot_lifecycle import BotLifecycleManager, BotState
 from pybot.app.bot_controller import DEFAULT_STOP_JOIN_TIMEOUT_S
@@ -29,9 +30,20 @@ from pybot.app.win32_util import (
     restore_and_activate,
     window_exists,
 )
+from pybot.mobs.import_mob import (
+    MobImportError,
+    import_mob_from_paths,
+    mob_assets_exist,
+    resolve_spr_act_paths,
+)
 from pybot.config.clients import load_client_profile, memory_reading_enabled
-from pybot.config.schema import MAX_SKILL_TIMERS, SkillTimerSetting
+from pybot.app.storage_chain_dialog import (
+    StorageChainDialog,
+    format_storage_chain_summary,
+)
+from pybot.config.schema import MAX_SKILL_TIMERS, KeyChainStep, SkillTimerSetting
 from pybot.mobs.catalog import load_mob_catalog
+from pybot.runtime.input.scan_codes import keysym_to_key_name
 from pybot.recognition.capture import capture_region
 from pybot.recognition.ui.status_panel import (
     StatusPanelValues,
@@ -55,8 +67,9 @@ class MainWindow:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("Hex Bot")
-        self.root.geometry("920x780")
-        self.root.minsize(880, 720)
+        # Initial size; replaced by _fit_window_to_content() after widgets exist.
+        self.root.geometry("1040x900")
+        self.root.minsize(980, 820)
 
         # ── Data layer ──────────────────────────────────────────────
         self.config = AppConfig().load()
@@ -93,7 +106,9 @@ class MainWindow:
 
         self.window_entries: list = []
         self.mob_var = tk.IntVar(
-            value=min(max(1, self.config.selected_monster), len(self.mob_catalog))
+            value=min(max(1, self.config.selected_monster), max(1, len(self.mob_catalog)))
+            if self.mob_catalog
+            else 1
         )
         self._memory_poller = GameMemoryPoller()
         self._memory_poll_after_id: str | None = None
@@ -106,10 +121,14 @@ class MainWindow:
         self._settings_apply_enabled = False
         self._mob_radios: list[ttk.Radiobutton] = []
         self._settings_checkbuttons: list[ttk.Checkbutton] = []
+        self._mob_import_busy = False
+        self._mob_radio_frame: ttk.Frame | None = None
 
         # Build UI (widgets created here, references shared to managers)
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_exit)
+        self._hook_mob_drop_zone()
+        self._fit_window_to_content()
 
         # Wire log pipe UI references after widgets exist
         self.log_pipe.set_log_box(self.log_box)
@@ -125,12 +144,188 @@ class MainWindow:
 
     def _check_mob_catalog(self) -> None:
         if not self.mob_catalog:
-            messagebox.showerror(
-                "ViiperHexBots",
-                "No mob descriptors found.\n\n"
-                "Create one with:\n.\\scripts\\build-mob-descriptor.ps1 -Mob horn",
+            # Drop zone can add the first mob; do not exit the app.
+            pass
+
+    def _fit_window_to_content(self) -> None:
+        """Grow the window to the UI's natural size; block shrink below that."""
+        self.root.update_idletasks()
+        children = self.root.winfo_children()
+        if children:
+            content = children[0]
+            content.update_idletasks()
+            width = content.winfo_reqwidth() + 24
+            height = content.winfo_reqheight() + 48
+        else:
+            width = self.root.winfo_reqwidth()
+            height = self.root.winfo_reqheight()
+        width = max(width, 980)
+        height = max(height, 820)
+
+        min_w, min_h = self.root.minsize()
+        width = max(width, min_w)
+        height = max(height, min_h)
+        self.root.minsize(width, height)
+
+        cur_w = self.root.winfo_width()
+        cur_h = self.root.winfo_height()
+        if cur_w < 50 or cur_h < 50:
+            self.root.geometry(f"{width}x{height}")
+            return
+        new_w = max(cur_w, width)
+        new_h = max(cur_h, height)
+        if new_w != cur_w or new_h != cur_h:
+            self.root.geometry(f"{new_w}x{new_h}")
+
+    def _rebuild_mob_radio_buttons(self) -> None:
+        frame = self._mob_radio_frame
+        if frame is None:
+            return
+        for radio in self._mob_radios:
+            radio.destroy()
+        self._mob_radios.clear()
+        for index, mob in enumerate(self.mob_catalog, start=1):
+            radio = ttk.Radiobutton(
+                frame,
+                text=mob.display_name,
+                variable=self.mob_var,
+                value=index,
+                command=self._apply_ui_settings,
             )
-            raise SystemExit(1)
+            radio.grid(row=index - 1, column=0, sticky="w")
+            self._mob_radios.append(radio)
+        if self.mob_catalog:
+            current = int(self.mob_var.get() or 1)
+            if current < 1 or current > len(self.mob_catalog):
+                self.mob_var.set(1)
+
+    def _refresh_mob_radios(self, *, select_stem: str | None = None) -> None:
+        self.mob_catalog = load_mob_catalog(ensure_assets=False)
+        self.lifecycle._mob_catalog = self.mob_catalog
+        self._rebuild_mob_radio_buttons()
+        if select_stem and self.mob_catalog:
+            key = select_stem.lower()
+            for index, mob in enumerate(self.mob_catalog, start=1):
+                if mob.descriptor_name.lower() == key:
+                    self.mob_var.set(index)
+                    break
+        if self._settings_apply_enabled:
+            self._apply_ui_settings()
+        self._fit_window_to_content()
+
+    def _hook_mob_drop_zone(self) -> None:
+        try:
+            import windnd
+        except ImportError:
+            self._mob_drop_status.configure(
+                text="Install windnd for drag-drop (Browse still works)"
+            )
+            return
+
+        def _decode_drop_path(item: object) -> Path:
+            if isinstance(item, bytes):
+                text = item.split(b"\0", 1)[0].decode("utf-8", errors="surrogateescape")
+            else:
+                text = str(item).split("\0", 1)[0]
+            return Path(text)
+
+        def _on_drop(files) -> None:
+            paths = [_decode_drop_path(f) for f in files]
+            if not paths:
+                return
+            self.root.after(0, lambda p=paths: self._begin_mob_import(p))
+
+        # Keep a reference so the closure is not collected while hooked.
+        self._mob_drop_handler = _on_drop
+        self.root.update_idletasks()
+        # Child Label HWNDs often never receive WM_DROPFILES; hook the root.
+        windnd.hook_dropfiles(self.root, func=_on_drop, force_unicode=True)
+
+    def _browse_mob_assets(self) -> None:
+        if not self._can_import_mob():
+            return
+        paths = filedialog.askopenfilenames(
+            title="Select .spr and .act (or cancel and pick a folder)",
+            filetypes=[
+                ("SPR/ACT", "*.spr *.act"),
+                ("SPR", "*.spr"),
+                ("ACT", "*.act"),
+                ("All", "*.*"),
+            ],
+        )
+        if paths:
+            self._begin_mob_import([Path(p) for p in paths])
+            return
+        folder = filedialog.askdirectory(title="Select folder containing .spr + .act")
+        if folder:
+            self._begin_mob_import([Path(folder)])
+
+    def _can_import_mob(self) -> bool:
+        if self._mob_import_busy:
+            messagebox.showinfo("Import mob", "A mob import is already running.")
+            return False
+        if self.lifecycle.state != BotState.OFF:
+            messagebox.showwarning(
+                "Import mob",
+                "Stop the bot before adding a mob descriptor.",
+            )
+            return False
+        return True
+
+    def _begin_mob_import(self, paths: list[Path]) -> None:
+        if not self._can_import_mob():
+            return
+        try:
+            spr, act = resolve_spr_act_paths(paths)
+        except MobImportError as exc:
+            messagebox.showerror("Import mob", str(exc))
+            self._mob_drop_status.configure(text=str(exc))
+            return
+
+        stem = spr.stem.lower()
+        overwrite = False
+        if mob_assets_exist(stem):
+            ok = messagebox.askyesno(
+                "Import mob",
+                f"Mob '{stem}' already exists.\nReplace SPR/ACT and rebuild descriptor?",
+            )
+            if not ok:
+                return
+            overwrite = True
+
+        self._mob_import_busy = True
+        self._mob_browse_button.configure(state=tk.DISABLED)
+        self._mob_drop_status.configure(text=f"Building {stem}…")
+        self.log_pipe.log(f"[MOB] importing {spr.name} + {act.name}")
+
+        def _worker() -> None:
+            try:
+                entry = import_mob_from_paths([spr, act], overwrite=overwrite)
+            except Exception as exc:
+                err = exc
+                self.root.after(0, lambda: self._mob_import_failed(err))
+                return
+            stem_ready = entry.descriptor_name
+            self.root.after(0, lambda: self._mob_import_succeeded(stem_ready))
+
+        threading.Thread(target=_worker, name="mob-import", daemon=True).start()
+
+    def _mob_import_failed(self, exc: Exception) -> None:
+        self._mob_import_busy = False
+        if self.lifecycle.state == BotState.OFF:
+            self._mob_browse_button.configure(state=tk.NORMAL)
+        self._mob_drop_status.configure(text=f"Failed: {exc}")
+        self.log_pipe.log(f"[MOB] import failed: {exc}")
+        messagebox.showerror("Import mob", f"Failed to build descriptor:\n\n{exc}")
+
+    def _mob_import_succeeded(self, stem: str) -> None:
+        self._mob_import_busy = False
+        if self.lifecycle.state == BotState.OFF:
+            self._mob_browse_button.configure(state=tk.NORMAL)
+        self._refresh_mob_radios(select_stem=stem)
+        self._mob_drop_status.configure(text=f"Ready: {stem}")
+        self.log_pipe.log(f"[MOB] descriptor ready: {stem}")
+        messagebox.showinfo("Import mob", f"Descriptor built for '{stem}'.")
 
     # ══════════════════════════════════════════════════════════════════
     #  UI BUILDING
@@ -208,23 +403,35 @@ class MainWindow:
             width=16,
         )
         self.client_combo.set(self.config.client_profile)
-        self.client_combo.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 8))
+        self.client_combo.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 4))
         self.client_combo.bind("<<ComboboxSelected>>", self.on_client_changed)
 
-        ttk.Separator(profile_col, orient=tk.HORIZONTAL).grid(
-            row=2, column=0, columnspan=2, sticky="ew", pady=(0, 6)
+        self.visual_status_var = tk.BooleanVar(
+            value=self.config.visual_status_reading
         )
-        ttk.Label(profile_col, text="Name:").grid(row=3, column=0, sticky="w")
+        self.visual_status_check = ttk.Checkbutton(
+            profile_col,
+            text="Visual SP / Weight",
+            variable=self.visual_status_var,
+            command=self._on_visual_status_toggled,
+        )
+        self.visual_status_check.grid(row=2, column=0, columnspan=2, sticky="w")
+        self._settings_checkbuttons.append(self.visual_status_check)
+
+        ttk.Separator(profile_col, orient=tk.HORIZONTAL).grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=(6, 6)
+        )
+        ttk.Label(profile_col, text="Name:").grid(row=4, column=0, sticky="w")
         self.memory_name = ttk.Label(profile_col, text="—")
-        self.memory_name.grid(row=3, column=1, sticky="w", padx=(8, 0))
-        ttk.Label(profile_col, text="SP:").grid(row=4, column=0, sticky="w", pady=(2, 0))
+        self.memory_name.grid(row=4, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(profile_col, text="SP:").grid(row=5, column=0, sticky="w", pady=(2, 0))
         self.memory_sp = ttk.Label(profile_col, text="—")
-        self.memory_sp.grid(row=4, column=1, sticky="w", padx=(8, 0), pady=(2, 0))
+        self.memory_sp.grid(row=5, column=1, sticky="w", padx=(8, 0), pady=(2, 0))
         ttk.Label(profile_col, text="Weight:").grid(
-            row=5, column=0, sticky="w", pady=(2, 0)
+            row=6, column=0, sticky="w", pady=(2, 0)
         )
         self.memory_weight = ttk.Label(profile_col, text="—")
-        self.memory_weight.grid(row=5, column=1, sticky="w", padx=(8, 0), pady=(2, 0))
+        self.memory_weight.grid(row=6, column=1, sticky="w", padx=(8, 0), pady=(2, 0))
 
         # ── Setup ──────────────────────────────────────────────────
         setup_frame = ttk.LabelFrame(main, text="Setup", padding=8)
@@ -234,18 +441,33 @@ class MainWindow:
         mob_col = ttk.Frame(setup_frame)
         mob_col.grid(row=0, column=0, sticky="nw")
         ttk.Label(mob_col, text="Descriptor Mob:").grid(row=0, column=0, sticky="w")
-        mob_row = 1
-        for index, mob in enumerate(self.mob_catalog, start=1):
-            radio = ttk.Radiobutton(
-                mob_col,
-                text=mob.display_name,
-                variable=self.mob_var,
-                value=index,
-                command=self._apply_ui_settings,
-            )
-            radio.grid(row=mob_row, column=0, sticky="w")
-            self._mob_radios.append(radio)
-            mob_row += 1
+        self._mob_radio_frame = ttk.Frame(mob_col)
+        self._mob_radio_frame.grid(row=1, column=0, sticky="nw")
+        self._rebuild_mob_radio_buttons()
+
+        drop_frame = ttk.LabelFrame(mob_col, text="Add mob (SPR + ACT)", padding=6)
+        drop_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self._mob_drop_label = tk.Label(
+            drop_frame,
+            text="Drop .spr + .act here\n(or a folder with both)",
+            relief=tk.GROOVE,
+            borderwidth=2,
+            width=28,
+            height=3,
+            justify=tk.CENTER,
+            background="#f0f0f0",
+        )
+        self._mob_drop_label.grid(row=0, column=0, sticky="ew")
+        drop_btns = ttk.Frame(drop_frame)
+        drop_btns.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self._mob_browse_button = ttk.Button(
+            drop_btns,
+            text="Browse…",
+            command=self._browse_mob_assets,
+        )
+        self._mob_browse_button.pack(side=tk.LEFT)
+        self._mob_drop_status = ttk.Label(drop_frame, text="", wraplength=200)
+        self._mob_drop_status.grid(row=2, column=0, sticky="w", pady=(4, 0))
 
         mode_col = ttk.Frame(setup_frame)
         mode_col.grid(row=0, column=1, sticky="nw", padx=(16, 0))
@@ -294,7 +516,12 @@ class MainWindow:
         keys_main.grid(row=0, column=0, sticky="nw")
 
         self.skill_button = self._key_entry(
-            keys_main, "Attack Skill Key:", self.config.skill_button, 0, 0
+            keys_main,
+            "Attack Skill Key:",
+            self.config.skill_button,
+            0,
+            0,
+            capture_key=True,
         )
         self.skill_delay = self._key_entry(
             keys_main,
@@ -305,7 +532,12 @@ class MainWindow:
             width=7,
         )
         self.teleport_button = self._key_entry(
-            keys_main, "Teleport Key:", self.config.teleport_button, 1, 0
+            keys_main,
+            "Teleport Key:",
+            self.config.teleport_button,
+            1,
+            0,
+            capture_key=True,
         )
         self.teleport_delay = self._key_entry(
             keys_main,
@@ -316,13 +548,57 @@ class MainWindow:
             width=7,
         )
         self.save_point_button = self._key_entry(
-            keys_main, "To SavePoint Key:", self.config.save_point_button, 2, 0
+            keys_main,
+            "To SavePoint Key:",
+            self.config.save_point_button,
+            2,
+            0,
+            capture_key=True,
         )
-        self.open_storage_button = self._key_entry(
-            keys_main, "Open Storage Key:", self.config.open_storage_button, 3, 0
+        self.sp_button = self._key_entry(
+            keys_main,
+            "SP Item Key:",
+            self.config.sp_button,
+            3,
+            0,
+            capture_key=True,
         )
+        sit_cell = ttk.Frame(keys_main)
+        sit_cell.grid(row=4, column=0, sticky="w", pady=2)
+        ttk.Label(sit_cell, text="Sit On Low Sp Key:").pack(side=tk.LEFT)
+        self.sit_on_low_sp_button = ttk.Entry(sit_cell, width=6)
+        self.sit_on_low_sp_button.insert(
+            0, self.config.sit_on_low_sp_button or "insert"
+        )
+        self.sit_on_low_sp_button.pack(side=tk.LEFT, padx=(4, 0))
+        self._bind_key_capture(self.sit_on_low_sp_button)
+        self.sit_on_low_sp_var = tk.BooleanVar(value=self.config.sit_on_low_sp)
+        self.sit_on_low_sp_toggle = tk.Button(
+            sit_cell,
+            text="On" if self.config.sit_on_low_sp else "Off",
+            width=4,
+            relief=tk.RAISED,
+            command=self._toggle_sit_on_low_sp,
+        )
+        self.sit_on_low_sp_toggle.pack(side=tk.LEFT, padx=(4, 0))
+        self._refresh_sit_toggle()
+        storage_cell = ttk.Frame(keys_main)
+        storage_cell.grid(row=5, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(storage_cell, text="Open Storage:").pack(side=tk.LEFT)
+        self.open_storage_cog = ttk.Button(
+            storage_cell,
+            text="⚙",
+            width=3,
+            command=self._open_storage_chain_dialog,
+        )
+        self.open_storage_cog.pack(side=tk.LEFT, padx=(4, 0))
+        self.open_storage_summary = ttk.Label(
+            storage_cell,
+            text=format_storage_chain_summary(self.config.open_storage_chain),
+        )
+        self.open_storage_summary.pack(side=tk.LEFT, padx=(6, 0))
         fly_cell = ttk.Frame(keys_main)
-        fly_cell.grid(row=3, column=1, sticky="w", pady=2, padx=(12, 0))
+        fly_cell.grid(row=6, column=0, sticky="w", pady=2)
         self.fly_wings_var = tk.BooleanVar(value=self.config.take_fly_wings)
         fly_check = ttk.Checkbutton(
             fly_cell,
@@ -336,28 +612,25 @@ class MainWindow:
         self.fly_wings_amount.insert(0, str(self.config.fly_wings_amount))
         self.fly_wings_amount.pack(side=tk.LEFT, padx=(4, 0))
         self._bind_setting_entry(self.fly_wings_amount)
-        self.sp_button = self._key_entry(
-            keys_main, "SP Item Key:", self.config.sp_button, 4, 0
+        weight_cell = ttk.Frame(keys_main)
+        weight_cell.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        ttk.Label(weight_cell, text="Items to storage weight:").pack(side=tk.LEFT)
+        # 49 = Off (AHK); 50–90 = active threshold %.
+        initial_weight = max(49, min(90, int(self.config.weight_modifier)))
+        self.storage_weight = tk.IntVar(value=initial_weight)
+        self.storage_weight_scale = ttk.Scale(
+            weight_cell,
+            from_=49,
+            to=90,
+            orient=tk.HORIZONTAL,
+            variable=self.storage_weight,
+            command=self._update_storage_weight_label,
+            length=140,
         )
-        sit_cell = ttk.Frame(keys_main)
-        sit_cell.grid(row=5, column=0, sticky="w", pady=2)
-        ttk.Label(sit_cell, text="Sit On Low Sp Key:").pack(side=tk.LEFT)
-        self.sit_on_low_sp_button = ttk.Entry(sit_cell, width=5)
-        self.sit_on_low_sp_button.insert(
-            0, self.config.sit_on_low_sp_button or "insert"
-        )
-        self.sit_on_low_sp_button.pack(side=tk.LEFT, padx=(4, 0))
-        self._bind_setting_entry(self.sit_on_low_sp_button)
-        self.sit_on_low_sp_var = tk.BooleanVar(value=self.config.sit_on_low_sp)
-        self.sit_on_low_sp_toggle = tk.Button(
-            sit_cell,
-            text="On" if self.config.sit_on_low_sp else "Off",
-            width=4,
-            relief=tk.RAISED,
-            command=self._toggle_sit_on_low_sp,
-        )
-        self.sit_on_low_sp_toggle.pack(side=tk.LEFT, padx=(4, 0))
-        self._refresh_sit_toggle()
+        self.storage_weight_scale.pack(side=tk.LEFT, padx=(6, 0))
+        self.storage_weight_label = ttk.Label(weight_cell, text="")
+        self.storage_weight_label.pack(side=tk.LEFT, padx=(6, 0))
+        self._update_storage_weight_label()
 
         ttk.Separator(keys_frame, orient=tk.VERTICAL).grid(
             row=0, column=1, sticky="ns", padx=10
@@ -384,39 +657,9 @@ class MainWindow:
             self._add_timer_box(timer)
         self._refresh_timer_add_button()
 
-        # ── Hunt Settings ───────────────────────────────────────────
-        hunt_frame = ttk.LabelFrame(main, text="Hunt Settings", padding=8)
-        hunt_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
-        ttk.Label(hunt_frame, text="Items To Kafra when weight is:").grid(
-            row=0, column=0, sticky="w"
-        )
-        self.weight_modifier = tk.IntVar(value=self.config.weight_modifier)
-        self.weight_scale = ttk.Scale(
-            hunt_frame,
-            from_=49,
-            to=90,
-            orient=tk.HORIZONTAL,
-            variable=self.weight_modifier,
-            command=self._update_weight_label,
-        )
-        self.weight_scale.grid(row=0, column=1, sticky="ew", padx=8)
-        self.weight_label = ttk.Label(hunt_frame, text=self._weight_text())
-        self.weight_label.grid(row=0, column=2)
-        self.captcha_var = tk.BooleanVar(value=self.config.detect_captcha)
-        captcha_check = ttk.Checkbutton(
-            hunt_frame,
-            text="Detect Captcha",
-            variable=self.captcha_var,
-            command=self._apply_ui_settings,
-        )
-        captcha_check.grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self._settings_checkbuttons.append(captcha_check)
-
-        hunt_frame.columnconfigure(1, weight=1)
-
         # ── Log (full width, expands with window) ───────────────────
         log_frame = ttk.LabelFrame(main, text="Log", padding=8)
-        log_frame.grid(row=4, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
+        log_frame.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
         log_body = ttk.Frame(log_frame)
         log_body.pack(fill=tk.BOTH, expand=True)
         log_scroll = ttk.Scrollbar(log_body, orient=tk.VERTICAL)
@@ -442,7 +685,7 @@ class MainWindow:
 
         # ── Controls (pinned below log, never clipped) ──────────────
         controls = ttk.Frame(main)
-        controls.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(12, 0))
+        controls.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(12, 0))
         ttk.Label(controls, text="Press F12 to quickly toggle bot").pack()
         button_row = ttk.Frame(controls)
         button_row.pack(pady=8)
@@ -467,8 +710,9 @@ class MainWindow:
         main.columnconfigure(0, weight=1)
         main.columnconfigure(1, weight=1)
         main.columnconfigure(2, weight=1)
-        main.rowconfigure(4, weight=1)
+        main.rowconfigure(3, weight=1)
         self._sync_memory_reading_from_profile()
+        self._update_visual_status_check_visibility()
         self._update_search_label()
         self._schedule_memory_poll()
         self._schedule_status_panel_poll()
@@ -495,6 +739,7 @@ class MainWindow:
         column: int,
         *,
         width: int = 5,
+        capture_key: bool = False,
     ) -> ttk.Entry:
         cell = ttk.Frame(parent)
         cell.grid(
@@ -508,13 +753,52 @@ class MainWindow:
         entry = ttk.Entry(cell, width=width)
         entry.insert(0, value)
         entry.pack(side=tk.LEFT, padx=(4, 0))
-        self._bind_setting_entry(entry)
+        if capture_key:
+            self._bind_key_capture(entry)
+        else:
+            self._bind_setting_entry(entry)
         return entry
 
     def _bind_setting_entry(self, entry: ttk.Entry) -> None:
         """Persist settings when the user finishes editing a text field."""
         entry.bind("<FocusOut>", self._apply_ui_settings)
         entry.bind("<Return>", self._apply_ui_settings)
+
+    def _bind_key_capture(self, entry: ttk.Entry) -> None:
+        """Capture the next key press into the entry (supports F-keys)."""
+        entry.bind("<KeyPress>", self._on_key_capture)
+        entry.bind("<FocusOut>", self._apply_ui_settings)
+
+    def _on_key_capture(self, event: tk.Event) -> str:
+        widget = event.widget
+        if event.keysym in ("BackSpace", "Delete"):
+            widget.delete(0, tk.END)
+            self._apply_ui_settings()
+            return "break"
+        name = keysym_to_key_name(event.keysym)
+        if not name:
+            return "break"
+        widget.delete(0, tk.END)
+        widget.insert(0, name)
+        self._apply_ui_settings()
+        return "break"
+
+    def _refresh_storage_chain_summary(self) -> None:
+        self.open_storage_summary.configure(
+            text=format_storage_chain_summary(self.config.open_storage_chain)
+        )
+
+    def _open_storage_chain_dialog(self) -> None:
+        def _apply(steps: list[KeyChainStep]) -> None:
+            self.config.open_storage_chain = list(steps)
+            self._refresh_storage_chain_summary()
+            self._apply_ui_settings()
+
+        StorageChainDialog(
+            self.root,
+            list(self.config.open_storage_chain),
+            on_apply=_apply,
+        )
 
     def _toggle_sit_on_low_sp(self) -> None:
         self.sit_on_low_sp_var.set(not self.sit_on_low_sp_var.get())
@@ -552,7 +836,7 @@ class MainWindow:
         key_entry = ttk.Entry(box, width=4)
         key_entry.insert(0, timer.button)
         key_entry.grid(row=0, column=1, sticky="w", padx=(2, 0))
-        self._bind_setting_entry(key_entry)
+        self._bind_key_capture(key_entry)
 
         ttk.Label(box, text="s").grid(row=1, column=0, sticky="w", pady=(2, 0))
         delay_entry = ttk.Entry(box, width=4)
@@ -642,10 +926,6 @@ class MainWindow:
     #  UI CALLBACKS (widget value helpers)
     # ══════════════════════════════════════════════════════════════════
 
-    def _weight_text(self) -> str:
-        value = int(self.weight_modifier.get())
-        return "Off" if value == 49 else str(value)
-
     def _update_search_label(self, *_args) -> None:
         cells = int(float(self.search_range.get()))
         px = cells * 64
@@ -653,8 +933,12 @@ class MainWindow:
         self.lifecycle.set_search_range_cells(cells)
         self._apply_ui_settings()
 
-    def _update_weight_label(self, *_args) -> None:
-        self.weight_label.configure(text=self._weight_text())
+    def _update_storage_weight_label(self, *_args) -> None:
+        percent = int(float(self.storage_weight.get()))
+        if percent < 50:
+            self.storage_weight_label.configure(text="Off")
+        else:
+            self.storage_weight_label.configure(text=f"{percent}%")
         self._apply_ui_settings()
 
     def refresh_windows(self) -> None:
@@ -710,14 +994,22 @@ class MainWindow:
     def on_client_changed(self, *_event) -> None:
         self.config.client_profile = self.client_combo.get()
         self._sync_memory_reading_from_profile()
+        self._update_visual_status_check_visibility()
         self._memory_poller.reset()
         memory = "on" if self.config.use_memory_reading else "off"
-        source = "memory" if self.config.use_memory_reading else "status panel"
+        if self.config.use_memory_reading:
+            source = "memory"
+        elif self.config.visual_status_reading:
+            source = "status panel"
+        else:
+            source = "off"
         self.log_pipe.log(
             f"Client profile: {self.config.client_profile} "
             f"(memory reading {memory}, stats from {source})"
         )
         self._refresh_memory_stats()
+        if self._is_generic_profile() and not self.visual_status_var.get():
+            self._disable_visual_status_ui()
         self._refresh_status_panel_overlay()
         if self._settings_apply_enabled:
             self.config.save()
@@ -725,6 +1017,34 @@ class MainWindow:
     def _sync_memory_reading_from_profile(self) -> None:
         """Memory reading follows the profile: Generic off, server profiles on."""
         self.config.use_memory_reading = memory_reading_enabled(self.client_combo.get())
+
+    def _is_generic_profile(self) -> bool:
+        return self.client_combo.get().strip().lower() == "generic"
+
+    def _visual_status_reading_active(self) -> bool:
+        """True when Generic should OCR Basic Info for SP/Weight."""
+        return self._is_generic_profile() and bool(self.visual_status_var.get())
+
+    def _update_visual_status_check_visibility(self) -> None:
+        if self._is_generic_profile():
+            self.visual_status_check.grid()
+        else:
+            self.visual_status_check.grid_remove()
+
+    def _on_visual_status_toggled(self) -> None:
+        self.config.visual_status_reading = bool(self.visual_status_var.get())
+        if not self.config.visual_status_reading:
+            self._disable_visual_status_ui()
+            self.log_pipe.log("Visual SP/Weight reading: off")
+        else:
+            self.log_pipe.log("Visual SP/Weight reading: on")
+        self._refresh_status_panel_overlay()
+        self._apply_ui_settings()
+
+    def _disable_visual_status_ui(self) -> None:
+        self._reset_status_panel_tracking()
+        self._status_panel_overlay.hide()
+        self._clear_vision_stats()
 
     @staticmethod
     def _format_pair(current: int | None, maximum: int | None) -> str:
@@ -811,7 +1131,7 @@ class MainWindow:
         self._memory_poll_after_id = self.root.after(MEMORY_POLL_MS, _tick)
 
     def _clear_status_panel_ui(self) -> None:
-        if not self.config.use_memory_reading:
+        if self._visual_status_reading_active():
             self._clear_vision_stats()
 
     def _reset_status_panel_tracking(self) -> None:
@@ -857,7 +1177,7 @@ class MainWindow:
             previous
         ) == self._status_panel_numbers(values):
             return
-        if not self.config.use_memory_reading:
+        if self._visual_status_reading_active():
             self._apply_status_panel_stats(values)
 
     def _refresh_status_panel_overlay(self) -> int:
@@ -870,6 +1190,10 @@ class MainWindow:
         Overlay stays visible (no hide/show flash). Both states use the same
         slot under the panel so header/digit ROIs stay uncovered.
         """
+        if self._is_generic_profile() and not self.visual_status_var.get():
+            self._status_panel_overlay.hide()
+            return STATUS_PANEL_SEARCH_MS
+
         hwnd = self.config.window_id
         if not hwnd or not window_exists(hwnd) or not is_window_active(hwnd):
             self._status_panel_overlay.hide()
@@ -948,9 +1272,8 @@ class MainWindow:
         self.config.selected_monster = self.mob_var.get()
         self.config.hunt_mode = self.hunt_mode_var.get()
         self.config.search_range = int(float(self.search_range.get()))
-        self.config.weight_modifier = int(float(self.weight_modifier.get()))
+        self.config.visual_status_reading = bool(self.visual_status_var.get())
         self.config.take_fly_wings = self.fly_wings_var.get()
-        self.config.detect_captcha = self.captcha_var.get()
         self.config.hunt_log_overlay = self.overlay_var.get()
         self.config.skill_button = self.skill_button.get().strip()
         raw = self.skill_delay.get().strip()
@@ -959,7 +1282,8 @@ class MainWindow:
         raw_tp = self.teleport_delay.get().strip()
         self.config.teleport_delay = int(raw_tp) if raw_tp else 800
         self.config.save_point_button = self.save_point_button.get().strip()
-        self.config.open_storage_button = self.open_storage_button.get().strip()
+        # open_storage_chain is edited via the cog dialog
+        self.config.weight_modifier = int(float(self.storage_weight.get()))
         self.config.skill_timers = self._collect_skill_timers_from_ui()
         self.config.sp_button = self.sp_button.get().strip()
         self.config.sit_on_low_sp_button = self.sit_on_low_sp_button.get().strip()
@@ -1017,6 +1341,7 @@ class MainWindow:
             messagebox.showerror(
                 "Error",
                 "VIIPER is not ready yet.\nPlease wait for initialization to finish.",
+                parent=self.root,
             )
             return
         self.on_window_selected()
@@ -1025,6 +1350,7 @@ class MainWindow:
                 "Error",
                 "Please select a valid game window first.\n"
                 "Choose the game in the dropdown and click Refresh if needed.",
+                parent=self.root,
             )
             return
 
@@ -1035,19 +1361,27 @@ class MainWindow:
             messagebox.showerror(
                 "Invalid Settings",
                 f"Fix numeric fields before starting:\n\n{exc}",
+                parent=self.root,
             )
             return
 
+        from datetime import datetime
+
+        # Fresh session id each start so restart logs are not mixed with the
+        # previous hunt and file handlers stay unambiguous on Windows.
+        session_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         if not self.lifecycle.start(
             config_snapshot=self.config,
-            session_id=self.session.session_id,
+            session_id=session_id,
         ):
             messagebox.showerror(
                 "Error",
-                "Bot is already starting or running.",
+                "Bot is already starting or running.\n"
+                "If it is stuck on Starting, press Stop once, then Start again.",
+                parent=self.root,
             )
             return
-        self.log_pipe.log("Starting hunt runtime...")
+        self.log_pipe.log(f"Starting hunt runtime... session={session_id}")
 
     def stop_bot(self) -> None:
         """Stop the bot (delegates to lifecycle)."""
@@ -1090,6 +1424,7 @@ class MainWindow:
             self.status_indicator.configure(text=" START ", bg="#1565c0")
             self._lock_ui(True)
         elif state == BotState.PAUSED:
+            self.bot_button.configure(text="Stop Bot")
             self.bot_status.configure(text="Paused (TAB)")
             self.status_indicator.configure(text=" PAUSED ", bg="#f9a825")
             self.continue_button.configure(state=tk.NORMAL)
@@ -1112,9 +1447,12 @@ class MainWindow:
         self.client_combo.configure(state=readonly)
         self.hunt_mode_combo.configure(state=readonly)
         self.search_scale.configure(state=state)
-        self.weight_scale.configure(state=state)
+        self.storage_weight_scale.configure(state=state)
         for radio in self._mob_radios:
             radio.configure(state=state)
+        if hasattr(self, "_mob_browse_button"):
+            browse_state = tk.DISABLED if (locked or self._mob_import_busy) else tk.NORMAL
+            self._mob_browse_button.configure(state=browse_state)
         for check in self._settings_checkbuttons:
             check.configure(state=state)
         for widget in (
@@ -1123,7 +1461,7 @@ class MainWindow:
             self.teleport_button,
             self.teleport_delay,
             self.save_point_button,
-            self.open_storage_button,
+            self.open_storage_cog,
             self.sp_button,
             self.sit_on_low_sp_button,
             self.sit_on_low_sp_toggle,

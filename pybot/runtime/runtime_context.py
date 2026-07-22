@@ -37,8 +37,11 @@ class HuntRuntimeContext:
     # Set for the whole claim → teleport key → settle delay window so the
     # 1s discovery cadence cannot scan mid-teleport and falsely confirm clear.
     discovery_suspend: threading.Event = field(default_factory=threading.Event)
-    # Set while regenerating SP (sit) — hunting + skill timers idle until clear.
+    # Set while regenerating SP (sit) or running storage UI — hunt/timers idle.
     sitting_event: threading.Event = field(default_factory=threading.Event)
+    _exclusive_lock: threading.Lock = field(default_factory=threading.Lock)
+    # AHK ``wingcount``: remaining fly wings; restocked by GetFlyWings.
+    wingcount: int = 0
 
     def should_run_workers(self) -> bool:
         return (
@@ -58,16 +61,46 @@ class HuntRuntimeContext:
         self.pause_event.set()
         self.resume_gate.clear()
 
+    def try_begin_exclusive_ops(self) -> bool:
+        """Acquire exclusive hunt pause (sit or storage). False if already held."""
+        with self._exclusive_lock:
+            if self.sitting_event.is_set():
+                return False
+            self.sitting_event.set()
+            self.resume_gate.clear()
+            return True
+
+    def begin_exclusive_ops(self) -> bool:
+        """Wait until exclusive ops can start. False if stopped first."""
+        while not self.stop_event.is_set():
+            if self.try_begin_exclusive_ops():
+                return True
+            self.stop_event.wait(WORKER_POLL_INTERVAL_S)
+        return False
+
+    def end_exclusive_ops(self) -> None:
+        """Release exclusive hunt pause."""
+        with self._exclusive_lock:
+            self.sitting_event.clear()
+            if not self.pause_event.is_set() and not self.stop_event.is_set():
+                self.resume_gate.set()
+
     def begin_sit_regen(self) -> None:
         """Pause hunting/timers for SP regeneration (independent of user pause)."""
-        self.sitting_event.set()
-        self.resume_gate.clear()
+        self.begin_exclusive_ops()
 
     def end_sit_regen(self) -> None:
         """Resume hunting/timers after sit regen completes."""
-        self.sitting_event.clear()
-        if not self.pause_event.is_set() and not self.stop_event.is_set():
-            self.resume_gate.set()
+        self.end_exclusive_ops()
+
+    def note_teleport_for_wings(self) -> None:
+        """AHK Teleport: decrement wing counter when Take Fly Wings is on."""
+        if (
+            self.config.open_storage_steps
+            and self.config.take_fly_wings
+            and self.wingcount > 0
+        ):
+            self.wingcount -= 1
 
     def is_stopped(self) -> bool:
         return self.stop_event.is_set()

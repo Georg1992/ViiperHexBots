@@ -1,7 +1,7 @@
 """Sit when SP is low; pause hunting (and timers) until SP recovers.
 
 Before sitting: teleport until a discovery scan sees no living mobs, idle 1s,
-then press sit. After SP recovers, stand and resume hunt.
+then press sit. After SP recovers, stand, wait 500ms, then resume hunt/timers.
 
 Each sit teleport clears tracking (same as hunt-mode teleport) so workers
 resume against the new screen only.
@@ -21,6 +21,7 @@ from pybot.runtime.constants import (
     SIT_LOW_SP_RATIO,
     SIT_RESUME_SP_RATIO,
     SIT_SP_POLL_INTERVAL_S,
+    SIT_STAND_RESUME_DELAY_S,
 )
 from pybot.runtime.detection.discovery_filter import filter_scan_candidates
 from pybot.runtime.input.input_backend import InputBackend
@@ -114,10 +115,12 @@ class SitOnLowSpWorker:
                 ratio = self._sp_ratio()
                 if ratio is not None and ratio >= SIT_RESUME_SP_RATIO:
                     ctx.logger.behavior(
-                        f"[SIT] SP recovered ratio={ratio:.1%} — standing, resume hunt"
+                        f"[SIT] SP recovered ratio={ratio:.1%} — standing, "
+                        f"wait {SIT_STAND_RESUME_DELAY_S * 1000:.0f}ms then resume"
                     )
                     self._input.teleport_key(sit_scan)
                     stood_up = True
+                    ctx.wait_unless_stopped(SIT_STAND_RESUME_DELAY_S)
                     return
                 ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
 

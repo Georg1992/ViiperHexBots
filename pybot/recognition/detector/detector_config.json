@@ -6,7 +6,6 @@
   "gateRefUniqueIoU": 0.50,
   "minSilhouetteRecall": 0.45,
   "minSilhouettePrecision": 0.71,
-  "minSilhouetteJaccard": 0.40,
   "discoveryHeatmapDownscale": 2,
   "discoveryHeatmapDownscaleMinSide": 800,
   "usePaletteDiversity": true,
