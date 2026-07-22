@@ -42,6 +42,8 @@ class HuntRuntimeConfig:
     teleport_duration_ms: int
     validation_enabled: bool
     control_file: Path | None
+    creamy_tp_button: str = ""
+    creamy_tp_scan_code: int = 0
     skill_timers: tuple[SkillTimerRuntime, ...] = ()
     save_point_button: str = ""
     save_point_scan_code: int = 0
@@ -57,6 +59,17 @@ class HuntRuntimeConfig:
     sit_on_low_sp_scan_code: int = 0
     client_profile: str = "Generic"
     visual_status_reading: bool = True
+
+    def active_teleport_scan_code(self) -> int:
+        """Teleport key for the current mob (Creamy uses Creamy TP Key)."""
+        if self.mob_name.casefold() == "creamy":
+            return self.creamy_tp_scan_code
+        return self.teleport_scan_code
+
+    def active_teleport_button(self) -> str:
+        if self.mob_name.casefold() == "creamy":
+            return self.creamy_tp_button
+        return self.teleport_button
 
 
 def resolve_mob_name(
@@ -135,6 +148,8 @@ def hunt_runtime_config_from_settings(
         skill_scan_code=key_name_to_scan_code(settings.skill_button),
         teleport_button=settings.teleport_button,
         teleport_scan_code=key_name_to_scan_code(settings.teleport_button),
+        creamy_tp_button=settings.creamy_tp_button,
+        creamy_tp_scan_code=key_name_to_scan_code(settings.creamy_tp_button),
         search_range_cells=settings.search_range or DEFAULT_SEARCH_RANGE_CELLS,
         cell_size_px=CELL_SIZE_PX,
         discovery_interval_ms=HUNT_DISCOVERY_INTERVAL_MS,

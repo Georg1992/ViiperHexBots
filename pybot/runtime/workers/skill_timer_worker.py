@@ -3,6 +3,7 @@
 Timers press the key only (no mouse click), same as teleport_key.
 Paused while sitting/user-paused; on hunt resume they re-arm and fire again
 with ``SKILL_TIMER_STAGGER_MS`` between presses when several are due.
+Storage sessions do not pause timers (combat only), so keys are not re-armed.
 """
 
 from __future__ import annotations

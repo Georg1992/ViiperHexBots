@@ -531,14 +531,20 @@ class MainWindow:
             1,
             width=7,
         )
-        self.teleport_button = self._key_entry(
-            keys_main,
-            "Teleport Key:",
-            self.config.teleport_button,
-            1,
-            0,
-            capture_key=True,
-        )
+        tp_row = ttk.Frame(keys_main)
+        tp_row.grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Label(tp_row, text="Teleport Key:").pack(side=tk.LEFT)
+        self.teleport_button = ttk.Entry(tp_row, width=6)
+        self.teleport_button.insert(0, self.config.teleport_button)
+        self.teleport_button.pack(side=tk.LEFT, padx=(4, 0))
+        self._bind_key_capture(self.teleport_button)
+        self._bind_setting_entry(self.teleport_button)
+        ttk.Label(tp_row, text="Creamy TP Key:").pack(side=tk.LEFT, padx=(12, 0))
+        self.creamy_tp_button = ttk.Entry(tp_row, width=6)
+        self.creamy_tp_button.insert(0, self.config.creamy_tp_button)
+        self.creamy_tp_button.pack(side=tk.LEFT, padx=(4, 0))
+        self._bind_key_capture(self.creamy_tp_button)
+        self._bind_setting_entry(self.creamy_tp_button)
         self.teleport_delay = self._key_entry(
             keys_main,
             "Teleport Delay:",
@@ -1279,6 +1285,7 @@ class MainWindow:
         raw = self.skill_delay.get().strip()
         self.config.skill_delay = int(raw) if raw else 500
         self.config.teleport_button = self.teleport_button.get().strip()
+        self.config.creamy_tp_button = self.creamy_tp_button.get().strip()
         raw_tp = self.teleport_delay.get().strip()
         self.config.teleport_delay = int(raw_tp) if raw_tp else 800
         self.config.save_point_button = self.save_point_button.get().strip()
@@ -1459,6 +1466,7 @@ class MainWindow:
             self.skill_button,
             self.skill_delay,
             self.teleport_button,
+            self.creamy_tp_button,
             self.teleport_delay,
             self.save_point_button,
             self.open_storage_cog,

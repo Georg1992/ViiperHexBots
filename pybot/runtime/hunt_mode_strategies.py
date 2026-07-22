@@ -212,7 +212,7 @@ class TeleportStrategy(HuntModeStrategy):
             self._log_no_target("wait", area.reason, context)
             return False
 
-        if not ctx.config.teleport_scan_code:
+        if not ctx.active_teleport_scan_code():
             self._log_no_target("wait", "no_teleport_key", context)
             return False
 
@@ -232,13 +232,15 @@ class TeleportStrategy(HuntModeStrategy):
         ctx.validation.log_area_reset("pre_teleport")
         self.on_area_reset()
 
+        tp_button = ctx.active_teleport_button()
         ctx.logger.behavior(
-            f"[MODE] teleport area_clear tracks={area.alive_count}"
+            f"[MODE] teleport area_clear tracks={area.alive_count} "
+            f"key={tp_button!r} wingsExhausted={ctx.fly_wings_exhausted}"
         )
         self._log_no_target("teleport", "area_clear", context)
 
         try:
-            self._input.teleport_key(ctx.config.teleport_scan_code)
+            self._input.teleport_key(ctx.active_teleport_scan_code())
         except Exception as exc:
             ctx.logger.behavior(
                 f"[MODE] teleport input error: {exc}"

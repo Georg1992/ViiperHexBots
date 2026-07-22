@@ -24,8 +24,8 @@ class AttackLoop:
         self._ctx.logger.behavior("[ATTACK] loop started")
         while not self._ctx.is_stopped():
             try:
-                if not self._ctx.should_run_workers():
-                    self._ctx.wait_while_stopped_or_paused(WORKER_POLL_INTERVAL_S)
+                if not self._ctx.should_run_combat():
+                    self._ctx.wait_while_combat_blocked(WORKER_POLL_INTERVAL_S)
                     continue
 
                 tick = monotonic_ms()

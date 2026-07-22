@@ -41,6 +41,12 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.config.teleport_scan_code = 16
         self.config.teleport_duration_ms = 10
         self.config.cell_size_px = 64
+        self.config.creamy_tp_button = "w"
+        self.config.creamy_tp_scan_code = 17
+        self.config.take_fly_wings = False
+        self.config.open_storage_steps = ()
+        self.config.active_teleport_scan_code.return_value = 16
+        self.config.active_teleport_button.return_value = "q"
         self.ctx = HuntRuntimeContext(
             config=self.config,
             logger=MagicMock(),

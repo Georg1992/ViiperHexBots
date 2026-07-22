@@ -165,16 +165,25 @@ def create_runtime_deps(
     if any(t.scan_code and t.interval_ms > 0 for t in ctx.config.skill_timers):
         skill_timer = SkillTimerWorker(ctx, input_backend)
         workers.append(("skill_timer", skill_timer.run))
+    if (
+        ctx.config.take_fly_wings
+        and ctx.config.open_storage_steps
+        and ctx.config.creamy_tp_scan_code <= 0
+    ):
+        raise ValueError(
+            "Take Fly Wings is On but Creamy TP Key is unset. "
+            "Creamy TP is required when storage has no more fly wings."
+        )
     if ctx.config.sit_on_low_sp:
         if ctx.config.sit_on_low_sp_scan_code <= 0:
             raise ValueError(
                 "Sit On Low Sp is On but the sit key is invalid "
                 f"(button={ctx.config.sit_on_low_sp_button!r})."
             )
-        if ctx.config.teleport_scan_code <= 0:
+        if ctx.config.active_teleport_scan_code() <= 0:
             raise ValueError(
                 "Sit On Low Sp is On but the teleport key is invalid "
-                f"(button={ctx.config.teleport_button!r}). "
+                f"(button={ctx.config.active_teleport_button()!r}). "
                 "Teleport is required to clear mobs before sitting."
             )
         profile = load_client_profile(ctx.config.client_profile)
@@ -212,7 +221,9 @@ def create_runtime_deps(
                 raise ValueError(
                     "Open Storage on Generic requires Visual SP/Weight reading enabled."
                 )
-        storage_worker = ItemsToStorageWorker(ctx, input_backend, memory)
+        storage_worker = ItemsToStorageWorker(
+            ctx, input_backend, memory, hunt_mode=hunt_mode
+        )
         workers.append(("storage", storage_worker.run))
 
     return RuntimeDependencies(
@@ -305,7 +316,8 @@ class HuntRuntime:
         )
         ctx.logger.behavior(
             f"[MODE] active={ctx.config.hunt_mode} "
-            f"skill={ctx.config.skill_button} teleport={ctx.config.teleport_button}"
+            f"skill={ctx.config.skill_button} "
+            f"teleport={ctx.active_teleport_button()!r}"
         )
 
         threads = [

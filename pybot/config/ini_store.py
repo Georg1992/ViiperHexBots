@@ -138,6 +138,7 @@ def load_settings(path: Path | None = None) -> AppSettings:
         skill_button=parser.get("Keybindings", "SkillButton", fallback="e"),
         skill_delay=parser.getint("Keybindings", "SkillDelay", fallback=500),
         teleport_button=parser.get("Keybindings", "TeleportButton", fallback="q"),
+        creamy_tp_button=parser.get("Keybindings", "CreamyTpButton", fallback=""),
         teleport_delay=parser.getint("Keybindings", "TeleportDelay", fallback=800),
         save_point_button=parser.get("Keybindings", "SavePointButton", fallback=""),
         sp_button=parser.get("Keybindings", "SPButton", fallback=""),
@@ -204,6 +205,7 @@ def save_settings(settings: AppSettings) -> None:
     parser["Keybindings"]["SkillButton"] = settings.skill_button
     parser["Keybindings"]["SkillDelay"] = str(settings.skill_delay)
     parser["Keybindings"]["TeleportButton"] = settings.teleport_button
+    parser["Keybindings"]["CreamyTpButton"] = settings.creamy_tp_button
     parser["Keybindings"]["TeleportDelay"] = str(settings.teleport_delay)
     parser["Keybindings"]["SavePointButton"] = settings.save_point_button
     parser["Keybindings"]["SPButton"] = settings.sp_button
