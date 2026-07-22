@@ -66,6 +66,8 @@ CHAR_NAME_MAX_BYTES = 32
 @dataclass(frozen=True)
 class MemorySnapshot:
     char_name: str | None = None
+    hp: int | None = None
+    hp_max: int | None = None
     sp: int | None = None
     sp_max: int | None = None
     weight: int | None = None
@@ -197,10 +199,10 @@ def _client_rect_screen(hwnd: int) -> tuple[int, int, int, int] | None:
 
 
 def read_vision_snapshot(hwnd: int) -> MemorySnapshot:
-    """Read SP/Weight from the open Basic Info panel into a ``MemorySnapshot``.
+    """Read HP/SP/Weight from the open Basic Info panel into a ``MemorySnapshot``.
 
-    Same fields as memory reading (``sp``, ``sp_max``, ``weight``, ``weight_max``).
-    ``char_name`` is not available from vision.
+    HP is vision-only (never filled from process memory). ``char_name`` is
+    not available from vision.
     """
     from pybot.recognition.capture import capture_region
     from pybot.recognition.ui.status_panel import read_status_panel
@@ -218,6 +220,8 @@ def read_vision_snapshot(hwnd: int) -> MemorySnapshot:
     if values is None:
         return MemorySnapshot(error="status_panel_unreadable")
     return MemorySnapshot(
+        hp=values.hp,
+        hp_max=values.hp_max,
         sp=values.sp,
         sp_max=values.sp_max,
         weight=values.weight,

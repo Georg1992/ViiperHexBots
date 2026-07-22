@@ -58,7 +58,6 @@ class HuntRuntimeConfig:
     sit_on_low_sp_button: str = "insert"
     sit_on_low_sp_scan_code: int = 0
     client_profile: str = "Generic"
-    visual_status_reading: bool = True
 
     def active_teleport_scan_code(self) -> int:
         """Teleport key for the current mob (Creamy uses Creamy TP Key)."""
@@ -169,7 +168,6 @@ def hunt_runtime_config_from_settings(
         sit_on_low_sp_button=settings.sit_on_low_sp_button,
         sit_on_low_sp_scan_code=key_name_to_scan_code(settings.sit_on_low_sp_button),
         client_profile=settings.client_profile,
-        visual_status_reading=settings.visual_status_reading,
     )
 
 

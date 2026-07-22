@@ -196,10 +196,6 @@ def create_runtime_deps(
                 "Sit On Low Sp requires a client profile with currentSpAddress "
                 f"and maxSpAddress (profile={ctx.config.client_profile!r})."
             )
-        if not has_sp_memory and not ctx.config.visual_status_reading:
-            raise ValueError(
-                "Sit On Low Sp on Generic requires Visual SP/Weight reading enabled."
-            )
         sit_worker = SitOnLowSpWorker(
             ctx, input_backend, memory, hunt_mode=hunt_mode
         )
@@ -216,10 +212,6 @@ def create_runtime_deps(
                 raise ValueError(
                     "Open Storage requires a client profile with currentWeightAddress "
                     f"and totalWeightAddress (profile={ctx.config.client_profile!r})."
-                )
-            if not has_weight_memory and not ctx.config.visual_status_reading:
-                raise ValueError(
-                    "Open Storage on Generic requires Visual SP/Weight reading enabled."
                 )
         storage_worker = ItemsToStorageWorker(
             ctx, input_backend, memory, hunt_mode=hunt_mode

@@ -1,4 +1,4 @@
-"""Status panel SP/Weight parsing tests."""
+"""Status panel HP/SP/Weight parsing tests."""
 
 from __future__ import annotations
 
@@ -18,19 +18,19 @@ from pybot.recognition.ui.status_panel import (
 )
 
 FIXTURES_DIR = PROJECT_ROOT / "tests"
-# (filename, expected_sp, expected_sp_max, expected_weight, expected_weight_max)
-FIXTURE_CASES: tuple[tuple[str, int, int, int, int], ...] = (
-    ("StatusPanel.png", 1229, 1229, 587, 2630),
-    ("StatusPanel2.png", 430, 430, 280, 2730),
-    ("StatusPanel3.png", 430, 430, 280, 2730),
-    ("StatusPanel4.png", 360, 430, 305, 2730),
-    ("StatusPanel5.png", 365, 430, 305, 2730),
-    ("W9.png", 430, 430, 297, 2730),
-    ("W4.png", 430, 430, 294, 2730),
-    ("W1.png", 430, 430, 291, 2730),
-    ("RedWeight.png", 107, 435, 2457, 2730),
+# (filename, hp, hp_max, sp, sp_max, weight, weight_max)
+FIXTURE_CASES: tuple[tuple[str, int, int, int, int, int, int], ...] = (
+    ("StatusPanel.png", 850, 3187, 1229, 1229, 587, 2630),
+    ("StatusPanel2.png", 2260, 3348, 430, 430, 280, 2730),
+    ("StatusPanel3.png", 1387, 3348, 430, 430, 280, 2730),
+    ("StatusPanel4.png", 3348, 3348, 360, 430, 305, 2730),
+    ("StatusPanel5.png", 3348, 3348, 365, 430, 305, 2730),
+    ("W9.png", 3348, 3348, 430, 430, 297, 2730),
+    ("W4.png", 3348, 3348, 430, 430, 294, 2730),
+    ("W1.png", 3348, 3348, 430, 430, 291, 2730),
+    ("RedWeight.png", 3424, 3424, 107, 435, 2457, 2730),
     # Trailing ``t`` of ``Weight`` sits in the ROI; must not become a leading 1.
-    ("FalseWeight.png", 249, 485, 427, 2730),
+    ("FalseWeight.png", 874, 3424, 249, 485, 427, 2730),
 )
 
 
@@ -81,21 +81,23 @@ class StatusPanelTests(unittest.TestCase):
         blanked[:30, :] = (40, 40, 40)
         self.assertIsNone(find_status_panel(blanked))
 
-    def test_reads_sp_weight_from_fixtures(self) -> None:
-        for name, sp, sp_max, weight, weight_max in FIXTURE_CASES:
+    def test_reads_hp_sp_weight_from_fixtures(self) -> None:
+        for name, hp, hp_max, sp, sp_max, weight, weight_max in FIXTURE_CASES:
             with self.subTest(fixture=name):
                 frame = self._load(name)
                 values = read_status_panel(frame)
                 self.assertIsNotNone(values, f"failed to read {name}")
                 assert values is not None
+                self.assertEqual(values.hp, hp)
+                self.assertEqual(values.hp_max, hp_max)
                 self.assertEqual(values.sp, sp)
                 self.assertEqual(values.sp_max, sp_max)
                 self.assertEqual(values.weight, weight)
                 self.assertEqual(values.weight_max, weight_max)
                 self.assertEqual(values.panel_origin, (0, 0))
 
-    def test_reads_currents_with_cached_max(self) -> None:
-        for name, sp, sp_max, weight, weight_max in FIXTURE_CASES:
+    def test_currents_reuse_hp_without_hp_ocr(self) -> None:
+        for name, hp, hp_max, sp, sp_max, weight, weight_max in FIXTURE_CASES:
             with self.subTest(fixture=name):
                 frame = self._load(name)
                 origin = find_status_panel(frame)
@@ -104,11 +106,15 @@ class StatusPanelTests(unittest.TestCase):
                 values = read_status_panel_currents(
                     frame,
                     origin,
+                    hp=hp,
+                    hp_max=hp_max,
                     sp_max=sp_max,
                     weight_max=weight_max,
                 )
                 self.assertIsNotNone(values)
                 assert values is not None
+                self.assertEqual(values.hp, hp)
+                self.assertEqual(values.hp_max, hp_max)
                 self.assertEqual(values.sp, sp)
                 self.assertEqual(values.sp_max, sp_max)
                 self.assertEqual(values.weight, weight)
@@ -116,7 +122,7 @@ class StatusPanelTests(unittest.TestCase):
 
     def test_reads_survive_origin_jitter(self) -> None:
         """Header match can land ±1–2px off; ROI padding must absorb that."""
-        for name, sp, sp_max, weight, weight_max in FIXTURE_CASES:
+        for name, hp, hp_max, sp, sp_max, weight, weight_max in FIXTURE_CASES:
             frame = self._load(name)
             origin = find_status_panel(frame)
             self.assertIsNotNone(origin)
@@ -129,6 +135,8 @@ class StatusPanelTests(unittest.TestCase):
                         )
                         self.assertIsNotNone(values)
                         assert values is not None
+                        self.assertEqual(values.hp, hp)
+                        self.assertEqual(values.hp_max, hp_max)
                         self.assertEqual(values.sp, sp)
                         self.assertEqual(values.sp_max, sp_max)
                         self.assertEqual(values.weight, weight)
@@ -136,7 +144,7 @@ class StatusPanelTests(unittest.TestCase):
 
     def test_sp_survives_bar_fill_change(self) -> None:
         """SP digits stay readable when the bar is full, empty, or split."""
-        for name, sp, sp_max, weight, weight_max in FIXTURE_CASES:
+        for name, hp, hp_max, sp, sp_max, weight, weight_max in FIXTURE_CASES:
             frame = self._load(name)
             origin = find_status_panel(frame)
             self.assertIsNotNone(origin)
@@ -151,6 +159,8 @@ class StatusPanelTests(unittest.TestCase):
                     values = read_status_panel(altered, origin=origin)
                     self.assertIsNotNone(values)
                     assert values is not None
+                    self.assertEqual(values.hp, hp)
+                    self.assertEqual(values.hp_max, hp_max)
                     self.assertEqual(values.sp, sp)
                     self.assertEqual(values.sp_max, sp_max)
                     self.assertEqual(values.weight, weight)
@@ -179,12 +189,15 @@ class StatusPanelTests(unittest.TestCase):
                     values = read_status_panel_currents(
                         altered,
                         origin,
+                        hp=2260,
+                        hp_max=3348,
                         sp_max=430,
                         weight_max=2730,
                     )
                     self.assertIsNotNone(values)
                     assert values is not None
                     self.assertEqual(values.sp, 430)
+                    self.assertEqual(values.hp, 2260)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
-"""Click-through overlay for Basic Info SP/Weight vision.
+"""Click-through overlay for Basic Info HP/SP/Weight vision.
 
 Two states, same on-screen slot under Basic Info:
 - Panel missing: prompt to open Basic Info
-- Panel found: show current SP / Weight
+- Panel found: show current HP / SP / Weight
 
 Stays visible during capture so the UI does not flash. Placement is below
 the panel so the header and digit ROIs stay uncovered.
@@ -49,7 +49,7 @@ COLOR_WARN = 0x00FFD966
 LINE_H = 16
 PAD_X = 6
 PAD_Y = 4
-VALUES_OVERLAY_H = 40
+VALUES_OVERLAY_H = 56
 MESSAGE_OVERLAY_W = 340
 PANEL_MISSING_LINES = (
     "Please Open Your Status Panel",
@@ -102,7 +102,7 @@ class _State:
     width: int = PANEL_WIDTH
     height: int = VALUES_OVERLAY_H
     warn: bool = False
-    lines: tuple[str, ...] = ("SP —", "Weight —")
+    lines: tuple[str, ...] = ("HP —", "SP —", "Weight —")
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -299,6 +299,7 @@ def update(
         width=PANEL_WIDTH,
         height=VALUES_OVERLAY_H,
         lines=(
+            f"HP {values.hp}/{values.hp_max}",
             f"SP {values.sp}/{values.sp_max}",
             f"Weight {_format_weight(values)}",
         ),
@@ -312,7 +313,7 @@ def show_panel_missing(
     client_top: int,
     panel_origin: tuple[int, int] = (0, 0),
 ) -> None:
-    """Prompt to open Basic Info — same slot as the SP/Weight overlay."""
+    """Prompt to open Basic Info — same slot as the HP/SP/Weight overlay."""
     height = PAD_Y * 2 + LINE_H * len(PANEL_MISSING_LINES)
     _show_under_panel(
         client_left=client_left,

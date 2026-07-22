@@ -40,8 +40,6 @@ class AppSettings:
 
     client_profile: str = "Generic"
     use_memory_reading: bool = False
-    # Generic only: OCR Basic Info for SP/Weight (ignored when memory reading is on).
-    visual_status_reading: bool = True
 
     selected_monster: int = 1
 

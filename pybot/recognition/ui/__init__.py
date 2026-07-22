@@ -1,5 +1,6 @@
-"""UI recognition helpers (status panel, inventory)."""
+"""UI recognition helpers (status panel, inventory, character pose)."""
 
+from pybot.recognition.ui.character_pose import CharacterPose, measure_center_pose
 from pybot.recognition.ui.inventory import (
     InventoryPanelHit,
     InventoryUiError,
@@ -21,6 +22,7 @@ from pybot.recognition.ui.status_panel import (
 )
 
 __all__ = [
+    "CharacterPose",
     "InventoryPanelHit",
     "InventoryUiError",
     "StatusPanelValues",
@@ -32,6 +34,7 @@ __all__ = [
     "find_wings_in_use_grid",
     "is_inventory_open",
     "is_storage_open",
+    "measure_center_pose",
     "read_status_panel",
     "read_status_panel_currents",
     "require_inventory_panel",

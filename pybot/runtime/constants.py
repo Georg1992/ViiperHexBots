@@ -17,6 +17,11 @@ SIT_SP_POLL_INTERVAL_S = 0.25
 SIT_IDLE_BEFORE_SIT_S = 1.0
 # After stand keypress, delay before hunt/timers resume.
 SIT_STAND_RESUME_DELAY_S = 0.5
+# Wait for sit animation before measuring the sitting sprite box.
+SIT_POSE_SETTLE_S = 0.4
+# SP ticks roughly every 2–3s while sitting; no increase for this long → stall.
+SIT_SP_STALL_S = 5.0
+
 # Minimum gap between distinct skill-timer key presses when several are due.
 SKILL_TIMER_STAGGER_MS = 500
 # Storage / fly-wings worker (AHK WeightModifier gate is active at >= 50).
@@ -59,6 +64,8 @@ __all__ = [
     "SIT_SP_POLL_INTERVAL_S",
     "SIT_IDLE_BEFORE_SIT_S",
     "SIT_STAND_RESUME_DELAY_S",
+    "SIT_POSE_SETTLE_S",
+    "SIT_SP_STALL_S",
     "SKILL_TIMER_STAGGER_MS",
     "STORAGE_WEIGHT_POLL_INTERVAL_S",
     "STORAGE_WEIGHT_MODIFIER_MIN",

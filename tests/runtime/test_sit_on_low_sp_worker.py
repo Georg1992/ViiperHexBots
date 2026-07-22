@@ -62,6 +62,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.capture.is_valid.return_value = True
         self.ctx.capture.get_hunt_roi.return_value = MagicMock(x=0, y=0, w=100, h=100)
         self.ctx.capture.capture_roi.return_value = MagicMock(size=1)
+        # No client frame → pose calibration skipped; attack path stays off.
+        self.ctx.capture.capture_client.return_value = None
         self.input = MagicMock(spec=ShadowInputBackend)
         self.memory = MemoryAddresses(current_sp=1, max_sp=2)
         self.hunt_mode = MagicMock()
@@ -184,6 +186,40 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
 
         self.ctx.overlay.set_track_positions.assert_called_with([])
         self.ctx.overlay.set_track_stats.assert_any_call(track_count=0, alive_count=0)
+
+    def test_sit_session_returns_danger_on_sp_drop_and_near_objects(self) -> None:
+        from unittest.mock import patch
+
+        from pybot.recognition.danger import DangerReport
+        from pybot.recognition.ui.character_pose import CharacterPose
+
+        poller = _FakePoller([0.40, 0.40, 0.30])
+        worker = SitOnLowSpWorker(
+            self.ctx,
+            self.input,
+            self.memory,
+            hunt_mode=self.hunt_mode,
+            poller=poller,
+        )
+        self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
+        stand = CharacterPose(body_height=99, fg_count=2500)
+        sit = CharacterPose(body_height=60, fg_count=2200)
+        poses = iter([stand, sit, stand])
+
+        with patch.object(worker, "_measure_pose", side_effect=lambda: next(poses, sit)):
+            with patch.object(
+                worker,
+                "_assess_danger",
+                return_value=DangerReport(
+                    in_danger=True,
+                    reasons=("near_objects:1",),
+                    near_object_count=1,
+                ),
+            ):
+                outcome = worker._sit_session()
+
+        self.assertEqual(outcome, "danger")
+        self.assertGreaterEqual(self.input.teleport_key.call_count, 1)
 
 
 if __name__ == "__main__":

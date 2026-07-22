@@ -118,10 +118,6 @@ def load_settings(path: Path | None = None) -> AppSettings:
         use_memory_reading=memory_reading_enabled(
             parser.get("Client", "Profile", fallback="Generic")
         ),
-        visual_status_reading=parser.getint(
-            "Client", "VisualStatusReading", fallback=1
-        )
-        == 1,
         selected_monster=parser.getint("MonsterSettings", "SelectedMonster", fallback=1),
         search_range=parser.getint("Settings", "SearchRange", fallback=16),
         hunt_mode=parser.get("Settings", "HuntMode", fallback="teleport"),
@@ -171,9 +167,7 @@ def save_settings(settings: AppSettings) -> None:
     parser["Client"]["UseMemoryReading"] = (
         "1" if memory_reading_enabled(settings.client_profile) else "0"
     )
-    parser["Client"]["VisualStatusReading"] = (
-        "1" if settings.visual_status_reading else "0"
-    )
+    parser["Client"].pop("VisualStatusReading", None)
 
     _ensure_section(parser, "MonsterSettings")
     parser["MonsterSettings"]["SelectedMonster"] = str(settings.selected_monster)

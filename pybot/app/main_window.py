@@ -58,7 +58,7 @@ STATUS_PANEL_SEARCH_MS = 1000
 # Panel locked — read current SP / Weight only.
 STATUS_PANEL_VALUE_MS = 200
 # Re-parse max SP / Weight this often while the panel stays locked.
-STATUS_PANEL_MAX_REFRESH_S = 5.0
+STATUS_PANEL_MAX_REFRESH_S = 1.0
 
 
 class MainWindow:
@@ -406,24 +406,15 @@ class MainWindow:
         self.client_combo.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 4))
         self.client_combo.bind("<<ComboboxSelected>>", self.on_client_changed)
 
-        self.visual_status_var = tk.BooleanVar(
-            value=self.config.visual_status_reading
-        )
-        self.visual_status_check = ttk.Checkbutton(
-            profile_col,
-            text="Visual SP / Weight",
-            variable=self.visual_status_var,
-            command=self._on_visual_status_toggled,
-        )
-        self.visual_status_check.grid(row=2, column=0, columnspan=2, sticky="w")
-        self._settings_checkbuttons.append(self.visual_status_check)
-
         ttk.Separator(profile_col, orient=tk.HORIZONTAL).grid(
-            row=3, column=0, columnspan=2, sticky="ew", pady=(6, 6)
+            row=2, column=0, columnspan=2, sticky="ew", pady=(6, 6)
         )
-        ttk.Label(profile_col, text="Name:").grid(row=4, column=0, sticky="w")
+        ttk.Label(profile_col, text="Name:").grid(row=3, column=0, sticky="w")
         self.memory_name = ttk.Label(profile_col, text="—")
-        self.memory_name.grid(row=4, column=1, sticky="w", padx=(8, 0))
+        self.memory_name.grid(row=3, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(profile_col, text="HP:").grid(row=4, column=0, sticky="w", pady=(2, 0))
+        self.memory_hp = ttk.Label(profile_col, text="—")
+        self.memory_hp.grid(row=4, column=1, sticky="w", padx=(8, 0), pady=(2, 0))
         ttk.Label(profile_col, text="SP:").grid(row=5, column=0, sticky="w", pady=(2, 0))
         self.memory_sp = ttk.Label(profile_col, text="—")
         self.memory_sp.grid(row=5, column=1, sticky="w", padx=(8, 0), pady=(2, 0))
@@ -718,7 +709,6 @@ class MainWindow:
         main.columnconfigure(2, weight=1)
         main.rowconfigure(3, weight=1)
         self._sync_memory_reading_from_profile()
-        self._update_visual_status_check_visibility()
         self._update_search_label()
         self._schedule_memory_poll()
         self._schedule_status_panel_poll()
@@ -1000,22 +990,17 @@ class MainWindow:
     def on_client_changed(self, *_event) -> None:
         self.config.client_profile = self.client_combo.get()
         self._sync_memory_reading_from_profile()
-        self._update_visual_status_check_visibility()
         self._memory_poller.reset()
         memory = "on" if self.config.use_memory_reading else "off"
         if self.config.use_memory_reading:
-            source = "memory"
-        elif self.config.visual_status_reading:
-            source = "status panel"
+            source = "memory (HP from status panel)"
         else:
-            source = "off"
+            source = "status panel"
         self.log_pipe.log(
             f"Client profile: {self.config.client_profile} "
             f"(memory reading {memory}, stats from {source})"
         )
         self._refresh_memory_stats()
-        if self._is_generic_profile() and not self.visual_status_var.get():
-            self._disable_visual_status_ui()
         self._refresh_status_panel_overlay()
         if self._settings_apply_enabled:
             self.config.save()
@@ -1024,33 +1009,9 @@ class MainWindow:
         """Memory reading follows the profile: Generic off, server profiles on."""
         self.config.use_memory_reading = memory_reading_enabled(self.client_combo.get())
 
-    def _is_generic_profile(self) -> bool:
-        return self.client_combo.get().strip().lower() == "generic"
-
-    def _visual_status_reading_active(self) -> bool:
-        """True when Generic should OCR Basic Info for SP/Weight."""
-        return self._is_generic_profile() and bool(self.visual_status_var.get())
-
-    def _update_visual_status_check_visibility(self) -> None:
-        if self._is_generic_profile():
-            self.visual_status_check.grid()
-        else:
-            self.visual_status_check.grid_remove()
-
-    def _on_visual_status_toggled(self) -> None:
-        self.config.visual_status_reading = bool(self.visual_status_var.get())
-        if not self.config.visual_status_reading:
-            self._disable_visual_status_ui()
-            self.log_pipe.log("Visual SP/Weight reading: off")
-        else:
-            self.log_pipe.log("Visual SP/Weight reading: on")
-        self._refresh_status_panel_overlay()
-        self._apply_ui_settings()
-
-    def _disable_visual_status_ui(self) -> None:
-        self._reset_status_panel_tracking()
-        self._status_panel_overlay.hide()
-        self._clear_vision_stats()
+    def _panel_owns_sp_weight(self) -> bool:
+        """True when SP/Weight come from Basic Info OCR (Generic / no memory)."""
+        return not self.config.use_memory_reading
 
     @staticmethod
     def _format_pair(current: int | None, maximum: int | None) -> str:
@@ -1068,9 +1029,11 @@ class MainWindow:
         self.memory_weight.configure(text=placeholder)
 
     def _clear_vision_stats(self, placeholder: str = "—") -> None:
-        """Clear SP/Weight when Generic (vision) cannot read the panel."""
-        self.memory_sp.configure(text=placeholder)
-        self.memory_weight.configure(text=placeholder)
+        """Clear vision-backed labels (HP always; SP/Weight when panel owns them)."""
+        self.memory_hp.configure(text=placeholder)
+        if self._panel_owns_sp_weight():
+            self.memory_sp.configure(text=placeholder)
+            self.memory_weight.configure(text=placeholder)
 
     def _apply_memory_snapshot(self, snap: MemorySnapshot) -> None:
         if not snap.ok:
@@ -1083,17 +1046,15 @@ class MainWindow:
         self.memory_weight.configure(
             text=self._format_pair(snap.weight, snap.weight_max)
         )
+        # HP is vision-only — never overwrite from memory polls.
 
     def _apply_status_panel_stats(self, values: StatusPanelValues) -> None:
-        """Map vision reads onto the same MemorySnapshot fields as memory."""
-        self._apply_memory_snapshot(
-            MemorySnapshot(
-                sp=values.sp,
-                sp_max=values.sp_max,
-                weight=values.weight,
-                weight_max=values.weight_max,
-                ok=True,
-            )
+        """Apply vision SP/Weight when memory is off (HP set in commit)."""
+        if not self._panel_owns_sp_weight():
+            return
+        self.memory_sp.configure(text=self._format_pair(values.sp, values.sp_max))
+        self.memory_weight.configure(
+            text=self._format_pair(values.weight, values.weight_max)
         )
 
     def _refresh_memory_stats(self) -> None:
@@ -1137,8 +1098,8 @@ class MainWindow:
         self._memory_poll_after_id = self.root.after(MEMORY_POLL_MS, _tick)
 
     def _clear_status_panel_ui(self) -> None:
-        if self._visual_status_reading_active():
-            self._clear_vision_stats()
+        """Panel missing/unreadable — drop HP; drop SP/Weight only if vision owns them."""
+        self._clear_vision_stats()
 
     def _reset_status_panel_tracking(self) -> None:
         self._status_panel_confirmed = None
@@ -1147,8 +1108,15 @@ class MainWindow:
     @staticmethod
     def _status_panel_numbers(
         values: StatusPanelValues,
-    ) -> tuple[int, int, int | None, int | None]:
-        return (values.sp, values.sp_max, values.weight, values.weight_max)
+    ) -> tuple[int, int, int, int, int | None, int | None]:
+        return (
+            values.hp,
+            values.hp_max,
+            values.sp,
+            values.sp_max,
+            values.weight,
+            values.weight_max,
+        )
 
     def _show_panel_missing(
         self,
@@ -1179,27 +1147,28 @@ class MainWindow:
         self._status_panel_overlay.update(
             values, client_left=client_left, client_top=client_top
         )
+        # HP is vision-only — always mirror into the bot UI from panel OCR.
+        self.memory_hp.configure(text=self._format_pair(values.hp, values.hp_max))
         if previous is not None and self._status_panel_numbers(
             previous
         ) == self._status_panel_numbers(values):
             return
-        if self._visual_status_reading_active():
+        if self._panel_owns_sp_weight():
             self._apply_status_panel_stats(values)
 
     def _refresh_status_panel_overlay(self) -> int:
         """Each tick: find Basic Info header, then read or show open-panel.
 
-        - Header missing → clear state, show "Please Open Your Status Panel"
-        - Header found → read SP/Weight and show values under the panel
-        - Currents every tick; full current+max every ``STATUS_PANEL_MAX_REFRESH_S``
+        HP is always OCR'd on the full-refresh cadence (including when memory
+        supplies SP/Weight). SP/Weight currents still refresh every tick.
+
+        - Header missing → clear vision-backed labels, show open-panel prompt
+        - Header found → read values and show under the panel
+        - Full current+max (incl. HP OCR) every ``STATUS_PANEL_MAX_REFRESH_S``
 
         Overlay stays visible (no hide/show flash). Both states use the same
         slot under the panel so header/digit ROIs stay uncovered.
         """
-        if self._is_generic_profile() and not self.visual_status_var.get():
-            self._status_panel_overlay.hide()
-            return STATUS_PANEL_SEARCH_MS
-
         hwnd = self.config.window_id
         if not hwnd or not window_exists(hwnd) or not is_window_active(hwnd):
             self._status_panel_overlay.hide()
@@ -1236,6 +1205,8 @@ class MainWindow:
             values = read_status_panel_currents(
                 frame,
                 origin,
+                hp=confirmed.hp,
+                hp_max=confirmed.hp_max,
                 sp_max=confirmed.sp_max,
                 weight_max=confirmed.weight_max,
             )
@@ -1278,7 +1249,6 @@ class MainWindow:
         self.config.selected_monster = self.mob_var.get()
         self.config.hunt_mode = self.hunt_mode_var.get()
         self.config.search_range = int(float(self.search_range.get()))
-        self.config.visual_status_reading = bool(self.visual_status_var.get())
         self.config.take_fly_wings = self.fly_wings_var.get()
         self.config.hunt_log_overlay = self.overlay_var.get()
         self.config.skill_button = self.skill_button.get().strip()

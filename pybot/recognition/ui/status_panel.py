@@ -1,7 +1,10 @@
-"""Locate the Basic Info status panel and parse SP / Weight.
+"""Locate the Basic Info status panel and parse HP / SP / Weight.
 
 Uses OpenCV template matching for the panel header, fixed relative ROIs for
 value bands, and RO digit-glyph templates under ``assets/UI/digits/``.
+
+HP is vision-only (never memory): full reads parse it; currents-only reuse
+the last HP so OCR of the HP band stays sparse (Gepard-sensitive).
 
 Callers should treat ``find_status_panel`` as the source of truth for whether
 Basic Info is open. Currents-only reads reuse a previously parsed max.
@@ -41,15 +44,19 @@ PANEL_HEIGHT = 143
 
 # Value ROIs relative to the full Basic Info panel origin (x, y, w, h).
 # Padded so ±2px header/origin jitter still keeps full glyph height/width.
+# HP sits directly above SP on the same digit column.
+HP_ROI = (50, 45, 110, 18)
+SP_ROI = (50, 66, 110, 16)
 # Weight starts after the ``Weight :`` colon so label ink is not classified.
 # Left edge includes 4-digit current weight (heavy/red); keep clear of colon under ±2 jitter.
-SP_ROI = (50, 66, 110, 16)
 # Width 66 keeps 4-digit current+max under ±2px origin jitter (e.g. FalseWeight).
 WEIGHT_ROI = (85, 116, 66, 14)
 
 
 @dataclass(frozen=True)
 class StatusPanelValues:
+    hp: int
+    hp_max: int
     sp: int
     sp_max: int
     weight: int | None
@@ -107,16 +114,21 @@ def read_status_panel(
     *,
     origin: tuple[int, int] | None = None,
 ) -> StatusPanelValues | None:
-    """Find (unless *origin* given) and parse current+max SP/Weight."""
+    """Find (unless *origin* given) and parse current+max HP/SP/Weight."""
     if origin is None:
         origin = find_status_panel(frame_bgr)
     if origin is None:
+        return None
+    hp = _parse_pair(frame_bgr, origin, HP_ROI, min_width=2)
+    if hp is None:
         return None
     sp = _parse_pair(frame_bgr, origin, SP_ROI, min_width=2)
     if sp is None:
         return None
     weight = _parse_pair(frame_bgr, origin, WEIGHT_ROI, min_width=3)
     return StatusPanelValues(
+        hp=hp[0],
+        hp_max=hp[1],
         sp=sp[0],
         sp_max=sp[1],
         weight=None if weight is None else weight[0],
@@ -129,19 +141,24 @@ def read_status_panel_currents(
     frame_bgr: np.ndarray,
     origin: tuple[int, int],
     *,
+    hp: int,
+    hp_max: int,
     sp_max: int,
     weight_max: int | None,
 ) -> StatusPanelValues | None:
-    """Parse only current SP / Weight at a known panel origin.
+    """Parse current SP / Weight; reuse last HP (no HP-band OCR).
 
-    Digits after ``/`` are ignored. *sp_max* / *weight_max* come from a
-    previous full read.
+    Digits after ``/`` are ignored for SP/Weight. *hp* / *hp_max* /
+    *sp_max* / *weight_max* come from a previous full read so the HP
+    ROI is not sampled on the fast poll (Gepard-sensitive).
     """
     sp = _parse_current(frame_bgr, origin, SP_ROI, min_width=2)
     if sp is None:
         return None
     weight = _parse_current(frame_bgr, origin, WEIGHT_ROI, min_width=3)
     return StatusPanelValues(
+        hp=hp,
+        hp_max=hp_max,
         sp=sp,
         sp_max=sp_max,
         weight=weight,
