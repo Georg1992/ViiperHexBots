@@ -9,7 +9,7 @@ depends on the full god object.
 
 Pause matrix (see ``runtime_context`` module docstring):
   sit     → discovery, tracking, attack, timers idle
-  storage → attack idle only; timers keep running
+  storage → discovery, tracking, attack idle; timers keep running
   sit ↔ storage mutually exclusive
 """
 
@@ -73,7 +73,8 @@ class TrackingWorkerContext(
     Protocol,
 ):
     """Hunt runtime subset consumed by TrackingWorker."""
-    pass
+
+    def should_run_tracking(self) -> bool: ...
 
 
 class DiscoveryWorkerContext(
@@ -89,7 +90,8 @@ class DiscoveryWorkerContext(
     Protocol,
 ):
     """Hunt runtime subset consumed by DiscoveryWorker."""
-    pass
+
+    def should_run_discovery(self) -> bool: ...
 
 
 class AttackLoopContext(
@@ -113,6 +115,14 @@ class SkillTimerWorkerContext(CanStop, CanLog, HasConfig, Protocol):
 
     Uses ``should_run_workers`` (via CanStop): idle during sit/pause, keep
     firing during storage so timer schedules are not re-armed mid-session.
+    """
+    pass
+
+
+class HpRestoreWorkerContext(CanStop, CanLog, HasConfig, CanCapture, Protocol):
+    """Hunt runtime subset consumed by HpRestoreWorker.
+
+    Idle during sit/pause (``should_run_workers``); keeps running during storage.
     """
     pass
 

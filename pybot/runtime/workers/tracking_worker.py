@@ -35,11 +35,14 @@ class TrackingWorker:
         ctx.logger.behavior("[TRACK] worker started")
         while not ctx.stop_event.is_set():
             try:
-                if ctx.should_run_workers():
+                if ctx.should_run_tracking():
                     self._tick()
                     ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
-                else:
+                elif not ctx.should_run_workers():
                     ctx.wait_while_stopped_or_paused(WORKER_POLL_INTERVAL_S)
+                else:
+                    # Storage UI: idle without scanning.
+                    ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
             except Exception:
                 ctx.logger.behavior(f"[TRACK] tick error:\n{traceback.format_exc()}")
 

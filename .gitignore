@@ -19,4 +19,5 @@ input-bridge/embed/viiper.exe
 nul
 scripts/test_overlay.py
 _debug_vis/
+_debug_*/
 _commit_msg.txt

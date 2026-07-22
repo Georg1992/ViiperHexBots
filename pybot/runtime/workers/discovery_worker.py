@@ -2,8 +2,9 @@
 
 Schedule: every ``discovery_interval_ms`` (default 1s), and immediately when
 ``discovery_wake`` is set after a teleport settle delay. While
-``discovery_suspend`` is set (claim → teleport key → delay), this worker does
-not scan — only waits for the post-delay wake.
+``discovery_suspend`` is set (claim → teleport key → delay), or while
+storage UI is open (``should_run_discovery`` false), this worker does
+not scan — only waits for the post-delay wake / storage end.
 
 One discovery pass (same frame):
 1. Living heatmap → silhouette scan for new / matched mobs (living refs only).
@@ -46,15 +47,19 @@ class DiscoveryWorker:
         interval_s = ctx.config.discovery_interval_ms / 1000.0
         while not ctx.stop_event.is_set():
             try:
-                if not ctx.should_run_workers():
-                    ctx.wait_while_stopped_or_paused(interval_s)
+                if not ctx.should_run_discovery():
+                    # Sit/pause: wait on resume gate. Storage: poll until UI done.
+                    if not ctx.should_run_workers():
+                        ctx.wait_while_stopped_or_paused(interval_s)
+                    else:
+                        ctx.stop_event.wait(interval_s)
                     continue
                 if ctx.discovery_suspend.is_set():
                     # Teleport in flight: ignore the 1s cadence; wait for wake.
                     if not self._wait_for_discovery_wake(interval_s):
                         continue
                     ctx.discovery_wake.clear()
-                    if ctx.discovery_suspend.is_set() or not ctx.should_run_workers():
+                    if ctx.discovery_suspend.is_set() or not ctx.should_run_discovery():
                         continue
                     self._scan()
                     continue
@@ -62,7 +67,7 @@ class DiscoveryWorker:
                 woke = self._wait_for_discovery_wake(interval_s)
                 if woke:
                     ctx.discovery_wake.clear()
-                if not ctx.should_run_workers() or ctx.discovery_suspend.is_set():
+                if not ctx.should_run_discovery() or ctx.discovery_suspend.is_set():
                     continue
                 self._scan()
             except Exception:
@@ -72,7 +77,7 @@ class DiscoveryWorker:
         ctx = self._ctx
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline and not ctx.stop_event.is_set():
-            if not ctx.should_run_workers():
+            if not ctx.should_run_discovery():
                 return False
             remaining = deadline - time.monotonic()
             if remaining <= 0:

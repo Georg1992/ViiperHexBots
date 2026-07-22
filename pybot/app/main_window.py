@@ -552,16 +552,33 @@ class MainWindow:
             0,
             capture_key=True,
         )
+        hp_cell = ttk.Frame(keys_main)
+        hp_cell.grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Label(hp_cell, text="HP Restore Key:").pack(side=tk.LEFT)
+        self.hp_button = ttk.Entry(hp_cell, width=6)
+        self.hp_button.insert(0, self.config.hp_button)
+        self.hp_button.pack(side=tk.LEFT, padx=(4, 0))
+        self._bind_key_capture(self.hp_button)
+        self._bind_setting_entry(self.hp_button)
+        self.heal_skill_var = tk.BooleanVar(value=self.config.heal_skill)
+        heal_check = ttk.Checkbutton(
+            hp_cell,
+            text="Heal skill",
+            variable=self.heal_skill_var,
+            command=self._apply_ui_settings,
+        )
+        heal_check.pack(side=tk.LEFT, padx=(8, 0))
+        self._settings_checkbuttons.append(heal_check)
         self.sp_button = self._key_entry(
             keys_main,
             "SP Item Key:",
             self.config.sp_button,
-            3,
+            4,
             0,
             capture_key=True,
         )
         sit_cell = ttk.Frame(keys_main)
-        sit_cell.grid(row=4, column=0, sticky="w", pady=2)
+        sit_cell.grid(row=5, column=0, sticky="w", pady=2)
         ttk.Label(sit_cell, text="Sit On Low Sp Key:").pack(side=tk.LEFT)
         self.sit_on_low_sp_button = ttk.Entry(sit_cell, width=6)
         self.sit_on_low_sp_button.insert(
@@ -580,7 +597,7 @@ class MainWindow:
         self.sit_on_low_sp_toggle.pack(side=tk.LEFT, padx=(4, 0))
         self._refresh_sit_toggle()
         storage_cell = ttk.Frame(keys_main)
-        storage_cell.grid(row=5, column=0, columnspan=2, sticky="w", pady=2)
+        storage_cell.grid(row=6, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Label(storage_cell, text="Open Storage:").pack(side=tk.LEFT)
         self.open_storage_cog = ttk.Button(
             storage_cell,
@@ -595,7 +612,7 @@ class MainWindow:
         )
         self.open_storage_summary.pack(side=tk.LEFT, padx=(6, 0))
         fly_cell = ttk.Frame(keys_main)
-        fly_cell.grid(row=6, column=0, sticky="w", pady=2)
+        fly_cell.grid(row=7, column=0, sticky="w", pady=2)
         self.fly_wings_var = tk.BooleanVar(value=self.config.take_fly_wings)
         fly_check = ttk.Checkbutton(
             fly_cell,
@@ -610,7 +627,7 @@ class MainWindow:
         self.fly_wings_amount.pack(side=tk.LEFT, padx=(4, 0))
         self._bind_setting_entry(self.fly_wings_amount)
         weight_cell = ttk.Frame(keys_main)
-        weight_cell.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        weight_cell.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         ttk.Label(weight_cell, text="Items to storage weight:").pack(side=tk.LEFT)
         # 49 = Off (AHK); 50–90 = active threshold %.
         initial_weight = max(49, min(90, int(self.config.weight_modifier)))
@@ -1262,6 +1279,8 @@ class MainWindow:
         # open_storage_chain is edited via the cog dialog
         self.config.weight_modifier = int(float(self.storage_weight.get()))
         self.config.skill_timers = self._collect_skill_timers_from_ui()
+        self.config.hp_button = self.hp_button.get().strip()
+        self.config.heal_skill = self.heal_skill_var.get()
         self.config.sp_button = self.sp_button.get().strip()
         self.config.sit_on_low_sp_button = self.sit_on_low_sp_button.get().strip()
         self.config.sit_on_low_sp = self.sit_on_low_sp_var.get()
@@ -1440,6 +1459,7 @@ class MainWindow:
             self.teleport_delay,
             self.save_point_button,
             self.open_storage_cog,
+            self.hp_button,
             self.sp_button,
             self.sit_on_low_sp_button,
             self.sit_on_low_sp_toggle,

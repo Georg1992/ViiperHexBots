@@ -87,25 +87,31 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         living = RawDetection(
             x=10, y=10, confidence=0.9, candidate_scale=1.0, living=True
         )
+        # Clear: mob → empty; post-idle recheck: empty; extra empties for safety.
+        empty = DiscoveryScanResult(
+            ok=True,
+            fail_reason="",
+            raw_count=0,
+            accepted_count=0,
+            detections=[],
+            duration_ms=1,
+            elapsed_s=0.001,
+        )
+        living_scan = DiscoveryScanResult(
+            ok=True,
+            fail_reason="",
+            raw_count=1,
+            accepted_count=1,
+            detections=[living],
+            duration_ms=1,
+            elapsed_s=0.001,
+        )
         self.ctx.detector.discover_frame.side_effect = [
-            DiscoveryScanResult(
-                ok=True,
-                fail_reason="",
-                raw_count=1,
-                accepted_count=1,
-                detections=[living],
-                duration_ms=1,
-                elapsed_s=0.001,
-            ),
-            DiscoveryScanResult(
-                ok=True,
-                fail_reason="",
-                raw_count=0,
-                accepted_count=0,
-                detections=[],
-                duration_ms=1,
-                elapsed_s=0.001,
-            ),
+            living_scan,
+            empty,
+            empty,
+            empty,
+            empty,
         ]
         worker = SitOnLowSpWorker(
             self.ctx,
@@ -127,7 +133,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
 
         self.assertGreaterEqual(self.input.teleport_key.call_count, 3)
         # First press clears area with teleport key; sit/stand use sit key.
-        self.assertEqual(self.input.teleport_key.call_args_list[0].args[0], 16)
+        self.assertEqual(self.input.teleport_key.call_args_list[0].args[0], 17)
         sit_presses = [
             c.args[0] for c in self.input.teleport_key.call_args_list if c.args[0] == 82
         ]
@@ -147,25 +153,31 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         living = RawDetection(
             x=10, y=10, confidence=0.9, candidate_scale=1.0, living=True
         )
+        # Clear: mob → empty; post-idle recheck: empty; extra empties for safety.
+        empty = DiscoveryScanResult(
+            ok=True,
+            fail_reason="",
+            raw_count=0,
+            accepted_count=0,
+            detections=[],
+            duration_ms=1,
+            elapsed_s=0.001,
+        )
+        living_scan = DiscoveryScanResult(
+            ok=True,
+            fail_reason="",
+            raw_count=1,
+            accepted_count=1,
+            detections=[living],
+            duration_ms=1,
+            elapsed_s=0.001,
+        )
         self.ctx.detector.discover_frame.side_effect = [
-            DiscoveryScanResult(
-                ok=True,
-                fail_reason="",
-                raw_count=1,
-                accepted_count=1,
-                detections=[living],
-                duration_ms=1,
-                elapsed_s=0.001,
-            ),
-            DiscoveryScanResult(
-                ok=True,
-                fail_reason="",
-                raw_count=0,
-                accepted_count=0,
-                detections=[],
-                duration_ms=1,
-                elapsed_s=0.001,
-            ),
+            living_scan,
+            empty,
+            empty,
+            empty,
+            empty,
         ]
         worker = SitOnLowSpWorker(
             self.ctx,
@@ -207,19 +219,74 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         poses = iter([stand, sit, stand])
 
         with patch.object(worker, "_measure_pose", side_effect=lambda: next(poses, sit)):
-            with patch.object(
-                worker,
-                "_assess_danger",
-                return_value=DangerReport(
-                    in_danger=True,
-                    reasons=("near_objects:1",),
-                    near_object_count=1,
-                ),
-            ):
-                outcome = worker._sit_session()
+            with patch.object(worker, "_capture_client", return_value=object()):
+                with patch.object(worker, "_read_hp", return_value=1000):
+                    with patch.object(
+                        worker,
+                        "_assess_danger",
+                        return_value=DangerReport(
+                            in_danger=True,
+                            reasons=("near_objects:1",),
+                            near_object_count=1,
+                        ),
+                    ):
+                        outcome = worker._sit_session()
 
         self.assertEqual(outcome, "danger")
         self.assertGreaterEqual(self.input.teleport_key.call_count, 1)
+
+    def test_sit_session_returns_danger_on_hp_drop(self) -> None:
+        from unittest.mock import patch
+
+        from pybot.recognition.danger import DangerReport
+        from pybot.recognition.ui.character_pose import CharacterPose
+
+        # Steady SP mid-regen; danger comes from HP drop only.
+        poller = _FakePoller([0.40, 0.40, 0.40, 0.40])
+        worker = SitOnLowSpWorker(
+            self.ctx,
+            self.input,
+            self.memory,
+            hunt_mode=self.hunt_mode,
+            poller=poller,
+        )
+        self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
+        stand = CharacterPose(body_height=99, fg_count=2500)
+        sit = CharacterPose(body_height=60, fg_count=2200)
+        poses = iter([stand, sit, stand])
+        hp_values = iter([1000, 900])
+
+        def fake_assess(frame, *, hp=None, previous_hp=None):
+            del frame
+            if (
+                hp is not None
+                and previous_hp is not None
+                and hp < previous_hp
+            ):
+                return DangerReport(
+                    in_danger=True,
+                    reasons=(f"hp_drop:{previous_hp}->{hp}",),
+                    near_object_count=0,
+                )
+            return DangerReport(in_danger=False, reasons=(), near_object_count=0)
+
+        with patch(
+            "pybot.runtime.workers.sit_on_low_sp_worker.SIT_HP_POLL_S",
+            0.0,
+        ):
+            with patch.object(
+                worker, "_measure_pose", side_effect=lambda: next(poses, sit)
+            ):
+                with patch.object(worker, "_capture_client", return_value=object()):
+                    with patch.object(
+                        worker, "_read_hp", side_effect=lambda _f: next(hp_values)
+                    ):
+                        with patch.object(
+                            worker, "_assess_danger", side_effect=fake_assess
+                        ):
+                            outcome = worker._sit_session()
+
+        self.assertEqual(outcome, "danger")
 
 
 if __name__ == "__main__":

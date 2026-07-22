@@ -21,6 +21,13 @@ SIT_STAND_RESUME_DELAY_S = 0.5
 SIT_POSE_SETTLE_S = 0.4
 # SP ticks roughly every 2–3s while sitting; no increase for this long → stall.
 SIT_SP_STALL_S = 5.0
+# How often to OCR HP while sitting (vision-only; Gepard-sensitive).
+SIT_HP_POLL_S = 1.0
+# Press HP Restore Key when vision HP/max is below this (item path).
+HP_RESTORE_RATIO = 0.5
+# Vision HP poll / min gap between HP Restore Key presses.
+HP_RESTORE_POLL_S = 1.0
+HP_RESTORE_COOLDOWN_S = 1.0
 
 # Minimum gap between distinct skill-timer key presses when several are due.
 SKILL_TIMER_STAGGER_MS = 500
@@ -48,6 +55,12 @@ STORAGE_INV_OPEN_POLL_S = 0.1
 # Shared open/closed menu validation timeout (inventory + storage).
 STORAGE_MENU_TIMEOUT_S = 2.0
 STORAGE_MENU_POLL_S = 0.1
+# After inventory/storage open, close, or tab switch — UI needs time to draw.
+STORAGE_UI_SETTLE_S = 0.1
+# After moving the cursor off UI before a template capture.
+STORAGE_CURSOR_CLEAR_S = 0.05
+# Abort restock and force-close menus when vision HP falls below this ratio.
+STORAGE_CRITICAL_HP_RATIO = HP_RESTORE_RATIO
 
 __all__ = [
     "HUNT_DISCOVERY_INTERVAL_MS",
@@ -66,6 +79,10 @@ __all__ = [
     "SIT_STAND_RESUME_DELAY_S",
     "SIT_POSE_SETTLE_S",
     "SIT_SP_STALL_S",
+    "SIT_HP_POLL_S",
+    "HP_RESTORE_RATIO",
+    "HP_RESTORE_POLL_S",
+    "HP_RESTORE_COOLDOWN_S",
     "SKILL_TIMER_STAGGER_MS",
     "STORAGE_WEIGHT_POLL_INTERVAL_S",
     "STORAGE_WEIGHT_MODIFIER_MIN",
@@ -81,4 +98,7 @@ __all__ = [
     "STORAGE_INV_OPEN_POLL_S",
     "STORAGE_MENU_TIMEOUT_S",
     "STORAGE_MENU_POLL_S",
+    "STORAGE_UI_SETTLE_S",
+    "STORAGE_CURSOR_CLEAR_S",
+    "STORAGE_CRITICAL_HP_RATIO",
 ]

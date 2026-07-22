@@ -63,6 +63,8 @@ class AppSettings:
     creamy_tp_button: str = ""
     teleport_delay: int = 800
     save_point_button: str = ""
+    hp_button: str = ""
+    heal_skill: bool = False
     sp_button: str = ""
     open_storage_chain: list[KeyChainStep] = field(default_factory=list)
     skill_timers: list[SkillTimerSetting] = field(default_factory=list)

@@ -111,6 +111,7 @@ class DiscoveryWorkerPauseTests(unittest.TestCase):
         ctx.discovery_suspend = threading.Event()
         ctx.resume_gate = threading.Event()
         ctx.should_run_workers.return_value = False
+        ctx.should_run_discovery.return_value = False
         ctx.config.discovery_interval_ms = 1000
         ctx.logger = MagicMock()
 

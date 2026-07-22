@@ -137,6 +137,8 @@ def load_settings(path: Path | None = None) -> AppSettings:
         creamy_tp_button=parser.get("Keybindings", "CreamyTpButton", fallback=""),
         teleport_delay=parser.getint("Keybindings", "TeleportDelay", fallback=800),
         save_point_button=parser.get("Keybindings", "SavePointButton", fallback=""),
+        hp_button=parser.get("Keybindings", "HPButton", fallback=""),
+        heal_skill=parser.getint("Keybindings", "HealSkill", fallback=0) == 1,
         sp_button=parser.get("Keybindings", "SPButton", fallback=""),
         open_storage_chain=_load_open_storage_chain(parser),
         skill_timers=_load_skill_timers(parser),
@@ -202,6 +204,8 @@ def save_settings(settings: AppSettings) -> None:
     parser["Keybindings"]["CreamyTpButton"] = settings.creamy_tp_button
     parser["Keybindings"]["TeleportDelay"] = str(settings.teleport_delay)
     parser["Keybindings"]["SavePointButton"] = settings.save_point_button
+    parser["Keybindings"]["HPButton"] = settings.hp_button
+    parser["Keybindings"]["HealSkill"] = "1" if settings.heal_skill else "0"
     parser["Keybindings"]["SPButton"] = settings.sp_button
     parser["Keybindings"]["OpenStorageChain"] = _save_open_storage_chain(
         settings.open_storage_chain

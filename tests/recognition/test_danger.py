@@ -67,6 +67,23 @@ class DangerNearObjectsTests(unittest.TestCase):
         near = count_near_objects(img, cell_size_px=64, near_cells=1.5)
         self.assertEqual(near.count, 0)
 
+    def test_hp_drop_is_danger(self) -> None:
+        img = cv2.imread(str(_TESTS / "sit1.png"), cv2.IMREAD_COLOR)
+        self.assertIsNotNone(img)
+        assert img is not None
+        report = assess_danger(img, cell_size_px=64, hp=900, previous_hp=1000)
+        self.assertTrue(report.in_danger)
+        self.assertTrue(report.hp_dropped)
+        self.assertTrue(any(r.startswith("hp_drop:") for r in report.reasons))
+
+    def test_stable_hp_alone_is_not_danger(self) -> None:
+        img = cv2.imread(str(_TESTS / "sit1.png"), cv2.IMREAD_COLOR)
+        self.assertIsNotNone(img)
+        assert img is not None
+        report = assess_danger(img, cell_size_px=64, hp=1000, previous_hp=1000)
+        self.assertFalse(report.in_danger)
+        self.assertFalse(report.hp_dropped)
+
 
 if __name__ == "__main__":
     unittest.main()

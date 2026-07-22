@@ -10,13 +10,15 @@ Signal  Discovery Tracking    Attack Timers
 (none)  yes       yes         yes    yes
 pause   no        no          no     no
 sit     no        no          no     no
-storage yes       yes         no     yes
+storage no        no          no     yes
 ======= ========= =========== ====== ======
 
 Sit and storage are mutually exclusive (``_sit_storage_lock``).
 ``should_run_workers`` gates discovery, tracking, and skill timers
 (false while stopped, user-paused, or sitting).
 ``should_run_combat`` additionally requires storage not held — attack only.
+Discovery/tracking also idle while ``storage_event`` is set so storage UI
+is not disturbed by hunt scans.
 """
 
 from __future__ import annotations
@@ -79,6 +81,14 @@ class HuntRuntimeContext:
 
     def should_run_combat(self) -> bool:
         """True when attack may run (``should_run_workers`` and not in storage)."""
+        return self.should_run_workers() and not self.storage_event.is_set()
+
+    def should_run_discovery(self) -> bool:
+        """True when discovery may scan (workers running and not in storage UI)."""
+        return self.should_run_workers() and not self.storage_event.is_set()
+
+    def should_run_tracking(self) -> bool:
+        """True when tracking may tick (workers running and not in storage UI)."""
         return self.should_run_workers() and not self.storage_event.is_set()
 
     def mark_running(self) -> None:
@@ -170,13 +180,13 @@ class HuntRuntimeContext:
         self.wingcount = 0
 
     def active_teleport_scan_code(self) -> int:
-        """Fly-wing teleport, or Creamy TP when wings are exhausted / Creamy mob."""
-        if self.fly_wings_exhausted:
+        """Fly-wing teleport, or Creamy TP when Take Fly Wings is off / exhausted."""
+        if self.fly_wings_exhausted or not self.config.take_fly_wings:
             return self.config.creamy_tp_scan_code
         return self.config.active_teleport_scan_code()
 
     def active_teleport_button(self) -> str:
-        if self.fly_wings_exhausted:
+        if self.fly_wings_exhausted or not self.config.take_fly_wings:
             return self.config.creamy_tp_button
         return self.config.active_teleport_button()
 

@@ -395,18 +395,14 @@ def slot_looks_empty(
     slot_cy: int,
     *,
     half: int = INV_SLOT_HALF,
+    max_sqdiff: float = TEMPLATE_MATCH_MAX_SQDIFF,
 ) -> bool:
-    """Heuristic empty check: bright, low-contrast icon box (no item glyph)."""
-    if frame_bgr is None or frame_bgr.size == 0:
-        return False
-    h, w = frame_bgr.shape[:2]
-    x0 = max(0, slot_cx - half)
-    y0 = max(0, slot_cy - half)
-    x1 = min(w, slot_cx + half)
-    y1 = min(h, slot_cy + half)
-    if x1 <= x0 or y1 <= y0:
-        return False
-    crop = frame_bgr[y0:y1, x0:x1]
-    mean = float(crop.mean())
-    std = float(crop.std())
-    return mean >= 230.0 and std <= 25.0
+    """True when ``empty_cell_img`` matches inside the slot icon box."""
+    return slot_contains_template(
+        frame_bgr,
+        "empty_cell",
+        slot_cx,
+        slot_cy,
+        half=half,
+        max_sqdiff=max_sqdiff,
+    )

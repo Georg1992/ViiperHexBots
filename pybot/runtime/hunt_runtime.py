@@ -41,6 +41,7 @@ from pybot.runtime.constants import (
 )
 from pybot.runtime.workers.items_to_storage_worker import ItemsToStorageWorker
 from pybot.runtime.workers.sit_on_low_sp_worker import SitOnLowSpWorker
+from pybot.runtime.workers.hp_restore_worker import HpRestoreWorker
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -165,6 +166,10 @@ def create_runtime_deps(
     if any(t.scan_code and t.interval_ms > 0 for t in ctx.config.skill_timers):
         skill_timer = SkillTimerWorker(ctx, input_backend)
         workers.append(("skill_timer", skill_timer.run))
+    if ctx.config.hp_scan_code > 0:
+        workers.append(
+            ("hp_restore", HpRestoreWorker(ctx, input_backend).run)
+        )
     if (
         ctx.config.take_fly_wings
         and ctx.config.open_storage_steps
@@ -174,16 +179,21 @@ def create_runtime_deps(
             "Take Fly Wings is On but Creamy TP Key is unset. "
             "Creamy TP is required when storage has no more fly wings."
         )
+    if not ctx.config.take_fly_wings and ctx.config.creamy_tp_scan_code <= 0:
+        raise ValueError(
+            "Take Fly Wings is Off but Creamy TP Key is unset. "
+            "Creamy TP is used for teleport when fly-wing restock is disabled."
+        )
     if ctx.config.sit_on_low_sp:
         if ctx.config.sit_on_low_sp_scan_code <= 0:
             raise ValueError(
                 "Sit On Low Sp is On but the sit key is invalid "
                 f"(button={ctx.config.sit_on_low_sp_button!r})."
             )
-        if ctx.config.active_teleport_scan_code() <= 0:
+        if ctx.active_teleport_scan_code() <= 0:
             raise ValueError(
                 "Sit On Low Sp is On but the teleport key is invalid "
-                f"(button={ctx.config.active_teleport_button()!r}). "
+                f"(button={ctx.active_teleport_button()!r}). "
                 "Teleport is required to clear mobs before sitting."
             )
         profile = load_client_profile(ctx.config.client_profile)

@@ -47,6 +47,9 @@ class HuntRuntimeConfig:
     skill_timers: tuple[SkillTimerRuntime, ...] = ()
     save_point_button: str = ""
     save_point_scan_code: int = 0
+    hp_button: str = ""
+    hp_scan_code: int = 0
+    heal_skill: bool = False
     sp_button: str = ""
     sp_scan_code: int = 0
     # (button, scan_code, delay_ms) for each assigned Open Storage chain step.
@@ -158,6 +161,9 @@ def hunt_runtime_config_from_settings(
         skill_timers=tuple(skill_timers),
         save_point_button=settings.save_point_button,
         save_point_scan_code=key_name_to_scan_code(settings.save_point_button),
+        hp_button=settings.hp_button,
+        hp_scan_code=key_name_to_scan_code(settings.hp_button),
+        heal_skill=settings.heal_skill,
         sp_button=settings.sp_button,
         sp_scan_code=key_name_to_scan_code(settings.sp_button),
         open_storage_steps=_open_storage_steps_from_settings(settings),

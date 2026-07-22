@@ -9,11 +9,14 @@ import numpy as np
 
 from pybot.game_state import MemorySnapshot
 from pybot.config.clients import MemoryAddresses
-from pybot.recognition.ui.inventory import InventoryPanelHit
+from pybot.recognition.ui.inventory import InventoryPanelHit, InventoryUiError
 from pybot.runtime.constants import STORAGE_ENTER_SCAN_CODE
 from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.runtime_context import HuntRuntimeContext
-from pybot.runtime.workers.items_to_storage_worker import ItemsToStorageWorker
+from pybot.runtime.workers.items_to_storage_worker import (
+    ItemsToStorageWorker,
+    StorageCriticalHpError,
+)
 from pybot.viiper.keyboard import MOD_LEFT_ALT, vk_to_modifier
 
 
@@ -140,10 +143,14 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.assertTrue(self.ctx.begin_storage_ops())
         self.assertTrue(self.ctx.should_run_workers())
         self.assertFalse(self.ctx.should_run_combat())
+        self.assertFalse(self.ctx.should_run_discovery())
+        self.assertFalse(self.ctx.should_run_tracking())
         self.assertFalse(self.ctx.try_begin_storage_ops())
         self.assertFalse(self.ctx.try_begin_sit_ops())
         self.ctx.end_storage_ops()
         self.assertTrue(self.ctx.should_run_combat())
+        self.assertTrue(self.ctx.should_run_discovery())
+        self.assertTrue(self.ctx.should_run_tracking())
 
     def test_note_teleport_decrements_wingcount(self) -> None:
         self.ctx.wingcount = 3
@@ -207,11 +214,14 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             "wing": (60, 60),
         }[name]
         slot_empty.side_effect = (
-            [False]
-            + [True] * 48
-            + [False, True, False, True]
+            # Use / Eqp / Etc: one occupied slot then a full clear scan each.
+            [False] + [True] * 48
+            + [False] + [True] * 48
+            + [False] + [True] * 48
         )
-        find_tpl.return_value = None
+        find_tpl.side_effect = (
+            lambda _f, name, **_kw: (10, 10) if name == "use" else None
+        )
 
         worker = self._worker(_FakePoller(90))
         worker.items_to_storage()
@@ -264,8 +274,10 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
     ) -> None:
         require_panel.return_value = _fake_panel()
         require_tpl.return_value = (10, 10)
-        # Use: all empty; Eqp: empty; Etc: item then empty (with OK dialog).
-        slot_empty.side_effect = [True] * 48 + [True, False, True]
+        # Use clear, Eqp clear, Etc: one item then clear (OK dialog on deposit).
+        slot_empty.side_effect = (
+            [True] * 48 + [True] * 48 + [False] + [True] * 48
+        )
 
         with patch(
             "pybot.runtime.workers.items_to_storage_worker.find_template",
@@ -321,8 +333,10 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         require_tpl.return_value = (10, 10)
         find_tpl.return_value = None
         # Use scan1: wing at (0,0), potion at (1,0) → deposit potion.
-        # Use scan2: all empty. Eqp/Etc empty.
-        slot_empty.side_effect = [False, False] + [True] * 48 + [True, True]
+        # Use/Eqp/Etc clear scans afterward.
+        slot_empty.side_effect = (
+            [False, False] + [True] * 48 + [True] * 48 + [True] * 48
+        )
         slot_wing.side_effect = [True, False]
 
         worker = self._worker(_FakePoller(90))
@@ -389,6 +403,79 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.assertIn(("type", "150"), self.input.calls)
         self.assertEqual(self.ctx.wingcount, 150)
         self.assertFalse(self.ctx.fly_wings_exhausted)
+        # Restock-only: Use selected once at session open (soft select may skip).
+        # left_click count depends on whether use_img was found (mocked True → 1).
+
+    @patch("pybot.runtime.workers.items_to_storage_worker.time.sleep", return_value=None)
+    @patch(
+        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._close_menus"
+    )
+    @patch(
+        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_inventory_open",
+        return_value=_fake_panel(),
+    )
+    @patch(
+        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._open_storage",
+        side_effect=InventoryUiError("storage open failed"),
+    )
+    @patch(
+        "pybot.runtime.workers.items_to_storage_worker.find_template",
+        return_value=None,
+    )
+    def test_storage_session_closes_menus_on_ui_miss(
+        self,
+        _find_tpl: MagicMock,
+        _open_storage: MagicMock,
+        _ensure_inv_open: MagicMock,
+        close_menus: MagicMock,
+        _sleep: MagicMock,
+    ) -> None:
+        worker = self._worker(_FakePoller(10))
+        with self.assertRaises(InventoryUiError):
+            worker.storage_session(dump=False, restock=True)
+        close_menus.assert_called()
+
+    @patch("pybot.runtime.workers.items_to_storage_worker.time.sleep", return_value=None)
+    @patch(
+        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._close_menus"
+    )
+    @patch(
+        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_storage_open"
+    )
+    @patch(
+        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_inventory_open",
+        return_value=_fake_panel(),
+    )
+    @patch(
+        "pybot.runtime.workers.items_to_storage_worker.find_template",
+        return_value=None,
+    )
+    @patch("pybot.runtime.workers.items_to_storage_worker.read_status_panel")
+    def test_restock_force_closes_only_on_critical_hp(
+        self,
+        read_hp: MagicMock,
+        _find_tpl: MagicMock,
+        _ensure_inv_open: MagicMock,
+        _ensure_stor_open: MagicMock,
+        close_menus: MagicMock,
+        _sleep: MagicMock,
+    ) -> None:
+        from pybot.recognition.ui.status_panel import StatusPanelValues
+
+        read_hp.return_value = StatusPanelValues(
+            hp=40,
+            hp_max=100,
+            sp=50,
+            sp_max=100,
+            weight=10,
+            weight_max=100,
+            panel_origin=(0, 0),
+        )
+        worker = self._worker(_FakePoller(10))
+        with self.assertRaises(StorageCriticalHpError):
+            worker.storage_session(dump=False, restock=True)
+        # Critical path does not use the normal session close — caller force-closes.
+        close_menus.assert_not_called()
 
     @patch("pybot.runtime.workers.items_to_storage_worker.time.sleep", return_value=None)
     @patch(
@@ -453,6 +540,15 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.assertEqual(self.ctx.active_teleport_scan_code(), 17)
         self.ctx.note_teleport_for_wings()
         self.assertEqual(self.ctx.wingcount, 0)
+
+    def test_take_fly_wings_off_uses_creamy_tp(self) -> None:
+        self.config.teleport_button = "q"
+        self.config.teleport_scan_code = 16
+        self.config.creamy_tp_button = "w"
+        self.config.creamy_tp_scan_code = 17
+        self.config.take_fly_wings = False
+        self.assertEqual(self.ctx.active_teleport_button(), "w")
+        self.assertEqual(self.ctx.active_teleport_scan_code(), 17)
 
     @patch("pybot.runtime.workers.items_to_storage_worker.time.sleep", return_value=None)
     @patch("pybot.runtime.workers.items_to_storage_worker.is_storage_open")
@@ -563,9 +659,10 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         find_wings.side_effect = [[], []]
         find_storage.return_value = (200, 100)
         slot_empty.side_effect = (
-            [False]
-            + [True] * 48
-            + [False, True, False, True]
+            # Use / Eqp / Etc dump grids, then restock path does not use slot_empty.
+            [False] + [True] * 48
+            + [False] + [True] * 48
+            + [False] + [True] * 48
         )
         self.config.fly_wings_amount = 150
 

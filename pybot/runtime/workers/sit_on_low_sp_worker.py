@@ -1,15 +1,16 @@
 """Sit when SP is low; pause hunting (and timers) until SP recovers.
 
 Before sitting: teleport until a discovery scan sees no living mobs, idle 1s,
-measure standing/sitting center pose, then sit. While regenerating: if SP
-stalls/drops and ``assess_danger`` reports nearby foreign sprites, stand,
-teleport to a quiet area, and sit again.
+measure standing/sitting center pose, then sit. While regenerating: interrupt
+on danger — HP dropping (vision; already standing from the hit), or SP
+stall/drop with nearby foreign sprites (stand key if still seated) — then
+teleport to a quiet area and sit again.
 
 Each sit teleport clears tracking (same as hunt-mode teleport) so workers
 resume against the new screen only.
 
 SP comes from ``GameMemoryPoller`` → ``MemorySnapshot`` (memory addresses or
-Basic Info vision — same ``sp`` / ``sp_max`` fields either way).
+Basic Info vision). HP for danger is always vision (status panel).
 """
 
 from __future__ import annotations
@@ -20,9 +21,10 @@ from pybot.config.clients import MemoryAddresses
 from pybot.game_state import GameMemoryPoller
 from pybot.recognition.danger import DangerReport, assess_danger
 from pybot.recognition.ui.character_pose import CharacterPose, measure_center_pose
-from pybot.runtime.clear_area import HuntModeAreaReset, teleport_until_clear
+from pybot.recognition.ui.status_panel import read_status_panel
+from pybot.runtime.clear_area import HuntModeAreaReset, teleport_until_quiet
 from pybot.runtime.constants import (
-    SIT_IDLE_BEFORE_SIT_S,
+    SIT_HP_POLL_S,
     SIT_LOW_SP_RATIO,
     SIT_POSE_SETTLE_S,
     SIT_RESUME_SP_RATIO,
@@ -107,12 +109,23 @@ class SitOnLowSpWorker:
             return None
         return measure_center_pose(frame)
 
-    def _assess_danger(self) -> DangerReport | None:
-        frame = self._capture_client()
-        if frame is None:
-            return None
+    def _read_hp(self, frame) -> int | None:
+        """OCR current HP from Basic Info (vision-only)."""
+        values = read_status_panel(frame)
+        return None if values is None else values.hp
+
+    def _assess_danger(
+        self,
+        frame,
+        *,
+        hp: int | None = None,
+        previous_hp: int | None = None,
+    ) -> DangerReport:
         return assess_danger(
-            frame, cell_size_px=int(self._ctx.config.cell_size_px)
+            frame,
+            cell_size_px=int(self._ctx.config.cell_size_px),
+            hp=hp,
+            previous_hp=previous_hp,
         )
 
     def _recover_sp(self, low_ratio: float) -> None:
@@ -124,24 +137,27 @@ class SitOnLowSpWorker:
                 f"[SIT] low SP ratio={low_ratio:.1%} — pausing hunt/timers, "
                 "teleport until clear before sit"
             )
+            leave_screen = False
             while not ctx.is_stopped():
-                if not teleport_until_clear(
-                    ctx, self._input, self._hunt_mode, log_tag="SIT"
+                # After sit danger (HP drop from unseen mobs), always TP once
+                # before the discovery clear loop — otherwise 0 detections skip TP.
+                if not teleport_until_quiet(
+                    ctx,
+                    self._input,
+                    self._hunt_mode,
+                    log_tag="SIT",
+                    force_first=leave_screen,
                 ):
-                    return
-                ctx.logger.behavior(
-                    f"[SIT] area clear — idle {SIT_IDLE_BEFORE_SIT_S:.0f}s before sit"
-                )
-                if not ctx.wait_unless_stopped(SIT_IDLE_BEFORE_SIT_S):
                     return
                 outcome = self._sit_session()
                 if outcome == "recovered":
                     return
                 if outcome == "stopped":
                     return
+                leave_screen = True
                 ctx.logger.behavior(
                     "[SIT] danger while regenerating — "
-                    "teleport to quiet area and sit again"
+                    "force teleport, then find another sit spot"
                 )
         finally:
             ctx.end_sit_regen()
@@ -152,7 +168,7 @@ class SitOnLowSpWorker:
 
         Returns:
             ``"recovered"`` — stood after SP ≥ resume threshold.
-            ``"danger"`` — SP stalled/dropped and danger assessment fired.
+            ``"danger"`` — HP drop or SP stall with nearby objects.
             ``"stopped"`` — stop/pause ended the session (stood if needed).
         """
         ctx = self._ctx
@@ -177,6 +193,8 @@ class SitOnLowSpWorker:
         sp_state = self._sp_snapshot()
         last_sp = sp_state[0] if sp_state is not None else None
         last_progress = time.monotonic()
+        last_hp: int | None = None
+        last_hp_poll = 0.0
 
         while not ctx.is_stopped():
             sp_state = self._sp_snapshot()
@@ -192,7 +210,7 @@ class SitOnLowSpWorker:
                     return "recovered"
 
                 now = time.monotonic()
-                check_danger = False
+                sp_stalled = False
                 if last_sp is None:
                     last_sp = sp
                     last_progress = now
@@ -201,20 +219,58 @@ class SitOnLowSpWorker:
                     last_progress = now
                 elif sp < last_sp:
                     last_sp = sp
-                    check_danger = True
+                    sp_stalled = True
                 elif now - last_progress >= SIT_SP_STALL_S:
-                    check_danger = True
+                    sp_stalled = True
 
-                if check_danger:
-                    danger = self._assess_danger()
-                    if danger is not None and danger.in_danger:
-                        ctx.logger.behavior(
-                            f"[SIT] danger while sitting sp={sp} "
-                            f"reasons={','.join(danger.reasons)}"
+                # HP OCR on its own cadence (always vision).
+                if now - last_hp_poll >= SIT_HP_POLL_S:
+                    frame = self._capture_client()
+                    last_hp_poll = now
+                    if frame is not None:
+                        hp = self._read_hp(frame)
+                        danger = self._assess_danger(
+                            frame, hp=hp, previous_hp=last_hp
                         )
-                        self._ensure_standing(sit_scan, sit_pose, stand_pose)
-                        return "danger"
-                    # Peaceful but SP stalled — wait another stall window.
+                        if danger.hp_dropped:
+                            # Hit while sitting stands the character automatically —
+                            # do not toggle sit (would sit again).
+                            ctx.logger.behavior(
+                                f"[SIT] danger while sitting sp={sp} "
+                                f"reasons={','.join(danger.reasons)} "
+                                "(already standing from hit)"
+                            )
+                            return "danger"
+                        if (
+                            sp_stalled
+                            and danger.has_near_objects
+                        ):
+                            ctx.logger.behavior(
+                                f"[SIT] danger while sitting sp={sp} "
+                                f"reasons={','.join(danger.reasons)}"
+                            )
+                            self._ensure_standing(
+                                sit_scan, sit_pose, stand_pose
+                            )
+                            return "danger"
+                        if hp is not None:
+                            last_hp = hp
+                    if sp_stalled:
+                        last_progress = now
+                elif sp_stalled:
+                    # Between HP polls: still check near objects on SP stall.
+                    frame = self._capture_client()
+                    if frame is not None:
+                        danger = self._assess_danger(frame)
+                        if danger.has_near_objects:
+                            ctx.logger.behavior(
+                                f"[SIT] danger while sitting sp={sp} "
+                                f"reasons={','.join(danger.reasons)}"
+                            )
+                            self._ensure_standing(
+                                sit_scan, sit_pose, stand_pose
+                            )
+                            return "danger"
                     last_progress = now
 
             ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)

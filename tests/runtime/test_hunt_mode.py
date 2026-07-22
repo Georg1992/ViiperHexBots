@@ -32,6 +32,7 @@ def make_config(**overrides) -> HuntRuntimeConfig:
         "skill_scan_code": 18,
         "teleport_button": "q",
         "teleport_scan_code": 16,
+        "take_fly_wings": True,
         "search_range_cells": 16,
         "cell_size_px": 64,
         "discovery_interval_ms": 3000,
