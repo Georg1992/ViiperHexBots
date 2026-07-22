@@ -19,7 +19,7 @@ from pybot.app.config_store import AppConfig, list_client_profiles
 from pybot.app.hotkey_manager import HotkeyManager
 from pybot.app.log_pipe import LogPipe
 from pybot.app.overlay import StatusPanelOverlay, Win32HuntOverlay
-from pybot.app.process_memory import GameMemoryPoller, MemorySnapshot
+from pybot.game_state import GameMemoryPoller, MemorySnapshot
 from pybot.app.session_log import AppSessionLog
 from pybot.app.startup_splash import preload_mob_descriptors
 from pybot.app.viiper_manager import ViiperManager

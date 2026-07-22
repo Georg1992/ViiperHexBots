@@ -179,19 +179,35 @@ def read_snapshot(
         kernel32.CloseHandle(handle)
 
 
+def _client_rect_screen(hwnd: int) -> tuple[int, int, int, int] | None:
+    """``(left, top, width, height)`` of *hwnd*'s client area in screen coords."""
+    if not hwnd or not user32.IsWindow(hwnd):
+        return None
+    client_rect = wintypes.RECT()
+    if not user32.GetClientRect(hwnd, ctypes.byref(client_rect)):
+        return None
+    origin = wintypes.POINT(0, 0)
+    if not user32.ClientToScreen(hwnd, ctypes.byref(origin)):
+        return None
+    width = client_rect.right - client_rect.left
+    height = client_rect.bottom - client_rect.top
+    if width <= 0 or height <= 0:
+        return None
+    return int(origin.x), int(origin.y), int(width), int(height)
+
+
 def read_vision_snapshot(hwnd: int) -> MemorySnapshot:
     """Read SP/Weight from the open Basic Info panel into a ``MemorySnapshot``.
 
     Same fields as memory reading (``sp``, ``sp_max``, ``weight``, ``weight_max``).
     ``char_name`` is not available from vision.
     """
-    from pybot.app.win32_util import client_rect_screen
     from pybot.recognition.capture import capture_region
     from pybot.recognition.ui.status_panel import read_status_panel
 
     if not hwnd:
         return MemorySnapshot(error="select a game window")
-    client = client_rect_screen(hwnd)
+    client = _client_rect_screen(hwnd)
     if client is None:
         return MemorySnapshot(error="no client rect")
     left, top, width, height = client

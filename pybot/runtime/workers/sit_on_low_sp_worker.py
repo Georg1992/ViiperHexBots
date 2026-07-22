@@ -12,7 +12,7 @@ Basic Info vision — same ``sp`` / ``sp_max`` fields either way).
 
 from __future__ import annotations
 
-from pybot.app.process_memory import GameMemoryPoller
+from pybot.game_state import GameMemoryPoller
 from pybot.config.clients import MemoryAddresses
 from pybot.runtime.clear_area import HuntModeAreaReset, teleport_until_clear
 from pybot.runtime.constants import (
@@ -85,7 +85,8 @@ class SitOnLowSpWorker:
     def _recover_sp(self, low_ratio: float) -> None:
         ctx = self._ctx
         sit_scan = ctx.config.sit_on_low_sp_scan_code
-        ctx.begin_sit_regen()
+        if not ctx.begin_sit_regen():
+            return
         stood_up = False
         sat_down = False
         try:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pybot.runtime.hunt_mode import HuntModeController
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.constants import WORKER_POLL_INTERVAL_S
@@ -12,7 +13,7 @@ class AttackLoop:
     def __init__(
         self,
         ctx: AttackLoopContext,
-        hunt_mode,
+        hunt_mode: HuntModeController,
         input_backend: InputBackend,
     ) -> None:
         self._ctx = ctx

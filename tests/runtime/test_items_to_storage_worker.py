@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from pybot.app.process_memory import MemorySnapshot
+from pybot.game_state import MemorySnapshot
 from pybot.config.clients import MemoryAddresses
 from pybot.recognition.ui.inventory import InventoryPanelHit
 from pybot.runtime.constants import STORAGE_ENTER_SCAN_CODE
@@ -124,15 +124,15 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
     def test_vk_menu_maps_to_left_alt(self) -> None:
         self.assertEqual(vk_to_modifier(0x12), MOD_LEFT_ALT)
 
-    def test_exclusive_ops_block_should_run_workers(self) -> None:
+    def test_sit_ops_block_should_run_workers(self) -> None:
         self.assertTrue(self.ctx.should_run_workers())
         self.assertTrue(self.ctx.should_run_combat())
-        self.assertTrue(self.ctx.begin_exclusive_ops())
+        self.assertTrue(self.ctx.begin_sit_ops())
         self.assertFalse(self.ctx.should_run_workers())
         self.assertFalse(self.ctx.should_run_combat())
-        self.assertFalse(self.ctx.try_begin_exclusive_ops())
+        self.assertFalse(self.ctx.try_begin_sit_ops())
         self.assertFalse(self.ctx.try_begin_storage_ops())
-        self.ctx.end_exclusive_ops()
+        self.ctx.end_sit_ops()
         self.assertTrue(self.ctx.should_run_workers())
         self.assertTrue(self.ctx.should_run_combat())
 
@@ -141,7 +141,7 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.assertTrue(self.ctx.should_run_workers())
         self.assertFalse(self.ctx.should_run_combat())
         self.assertFalse(self.ctx.try_begin_storage_ops())
-        self.assertFalse(self.ctx.try_begin_exclusive_ops())
+        self.assertFalse(self.ctx.try_begin_sit_ops())
         self.ctx.end_storage_ops()
         self.assertTrue(self.ctx.should_run_combat())
 

@@ -6,6 +6,11 @@ that compose those primitives into narrow interfaces for each worker.
 
 HuntRuntimeContext structurally satisfies all of them, but no worker
 depends on the full god object.
+
+Pause matrix (see ``runtime_context`` module docstring):
+  sit     → discovery, tracking, attack, timers idle
+  storage → attack idle only; timers keep running
+  sit ↔ storage mutually exclusive
 """
 
 from __future__ import annotations
@@ -30,36 +35,73 @@ from pybot._protocols import (
 # ── HuntModeController context protocol ──────────────────────────
 
 
-class HuntModeControllerContext(CanStop, CanLog, HasConfig,
-                                CanTrack, CanValidate, CanPolicy,
-                                CanWakeDiscovery,
-                                CanAreaReset, CanOverlay, Protocol):
-    """Hunt runtime subset consumed by HuntModeController."""
-    pass
+class HuntModeControllerContext(
+    CanStop,
+    CanLog,
+    HasConfig,
+    CanTrack,
+    CanValidate,
+    CanPolicy,
+    CanWakeDiscovery,
+    CanAreaReset,
+    CanOverlay,
+    Protocol,
+):
+    """Hunt runtime subset consumed by HuntModeController / strategies."""
+
+    fly_wings_exhausted: bool
+
+    def should_run_combat(self) -> bool: ...
+    def wait_unless_stopped(self, timeout_s: float) -> bool: ...
+    def active_teleport_scan_code(self) -> int: ...
+    def active_teleport_button(self) -> str: ...
+    def note_teleport_for_wings(self) -> None: ...
 
 
 # ── Worker-specific combined context protocols ────────────────────
 # Each lists exactly what its worker touches from the runtime context.
 
 
-class TrackingWorkerContext(CanStop, CanLog,
-                            CanCapture, CanTrackLocal, CanTrack,
-                            CanWakeDiscovery, CanOverlay, Protocol):
+class TrackingWorkerContext(
+    CanStop,
+    CanLog,
+    CanCapture,
+    CanTrackLocal,
+    CanTrack,
+    CanWakeDiscovery,
+    CanOverlay,
+    Protocol,
+):
     """Hunt runtime subset consumed by TrackingWorker."""
     pass
 
 
-class DiscoveryWorkerContext(CanStop, CanLog, HasConfig,
-                             CanCapture, CanDetect, CanTrack,
-                             CanValidate, CanWakeDiscovery, CanOverlay,
-                             Protocol):
+class DiscoveryWorkerContext(
+    CanStop,
+    CanLog,
+    HasConfig,
+    CanCapture,
+    CanDetect,
+    CanTrack,
+    CanValidate,
+    CanWakeDiscovery,
+    CanOverlay,
+    Protocol,
+):
     """Hunt runtime subset consumed by DiscoveryWorker."""
     pass
 
 
-class AttackLoopContext(CanStop, CanLog, HasConfig,
-                        CanTrack, CanValidate,
-                        CanPolicy, CanOverlay, Protocol):
+class AttackLoopContext(
+    CanStop,
+    CanLog,
+    HasConfig,
+    CanTrack,
+    CanValidate,
+    CanPolicy,
+    CanOverlay,
+    Protocol,
+):
     """Hunt runtime subset consumed by AttackLoop."""
 
     def should_run_combat(self) -> bool: ...
@@ -67,7 +109,11 @@ class AttackLoopContext(CanStop, CanLog, HasConfig,
 
 
 class SkillTimerWorkerContext(CanStop, CanLog, HasConfig, Protocol):
-    """Hunt runtime subset consumed by SkillTimerWorker."""
+    """Hunt runtime subset consumed by SkillTimerWorker.
+
+    Uses ``should_run_workers`` (via CanStop): idle during sit/pause, keep
+    firing during storage so timer schedules are not re-armed mid-session.
+    """
     pass
 
 
@@ -84,7 +130,7 @@ class SitOnLowSpWorkerContext(
 ):
     """Hunt runtime subset consumed by SitOnLowSpWorker."""
 
-    def begin_sit_regen(self) -> None: ...
+    def begin_sit_regen(self) -> bool: ...
     def end_sit_regen(self) -> None: ...
     def wait_unless_stopped(self, timeout_s: float) -> bool: ...
     def active_teleport_scan_code(self) -> int: ...

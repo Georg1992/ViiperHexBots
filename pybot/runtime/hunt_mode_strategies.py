@@ -116,7 +116,9 @@ class HuntModeStrategy(ABC):
             True if the bot took a mode-specific action (teleport, etc.).
         """
         ctx = self._ctx
-        if ctx.pause_event.is_set() or ctx.stop_event.is_set():
+        # Defense-in-depth: attack already gates on should_run_combat; skip
+        # mode actions while pause/sit/storage would block combat anyway.
+        if not ctx.should_run_combat():
             self._log_no_target("skip", "bot_not_running")
             return False
 

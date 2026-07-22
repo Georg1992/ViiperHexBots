@@ -6,7 +6,7 @@ import threading
 import unittest
 from unittest.mock import MagicMock
 
-from pybot.app.process_memory import MemorySnapshot
+from pybot.game_state import MemorySnapshot
 from pybot.config.clients import MemoryAddresses
 from pybot.runtime.constants import SIT_LOW_SP_RATIO, SIT_RESUME_SP_RATIO
 from pybot.runtime.detection.detector_session import DiscoveryScanResult, RawDetection

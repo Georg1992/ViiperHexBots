@@ -10,7 +10,7 @@ import ctypes
 import time
 from ctypes import wintypes
 
-from pybot.app.process_memory import GameMemoryPoller
+from pybot.game_state import GameMemoryPoller
 from pybot.config.clients import MemoryAddresses
 from pybot.recognition.ui.inventory import (
     InventoryUiError,

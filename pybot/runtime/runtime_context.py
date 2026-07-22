@@ -1,4 +1,23 @@
-"""Shared hunt runtime state for all workers."""
+"""Shared hunt runtime state for all workers.
+
+Pause / session matrix
+----------------------
+Who may run while a signal is held:
+
+======= ========= =========== ====== ======
+Signal  Discovery Tracking    Attack Timers
+======= ========= =========== ====== ======
+(none)  yes       yes         yes    yes
+pause   no        no          no     no
+sit     no        no          no     no
+storage yes       yes         no     yes
+======= ========= =========== ====== ======
+
+Sit and storage are mutually exclusive (``_sit_storage_lock``).
+``should_run_workers`` gates discovery, tracking, and skill timers
+(false while stopped, user-paused, or sitting).
+``should_run_combat`` additionally requires storage not held — attack only.
+"""
 
 from __future__ import annotations
 
@@ -41,14 +60,17 @@ class HuntRuntimeContext:
     sitting_event: threading.Event = field(default_factory=threading.Event)
     # Set while ItemsToStorage / GetFlyWings runs — combat idles; timers keep going.
     storage_event: threading.Event = field(default_factory=threading.Event)
-    _exclusive_lock: threading.Lock = field(default_factory=threading.Lock)
+    _sit_storage_lock: threading.Lock = field(default_factory=threading.Lock)
     # AHK ``wingcount``: remaining fly wings; restocked by GetFlyWings.
     wingcount: int = 0
     # Set when storage has no wings left — stop GetFlyWings for this hunt.
     fly_wings_exhausted: bool = False
 
     def should_run_workers(self) -> bool:
-        """True when hunt + skill timers may run (not stopped/paused/sitting)."""
+        """True when discovery, tracking, and skill timers may run.
+
+        False while stopped, user-paused, or sitting. Storage does not clear this.
+        """
         return (
             not self.stop_event.is_set()
             and not self.pause_event.is_set()
@@ -56,7 +78,7 @@ class HuntRuntimeContext:
         )
 
     def should_run_combat(self) -> bool:
-        """True when attack may run (workers + not in a storage session)."""
+        """True when attack may run (``should_run_workers`` and not in storage)."""
         return self.should_run_workers() and not self.storage_event.is_set()
 
     def mark_running(self) -> None:
@@ -70,33 +92,33 @@ class HuntRuntimeContext:
         self.pause_event.set()
         self.resume_gate.clear()
 
-    def try_begin_exclusive_ops(self) -> bool:
+    def try_begin_sit_ops(self) -> bool:
         """Acquire sit pause (hunt + timers). False if sit or storage already held."""
-        with self._exclusive_lock:
+        with self._sit_storage_lock:
             if self.sitting_event.is_set() or self.storage_event.is_set():
                 return False
             self.sitting_event.set()
             self.resume_gate.clear()
             return True
 
-    def begin_exclusive_ops(self) -> bool:
-        """Wait until sit exclusive ops can start. False if stopped first."""
+    def begin_sit_ops(self) -> bool:
+        """Wait until sit ops can start. False if stopped first."""
         while not self.stop_event.is_set():
-            if self.try_begin_exclusive_ops():
+            if self.try_begin_sit_ops():
                 return True
             self.stop_event.wait(WORKER_POLL_INTERVAL_S)
         return False
 
-    def end_exclusive_ops(self) -> None:
-        """Release sit pause."""
-        with self._exclusive_lock:
+    def end_sit_ops(self) -> None:
+        """Release sit pause; restore resume_gate unless user-paused/stopped."""
+        with self._sit_storage_lock:
             self.sitting_event.clear()
             if not self.pause_event.is_set() and not self.stop_event.is_set():
                 self.resume_gate.set()
 
     def try_begin_storage_ops(self) -> bool:
         """Acquire storage session (combat only). False if sit/storage held."""
-        with self._exclusive_lock:
+        with self._sit_storage_lock:
             if self.sitting_event.is_set() or self.storage_event.is_set():
                 return False
             self.storage_event.set()
@@ -112,16 +134,16 @@ class HuntRuntimeContext:
 
     def end_storage_ops(self) -> None:
         """Release storage session; combat may resume."""
-        with self._exclusive_lock:
+        with self._sit_storage_lock:
             self.storage_event.clear()
 
-    def begin_sit_regen(self) -> None:
+    def begin_sit_regen(self) -> bool:
         """Pause hunting/timers for SP regeneration (independent of user pause)."""
-        self.begin_exclusive_ops()
+        return self.begin_sit_ops()
 
     def end_sit_regen(self) -> None:
         """Resume hunting/timers after sit regen completes."""
-        self.end_exclusive_ops()
+        self.end_sit_ops()
 
     def note_teleport_for_wings(self) -> None:
         """AHK Teleport: decrement wing counter when Take Fly Wings is on."""
