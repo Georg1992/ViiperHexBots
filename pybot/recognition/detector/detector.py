@@ -1,6 +1,7 @@
 """Sprite heatmap + silhouette-gate mob detector.
 
-Pipeline: sprite palette heatmap → blobs → silhouette gate.
+Pipeline: sprite heatmap → blobs → geometry pre-gate → color-structure
+pre-gate → silhouette gate → accept by heat score.
 No RegionScorer, no structural pixels, no center refinement, no scales.
 """
 
@@ -23,6 +24,7 @@ from pybot.recognition.detector.descriptors.layout_utils import (
 )
 from pybot.recognition.detector.scoring.heatmap_detector import (
     HeatmapDetector,
+    required_groups_structure,
     sprite_palette_heatmap,
 )
 
@@ -34,8 +36,13 @@ REQUIRED_CONFIG_KEYS = {
     "silhouettePaletteDistanceScale",
     "silhouetteHorizontalBridgeCells",
     "minSpritePaletteMatch",
+    "gateRefUniqueIoU",
     "minSilhouetteRecall",
     "minSilhouettePrecision",
+    "minRequiredPaletteGroups",
+    "minSecondPaletteGroupShare",
+    "minRequiredPaletteCoverage",
+    "minBodyClusterStrong",
     "usePaletteDiversity",
     "topCandidateCenters",
     "minCenterHeat",
@@ -53,8 +60,6 @@ REQUIRED_CONFIG_KEYS = {
     # death-detection keys (local_tracker / opacity_probe / hunt)
     "deathOpacityBaselineSamples",
     "deathOpacityMinBaseline",
-    "deathOpacityDecayRatio",
-    "deathOpacityStrongDecayRatio",
     "deathOpacityConfirmTicks",
     "deathRediscoveryCooldownMs",
     "deathOpacityMoveThresholdPx",
@@ -249,7 +254,7 @@ class MobDetector:
         return descriptor
 
     # ------------------------------------------------------------------
-    #  Discovery pipeline: heatmap → blobs → silhouette gate
+    #  Discovery: heatmap → blobs → geometry → color structure → silhouette
     # ------------------------------------------------------------------
 
     def detect(
@@ -261,6 +266,7 @@ class MobDetector:
     ) -> DetectionResult:
         """Heatmap discovery with optional known-track dual silhouette check.
 
+        Order: heatmap → blobs → geometry → color structure → silhouette.
         * First scan (no ``known_tracks``): living silhouette gate only.
         * Later scans: heatmap blobs near known tracks are extracted and scored
           against living and death silhouettes; death is confirmed only when the
@@ -293,7 +299,7 @@ class MobDetector:
         blob_to_known = self._mark_known_blobs(blobs, known, dedup_radius)
         death_masks = list(descriptor.death_silhouette_masks)
 
-        # --- geometry pre-gate, then silhouette gate -------------------
+        # --- geometry → color structure → silhouette -------------------
         candidates: list[DetectionCandidate] = []
         death_confirmed: list[tuple[int, int, int]] = []
         silhouette_checks: list[SilhouetteCheck] = []
@@ -305,6 +311,18 @@ class MobDetector:
             known_hit = blob_to_known.get(blob_index)
 
             if not self._passes_discovery_geometry_gate(comp_bbox, descriptor):
+                silhouette_checks.append(SilhouetteCheck(
+                    center_x=cx,
+                    center_y=cy,
+                    heat_score=heat_score,
+                    passed=False,
+                    similarity=0.0,
+                ))
+                continue
+
+            if not self._passes_color_structure_gate(
+                frame_bgr, descriptor, comp_bbox,
+            ):
                 silhouette_checks.append(SilhouetteCheck(
                     center_x=cx,
                     center_y=cy,
@@ -488,6 +506,62 @@ class MobDetector:
         return self._passes_size_aspect_vs_descriptor(
             int(hw), int(hh), descriptor, require_min_area=True,
         )
+
+    def _passes_color_structure_gate(
+        self,
+        frame_bgr: np.ndarray,
+        descriptor: MobDescriptor,
+        comp_bbox: tuple[int, int, int, int],
+    ) -> bool:
+        """Reject heat CCs that lack this mob's color structure / palette.
+
+        Fail-closed before silhouette:
+        - enough required groups present (diversity presence)
+        - non-trivial second-group share (rejects mono-family, e.g. Poring)
+        - enough crop pixels match required-group colors (coverage)
+        - enough crop pixels strongly match body clusters (dominant+supporting)
+          (rejects obviously foreign palettes)
+
+        Skips when the descriptor has no required groups.
+        """
+        required_groups = descriptor.match_palette_required_groups
+        if not required_groups:
+            return True
+        min_groups = int(self.config["minRequiredPaletteGroups"])
+        min_second = float(self.config["minSecondPaletteGroupShare"])
+        min_coverage = float(self.config["minRequiredPaletteCoverage"])
+        min_body_strong = float(self.config["minBodyClusterStrong"])
+        if (
+            min_groups <= 0
+            and min_second <= 0.0
+            and min_coverage <= 0.0
+            and min_body_strong <= 0.0
+        ):
+            return True
+        bx, by, bw, bh = comp_bbox
+        fh, fw = frame_bgr.shape[:2]
+        x0 = max(0, int(bx))
+        y0 = max(0, int(by))
+        x1 = min(fw, x0 + max(0, int(bw)))
+        y1 = min(fh, y0 + max(0, int(bh)))
+        if x1 <= x0 or y1 <= y0:
+            return False
+        crop = frame_bgr[y0:y1, x0:x1]
+        present, second_share, match_coverage, body_strong = required_groups_structure(
+            crop,
+            descriptor,
+            float(descriptor.max_sprite_palette_distance),
+            downscale=1,
+        )
+        if min_groups > 0 and present < min_groups:
+            return False
+        if min_second > 0.0 and second_share < min_second:
+            return False
+        if min_coverage > 0.0 and match_coverage < min_coverage:
+            return False
+        if min_body_strong > 0.0 and body_strong < min_body_strong:
+            return False
+        return True
 
     def _descriptor_min_area_ratio(self, descriptor: MobDescriptor) -> float:
         stable_bits: list[bool] = []

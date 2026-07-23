@@ -8,12 +8,12 @@ not scan — only waits for the post-delay wake / storage end.
 
 One discovery pass (same frame):
 1. Living heatmap → silhouette scan for new / matched mobs (living refs only).
-2. Known-track peaks: living vs death silhouette; death wins → ``discovery_death``.
+2. Known-track peaks: living vs death silhouette; death wins → immediate kill.
 3. Reconcile: create / match / mark in-ROI absent / drop outside-ROI only.
 
-Tracking owns authoritative position and all in-ROI death/lost/unreachable
-removal (``discovery_death`` flag or opacity). Discovery never overwrites
-authoritative x/y and never removes for death.
+Tracking owns authoritative position and opacity / lost / unreachable removal.
+Discovery never overwrites authoritative x/y; it does remove when the static
+death silhouette beats living on a known track.
 
 Teleport clear requires zero living scan candidates, not merely zero alive
 tracks after ghost matching. Capture-time position snapshots keep dedup and
@@ -130,10 +130,11 @@ class DiscoveryWorker:
             flagged = ctx.tracks.note_discovery_deaths(
                 death_confirmed,
                 area_epoch=area_epoch,
+                now_tick=now_ms,
             )
             if flagged:
                 ctx.logger.behavior(
-                    f"[DISCOVERY] death noted for tracker: {flagged}"
+                    f"[DISCOVERY] death removed for tracker: {flagged}"
                 )
 
         filtered = filter_scan_candidates(scan.detections, roi, ctx.config.cell_size_px)

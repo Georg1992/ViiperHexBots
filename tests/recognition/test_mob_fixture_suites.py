@@ -1,4 +1,4 @@
-"""Mob screenshot fixture regression tests (Horn, TharaFrog, Alligator, Noxious, Creamy, Wolf)."""
+"""Mob screenshot fixture regression tests (Horn, TharaFrog, Alligator, Noxious, Creamy, Wolf, WildRose)."""
 
 from __future__ import annotations
 

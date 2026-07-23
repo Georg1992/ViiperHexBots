@@ -39,12 +39,15 @@ class DescriptorV8Tests(unittest.TestCase):
         self.assertIn(len(descriptor.silhouette_masks), GATE_SILHOUETTE_REF_COUNTS)
         self.assertEqual(len(descriptor.silhouette_masks[0].avg_mask), 256)
         self.assertGreaterEqual(
+            len(descriptor.death_silhouette_masks), 1
+        )
+        self.assertLessEqual(
             len(descriptor.death_silhouette_masks), MIN_DEATH_GATE_SILHOUETTE_MASKS
         )
         self.assertEqual(len(descriptor.death_silhouette_masks[0].avg_mask), 256)
         living_avgs = {tuple(m.avg_mask) for m in descriptor.silhouette_masks}
         death_avgs = {tuple(m.avg_mask) for m in descriptor.death_silhouette_masks}
-        self.assertFalse(living_avgs == death_avgs)
+        self.assertFalse(living_avgs & death_avgs)
 
     def test_death_action_indices_are_act_editor_die_group(self) -> None:
         # 5 animations × 8 dirs → Die = animation 4 → actions 32..39
@@ -62,41 +65,27 @@ class DescriptorV8Tests(unittest.TestCase):
         self.assertEqual(ACTIONS_PER_ANIMATION, 8)
         self.assertEqual(DEAD_ACTION_COUNT, 8)
 
-    def test_death_gate_picks_farthest_from_living(self) -> None:
+    def test_death_gate_keeps_last_frame_per_die_facing(self) -> None:
         asset_dir = self.builder.asset_dir("horn")
         spr = SprReader(asset_dir / "horn.spr").load()
         act = ActReader(asset_dir / "horn.act").load()
-        facing_pairs = self.builder._living_action_pairs(act, spr)
-        living = self.builder._build_frame_silhouette_masks(spr, act, facing_pairs)
         indices = DescriptorBuilder._death_action_indices(len(act.actions))
-        pool = self.builder._build_death_frame_silhouette_masks(spr, act, indices)
+        corpse_pool = self.builder._build_death_corpse_silhouette_masks(
+            spr, act, indices,
+        )
+        self.assertGreater(len(corpse_pool), 0)
+        self.assertLessEqual(len(corpse_pool), DEAD_ACTION_COUNT)
         coherent = [
-            m for m in pool if self.builder._is_coherent_gate_silhouette(m)
+            m for m in corpse_pool if self.builder._is_coherent_gate_silhouette(m)
         ]
-        pool = coherent if coherent else pool
-        order = self.builder._farthest_from_anchors_mask_order(pool, living)
-        self.assertGreaterEqual(len(order), MIN_DEATH_GATE_SILHOUETTE_MASKS)
+        expected = coherent if coherent else corpse_pool
 
-        def max_living_sim(mask) -> float:
-            avg = np.asarray(mask.avg_mask, dtype=np.float32)
-            return max(
-                self.builder._soft_jaccard(
-                    avg,
-                    np.asarray(live.avg_mask, dtype=np.float32),
-                )
-                for live in living
-            )
-
-        first = pool[order[0]]
-        first_sim = max_living_sim(first)
-        # First pick is among the least living-like in the pool.
-        ranked = sorted(max_living_sim(m) for m in pool)
-        self.assertLessEqual(first_sim, ranked[len(ranked) // 4])
-        # Selected death refs stay farther from living than the living-like half.
-        selected = [pool[i] for i in order[:MIN_DEATH_GATE_SILHOUETTE_MASKS]]
-        selected_sims = [max_living_sim(m) for m in selected]
-        median_pool = ranked[len(ranked) // 2]
-        self.assertTrue(all(sim <= median_pool for sim in selected_sims))
+        descriptor = self.builder.build("horn", force=True)
+        death = descriptor.death_silhouette_masks
+        self.assertEqual(len(death), len(expected))
+        expected_avgs = {tuple(m.avg_mask) for m in expected}
+        for mask in death:
+            self.assertIn(tuple(mask.avg_mask), expected_avgs)
 
     def test_gate_masks_are_selected_from_frames(self) -> None:
         asset_dir = self.builder.asset_dir("horn")

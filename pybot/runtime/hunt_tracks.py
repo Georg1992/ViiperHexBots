@@ -367,23 +367,37 @@ class HuntTracks:
         deaths: list[tuple[int, int, int]],
         *,
         area_epoch: int | None = None,
+        now_tick: int | None = None,
     ) -> list[int]:
-        """Record discovery death-silhouette hits; tracking removes on next tick.
+        """Kill tracks matched to the static death silhouette immediately.
 
         ``deaths`` entries are ``(track_id, screen_x, screen_y)`` — the death
-        site is frozen for the rediscovery ghost. Returns flagged ids.
+        site is frozen for the rediscovery ghost. Returns removed track ids.
         """
-        flagged: list[int] = []
+        tick = now_tick if now_tick is not None else monotonic_ms()
+        removed: list[int] = []
         with self._lock:
             if area_epoch is not None and area_epoch != self._area_epoch:
                 return []
+            remove_ids: set[int] = set()
             for track_id, x, y in deaths:
                 track = self._get_track_by_id_locked(track_id)
                 if track is None:
                     continue
                 note_discovery_death(track, x=int(x), y=int(y))
-                flagged.append(track_id)
-            return flagged
+                sample = self._kill_sample_attack_count_locked(track)
+                self._pending_attack_track_ids.discard(track_id)
+                self._record_kill_locked(sample)
+                self._record_removed_site_locked(
+                    track.discovery_death_x,
+                    track.discovery_death_y,
+                    tick,
+                )
+                remove_ids.add(track_id)
+                removed.append(track_id)
+            if remove_ids:
+                self._remove_tracks_locked(remove_ids)
+            return removed
 
     def apply_tracking(
         self,

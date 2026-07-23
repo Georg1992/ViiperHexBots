@@ -49,8 +49,9 @@ HP_ROI = (50, 45, 110, 18)
 SP_ROI = (50, 66, 110, 16)
 # Weight starts after the ``Weight :`` colon so label ink is not classified.
 # Left edge includes 4-digit current weight (heavy/red); keep clear of colon under ±2 jitter.
-# Width 66 keeps 4-digit current+max under ±2px origin jitter (e.g. FalseWeight).
-WEIGHT_ROI = (85, 116, 66, 14)
+# Width 74 covers right-shifted values when Zeny is short (WeightIssue) under
+# ±2px origin jitter; trailing Zeny-label crumbs stay below threshold and strip.
+WEIGHT_ROI = (85, 116, 74, 14)
 
 
 @dataclass(frozen=True)
@@ -300,15 +301,37 @@ def _strip_bar_chrome(mask: np.ndarray) -> np.ndarray:
 def _drop_leading_orphan_glyphs(
     comps: list[tuple[int, np.ndarray]],
 ) -> list[tuple[int, np.ndarray]]:
-    """Drop left-side label fragments separated from the digit cluster by a gap."""
-    while len(comps) >= 2:
-        x0, glyph0 = comps[0]
-        x1, _glyph1 = comps[1]
-        gap = x1 - (x0 + glyph0.shape[1])
-        if gap <= MAX_LEADING_ORPHAN_GAP_PX:
+    """Drop left-side label fragments separated from the digit cluster by a gap.
+
+    Label crumbs can pack tightly (colon / ``t`` fragments) and sit before a
+    large gap into the real digits. Cut at large gaps that appear *before* the
+    last current-value glyph — never at the current-to-``/`` spacing (7–12px).
+    """
+    if len(comps) < 2:
+        return comps
+    slash_i: int | None = None
+    for index, (_x, glyph) in enumerate(comps):
+        ch, score = _classify_glyph(glyph)
+        if ch == "/" and score >= DIGIT_MATCH_THRESHOLD:
+            slash_i = index
             break
-        comps = comps[1:]
-    return comps
+    if slash_i is None:
+        while len(comps) >= 2:
+            x0, glyph0 = comps[0]
+            x1, _glyph1 = comps[1]
+            gap = x1 - (x0 + glyph0.shape[1])
+            if gap <= MAX_LEADING_ORPHAN_GAP_PX:
+                break
+            comps = comps[1:]
+        return comps
+    cut = 0
+    for index in range(max(0, slash_i - 1)):
+        x0, glyph0 = comps[index]
+        x1, _glyph1 = comps[index + 1]
+        gap = x1 - (x0 + glyph0.shape[1])
+        if gap > MAX_LEADING_ORPHAN_GAP_PX:
+            cut = index + 1
+    return comps[cut:]
 
 
 def _glyph_components(mask: np.ndarray, *, min_width: int) -> list[np.ndarray]:

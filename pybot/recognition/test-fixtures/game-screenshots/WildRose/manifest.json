@@ -1,0 +1,10 @@
+{
+  "mob": "wild_rose",
+  "folder": "WildRose",
+  "description": "Wild Rose detection fixtures. Leading digit is mob count. *_Gray* = gray world textures.",
+  "strictAcceptCount": true,
+  "fixtureCount": 4,
+  "normalFixtureCount": 0,
+  "grayFixtureCount": 4,
+  "filenamePattern": "^(\\d+)WildRose(?:_Gray\\d*)?\\.png$"
+}

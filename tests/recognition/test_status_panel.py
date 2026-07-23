@@ -31,6 +31,8 @@ FIXTURE_CASES: tuple[tuple[str, int, int, int, int, int, int], ...] = (
     ("RedWeight.png", 3424, 3424, 107, 435, 2457, 2730),
     # Trailing ``t`` of ``Weight`` sits in the ROI; must not become a leading 1.
     ("FalseWeight.png", 874, 3424, 249, 485, 427, 2730),
+    # Short Zeny right-shifts ``464 / 2730``; ROI must still capture the max.
+    ("WeightIssue.png", 3501, 3501, 370, 457, 464, 2730),
 )
 
 

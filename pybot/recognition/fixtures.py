@@ -113,6 +113,11 @@ MOB_FIXTURE_SUITES: tuple[MobFixtureSuite, ...] = (
         mob_name="desert_wolf",
         pattern=re.compile(r"^(\d+)Wolf(?:_Gray\d*)?\.png$", re.IGNORECASE),
     ),
+    MobFixtureSuite.from_manifest(
+        folder="WildRose",
+        mob_name="wild_rose",
+        pattern=re.compile(r"^(\d+)WildRose(?:_Gray\d*)?\.png$", re.IGNORECASE),
+    ),
 )
 
 

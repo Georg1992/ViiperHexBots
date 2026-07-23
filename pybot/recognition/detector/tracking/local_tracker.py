@@ -187,9 +187,9 @@ def _finalize_track_hit(
     x = bx + bw // 2 + offset_x
     y = by + bh // 2 + offset_y
 
-    # Calibrate opacity even while walking so death can fire as soon as the
-    # mob stops. Mild decay still needs a stationary confirm; strong decay can
-    # fire while moving (death animations keep the moving flag set).
+    # Probe as soon as the track is old enough (default 0). Any opacity drop
+    # starts the streak; confirm ticks only advance while stationary (corpses
+    # stop moving after the short fall animation).
     if _track_old_enough(
         detector.config,
         created_tick=created_tick,

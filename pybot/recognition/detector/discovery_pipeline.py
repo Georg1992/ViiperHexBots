@@ -54,6 +54,11 @@ def _geometry_gate() -> Callable:
     return MobDetector._passes_discovery_geometry_gate
 
 
+def _color_structure_gate() -> Callable:
+    from pybot.recognition.detector.detector import MobDetector
+    return MobDetector._passes_color_structure_gate
+
+
 def _noisy_extract() -> Callable:
     from pybot.recognition.detector.detector import MobDetector
     return MobDetector._noisy_extraction_signal
@@ -103,6 +108,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "build_sprite_heatmap",
                     "top_centers",
                     "_passes_discovery_geometry_gate",
+                    "_passes_color_structure_gate",
                     "_evaluate_silhouette_gate",
                     "_noisy_extraction_signal",
                     "_finalize_accepted",
@@ -179,6 +185,34 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "_GEOMETRY_AREA_MAX_RATIO",
                     "_GEOMETRY_ASPECT_MIN_RATIO",
                     "_GEOMETRY_ASPECT_MAX_RATIO",
+                ),
+            ),
+        ),
+    ),
+    PipelineStage(
+        title="Color structure pre-gate",
+        items=(
+            "heat-CC crop required palette groups present count",
+            "second-largest required-group share among matched pixels",
+            "required-group match coverage of crop pixels",
+            "dominant+supporting body-cluster strong-match fraction",
+            "reject when present < minRequiredPaletteGroups (fail-closed)",
+            "reject when second_share < minSecondPaletteGroupShare (fail-closed)",
+            "reject when coverage < minRequiredPaletteCoverage (fail-closed)",
+            "reject when body_strong < minBodyClusterStrong (fail-closed)",
+            "skip gate when descriptor has no required groups",
+        ),
+        sources=(
+            SourceCheck(
+                _color_structure_gate,
+                (
+                    "required_groups_structure",
+                    "minRequiredPaletteGroups",
+                    "minSecondPaletteGroupShare",
+                    "minRequiredPaletteCoverage",
+                    "minBodyClusterStrong",
+                    "match_palette_required_groups",
+                    "max_sprite_palette_distance",
                 ),
             ),
         ),

@@ -153,6 +153,121 @@ def weighted_sprite_palette_heatmap(
 # Optional Lab groups (eyes / intermittents) never raise the diversity bar,
 # but their local presence multiplies heat up to this extra gain.
 _OPTIONAL_GROUP_BOOST = np.float32(0.35)
+# Hard color-structure gate: group counts as present when peak local presence
+# reaches this (1.0 = coverage window meets _MIN_GROUP_AREA_FRACTION).
+_GROUP_PRESENT_PEAK_MIN = 1.0
+# Body-cluster pixel counts as a strong match at this similarity.
+_BODY_STRONG_SIM = 0.5
+
+
+def _group_presence_maps(
+    similarity_hwc: np.ndarray,
+    groups: list[list[int]],
+    ksize: tuple[int, int],
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """Per-group max-sim and local presence maps (same semantics as diversity)."""
+    denom = _PRESENCE_SIMILARITY_HIGH - _PRESENCE_SIMILARITY_LOW
+    group_similarity: list[np.ndarray] = []
+    group_present: list[np.ndarray] = []
+    for indices in groups:
+        idx = np.asarray(indices, dtype=np.int32)
+        g_sim = similarity_hwc[:, :, idx].max(axis=2).astype(np.float32)
+        group_similarity.append(g_sim)
+        matched = np.clip(
+            (g_sim - _PRESENCE_SIMILARITY_LOW) / denom,
+            0.0,
+            1.0,
+        ).astype(np.float32)
+        local_presence = cv2.boxFilter(
+            matched, ddepth=-1, ksize=ksize, normalize=True,
+        )
+        present = np.clip(
+            local_presence / _MIN_GROUP_AREA_FRACTION, 0.0, 1.0,
+        ).astype(np.float32)
+        group_present.append(present)
+    return group_similarity, group_present
+
+
+def required_groups_structure(
+    crop_bgr: np.ndarray,
+    descriptor: MobDescriptor,
+    max_distance: float,
+    *,
+    downscale: int = 1,
+    presence_peak_min: float = float(_GROUP_PRESENT_PEAK_MIN),
+) -> tuple[int, float, float, float]:
+    """Palette structure in *crop_bgr*.
+
+    Returns ``(present_count, second_share, match_coverage, body_strong)``:
+
+    - ``present_count``: required groups with diversity-style local presence
+      peak >= ``presence_peak_min``.
+    - ``second_share``: second-largest required-group share among matched
+      pixels (mono-family blobs are low).
+    - ``match_coverage``: fraction of crop pixels within ``max_distance`` of
+      any required-group color.
+    - ``body_strong``: fraction of crop pixels with dominant/supporting body
+      cluster similarity >= 0.5 (foreign palettes are low).
+    """
+    empty = (0, 0.0, 0.0, 0.0)
+    groups = list(descriptor.match_palette_required_groups)
+    if (
+        not groups
+        or crop_bgr is None
+        or crop_bgr.size == 0
+        or not descriptor.match_palette_bgr
+    ):
+        return empty
+    _base, similarity_hwc = weighted_sprite_palette_heatmap(
+        crop_bgr,
+        descriptor,
+        max_distance,
+        return_similarity=True,
+    )
+    if similarity_hwc.size == 0:
+        return empty
+    ksize = _coverage_window(
+        float(descriptor.avg_width),
+        float(descriptor.avg_height),
+        downscale,
+    )
+    _sims, present_maps = _group_presence_maps(similarity_hwc, groups, ksize)
+    present_count = sum(
+        1 for present in present_maps if float(present.max()) >= presence_peak_min
+    )
+
+    pixels = crop_bgr.reshape(-1, 3).astype(np.float32)
+    palette = np.asarray(descriptor.match_palette_bgr, dtype=np.float32)
+    max_dist = float(max(max_distance, 1.0))
+    match_mats: list[np.ndarray] = []
+    for indices in groups:
+        gpal = palette[np.asarray(indices, dtype=np.int32)]
+        dist = np.linalg.norm(pixels[:, None, :] - gpal[None, :, :], axis=2).min(
+            axis=1
+        )
+        match_mats.append(dist <= max_dist)
+    matched = np.stack(match_mats, axis=1)
+    any_match = matched.any(axis=1)
+    match_coverage = float(any_match.mean()) if any_match.size else 0.0
+
+    body_clusters = [descriptor.dominant_color, *descriptor.supporting_colors]
+    if body_clusters:
+        body_best = np.stack(
+            [_cluster_match(crop_bgr.astype(np.float32), cluster) for cluster in body_clusters],
+            axis=2,
+        ).max(axis=2)
+        body_strong = float((body_best >= _BODY_STRONG_SIM).mean())
+    else:
+        body_strong = 0.0
+
+    if int(any_match.sum()) <= 0:
+        return present_count, 0.0, match_coverage, body_strong
+    shares = matched[any_match].sum(axis=0).astype(np.float32)
+    shares /= np.float32(any_match.sum())
+    if shares.size < 2:
+        return present_count, 0.0, match_coverage, body_strong
+    ordered = np.sort(shares)[::-1]
+    return present_count, float(ordered[1]), match_coverage, body_strong
 
 
 def apply_palette_diversity(
@@ -187,38 +302,25 @@ def apply_palette_diversity(
             "diversity_factor": ones,
         }
 
-    denom = _PRESENCE_SIMILARITY_HIGH - _PRESENCE_SIMILARITY_LOW
     ksize = _coverage_window(avg_width, avg_height, downscale)
+    req_sims, req_present = _group_presence_maps(
+        similarity_hwc, required_groups, ksize,
+    )
+    opt_sims, opt_present = _group_presence_maps(
+        similarity_hwc, optional_groups, ksize,
+    )
+    group_similarity = req_sims + opt_sims
+    group_present = req_present + opt_present
 
-    group_similarity: list[np.ndarray] = []
-    group_present: list[np.ndarray] = []
     required_effective = np.zeros((h, w), dtype=np.float32)
+    for present in req_present:
+        required_effective += present
     optional_effective = np.zeros((h, w), dtype=np.float32)
+    for present in opt_present:
+        optional_effective += present
 
-    def _accumulate(groups: list[list[int]], into: np.ndarray) -> int:
-        count = 0
-        for indices in groups:
-            idx = np.asarray(indices, dtype=np.int32)
-            g_sim = similarity_hwc[:, :, idx].max(axis=2).astype(np.float32)
-            group_similarity.append(g_sim)
-            matched = np.clip(
-                (g_sim - _PRESENCE_SIMILARITY_LOW) / denom,
-                0.0,
-                1.0,
-            ).astype(np.float32)
-            local_presence = cv2.boxFilter(
-                matched, ddepth=-1, ksize=ksize, normalize=True,
-            )
-            present = np.clip(
-                local_presence / _MIN_GROUP_AREA_FRACTION, 0.0, 1.0,
-            ).astype(np.float32)
-            group_present.append(present)
-            into += present
-            count += 1
-        return count
-
-    n_required = _accumulate(required_groups, required_effective)
-    n_optional = _accumulate(optional_groups, optional_effective)
+    n_required = len(required_groups)
+    n_optional = len(optional_groups)
 
     if n_required <= 0:
         diversity_factor = np.ones((h, w), dtype=np.float32)

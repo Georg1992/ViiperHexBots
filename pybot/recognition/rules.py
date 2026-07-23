@@ -6,19 +6,16 @@ Ownership:
 - **Discovery** creates tracks for new mobs, marks in-ROI unmatched tracks as
   ``discovery_absent``, may drop unmatched tracks that are already outside the
   hunt ROI (left the search area), on match publishes a soft position prior
-  (``discovery_obs_*``), and may set ``discovery_death`` (+ death-site coords)
-  when a death silhouette wins over living at a known track. It never
-  overwrites authoritative ``x``/``y`` and never removes for death — tracking
-  owns in-ROI death/lost/unreachable removal.
+  (``discovery_obs_*``), and on static death-silhouette win removes the track
+  immediately (rediscovery ghost at the death site). It never overwrites
+  authoritative ``x``/``y``.
 - **Tracking** is the sole writer of authoritative position, movement, opacity
-  death, lost_count, unreachable removal, and in-ROI death/lost removal. It
-  consumes discovery priors on miss, drops on joint absence, and removes
-  tracks when ``discovery_death`` is set (ghost at the recorded death site)
-  or opacity confirms (ghost at the opacity hit).
+  death, lost_count, and unreachable removal. It consumes discovery priors on
+  miss, drops on joint absence, and removes on opacity confirm (ghost at the
+  opacity hit). A leftover ``discovery_death`` flag is still honored if present.
 - **Attack** records attack_count / last_attack_tick only; it reads position
   snapshots for clicks but must not mutate tracking fields or remove tracks.
-- Death-flagged tracks are excluded from living discovery match/create so a
-  sticky ``discovery_death`` cannot consume a nearby living detection.
+- Rediscovery ghosts block immediate recreates at corpse sites.
 """
 
 from __future__ import annotations

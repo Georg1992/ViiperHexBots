@@ -6,11 +6,11 @@ detector dedicated to tracking so it never blocks on the discovery scan's
 lock), writing fresh coordinates into the shared HuntTracks store.
 
 Tracking is the sole writer of authoritative position and in-ROI removal.
-Discovery publishes soft ``discovery_obs_*`` priors, ``discovery_absent``, and
-optional ``discovery_death`` (+ frozen death-site coords). On a local miss,
-tracking searches/snaps from the prior and drops on joint absence. When
-``discovery_death`` is set or opacity confirms, tracking removes and ghosts.
-Otherwise: lost miss-limit or unreachable. Discovery never removes for death.
+Discovery publishes soft ``discovery_obs_*`` priors and ``discovery_absent``,
+and removes immediately on static death-silhouette match (ghost site). On a
+local miss, tracking searches/snaps from the prior and drops on joint absence.
+Opacity confirm also removes and ghosts. Otherwise: lost miss-limit or
+unreachable.
 """
 
 from __future__ import annotations

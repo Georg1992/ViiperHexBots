@@ -77,7 +77,7 @@ def calibrate_opacity_baseline(
     baseline_samples: int,
     config: dict,
 ) -> tuple[float, int]:
-    """Accumulate baseline samples while the mob is alive and stationary."""
+    """Accumulate baseline samples while the mob is alive."""
     min_samples = int(config["deathOpacityBaselineSamples"])
     min_baseline = float(config["deathOpacityMinBaseline"])
 
@@ -108,23 +108,17 @@ def evaluate_opacity_death(
     baseline_samples: int,
     decay_streak: int,
     config: dict,
-    decay_ratio_limit: float | None = None,
     moving: bool = False,
 ) -> tuple[float, int, int, bool]:
     """Update opacity baseline state and return whether death is confirmed.
 
-    Mild decay (``deathOpacityDecayRatio``) only advances while stationary.
-    Strong decay (``deathOpacityStrongDecayRatio``) can advance while walking
-    so fading death animations that keep ``moving`` set still resolve.
+    Any drop below the living baseline starts the decay streak. Dead sprites
+    stop moving, so the streak only advances while stationary; a drop while
+    ``moving`` holds the streak (no reset). Recovery to baseline clears it.
+    Death requires ``deathOpacityConfirmTicks`` consecutive stationary drops.
     """
     min_samples = int(config["deathOpacityBaselineSamples"])
     min_baseline = float(config["deathOpacityMinBaseline"])
-    decay_ratio_limit = (
-        float(decay_ratio_limit)
-        if decay_ratio_limit is not None
-        else float(config["deathOpacityDecayRatio"])
-    )
-    strong_decay_ratio = float(config["deathOpacityStrongDecayRatio"])
     confirm_ticks = int(config["deathOpacityConfirmTicks"])
 
     if baseline_samples < min_samples:
@@ -137,14 +131,11 @@ def evaluate_opacity_death(
         baseline = max(baseline, opacity_score)
         return baseline, baseline_samples, decay_streak, False
 
-    ratio = opacity_score / baseline if baseline > 0.0 else 1.0
-    strong_decay = ratio <= strong_decay_ratio + 1e-6
-    mild_decay = ratio <= decay_ratio_limit + 1e-6
-
-    if strong_decay or (mild_decay and not moving):
+    dropped = opacity_score < baseline
+    if dropped and not moving:
         decay_streak += 1
-    elif mild_decay and moving:
-        # Walking blur can look like mild decay — hold streak, don't reset.
+    elif dropped and moving:
+        # Fall / walk blur can look like a drop — hold streak until stopped.
         pass
     else:
         decay_streak = 0

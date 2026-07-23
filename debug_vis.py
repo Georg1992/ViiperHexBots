@@ -3,7 +3,7 @@
 Outputs under _debug_vis/:
   pipeline.txt                      — discovery pipeline structure (text)
   {mob}/descriptor.png              — descriptor fields used for that mob
-  {mob}/death_silhouettes.png       — Die-frame pool + death gate refs
+  {mob}/death_silhouettes.png       — death-check silhouette refs (runtime)
   {mob}/{fixture}_viz.png           — heatmap | frame+boxes | silhouettes
 """
 
@@ -18,14 +18,10 @@ import numpy as np
 
 from pybot.mobs.catalog import ensure_mob_assets, load_mob_catalog
 from pybot.paths import PROJECT_ROOT
-from pybot.recognition.act_reader import ActReader
 from pybot.recognition.detector.descriptors.descriptor import (
     ColorCluster,
     MobDescriptor,
     SilhouetteMask,
-)
-from pybot.recognition.detector.descriptors.descriptor_builder import (
-    DescriptorBuilder,
 )
 from pybot.recognition.detector.descriptors.layout_utils import (
     HARD_OCCUPANCY,
@@ -42,7 +38,6 @@ from pybot.recognition.detector.discovery_pipeline import (
     format_discovery_pipeline_text,
 )
 from pybot.recognition.fixtures import MOB_FIXTURE_SUITES, fixture_search_frame
-from pybot.recognition.spr_reader import SprReader
 
 OUT_DIR = Path("_debug_vis")
 
@@ -494,76 +489,48 @@ def _pack_tiles(tiles: list[np.ndarray], *, cols: int, gap: int = 6) -> np.ndarr
     return canvas
 
 
-def load_die_frame_silhouette_masks(mob_name: str) -> list[SilhouetteMask]:
-    """All non-empty Die-action frame silhouettes (pre gate selection)."""
-    builder = DescriptorBuilder(PROJECT_ROOT)
-    asset_dir = builder.asset_dir(mob_name)
-    spr_stem = mob_name.lower()
-    spr = SprReader(asset_dir / f"{spr_stem}.spr").load()
-    act = ActReader(asset_dir / f"{spr_stem}.act").load()
-    action_indices = DescriptorBuilder._death_action_indices(len(act.actions))
-    if not action_indices:
-        return []
-    return builder._build_death_frame_silhouette_masks(spr, act, action_indices)
-
-
-def render_death_silhouettes(
-    descriptor: MobDescriptor,
-    die_frame_masks: list[SilhouetteMask],
-) -> np.ndarray:
-    """One page: death gate refs (runtime) + full Die-frame silhouette pool."""
+def render_death_silhouettes(descriptor: MobDescriptor) -> np.ndarray:
+    """Page of silhouette refs actually used for discovery death checks."""
     gate = list(descriptor.death_silhouette_masks)
     header = _text_block([
-        f"{descriptor.mob_name}  v{descriptor.version}  DEATH SILHOUETTES",
-        (
-            f"Die frame pool={len(die_frame_masks)}  "
-            f"gate refs={len(gate)} (used by discovery death check)"
-        ),
-        "Gate picks = farthest from living silhouettes, then from each other",
-    ], width=960)
+        f"{descriptor.mob_name}  v{descriptor.version}  DEATH CHECK SILHOUETTES",
+        f"{len(gate)} ref(s) used by discovery death match (static decay pose)",
+        "Last opaque Die frame per facing — all facings kept for death check",
+    ], width=max(480, 160 + len(gate) * (_SIL_SIZE // 2 + 12)))
+
+    if not gate:
+        empty = np.full((80, header.shape[1], 3), 28, dtype=np.uint8)
+        cv2.putText(
+            empty, "(no death silhouette refs)", (12, 48),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (120, 120, 180), 1, cv2.LINE_AA,
+        )
+        return np.vstack([header, empty])
 
     gate_tiles = [
-        _labeled_silhouette_tile(mask, f"GATE {i}", _SIL_SIZE // 2)
+        _labeled_silhouette_tile(mask, f"DEATH {i}", _SIL_SIZE // 2)
         for i, mask in enumerate(gate)
     ]
-    pool_tile_size = 48 if len(die_frame_masks) > 40 else (_SIL_SIZE // 2)
-    pool_tiles = [
-        _labeled_silhouette_tile(mask, f"{i}", pool_tile_size)
-        for i, mask in enumerate(die_frame_masks)
-    ]
-    pool_cols = 12 if len(die_frame_masks) > 24 else 8
+    grid = _pack_tiles(gate_tiles, cols=max(1, min(8, len(gate_tiles))))
+    title_bar = np.full((22, max(grid.shape[1], header.shape[1]), 3), 36, dtype=np.uint8)
+    cv2.putText(
+        title_bar,
+        f"DEATH CHECK REFS ({len(gate)})",
+        (6, 15),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.4,
+        (160, 200, 255),
+        1,
+        cv2.LINE_AA,
+    )
+    max_w = max(header.shape[1], title_bar.shape[1], grid.shape[1])
 
-    sections: list[tuple[str, np.ndarray]] = [
-        (f"DEATH GATE REFS ({len(gate)})", _pack_tiles(gate_tiles, cols=max(1, len(gate_tiles)))),
-        (
-            f"DIE FRAME POOL ({len(die_frame_masks)})",
-            _pack_tiles(pool_tiles, cols=pool_cols),
-        ),
-    ]
+    def _pad(img: np.ndarray) -> np.ndarray:
+        if img.shape[1] >= max_w:
+            return img
+        pad = np.full((img.shape[0], max_w - img.shape[1], 3), 28, dtype=np.uint8)
+        return np.hstack([img, pad])
 
-    rows: list[np.ndarray] = [header]
-    max_w = header.shape[1]
-    for title, img in sections:
-        block_w = max(img.shape[1], 200)
-        title_bar = np.full((22, block_w, 3), 36, dtype=np.uint8)
-        cv2.putText(
-            title_bar, title, (6, 15),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (160, 200, 255), 1, cv2.LINE_AA,
-        )
-        if img.shape[1] < block_w:
-            pad = np.full((img.shape[0], block_w - img.shape[1], 3), 28, dtype=np.uint8)
-            img = np.hstack([img, pad])
-        block = np.vstack([title_bar, img])
-        max_w = max(max_w, block.shape[1])
-        rows.append(block)
-
-    padded: list[np.ndarray] = []
-    for row in rows:
-        if row.shape[1] < max_w:
-            pad = np.full((row.shape[0], max_w - row.shape[1], 3), 28, dtype=np.uint8)
-            row = np.hstack([row, pad])
-        padded.append(row)
-    return np.vstack(padded)
+    return np.vstack([_pad(header), _pad(title_bar), _pad(grid)])
 
 
 def render_descriptor_info(
@@ -710,21 +677,17 @@ def main() -> None:
         mob_name = entry.descriptor_name
         try:
             descriptor = detector.ensure_descriptor(mob_name)
-            die_pool = load_die_frame_silhouette_masks(mob_name)
         except (FileNotFoundError, RuntimeError) as exc:
             print(f"  SKIP death viz {mob_name:15s}  {exc}")
             continue
         mob_dir = OUT_DIR / mob_name
         mob_dir.mkdir(parents=True, exist_ok=True)
         death_path = mob_dir / "death_silhouettes.png"
-        cv2.imwrite(
-            str(death_path),
-            render_death_silhouettes(descriptor, die_pool),
-        )
+        cv2.imwrite(str(death_path), render_death_silhouettes(descriptor))
         death_viz_count += 1
         print(
             f"  {mob_name:15s} wrote death_silhouettes.png  "
-            f"pool={len(die_pool)} gate={len(descriptor.death_silhouette_masks)}"
+            f"death_refs={len(descriptor.death_silhouette_masks)}"
         )
 
     for suite in MOB_FIXTURE_SUITES:

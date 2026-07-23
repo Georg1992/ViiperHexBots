@@ -27,7 +27,7 @@ from pybot.recognition.detector.descriptors.palette_groups import (
     split_palette_groups_by_required,
 )
 
-DESCRIPTOR_VERSION = 37
+DESCRIPTOR_VERSION = 40
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -48,7 +48,8 @@ GATE_SILHOUETTE_REF_COUNTS = (
 ACTIONS_PER_ANIMATION = 8
 DEAD_ACTION_COUNT = ACTIONS_PER_ANIMATION
 MIN_ACTIONS_FOR_DEATH = LIVING_FACING_ACTION_LIMIT + DEAD_ACTION_COUNT
-MIN_DEATH_GATE_SILHOUETTE_MASKS = 6
+# Static decay corpse: last opaque Die frame per facing (all used at death check).
+MIN_DEATH_GATE_SILHOUETTE_MASKS = DEAD_ACTION_COUNT
 MATCH_PALETTE_MAX_COLORS = 32
 MATCH_PALETTE_MAX_ACCENT_COLORS = 8
 # Palette shades present in at least this fraction of opaque frames are
@@ -60,6 +61,9 @@ PALETTE_NEAR_BLACK_MAX_VALUE = 20.0
 PALETTE_NEAR_BLACK_MAX_SATURATION = 25.0
 PALETTE_NEAR_WHITE_MIN_VALUE = 250.0
 PALETTE_NEAR_WHITE_MAX_SATURATION = 15.0
+# Dark, nearly-neutral shades collide with gray-world grid/floor (e.g. Wild Rose).
+PALETTE_DARK_MUTED_MAX_VALUE = 60.0
+PALETTE_DARK_MUTED_MAX_CHROMA = 22.0
 MIN_DISTINCTIVE_SATURATION = 40.0
 MIN_DISTINCTIVE_VALUE = 30.0
 BODY_CLUSTER_MAX_DISTANCE = 28.0
@@ -333,9 +337,12 @@ class DescriptorBuilder:
     def _is_scene_matching_speck(bgr: tuple[int, int, int]) -> bool:
         """Drop colors that match generic scene shadows/highlights instead of mob fill."""
         value, saturation = _bgr_value_saturation(bgr)
+        chroma = float(max(bgr) - min(bgr))
         if value <= PALETTE_NEAR_BLACK_MAX_VALUE and saturation <= PALETTE_NEAR_BLACK_MAX_SATURATION:
             return True
         if value >= PALETTE_NEAR_WHITE_MIN_VALUE and saturation <= PALETTE_NEAR_WHITE_MAX_SATURATION:
+            return True
+        if value <= PALETTE_DARK_MUTED_MAX_VALUE and chroma <= PALETTE_DARK_MUTED_MAX_CHROMA:
             return True
         return False
 
@@ -881,7 +888,7 @@ class DescriptorBuilder:
         act_file,
         action_indices: tuple[int, ...],
     ) -> list[SilhouetteMask]:
-        """All non-empty frames from each Die directional action."""
+        """All non-empty frames from each Die directional action (debug pool)."""
         masks: list[SilhouetteMask] = []
         for action_index in action_indices:
             frames = self._collect_frames(
@@ -891,6 +898,23 @@ class DescriptorBuilder:
                 masks.append(self._build_silhouette_mask([bgra]))
         return masks
 
+    def _build_death_corpse_silhouette_masks(
+        self,
+        spr_file,
+        act_file,
+        action_indices: tuple[int, ...],
+    ) -> list[SilhouetteMask]:
+        """Last non-transparent frame from each Die action (static decay pose)."""
+        masks: list[SilhouetteMask] = []
+        for action_index in action_indices:
+            frames = self._collect_frames(
+                spr_file, act_file, (action_index,), frame_start=0,
+            )
+            if not frames:
+                continue
+            masks.append(self._build_silhouette_mask([frames[-1]]))
+        return masks
+
     def _build_death_gate_silhouette_masks(
         self,
         spr_file,
@@ -898,19 +922,17 @@ class DescriptorBuilder:
         *,
         living_masks: list[SilhouetteMask],
     ) -> list[SilhouetteMask]:
-        """Pick Die-frame masks farthest from living and from each other.
+        """Keep static decay corpse silhouettes for every Die facing.
 
-        Pool = all non-empty frames from the last 8 Die actions. Selection is
-        greedy farthest-first against living silhouettes as fixed anchors, then
-        against already chosen death refs — so each pick is unlike living poses
-        and unlike the other death refs.
+        Die clips fall quickly then hold one opaque decay sprite. Gate refs =
+        last non-transparent frame per Die directional action (up to 8), so
+        discovery death match covers all facings.
         """
-        if not living_masks:
-            return []
+        del living_masks  # corpse pose is fixed; no farthest-from-living cull
         action_indices = self._death_action_indices(len(act_file.actions))
         if not action_indices:
             return []
-        frame_masks = self._build_death_frame_silhouette_masks(
+        frame_masks = self._build_death_corpse_silhouette_masks(
             spr_file, act_file, action_indices,
         )
         if not frame_masks:
@@ -918,12 +940,9 @@ class DescriptorBuilder:
         coherent = [
             mask for mask in frame_masks if self._is_coherent_gate_silhouette(mask)
         ]
+        # Prefer coherent facings; if none pass, keep every facing corpse.
         pool = coherent if coherent else frame_masks
-        target = min(MIN_DEATH_GATE_SILHOUETTE_MASKS, len(pool))
-        if target <= 0:
-            return []
-        order = self._farthest_from_anchors_mask_order(pool, living_masks)
-        return [pool[idx] for idx in order[:target]]
+        return list(pool)
 
     def _farthest_from_anchors_mask_order(
         self,
