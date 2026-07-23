@@ -249,10 +249,10 @@ class DescriptorBuilder:
         # Geometry aspect band from sprite frame tight bboxes.
         # Runtime blob imprecision (GaussianBlur + heat spread) distorts
         # small sprites (Creamy 48 px → tall/narrow blobs). Frame aspect
-        # variation does not predict this — a flat 45 % margin is the
-        # empirically-determined minimum that covers Creamy's vertical
-        # heat spread without letting Wild Rose gray-world FPs through.
-        aspect_margin = 0.45
+        # variation does not predict this — a flat 50 % margin covers
+        # Thara's slightly-wide heat blobs without meaningfully widening
+        # the Wild Rose false-positive envelope.
+        aspect_margin = 0.50
         min_aspect, max_aspect = self._measure_aspect_band(
             all_facing_frames, margin=aspect_margin,
         )
@@ -974,12 +974,12 @@ class DescriptorBuilder:
         frames: list[np.ndarray],
         body_clusters: list[ColorCluster],
     ) -> float:
-        """Measure body_strong on actual sprite frames; floor at 8 % of median.
+        """Measure body_strong on actual sprite frames; floor at 6 % of median.
 
         body_strong = fraction of opaque pixels whose best body-cluster
         similarity >= 0.5. On the mob's own sprite this should be high;
-        a runtime impostor must clear at least 8 % of that signal (capped
-        at 0.10 so tight-cluster mobs like Horn don't get an unreachable
+        a runtime impostor must clear at least 6 % of that signal (capped
+        at 0.08 so tight-cluster mobs like Horn don't get an unreachable
         floor). Falls back to 0.03 (config default) when no frames are
         available.
         """
@@ -1005,11 +1005,11 @@ class DescriptorBuilder:
         if not values:
             return 0.03
         median = float(np.median(values))
-        # Runtime body_strong degrades ~5-15× from sprite measurement
-        # (anti-aliased edges, lighting, background mixing). Use 8 %
-        # of median with a soft cap at 0.10 so tight-cluster mobs
+        # Runtime body_strong degrades ~10-20× from sprite measurement
+        # (anti-aliased edges, lighting, background mixing). Use 6 %
+        # of median with a soft cap at 0.08 so tight-cluster mobs
         # (Horn) don't get an unreachable floor.
-        return max(0.02, min(0.10, median * 0.08))
+        return max(0.015, min(0.08, median * 0.06))
 
     @staticmethod
     def _measure_palette_coverage_floor(
