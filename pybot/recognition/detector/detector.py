@@ -591,31 +591,29 @@ class MobDetector:
             and body_strong < min_body_cov_ratio * match_coverage
         ):
             return False
+
         return True
 
     def _descriptor_min_area_ratio(self, descriptor: MobDescriptor) -> float:
-        """Min stable silhouette occupancy across facings, cached per descriptor.
+        """Mean stable silhouette occupancy across all facings, cached per descriptor.
 
-        Uses the *minimum* stable fraction across all facings so side-facing
-        heat blobs (smaller footprint than front-facing) are not unfairly
-        rejected. Cached on the descriptor object to avoid recomputing
-        stable_bits per blob.
+        Cached on the descriptor object to avoid recomputing stable_bits per
+        blob.  ``_GEOMETRY_AREA_SIL_FRAC_DIVISOR = 4.0`` already provides a
+        75 % margin below the representative sprite footprint, so per-mask
+        minimums are unnecessary leniency.
         """
-        # Cache key: store on the descriptor instance if not yet computed.
         cached = getattr(descriptor, "_min_area_ratio", None)
         if cached is not None:
             return float(cached)
-        min_sil_frac = 1.0
+        stable_bits: list[bool] = []
         for mask in descriptor.silhouette_masks:
             if mask.stable_mask:
-                bits = np.asarray(mask.stable_mask, dtype=np.float32)
-                sil_frac = float(bits.mean())
-                if sil_frac < min_sil_frac:
-                    min_sil_frac = sil_frac
-        if min_sil_frac >= 1.0:
+                stable_bits.extend(mask.stable_mask)
+        if not stable_bits:
             descriptor._min_area_ratio = 1.0
             return 1.0
-        result = min_sil_frac / _GEOMETRY_AREA_SIL_FRAC_DIVISOR
+        sil_frac = float(np.mean(np.asarray(stable_bits, dtype=np.float32)))
+        result = sil_frac / _GEOMETRY_AREA_SIL_FRAC_DIVISOR
         descriptor._min_area_ratio = result
         return result
 
