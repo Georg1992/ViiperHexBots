@@ -28,7 +28,7 @@ from pybot.recognition.detector.descriptors.palette_groups import (
 )
 
 
-DESCRIPTOR_VERSION = 47
+DESCRIPTOR_VERSION = 48
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -74,6 +74,8 @@ MIN_DISTINCTIVE_VALUE = 30.0
 BODY_CLUSTER_MAX_DISTANCE = 28.0
 DOMINANT_CLUSTER_MAX_DISTANCE = 20.0
 ACCENT_CLUSTER_MAX_DISTANCE = 30.0
+# Fixed RNG seed ensures k-means centroids are deterministic across builds.
+_KMEANS_RNG_SEED = 42
 SILHOUETTE_WIDTH = 16
 SILHOUETTE_HEIGHT = 16
 STABLE_SILHOUETTE_VALUE = 0.20
@@ -883,6 +885,10 @@ class DescriptorBuilder:
             return []
         samples = bgr_pixels.astype(np.float32)
         k = min(count, len(samples))
+        # Fixed RNG seed so k-means produces the same centroids every build.
+        # KMEANS_PP_CENTERS is deterministic given the same seed, but
+        # OpenCV's internal theRNG() defaults to time-based seeding.
+        cv2.setRNGSeed(_KMEANS_RNG_SEED)
         _, labels, centers = cv2.kmeans(
             samples,
             k,
