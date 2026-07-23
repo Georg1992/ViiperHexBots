@@ -28,7 +28,7 @@ from pybot.recognition.detector.descriptors.palette_groups import (
 )
 
 
-DESCRIPTOR_VERSION = 46
+DESCRIPTOR_VERSION = 47
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -248,12 +248,14 @@ class DescriptorBuilder:
         use_diversity = body_group_count <= 2
 
         # Geometry aspect band from sprite frame tight bboxes.
-        # Runtime blob imprecision (GaussianBlur + heat spread) distorts
-        # small sprites (Creamy 48 px → tall/narrow blobs). Frame aspect
-        # variation does not predict this — a flat 50 % margin covers
-        # Thara's slightly-wide heat blobs without meaningfully widening
-        # the Wild Rose false-positive envelope.
-        aspect_margin = 0.50
+        # Small sprites get GaussianBlur shape distortion at 2×
+        # downscale — heat spreads asymmetrically, producing
+        # tall/narrow blobs. Margin scales inversely with size:
+        # base 50 % below 72 px, proportional above. Keeps large
+        # sprite bands tight (no Desert Wolf FPs) while small
+        # sprites (Creamy 48 px → 75 %) pass distorted blobs.
+        min_dim = min(profile["size"].avg_width, profile["size"].avg_height)
+        aspect_margin = max(0.50, 0.50 * (72.0 / max(min_dim, 1.0)))
         min_aspect, max_aspect = self._measure_aspect_band(
             all_facing_frames, margin=aspect_margin,
         )
