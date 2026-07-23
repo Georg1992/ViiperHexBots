@@ -18,7 +18,6 @@
   "localTrackMovingSearchRadiusPx": 180,
   "topCandidateCenters": 32,
   "minCenterHeat": 0.015,
-  "minDiscoveryHeat": 0.0,
   "peakRelativeThreshold": 0.25,
   "maxCandidates": 100,
   "smallScaleMinFrameWidth": 512,
