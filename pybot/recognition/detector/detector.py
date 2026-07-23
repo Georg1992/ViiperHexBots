@@ -277,6 +277,16 @@ class MobDetector:
         downscale = 1
         if self.discovery_heatmap_downscale > 1 and min(fw, fh) >= self.discovery_heatmap_downscale_min_side:
             downscale = self.discovery_heatmap_downscale
+        # Very small sprites lose too much signal at 2× downscale —
+        # GaussianBlur on a <24 px field smears heat into speckles
+        # rejected by the area gate. Gated behind diversity-off to
+        # avoid regressions (Noxious is size-eligible but div-on).
+        if (
+            downscale > 1
+            and not descriptor.use_body_cluster_diversity
+            and min(descriptor.avg_width, descriptor.avg_height) / downscale < 24.0
+        ):
+            downscale = 1
 
         sprite_heatmap = self.heatmap_detector.build_sprite_heatmap(
             frame_bgr,
