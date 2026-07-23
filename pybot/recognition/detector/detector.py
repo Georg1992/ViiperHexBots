@@ -47,6 +47,7 @@ REQUIRED_CONFIG_KEYS = {
     "usePaletteDiversity",
     "topCandidateCenters",
     "minCenterHeat",
+    "minDiscoveryHeat",
     "peakRelativeThreshold",
     "maxCandidates",
     "smallScaleMinFrameWidth",
@@ -297,6 +298,9 @@ class MobDetector:
         known = list(known_tracks or ())
         blob_to_known = self._mark_known_blobs(blobs, known, dedup_radius)
 
+        # --- heat-floor gate (tunable per-mob via config) ----------
+        min_discovery_heat = float(self.config.get("minDiscoveryHeat", 0.0))
+
         # --- gates → silhouette (known tracks skip pre-gates) ----------
         candidates: list[DetectionCandidate] = []
         silhouette_checks: list[SilhouetteCheck] = []
@@ -308,8 +312,19 @@ class MobDetector:
 
             # New peaks must clear geometry + color structure. Known tracks were
             # already silhouette-confirmed when created — skip those pre-gates so
-            # fading corpses can still reach living-vs-death silhouette scoring.
+            # fading corpses can still reach silhouette scoring.
             if known_hit is None:
+                # Heat-floor gate: tunable per-mob via minDiscoveryHeat config.
+                # Rejects weak terrain heat blobs before expensive silhouette check.
+                if min_discovery_heat > 0.0 and heat_score < min_discovery_heat:
+                    silhouette_checks.append(SilhouetteCheck(
+                        center_x=cx,
+                        center_y=cy,
+                        heat_score=heat_score,
+                        passed=False,
+                        similarity=0.0,
+                    ))
+                    continue
                 if not self._passes_discovery_geometry_gate(comp_bbox, descriptor):
                     silhouette_checks.append(SilhouetteCheck(
                         center_x=cx,
