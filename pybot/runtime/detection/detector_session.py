@@ -34,8 +34,7 @@ class DiscoveryScanResult:
     detections: list[RawDetection]
     duration_ms: int
     elapsed_s: float
-    # Known-track death hits from the same scan: (track_id, screen_x, screen_y).
-    death_confirmed: list[tuple[int, int, int]] | None = None
+
 
 
 @dataclass(frozen=True)
@@ -109,7 +108,6 @@ class DetectorSession:
                 detections=[],
                 duration_ms=0,
                 elapsed_s=0.0,
-                death_confirmed=[],
             )
         return self.discover_frame(frame, roi)
 
@@ -120,12 +118,12 @@ class DetectorSession:
         *,
         known_tracks: list[tuple[int, int, int, float]] | None = None,
     ) -> DiscoveryScanResult:
-        """Discovery scan: new peaks living-only; known tracks alive+dead gates.
+        """Discovery scan: living silhouette gate only. Death is tracker-owned.
 
         ``known_tracks`` are ``(track_id, screen_x, screen_y, scale)`` at capture
-        time. Empty on the first scan (living-only). Later scans mark heatmap
-        peaks near those coords and dual-check silhouettes; deaths go to
-        ``death_confirmed`` for the tracker.
+        time. Empty on the first scan (living-only). Later scans find heatmap
+        peaks near known-track coords, skip pre-gates, and score against living
+        silhouettes.
         """
         if frame is None or frame.size == 0:
             return DiscoveryScanResult(
@@ -136,16 +134,11 @@ class DetectorSession:
                 detections=[],
                 duration_ms=0,
                 elapsed_s=0.0,
-                death_confirmed=[],
             )
         frame_known: list[tuple[int, int, int, float]] = [
             (int(track_id), int(screen_x) - roi.x, int(screen_y) - roi.y, float(scale))
             for track_id, screen_x, screen_y, scale in (known_tracks or ())
         ]
-        screen_by_id = {
-            int(track_id): (int(screen_x), int(screen_y))
-            for track_id, screen_x, screen_y, _scale in (known_tracks or ())
-        }
         start = time.perf_counter()
         with self._lock:
             result = self._detector.detect(
@@ -166,13 +159,6 @@ class DetectorSession:
             )
             for candidate in result.accepted
         ]
-        death_confirmed: list[tuple[int, int, int]] = []
-        for track_id, fx, fy in result.death_confirmed or ():
-            tid = int(track_id)
-            if tid not in screen_by_id:
-                continue
-            # Freeze the death blob center (not live track coords) for the ghost.
-            death_confirmed.append((tid, int(fx) + roi.x, int(fy) + roi.y))
         return DiscoveryScanResult(
             ok=True,
             fail_reason="",
@@ -181,7 +167,6 @@ class DetectorSession:
             detections=accepted,
             duration_ms=duration_ms,
             elapsed_s=elapsed_s,
-            death_confirmed=death_confirmed,
         )
 
     def track_locals(

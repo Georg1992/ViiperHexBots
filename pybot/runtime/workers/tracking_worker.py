@@ -6,12 +6,12 @@ every alive track with the LocalTracker (via ``ctx.tracker`` — a detector
 dedicated to tracking so it never blocks on the discovery scan's lock),
 writing fresh coordinates into the shared HuntTracks store.
 
-Tracking is the sole writer of authoritative position and the sole remover of
-tracks (opacity death, discovery_death notifications, joint absence,
-unreachable). Discovery notifies on static death-silhouette match and
-publishes soft ``discovery_obs_*`` priors / ``discovery_absent``. Tracking
-never drops a track just because local follow missed — it keeps searching
-until discovery confirms gone/dead or the mob is unreachable.
+Tracking is the sole writer of authoritative position, the sole remover of
+tracks, and the sole death detector (opacity death, joint absence,
+unreachable). Discovery publishes soft ``discovery_obs_*`` priors /
+``discovery_absent``. Tracking never drops a track just because local follow
+missed — it keeps searching until discovery confirms gone or the mob is
+unreachable.
 """
 
 from __future__ import annotations

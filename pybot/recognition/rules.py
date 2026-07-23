@@ -5,16 +5,14 @@ Used by tests to lock the pipeline contract.
 Ownership:
 - **Discovery** creates tracks for new mobs, marks unmatched tracks as
   ``discovery_absent``, on match publishes a soft position prior
-  (``discovery_obs_*``), and on static death-silhouette win sets
-  ``discovery_death`` (notification only). It never overwrites authoritative
-  ``x``/``y`` and never deletes tracks. Tracking wakes discovery on local miss
-  so priors / absence / death can be refreshed promptly.
-- **Tracking** is the sole remover of tracks. It owns authoritative position
-  and movement, consumes discovery priors on miss, keeps searching while local
-  follow fails, and drops on sustained joint absence
-  (discovery_absent + local miss for ``trackJointAbsentConfirmMs``),
-  ``discovery_death`` notifications, opacity death (when enabled), or
-  unreachable.
+  (``discovery_obs_*``). It never overwrites authoritative ``x``/``y`` and
+  never deletes tracks. Tracking wakes discovery on local miss so priors /
+  absence can be refreshed promptly.
+- **Tracking** is the sole remover of tracks and the sole death detector.
+  It owns authoritative position and movement, consumes discovery priors on
+  miss, keeps searching while local follow fails, and drops on opacity death,
+  sustained joint absence (discovery_absent + local miss for
+  ``trackJointAbsentConfirmMs``), or unreachable.
 - **Attack** records attack_count / last_attack_tick only; it reads position
   snapshots for clicks but must not mutate tracking fields or remove tracks.
 - Rediscovery ghosts (placed by tracking on death) block immediate recreates
@@ -261,15 +259,6 @@ def apply_discovery_observation(
     track.discovery_obs_tick = now_tick
     track.last_discovery_tick = now_tick
     track.discovery_absent = False
-
-
-def note_discovery_death(track: MobTrack, *, x: int, y: int) -> None:
-    """Discovery helper: death won at ``(x, y)``; tracking will remove + ghost."""
-    track.discovery_death = True
-    track.discovery_death_x = int(x)
-    track.discovery_death_y = int(y)
-    track.discovery_absent = False
-    clear_discovery_observation(track)
 
 
 def clear_discovery_observation(track: MobTrack) -> None:

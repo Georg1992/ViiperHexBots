@@ -244,7 +244,6 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             "dual gate recall AND precision",
             "reject solid-fill hard occupancy (>=95% of gate grid)",
             "noisy extract flags (bloated / soft-hard) on SilhouetteCheck",
-            "known tracks: score same extract vs death silhouettes; death wins when death_passed and death_sim > living_sim",
             "pass / fail per blob",
         ),
         sources=(
@@ -303,14 +302,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "noisy_extract",
                 ),
             ),
-            SourceCheck(
-                _detect,
-                (
-                    "_score_death_vs_living_extract",
-                    "death_wins",
-                    "death_confirmed",
-                ),
-            ),
+
         ),
     ),
     PipelineStage(

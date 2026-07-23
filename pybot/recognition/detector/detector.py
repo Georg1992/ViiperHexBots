@@ -187,8 +187,7 @@ class DetectionResult:
     timing: dict[str, float]
     sprite_heatmap: np.ndarray
     silhouette_checks: list[SilhouetteCheck]
-    # Known-track deaths from dual alive/dead gate: (track_id, frame_x, frame_y).
-    death_confirmed: list[tuple[int, int, int]] | None = None
+
 
 
 def load_detector_config(path: Optional[Path] = None) -> dict:
@@ -266,16 +265,12 @@ class MobDetector:
         *,
         known_tracks: list[tuple[int, int, int, float]] | None = None,
     ) -> DetectionResult:
-        """Heatmap discovery with optional known-track dual silhouette check.
+        """Heatmap discovery with known-track silhouette check.
 
         Order: heatmap → blobs → (new peaks: geometry + color structure) →
-        silhouette. Known-track blobs skip geometry/color and score living vs
-        death silhouettes so fading corpses still reach the death check.
-        * First scan (no ``known_tracks``): living silhouette gate only.
-        * Later scans: heatmap blobs near known tracks are extracted and scored
-          against living and death silhouettes; death is confirmed only when the
-          death match passes the gate and beats the living similarity. Other
-          blobs stay living-only.
+        silhouette. Known-track blobs skip geometry/color and score against
+        living silhouettes only — death detection is owned by the tracker's
+        opacity probe.
         """
         start = time.perf_counter()
         descriptor = self.ensure_descriptor(mob_name)
@@ -301,13 +296,10 @@ class MobDetector:
         dedup_radius = int(self.config["trackDedupRadiusPx"])
         known = list(known_tracks or ())
         blob_to_known = self._mark_known_blobs(blobs, known, dedup_radius)
-        death_masks = list(descriptor.death_silhouette_masks)
 
         # --- gates → silhouette (known tracks skip pre-gates) ----------
         candidates: list[DetectionCandidate] = []
-        death_confirmed: list[tuple[int, int, int]] = []
         silhouette_checks: list[SilhouetteCheck] = []
-        claimed_death_tracks: set[int] = set()
 
         for blob_index, (cx, cy, heat_score, comp_bbox) in enumerate(blobs):
             bx, by, bw, bh = comp_bbox
@@ -405,25 +397,8 @@ class MobDetector:
                     ))
                 continue
 
-            # Known track: score same extract vs living and death; death must win.
-            track_id, _kx, _ky, _scale = known_hit
-            living_sim = float(similarity)
-            death_sim = 0.0
-            death_passed = False
-            if death_masks:
-                death_sim, death_passed = self._score_death_vs_living_extract(
-                    frame_bgr,
-                    descriptor,
-                    bbox,
-                    comp_bbox=comp_bbox,
-                    death_masks=death_masks,
-                    living_candidate=candidate,
-                )
-            death_wins = death_passed and death_sim > living_sim
-            if death_wins and int(track_id) not in claimed_death_tracks:
-                claimed_death_tracks.add(int(track_id))
-                death_confirmed.append((int(track_id), int(cx), int(cy)))
-            elif passed:
+            # Known track: living silhouette only (death is tracker-owned).
+            if passed:
                 candidates.append(DetectionCandidate(
                     mob_name=descriptor.mob_name,
                     center_x=cx, center_y=cy,
@@ -456,7 +431,6 @@ class MobDetector:
             timing=timing,
             sprite_heatmap=sprite_heatmap,
             silhouette_checks=silhouette_checks,
-            death_confirmed=death_confirmed,
         )
 
     @staticmethod
@@ -704,41 +678,7 @@ class MobDetector:
             ))
         return refs
 
-    def _score_death_vs_living_extract(
-        self,
-        frame_bgr: np.ndarray,
-        descriptor: MobDescriptor,
-        bbox: tuple[int, int, int, int],
-        *,
-        comp_bbox: tuple[int, int, int, int] | None,
-        death_masks: list,
-        living_candidate: np.ndarray | None,
-    ) -> tuple[float, bool]:
-        """Score death refs on the living extract (or a death-gate extract).
 
-        Returns ``(death_similarity, death_gate_passed)``. Prefer the living
-        candidate mask so living vs death compare the same silhouette crop.
-        """
-        min_recall = float(self.config["minSilhouetteRecall"])
-        min_precision = float(self.config["minSilhouettePrecision"])
-        if living_candidate is not None:
-            death_refs = self._descriptor_silhouette_references(death_masks)
-            if not death_refs:
-                return 0.0, False
-            death_sim, _idx, _scores, death_prec, death_rec = best_silhouette_match(
-                living_candidate, death_refs,
-            )
-            death_passed = death_rec >= min_recall and death_prec >= min_precision
-            return float(death_sim), bool(death_passed)
-
-        death_passed, death_sim, *_rest = self._evaluate_silhouette_gate(
-            frame_bgr,
-            descriptor,
-            bbox,
-            comp_bbox=comp_bbox,
-            masks=death_masks,
-        )
-        return float(death_sim), bool(death_passed)
 
     def _evaluate_silhouette_gate(
         self,

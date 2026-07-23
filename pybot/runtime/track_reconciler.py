@@ -12,8 +12,6 @@ track just created earlier in this same scan) is skipped; only genuinely new
 detections create a track. Alive tracks with no matching detection are listed
 in ``removed_ids``; the caller marks them ``discovery_absent`` (notification).
 
-Tracks already flagged ``discovery_death`` are excluded from living match and
-from absence listing — tracking owns their removal via the death flag.
 """
 
 from __future__ import annotations
@@ -73,29 +71,14 @@ class TrackReconciler:
             else [(t.id, t.x, t.y) for t in tracks if is_alive(t)]
         )
         tracks_by_id = {t.id: t for t in tracks if is_alive(t)}
-        # Death-flagged tracks are tracking's responsibility; do not bind living
-        # detections to them or mark them discovery_absent in this pass.
-        death_flagged_ids = {
-            tid for tid, track in tracks_by_id.items() if track.discovery_death
-        }
-        matchable_positions = [
-            entry for entry in track_positions if entry[0] not in death_flagged_ids
-        ]
-        unmatched_ids = {entry[0] for entry in matchable_positions}
-        death_capture_xy = {
-            (int(entry[1]), int(entry[2]))
-            for entry in track_positions
-            if entry[0] in death_flagged_ids
-        }
+        unmatched_ids = {entry[0] for entry in track_positions}
 
         # Working set of "known" positions: seeded with frame-time known
         # objects, extended with each track created in this scan so two
-        # detections of one new mob don't both spawn a track. Death-flagged
-        # capture sites are omitted so a nearby living peak can still create.
+        # detections of one new mob don't both spawn a track.
         known_positions: list[tuple[int, int]] = [
             (int(x), int(y))
             for x, y in existing_positions
-            if (int(x), int(y)) not in death_capture_xy
         ]
 
         matched_count = 0
@@ -114,7 +97,7 @@ class TrackReconciler:
             matched_tid = TrackReconciler._match_track_id(
                 detection.x,
                 detection.y,
-                matchable_positions,
+                track_positions,
                 unmatched_ids,
                 radius_sq=radius_sq,
             )

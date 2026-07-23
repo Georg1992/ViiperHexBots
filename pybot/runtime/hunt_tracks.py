@@ -21,7 +21,6 @@ from pybot.recognition.rules import (
     death_movement_thresholds,
     has_discovery_observation,
     joint_absent_confirm_ms,
-    note_discovery_death,
     is_alive,
     is_track_unreachable_by_attacks,
     mob_attack_anchor_key,
@@ -344,32 +343,6 @@ class HuntTracks:
             self._last_reconcile_summary = summary
             return summary
 
-    def note_discovery_deaths(
-        self,
-        deaths: list[tuple[int, int, int]],
-        *,
-        area_epoch: int | None = None,
-        now_tick: int | None = None,
-    ) -> list[int]:
-        """Notify tracking that death silhouettes won on these tracks.
-
-        Sets ``discovery_death`` + frozen death site only. Does not remove
-        tracks, record kills, or place rediscovery ghosts — tracking owns
-        those on the next ``apply_tracking`` tick. Returns flagged track ids.
-        """
-        del now_tick  # notification has no clock side effects
-        flagged: list[int] = []
-        with self._lock:
-            if area_epoch is not None and area_epoch != self._area_epoch:
-                return []
-            for track_id, x, y in deaths:
-                track = self._get_track_by_id_locked(track_id)
-                if track is None:
-                    continue
-                note_discovery_death(track, x=int(x), y=int(y))
-                flagged.append(track_id)
-            return flagged
-
     def apply_tracking(
         self,
         results,
@@ -400,20 +373,12 @@ class HuntTracks:
                 track = self._get_track_by_id_locked(result.track_id)
                 if track is None:
                     continue
-                if getattr(result, "dead", False) or track.discovery_death:
+                if getattr(result, "dead", False):
                     sample = self._kill_sample_attack_count_locked(track)
                     self._pending_attack_track_ids.discard(result.track_id)
                     self._record_kill_locked(sample)
-                    # Opacity hit coords when available; else frozen discovery site.
-                    if getattr(result, "dead", False):
-                        ghost_x, ghost_y = result.x, result.y
-                    elif track.discovery_death:
-                        ghost_x, ghost_y = (
-                            track.discovery_death_x,
-                            track.discovery_death_y,
-                        )
-                    else:
-                        ghost_x, ghost_y = track.x, track.y
+                    # Opacity hit coords for ghost site.
+                    ghost_x, ghost_y = result.x, result.y
                     self._record_removed_site_locked(ghost_x, ghost_y, tick)
                     dead_ids.append(result.track_id)
                     continue
@@ -475,23 +440,6 @@ class HuntTracks:
                     confirm_ms = joint_absent_confirm_ms(self._detector_config())
                     if (tick - last_found) >= confirm_ms:
                         joint_absent_ids.append(result.track_id)
-            # Discovery may flag death while a track is absent from this batch
-            # (e.g. empty follow list) — still remove on the tracking tick.
-            seen_ids = {int(getattr(r, "track_id", -1)) for r in results}
-            for track in self._tracks:
-                if track.id in seen_ids or track.id in dead_ids:
-                    continue
-                if not track.discovery_death:
-                    continue
-                sample = self._kill_sample_attack_count_locked(track)
-                self._pending_attack_track_ids.discard(track.id)
-                self._record_kill_locked(sample)
-                self._record_removed_site_locked(
-                    track.discovery_death_x,
-                    track.discovery_death_y,
-                    tick,
-                )
-                dead_ids.append(track.id)
             remove_ids = set(dead_ids)
             remove_ids.update(joint_absent_ids)
             # "Lost" for callers = joint absence only. Do not drop on local miss
@@ -667,5 +615,5 @@ class HuntTracks:
             # Exclude discovery-death notifications — tracking owns the drop,
             # but attack must not keep clicking a corpse while waiting.
             return copy.deepcopy(
-                [t for t in self._tracks if is_alive(t) and not t.discovery_death]
+                [t for t in self._tracks if is_alive(t)]
             )

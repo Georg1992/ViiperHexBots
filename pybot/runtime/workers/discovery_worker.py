@@ -8,14 +8,12 @@ not scan — only waits for the post-delay wake / storage end.
 
 One discovery pass (same frame):
 1. Living heatmap → silhouette scan for new / matched mobs (living refs only).
-2. Known-track peaks: living vs death silhouette; death wins → notify tracker
-   (``discovery_death``); tracking owns the remove + ghost.
-3. Reconcile: create / match / mark unmatched absent. Never deletes tracks.
+2. Reconcile: create / match / mark unmatched absent. Never deletes tracks.
 
-Tracking owns authoritative position and all track removal (joint-absence,
-discovery_death notifications, unreachable). Discovery never overwrites
-authoritative x/y; it only creates, soft-priors, absence marks, and death
-notifications, and refreshes priors when tracking wakes it on a local miss.
+Tracking owns authoritative position and all track removal (opacity death,
+joint-absence, unreachable). Discovery never overwrites authoritative x/y;
+it only creates, soft-priors, absence marks, and refreshes priors when
+tracking wakes it on a local miss.
 
 Teleport clear requires zero living scan candidates, not merely zero alive
 tracks after ghost matching. Capture-time position snapshots keep dedup and
@@ -127,18 +125,6 @@ class DiscoveryWorker:
 
         self._scan_count += 1
 
-        death_confirmed = scan.death_confirmed or []
-        if death_confirmed:
-            flagged = ctx.tracks.note_discovery_deaths(
-                death_confirmed,
-                area_epoch=area_epoch,
-                now_tick=now_ms,
-            )
-            if flagged:
-                ctx.logger.behavior(
-                    f"[DISCOVERY] death notified for tracker: {flagged}"
-                )
-
         filtered = filter_scan_candidates(scan.detections, roi, ctx.config.cell_size_px)
         ctx.overlay.set_scan_living(len(filtered))
 
@@ -170,7 +156,6 @@ class DiscoveryWorker:
         verbose = (
             summary.added_count > 0
             or summary.removed_count > 0
-            or bool(death_confirmed)
             or self._scan_count <= 3
             or self._scan_count % 20 == 0
         )
@@ -186,7 +171,6 @@ class DiscoveryWorker:
                 f"raw={scan.raw_count} filtered={len(filtered)} "
                 f"added={summary.added_count} removed={summary.removed_count} "
                 f"matched={summary.matched_count} "
-                f"deaths={len(death_confirmed)} "
                 f"tracks={ctx.tracks.get_track_count()}"
             )
 
