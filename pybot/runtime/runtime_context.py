@@ -62,8 +62,6 @@ class HuntRuntimeContext:
     sitting_event: threading.Event = field(default_factory=threading.Event)
     # Set while ItemsToStorage / GetFlyWings runs — combat idles; timers keep going.
     storage_event: threading.Event = field(default_factory=threading.Event)
-    # Signalled by coord tracking worker after each tick; death worker waits on it.
-    coord_tick_done: threading.Event = field(default_factory=threading.Event)
     _sit_storage_lock: threading.Lock = field(default_factory=threading.Lock)
     # AHK ``wingcount``: remaining fly wings; restocked by GetFlyWings.
     wingcount: int = 0

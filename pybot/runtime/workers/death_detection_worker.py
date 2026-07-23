@@ -1,8 +1,8 @@
 """Death detection loop — own thread, opacity probe only.
 
-Runs sequentially after each coordinate-tracking tick. Waits on
-``coord_tick_done``, then captures a frame and probes opacity on every
-alive track using the positions freshly updated by the coords worker.
+Runs independently from the coordinate-tracking worker. Captures frames
+and probes opacity on every alive track at its own cadence, reading the
+freshest positions from HuntTracks (written by the coords worker).
 Death is confirmed via opacity fade while stationary; dead tracks are
 removed and kill samples are recorded.
 
@@ -21,7 +21,10 @@ from pybot.runtime.workers.worker_contexts import DeathDetectionWorkerContext
 
 
 class DeathDetectionWorker:
-    """Opacity-only death detector. Reads positions from coords, probes opacity."""
+    """Opacity-only death detector. Reads positions from HuntTracks independently."""
+
+    # Run at most this often when there are alive tracks to probe.
+    _TICK_INTERVAL_S = 0.08
 
     def __init__(self, ctx: DeathDetectionWorkerContext) -> None:
         self._ctx = ctx
@@ -35,11 +38,7 @@ class DeathDetectionWorker:
                 if not ctx.should_run_workers():
                     ctx.wait_while_stopped_or_paused(WORKER_POLL_INTERVAL_S)
                     continue
-                # Wait for the coords worker to finish its tick.
-                if not ctx.coord_tick_done.wait(timeout=0.5):
-                    continue
-                ctx.coord_tick_done.clear()
-                if ctx.stop_event.is_set():
+                if ctx.stop_event.wait(self._TICK_INTERVAL_S):
                     break
                 self._tick()
             except Exception:

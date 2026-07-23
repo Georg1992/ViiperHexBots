@@ -64,8 +64,6 @@ class CoordTrackingWorker:
             if (lost_ids or unreachable_ids) and not ctx.discovery_suspend.is_set():
                 ctx.discovery_wake.set()
             self._update_overlay(now_ms)
-            # Signal death worker for this (empty) tick.
-            ctx.coord_tick_done.set()
             return
 
         frame = ctx.capture.capture_roi(roi)
@@ -119,9 +117,6 @@ class CoordTrackingWorker:
             ctx.discovery_wake.set()
 
         self._update_overlay(now_ms)
-
-        # Signal death worker that coords are ready for this tick.
-        ctx.coord_tick_done.set()
 
     def _log_drops(
         self,

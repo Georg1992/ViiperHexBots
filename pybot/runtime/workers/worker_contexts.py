@@ -74,8 +74,6 @@ class CoordTrackingWorkerContext(
 ):
     """Hunt runtime subset consumed by CoordTrackingWorker."""
 
-    coord_tick_done: object  # threading.Event
-
     def should_run_tracking(self) -> bool: ...
 
 
@@ -88,7 +86,6 @@ class DeathDetectionWorkerContext(
 ):
     """Hunt runtime subset consumed by DeathDetectionWorker."""
 
-    coord_tick_done: object  # threading.Event
     tracker: object  # DetectorSession (for ensure_descriptor + config)
 
 
