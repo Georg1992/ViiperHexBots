@@ -27,7 +27,7 @@ from pybot.recognition.detector.descriptors.palette_groups import (
     split_palette_groups_by_required,
 )
 
-DESCRIPTOR_VERSION = 44
+DESCRIPTOR_VERSION = 45
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -342,11 +342,11 @@ class DescriptorBuilder:
                 baseline_areas.append(area)
 
         if not baseline_areas:
-            return raw_pairs[:1]  # fallback: at least one pair
+            raise RuntimeError("no frames could be rendered for living action pairs")
 
         baseline = float(np.median(baseline_areas[:2]))  # median of first 2 pairs
         if baseline <= 0:
-            return raw_pairs[:1]
+            raise RuntimeError("baseline sprite area is zero — cannot detect living actions")
 
         max_area = baseline * (1.0 + LIVING_ACTION_SIZE_TOLERANCE)
         min_area = baseline * (1.0 - LIVING_ACTION_SIZE_TOLERANCE)
@@ -368,7 +368,10 @@ class DescriptorBuilder:
                 break  # Stop at the first out-of-tolerance pair
 
         if not kept:
-            return raw_pairs[:1]
+            raise RuntimeError(
+                "no action pairs pass size tolerance check — "
+                "all pairs out of tolerance or malformed SPR"
+            )
         return tuple(kept)
 
     def _collect_facing_frames(
@@ -964,7 +967,7 @@ class DescriptorBuilder:
             if h > 1.0:
                 aspects.append(w / h)
         if not aspects:
-            return 0.60, 1.75
+            raise RuntimeError("no opaque sprite frames to measure aspect band")
         raw_min = float(np.min(aspects))
         raw_max = float(np.max(aspects))
         return max(0.35, raw_min * (1.0 - margin)), raw_max * (1.0 + margin)
@@ -977,14 +980,12 @@ class DescriptorBuilder:
         """Measure body_strong on actual sprite frames; floor at 6 % of median.
 
         body_strong = fraction of opaque pixels whose best body-cluster
-        similarity >= 0.5. On the mob's own sprite this should be high;
-        a runtime impostor must clear at least 6 % of that signal (capped
-        at 0.08 so tight-cluster mobs like Horn don't get an unreachable
-        floor). Falls back to 0.03 (config default) when no frames are
-        available.
+        similarity >= 0.5. The floor is 6 % of the median sprite measurement
+        (capped at 0.08) so tight-cluster mobs like Horn don't get an
+        unreachable floor.
         """
         if not body_clusters:
-            return 0.03
+            raise RuntimeError("no body clusters to measure body_strong floor")
         _body_strong_sim = 0.5
         values: list[float] = []
         for bgra in frames:
@@ -1003,7 +1004,7 @@ class DescriptorBuilder:
             strong = float((best[opaque] >= _body_strong_sim).mean())
             values.append(strong)
         if not values:
-            return 0.03
+            raise RuntimeError("no opaque sprite frames to measure body_strong")
         median = float(np.median(values))
         # Runtime body_strong degrades ~10-20× from sprite measurement
         # (anti-aliased edges, lighting, background mixing). Use 6 %
@@ -1021,18 +1022,15 @@ class DescriptorBuilder:
         """Measure required-palette coverage on actual sprite frames.
 
         Coverage = fraction of opaque pixels within max_distance of any
-        required-group palette color. On the mob's own sprite this is
-        near 1.0 — runtime background dilution dominates, so the floor
-        is capped at the config default (0.28). Per-mob differentiation
-        only lowers the floor for mobs with genuinely patchy sprite
-        coverage. Falls back to 0.28 (config default).
+        required-group palette color. The floor is 25 % of the median
+        sprite measurement (capped at 0.28).
         """
         if not palette_bgr or not required_groups:
-            return 0.28
+            raise RuntimeError("no palette or required groups for coverage floor")
         palette = np.asarray(palette_bgr, dtype=np.float32)
         req_indices = sorted({idx for group in required_groups for idx in group})
         if not req_indices:
-            return 0.28
+            raise RuntimeError("no required-group palette indices for coverage floor")
         req_palette = palette[req_indices]
         max_d = max(max_distance, 1.0)
         values: list[float] = []
@@ -1051,13 +1049,10 @@ class DescriptorBuilder:
             coverage = float(within[opaque].mean())
             values.append(coverage)
         if not values:
-            return 0.28
+            raise RuntimeError("no opaque sprite frames to measure palette coverage")
         median = float(np.median(values))
-        # Runtime background dilution dominates coverage — the sprite
-        # measurement at 100 % does not capture runtime conditions.
-        # Cap at 0.28 (config default) so legitimate mobs are not
-        # rejected; only lower the floor for mobs with genuinely
-        # patchy palette coverage on their own sprite.
+        # Cap at 0.28 so legitimate mobs are not rejected; only lower
+        # the floor for mobs with genuinely patchy palette coverage.
         return max(0.08, min(0.28, median * 0.25))
 
     def _build_frame_silhouette_masks(

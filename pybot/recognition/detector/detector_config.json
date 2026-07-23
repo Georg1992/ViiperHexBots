@@ -10,7 +10,6 @@
   "minSecondPaletteGroupShare": 0.09,
   "minRequiredPaletteCoverage": 0.28,
   "minBodyClusterStrong": 0.03,
-  "minBodyToPaletteCoverageRatio": 0.11,
   "discoveryHeatmapDownscale": 2,
   "discoveryHeatmapDownscaleMinSide": 800,
   "localTrackSearchRadiusPx": 120,

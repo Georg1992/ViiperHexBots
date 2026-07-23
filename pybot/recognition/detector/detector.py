@@ -43,7 +43,6 @@ REQUIRED_CONFIG_KEYS = {
     "minSecondPaletteGroupShare",
     "minRequiredPaletteCoverage",
     "minBodyClusterStrong",
-    "minBodyToPaletteCoverageRatio",
     "topCandidateCenters",
     "minCenterHeat",
     "peakRelativeThreshold",
@@ -501,8 +500,6 @@ class MobDetector:
         - enough crop pixels match required-group colors (coverage)
         - enough crop pixels strongly match mass body clusters
           (rejects obviously foreign palettes)
-        - body_strong scales with palette coverage (rejects high-coverage
-          impostors with weak real body)
 
         Skips when the descriptor has no required groups.
         """
@@ -511,9 +508,6 @@ class MobDetector:
             return True
         min_groups = int(self.config["minRequiredPaletteGroups"])
         min_second = float(self.config["minSecondPaletteGroupShare"])
-        # Each descriptor defines its own floors from actual sprite data.
-        # Config values serve as universal fallbacks for old descriptors
-        # that predate build-time threshold derivation.
         min_body_strong = float(descriptor.min_body_cluster_strong)
         min_coverage = float(descriptor.min_required_palette_coverage)
         if (
@@ -556,12 +550,7 @@ class MobDetector:
             return False
         if min_coverage > 0.0 and match_coverage < min_coverage:
             return False
-        # Body_strong is unreliable for diversity-disabled mobs whose
-        # k-means centroids span 3+ Lab groups (Creamy). Use a minimal
-        # floor of 0.01 — catches near-zero impostors (0.0021) while
-        # passing legitimate blobs (0.028-0.055).
-        _body_floor = min_body_strong if descriptor.use_body_cluster_diversity else 0.01
-        if _body_floor > 0.0 and body_strong < _body_floor:
+        if min_body_strong > 0.0 and body_strong < min_body_strong:
             return False
 
         return True

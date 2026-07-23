@@ -66,11 +66,11 @@ class MobDescriptor:
     accent_pixels_bgr: list[list[int]]
     silhouette_masks: list[SilhouetteMask]
     death_silhouette_masks: list[SilhouetteMask]
-    use_body_cluster_diversity: bool = True
-    min_aspect_ratio: float = 0.60
-    max_aspect_ratio: float = 1.75
-    min_body_cluster_strong: float = 0.03
-    min_required_palette_coverage: float = 0.28
+    use_body_cluster_diversity: bool
+    min_aspect_ratio: float
+    max_aspect_ratio: float
+    min_body_cluster_strong: float
+    min_required_palette_coverage: float
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MobDescriptor":
@@ -165,11 +165,11 @@ class MobDescriptor:
             accent_pixels_bgr=accent_pixels_bgr,
             silhouette_masks=silhouette_masks,
             death_silhouette_masks=death_silhouette_masks,
-            use_body_cluster_diversity=data.get("useBodyClusterDiversity", True),
-            min_aspect_ratio=float(data.get("minAspectRatio", 0.60)),
-            max_aspect_ratio=float(data.get("maxAspectRatio", 1.75)),
-            min_body_cluster_strong=float(data.get("minBodyClusterStrong", 0.03)),
-            min_required_palette_coverage=float(data.get("minRequiredPaletteCoverage", 0.28)),
+            use_body_cluster_diversity=bool(data["useBodyClusterDiversity"]),
+            min_aspect_ratio=float(data["minAspectRatio"]),
+            max_aspect_ratio=float(data["maxAspectRatio"]),
+            min_body_cluster_strong=float(data["minBodyClusterStrong"]),
+            min_required_palette_coverage=float(data["minRequiredPaletteCoverage"]),
         )
 
     @classmethod
