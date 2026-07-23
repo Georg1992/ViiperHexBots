@@ -309,7 +309,8 @@ class MobDetector:
             # New peaks must clear geometry + color structure. Known tracks were
             # already silhouette-confirmed when created — skip those pre-gates so
             # fading corpses can still reach silhouette scoring.
-            if known_hit is None:                if not self._passes_discovery_geometry_gate(comp_bbox, descriptor):
+            if known_hit is None:
+                if not self._passes_discovery_geometry_gate(comp_bbox, descriptor):
                     silhouette_checks.append(SilhouetteCheck(
                         center_x=cx,
                         center_y=cy,
