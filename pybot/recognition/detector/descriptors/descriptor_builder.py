@@ -957,8 +957,7 @@ class DescriptorBuilder:
 
         Each frame's opaque bounding box gives a width/height ratio.
         The band is [min * (1-margin), max * (1+margin)] so runtime
-        blob imprecision does not reject valid detections. Falls back
-        to [0.60, 1.75] when no frames are available.
+        blob imprecision does not reject valid detections.
         """
         aspects: list[float] = []
         for bgra in frames:
