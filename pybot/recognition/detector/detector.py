@@ -516,13 +516,11 @@ class MobDetector:
         # that predate build-time threshold derivation.
         min_body_strong = float(descriptor.min_body_cluster_strong)
         min_coverage = float(descriptor.min_required_palette_coverage)
-        min_body_cov_ratio = float(self.config["minBodyToPaletteCoverageRatio"])
         if (
             min_groups <= 0
             and min_second <= 0.0
             and min_coverage <= 0.0
             and min_body_strong <= 0.0
-            and min_body_cov_ratio <= 0.0
         ):
             return True
         bx, by, bw, bh = comp_bbox
@@ -564,15 +562,6 @@ class MobDetector:
         # passing legitimate blobs (0.028-0.055).
         _body_floor = min_body_strong if descriptor.use_body_cluster_diversity else 0.01
         if _body_floor > 0.0 and body_strong < _body_floor:
-            return False
-        # body_strong / coverage ratio — also unreliable when body
-        # clusters span 3+ Lab groups (same rationale as above).
-        if (
-            min_body_cov_ratio > 0.0
-            and match_coverage > 1e-6
-            and body_strong < min_body_cov_ratio * match_coverage
-            and descriptor.use_body_cluster_diversity
-        ):
             return False
 
         return True

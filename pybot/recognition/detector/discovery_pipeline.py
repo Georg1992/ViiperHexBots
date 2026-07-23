@@ -206,8 +206,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             "reject when present < minRequiredPaletteGroups (fail-closed)",
             "reject when second_share < minSecondPaletteGroupShare (fail-closed)",
             "reject when coverage < descriptor.min_required_palette_coverage (fail-closed)",
-            "reject when body_strong < descriptor.min_body_cluster_strong (fail-closed)",
-            "reject when body_strong < minBodyToPaletteCoverageRatio * coverage (fail-closed)",
+            "reject when body_strong < descriptor.min_body_cluster_strong (fail-closed; soft 0.01 floor when diversity off)",
             "skip gate when descriptor has no required groups",
         ),
         sources=(
@@ -219,7 +218,6 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "minSecondPaletteGroupShare",
                     "min_required_palette_coverage",
                     "min_body_cluster_strong",
-                    "minBodyToPaletteCoverageRatio",
                     "match_palette_required_groups",
                     "max_sprite_palette_distance",
                 ),
