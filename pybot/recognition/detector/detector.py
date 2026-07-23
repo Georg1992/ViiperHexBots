@@ -559,11 +559,23 @@ class MobDetector:
         if x1 <= x0 or y1 <= y0:
             return False
         crop = frame_bgr[y0:y1, x0:x1]
+        # Only use cached body map when it belongs to the same descriptor
+        # to avoid cross-mob poisoning when detect() is called for
+        # different mobs on the same HeatmapDetector instance.
+        body_map = None
+        body_ds = 0
+        if self.heatmap_detector._last_body_descriptor_id == id(descriptor):
+            body_map = self.heatmap_detector._last_body_best
+            body_ds = self.heatmap_detector._last_body_downscale
         present, second_share, match_coverage, body_strong = required_groups_structure(
             crop,
             descriptor,
             float(descriptor.max_sprite_palette_distance),
             downscale=1,
+            body_best_full=body_map,
+            body_best_downscale=body_ds,
+            crop_x=x0,
+            crop_y=y0,
         )
         if min_groups > 0 and present < min_groups:
             return False
@@ -582,14 +594,30 @@ class MobDetector:
         return True
 
     def _descriptor_min_area_ratio(self, descriptor: MobDescriptor) -> float:
-        stable_bits: list[bool] = []
+        """Min stable silhouette occupancy across facings, cached per descriptor.
+
+        Uses the *minimum* stable fraction across all facings so side-facing
+        heat blobs (smaller footprint than front-facing) are not unfairly
+        rejected. Cached on the descriptor object to avoid recomputing
+        stable_bits per blob.
+        """
+        # Cache key: store on the descriptor instance if not yet computed.
+        cached = getattr(descriptor, "_min_area_ratio", None)
+        if cached is not None:
+            return float(cached)
+        min_sil_frac = 1.0
         for mask in descriptor.silhouette_masks:
             if mask.stable_mask:
-                stable_bits.extend(mask.stable_mask)
-        if not stable_bits:
+                bits = np.asarray(mask.stable_mask, dtype=np.float32)
+                sil_frac = float(bits.mean())
+                if sil_frac < min_sil_frac:
+                    min_sil_frac = sil_frac
+        if min_sil_frac >= 1.0:
+            descriptor._min_area_ratio = 1.0
             return 1.0
-        sil_frac = float(np.mean(np.asarray(stable_bits, dtype=np.float32)))
-        return sil_frac / _GEOMETRY_AREA_SIL_FRAC_DIVISOR
+        result = min_sil_frac / _GEOMETRY_AREA_SIL_FRAC_DIVISOR
+        descriptor._min_area_ratio = result
+        return result
 
     def _passes_size_aspect_vs_descriptor(
         self,

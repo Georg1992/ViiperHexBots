@@ -217,19 +217,18 @@ def required_groups_structure(
     *,
     downscale: int = 1,
     presence_peak_min: float = float(_GROUP_PRESENT_PEAK_MIN),
+    body_best_full: np.ndarray | None = None,
+    body_best_downscale: int = 0,
+    crop_x: int = 0,
+    crop_y: int = 0,
 ) -> tuple[int, float, float, float]:
     """Palette structure in *crop_bgr*.
 
-    Returns ``(present_count, second_share, match_coverage, body_strong)``:
+    Returns ``(present_count, second_share, match_coverage, body_strong)``.
 
-    - ``present_count``: required groups with diversity-style local presence
-      peak >= ``presence_peak_min``.
-    - ``second_share``: second-largest required-group share among matched
-      pixels (mono-family blobs are low).
-    - ``match_coverage``: fraction of crop pixels within ``max_distance`` of
-      any required-group color.
-    - ``body_strong``: fraction of crop pixels with mass body-cluster
-      similarity >= 0.5 (foreign palettes are low).
+    When ``body_best_full`` is provided (precomputed body-cluster similarity
+    map at ``body_best_downscale`` resolution), ``body_strong`` is sampled from
+    it at ``(crop_x, crop_y)`` in O(1) instead of recomputed on the crop.
     """
     empty = (0, 0.0, 0.0, 0.0)
     groups = list(descriptor.match_palette_required_groups)
@@ -258,29 +257,39 @@ def required_groups_structure(
         1 for present in present_maps if float(present.max()) >= presence_peak_min
     )
 
-    pixels = crop_bgr.reshape(-1, 3).astype(np.float32)
-    palette = np.asarray(descriptor.match_palette_bgr, dtype=np.float32)
-    max_dist = float(max(max_distance, 1.0))
+    # Derive group match masks directly from similarity_hwc (already computed
+    # via weighted_sprite_palette_heatmap). similarity > 0.0 ⇔ pixel is within
+    # max_distance of a palette color in that group.
     match_mats: list[np.ndarray] = []
     for indices in groups:
-        gpal = palette[np.asarray(indices, dtype=np.int32)]
-        dist = np.linalg.norm(pixels[:, None, :] - gpal[None, :, :], axis=2).min(
-            axis=1
-        )
-        match_mats.append(dist <= max_dist)
+        idx_arr = np.asarray(indices, dtype=np.int32)
+        group_max_sim = similarity_hwc[:, :, idx_arr].max(axis=2)
+        match_mats.append((group_max_sim > 0.0).reshape(-1))
     matched = np.stack(match_mats, axis=1)
     any_match = matched.any(axis=1)
     match_coverage = float(any_match.mean()) if any_match.size else 0.0
 
-    body_clusters = mass_body_clusters(descriptor)
-    if body_clusters:
-        body_best = np.stack(
-            [_cluster_match(crop_bgr.astype(np.float32), cluster) for cluster in body_clusters],
-            axis=2,
-        ).max(axis=2)
-        body_strong = float((body_best >= _BODY_STRONG_SIM).mean())
+    # Body_strong: prefer O(1) sampling from precomputed full-frame body map.
+    dscale = max(body_best_downscale, 1)
+    if body_best_full is not None and body_best_full.size > 0:
+        ch, cw = crop_bgr.shape[:2]
+        bh, bw = body_best_full.shape[:2]
+        y0_sc = max(0, min(bh - 1, crop_y // dscale))
+        y1_sc = max(y0_sc + 1, min(bh, (crop_y + ch + dscale - 1) // dscale))
+        x0_sc = max(0, min(bw - 1, crop_x // dscale))
+        x1_sc = max(x0_sc + 1, min(bw, (crop_x + cw + dscale - 1) // dscale))
+        body_patch = body_best_full[y0_sc:y1_sc, x0_sc:x1_sc]
+        body_strong = float((body_patch >= _BODY_STRONG_SIM).mean()) if body_patch.size else 0.0
     else:
-        body_strong = 0.0
+        body_clusters = mass_body_clusters(descriptor)
+        if body_clusters:
+            body_best = np.stack(
+                [_cluster_match(crop_bgr.astype(np.float32), cluster) for cluster in body_clusters],
+                axis=2,
+            ).max(axis=2)
+            body_strong = float((body_best >= _BODY_STRONG_SIM).mean())
+        else:
+            body_strong = 0.0
 
     if int(any_match.sum()) <= 0:
         return present_count, 0.0, match_coverage, body_strong
@@ -397,13 +406,17 @@ def apply_body_cluster_diversity(
         np.minimum(body_suppress, group_suppress),
     ).astype(np.float32)
 
-    base_peak = float(base_sprite.max())
-    if base_peak > 1e-6:
-        palette_gate = np.clip(
-            base_sprite / np.float32(base_peak * 0.25), 0.0, 1.0,
-        ).astype(np.float32)
-    else:
-        palette_gate = np.zeros((h, w), dtype=np.float32)
+    # Palette gate: limit diversity boost to pixels with meaningful palette
+    # heat in their local neighborhood. Uses the same coverage window for
+    # a local-max baseline instead of a frame-global peak (which is fragile
+    # when a single bright impostor inflates the threshold frame-wide).
+    local_peak = cv2.boxFilter(
+        base_sprite, ddepth=-1, ksize=ksize, normalize=True,
+    )
+    local_peak = np.maximum(local_peak, np.float32(1e-6))
+    palette_gate = np.clip(
+        base_sprite / (local_peak * np.float32(0.25)), 0.0, 1.0,
+    ).astype(np.float32)
     diversity_factor = np.where(
         body_factor < np.float32(1.0),
         body_factor,
@@ -494,6 +507,12 @@ class HeatmapDetector:
         self.use_palette_diversity = bool(config["usePaletteDiversity"])
         self.min_body_cluster_strong = float(config["minBodyClusterStrong"])
         self.min_required_groups = int(config["minRequiredPaletteGroups"])
+        # Cached full-frame body map from the last build_sprite_heatmap call
+        # (at work resolution). Keyed by descriptor identity to avoid cross-mob
+        # poisoning when detect() is called for different mobs on the same frame.
+        self._last_body_best: np.ndarray | None = None
+        self._last_body_downscale: int = 0
+        self._last_body_descriptor_id: int = 0
 
     def _center_scales(self, frame_width: int) -> list[float]:
         return [
@@ -552,7 +571,7 @@ class HeatmapDetector:
                 descriptor.max_sprite_palette_distance,
                 return_similarity=True,
             )
-            sprite, _div_maps = apply_body_cluster_diversity(
+            sprite, div_maps = apply_body_cluster_diversity(
                 base_sprite,
                 work_bgr,
                 descriptor,
@@ -563,12 +582,18 @@ class HeatmapDetector:
                 avg_height=descriptor.size.avg_height,
                 downscale=downscale,
             )
+            self._last_body_best = div_maps["body_best"]
+            self._last_body_downscale = downscale
+            self._last_body_descriptor_id = id(descriptor)
         else:
             sprite = weighted_sprite_palette_heatmap(
                 work_bgr,
                 descriptor,
                 descriptor.max_sprite_palette_distance,
             )
+            self._last_body_best = None
+            self._last_body_downscale = 0
+            self._last_body_descriptor_id = 0
 
         # --- 2. Edge-density boost ---
         # --- 3. GaussianBlur ---
