@@ -52,6 +52,7 @@ def track_local(
     offset_x: int = 0,
     offset_y: int = 0,
     search_radius_px: int | None = None,
+    skip_opacity: bool = False,
 ) -> LocalTrackResult:
     """Follow one known track near its last / predicted center."""
     track_id = int(track["trackId"])
@@ -151,6 +152,7 @@ def track_local(
         opacity_baseline_samples=opacity_baseline_samples,
         opacity_decay_streak=opacity_decay_streak,
         moving=moving,
+        skip_opacity=skip_opacity,
     )
 
 
@@ -186,6 +188,7 @@ def _finalize_track_hit(
     opacity_baseline_samples: int,
     opacity_decay_streak: int,
     moving: bool,
+    skip_opacity: bool = False,
 ) -> LocalTrackResult:
     bx, by, bw, bh = bbox
     x = bx + bw // 2 + offset_x
@@ -204,11 +207,13 @@ def _finalize_track_hit(
         stop_threshold_px=stop_px,
     )
 
-    if _track_old_enough(
+    if not skip_opacity and _track_old_enough(
         detector.config,
         created_tick=created_tick,
         now_tick=now_tick,
     ):
+        # opacity probing runs here for direct API callers;
+        # the coord worker sets skip_opacity=True and defers to death worker.
         max_dist = float(descriptor.max_sprite_palette_distance)
         min_match = float(detector.config["minSpritePaletteMatch"])
         opacity_score = measure_opacity_score(

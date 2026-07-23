@@ -343,6 +343,46 @@ class HuntTracks:
             self._last_reconcile_summary = summary
             return summary
 
+    def apply_death_results(
+        self,
+        death_results: list[tuple[int, float, int, int, bool]],
+        *,
+        now_tick: int | None = None,
+        area_epoch: int | None = None,
+    ) -> list[int]:
+        """Apply opacity death results. Returns removed dead track ids.
+
+        Each entry is ``(track_id, opacity_baseline, opacity_baseline_samples,
+        opacity_decay_streak, dead)`` from ``probe_track_death()``.
+        Non-dead tracks get their opacity state updated; dead tracks are
+        removed and kill samples recorded.
+        """
+        tick = now_tick if now_tick is not None else monotonic_ms()
+        dead_ids: list[int] = []
+        with self._lock:
+            if area_epoch is not None and area_epoch != self._area_epoch:
+                return []
+            for tid, baseline, samples, streak, dead in death_results:
+                track = self._get_track_by_id_locked(tid)
+                if track is None:
+                    continue
+                if dead:
+                    sample = self._kill_sample_attack_count_locked(track)
+                    self._pending_attack_track_ids.discard(tid)
+                    self._record_kill_locked(sample)
+                    self._record_removed_site_locked(track.x, track.y, tick)
+                    dead_ids.append(tid)
+                else:
+                    apply_opacity_observation(
+                        track,
+                        opacity_baseline=baseline,
+                        opacity_baseline_samples=samples,
+                        opacity_decay_streak=streak,
+                    )
+            if dead_ids:
+                self._remove_tracks_locked(set(dead_ids))
+            return dead_ids
+
     def apply_tracking(
         self,
         results,
@@ -350,7 +390,7 @@ class HuntTracks:
         now_tick: int | None = None,
         area_epoch: int | None = None,
     ) -> tuple[list[int], list[int], list[int]]:
-        """Tracking step: refresh coordinates from LocalTracker and drop confirmed gone tracks.
+        """Tracking step: refresh coordinates from LocalTracker and drop gone tracks.
 
         ``results`` is any iterable of objects exposing ``track_id``, ``found``,
         ``x``, ``y`` and ``confidence`` (e.g. ``LocalTrackResult``). Returns
@@ -358,6 +398,9 @@ class HuntTracks:
         ``lost_ids`` means joint absence (discovery_absent + sustained local
         miss for ``trackJointAbsentConfirmMs``), not a single-frame miss —
         tracking keeps searching until discovery confirms.
+
+        Death detection is handled separately by ``apply_death_results()`` —
+        this method expects results without death flags (from the coords worker).
 
         ``area_epoch`` is the epoch sampled with the tracking frame. If the store
         advanced (teleport / area_reset) while local follow was running, discard
@@ -374,12 +417,13 @@ class HuntTracks:
                 if track is None:
                     continue
                 if getattr(result, "dead", False):
+                    # Opacity death (from direct API callers or if coords
+                    # worker ever flags death). The death worker uses
+                    # apply_death_results() instead.
                     sample = self._kill_sample_attack_count_locked(track)
                     self._pending_attack_track_ids.discard(result.track_id)
                     self._record_kill_locked(sample)
-                    # Opacity hit coords for ghost site.
-                    ghost_x, ghost_y = result.x, result.y
-                    self._record_removed_site_locked(ghost_x, ghost_y, tick)
+                    self._record_removed_site_locked(result.x, result.y, tick)
                     dead_ids.append(result.track_id)
                     continue
                 if result.found:

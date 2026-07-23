@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 from pybot.recognition.detector.detector import load_detector_config
 from pybot.runtime.hunt_tracks import HuntTracks
-from pybot.runtime.workers.tracking_worker import TrackingWorker
+from pybot.runtime.workers.coord_tracking_worker import CoordTrackingWorker
 
 
 class TrackingDiscoveryWakeTests(unittest.TestCase):
@@ -27,7 +27,7 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         self.ctx.tracker.track_locals_frame.return_value = SimpleNamespace(
             results=[]
         )
-        self.worker = TrackingWorker(self.ctx)
+        self.worker = CoordTrackingWorker(self.ctx)
 
     def test_death_does_not_wake_discovery(self) -> None:
         track = self.tracks.create_track(

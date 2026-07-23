@@ -27,9 +27,10 @@ from pybot.recognition.capture import reset_capture_session
 from pybot.recognition.detector.detector import load_detector_config
 from pybot.runtime.detection.detector_session import DetectorSession
 from pybot.runtime.workers.attack_loop import AttackLoop
+from pybot.runtime.workers.coord_tracking_worker import CoordTrackingWorker
+from pybot.runtime.workers.death_detection_worker import DeathDetectionWorker
 from pybot.runtime.workers.discovery_worker import DiscoveryWorker
 from pybot.runtime.workers.skill_timer_worker import SkillTimerWorker
-from pybot.runtime.workers.tracking_worker import TrackingWorker
 from pybot.config.clients import (
     MemoryAddresses,
     load_client_profile,
@@ -155,11 +156,13 @@ def create_runtime_deps(
         ViiperBackend()
     )
     hunt_mode = create_hunt_mode(ctx, input_backend)
-    tracking = TrackingWorker(ctx)
+    tracking = CoordTrackingWorker(ctx)
+    death = DeathDetectionWorker(ctx)
     discovery = DiscoveryWorker(ctx, hunt_mode)
     attack = AttackLoop(ctx, hunt_mode, input_backend)
     workers: list[tuple[str, Callable[[], None]]] = [
-        ("tracking", tracking.run),
+        ("coord", tracking.run),
+        ("death", death.run),
         ("discovery", discovery.run),
         ("attack", attack.run),
     ]

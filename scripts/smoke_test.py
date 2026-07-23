@@ -47,8 +47,10 @@ check("main_window",
 print("  --- worker modules ---")
 check("discovery_worker",
     lambda: __import__("pybot.runtime.workers.discovery_worker", fromlist=["DiscoveryWorker"]))
-check("tracking_worker",
-    lambda: __import__("pybot.runtime.workers.tracking_worker", fromlist=["TrackingWorker"]))
+check("coord_tracking_worker",
+    lambda: __import__("pybot.runtime.workers.coord_tracking_worker", fromlist=["CoordTrackingWorker"]))
+check("death_detection_worker",
+    lambda: __import__("pybot.runtime.workers.death_detection_worker", fromlist=["DeathDetectionWorker"]))
 check("attack_loop",
     lambda: __import__("pybot.runtime.workers.attack_loop", fromlist=["AttackLoop"]))
 check("skill_timer_worker",

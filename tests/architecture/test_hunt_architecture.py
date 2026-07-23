@@ -25,7 +25,6 @@ FORBIDDEN_IMPORTS = (
     "detector_session",
     "hunt_capture",
     "discovery_filter",
-    "window_roi",
 )
 
 
@@ -47,7 +46,7 @@ class HuntArchitectureTests(unittest.TestCase):
         )
         self.assertIn("discovery_filter", discovery)
 
-        tracking = (PYBOT_RUNTIME / "workers" / "tracking_worker.py").read_text(
+        tracking = (PYBOT_RUNTIME / "workers" / "coord_tracking_worker.py").read_text(
             encoding="utf-8", errors="replace"
         )
         self.assertIn("detector_session", tracking)
@@ -64,7 +63,8 @@ class HuntArchitectureTests(unittest.TestCase):
         )
         self.assertIn("DetectorSession", runtime)
         self.assertIn("HuntWindowCapture", runtime)
-        self.assertIn("TrackingWorker", runtime)
+        self.assertIn("CoordTrackingWorker", runtime)
+        self.assertIn("DeathDetectionWorker", runtime)
         self.assertIn("DiscoveryWorker", runtime)
         self.assertIn("AttackLoop", runtime)
 

@@ -149,3 +149,68 @@ def evaluate_opacity_death(
         return baseline, baseline_samples, decay_streak, False
 
     return baseline, baseline_samples, 0, False
+
+
+def probe_track_death(
+    frame_bgr: np.ndarray,
+    descriptor: MobDescriptor,
+    x: int,
+    y: int,
+    scale: float,
+    *,
+    opacity_baseline: float,
+    opacity_baseline_samples: int,
+    opacity_decay_streak: int,
+    config: dict,
+    moving: bool,
+    now_tick: int,
+) -> tuple[float, int, int, bool]:
+    """Measure opacity at a track position and evaluate death.
+
+    Called by the death-detection worker. Does not do local follow — reads
+    the track's current position (set by the coordinate-tracking worker) and
+    probes opacity at a descriptor-sized window around it.
+
+    Returns ``(baseline, samples, decay_streak, dead)``.
+    """
+    min_match = float(config["minSpritePaletteMatch"])
+    max_dist = float(descriptor.max_sprite_palette_distance)
+    if frame_bgr.size == 0:
+        return opacity_baseline, opacity_baseline_samples, opacity_decay_streak, False
+
+    avg_w = float(descriptor.avg_width)
+    avg_h = float(descriptor.avg_height)
+    w = max(int(round(avg_w * scale)), 4)
+    h = max(int(round(avg_h * scale)), 4)
+    fh, fw = frame_bgr.shape[:2]
+    x0 = max(0, x - w // 2)
+    y0 = max(0, y - h // 2)
+    x1 = min(fw, x0 + w)
+    y1 = min(fh, y0 + h)
+    if x1 <= x0 or y1 <= y0:
+        return opacity_baseline, opacity_baseline_samples, opacity_decay_streak, False
+
+    bbox = (x0, y0, x1 - x0, y1 - y0)
+    opacity_score = measure_opacity_score(
+        frame_bgr, descriptor, bbox, max_dist, min_match,
+    )
+    if not is_opacity_calibrated(
+        baseline=opacity_baseline,
+        baseline_samples=opacity_baseline_samples,
+        config=config,
+    ):
+        return calibrate_opacity_baseline(
+            opacity_score=opacity_score,
+            baseline=opacity_baseline,
+            baseline_samples=opacity_baseline_samples,
+            config=config,
+        ) + (0, False)
+    return evaluate_opacity_death(
+        opacity_score=opacity_score,
+        baseline=opacity_baseline,
+        baseline_samples=opacity_baseline_samples,
+        decay_streak=opacity_decay_streak,
+        config=config,
+        moving=moving,
+        now_tick=now_tick,
+    )

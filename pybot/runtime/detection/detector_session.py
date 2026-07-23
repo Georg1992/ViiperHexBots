@@ -93,6 +93,14 @@ class DetectorSession:
             return False
         return True
 
+    def ensure_descriptor(self):
+        """Return the cached MobDescriptor for the session's mob."""
+        return self._detector.ensure_descriptor(self._mob_name)
+
+    def detector_config(self) -> dict:
+        """Return the detector config dict (for opacity probe thresholds)."""
+        return self._detector.config
+
     @property
     def mob_name(self) -> str:
         return self._mob_name
@@ -242,6 +250,7 @@ class DetectorSession:
                         track,
                         offset_x=roi.x,
                         offset_y=roi.y,
+                        skip_opacity=True,
                     )
                 )
         duration_ms = int((time.perf_counter() - start) * 1000)

@@ -62,7 +62,7 @@ class HuntModeControllerContext(
 # Each lists exactly what its worker touches from the runtime context.
 
 
-class TrackingWorkerContext(
+class CoordTrackingWorkerContext(
     CanStop,
     CanLog,
     CanCapture,
@@ -72,9 +72,24 @@ class TrackingWorkerContext(
     CanOverlay,
     Protocol,
 ):
-    """Hunt runtime subset consumed by TrackingWorker."""
+    """Hunt runtime subset consumed by CoordTrackingWorker."""
+
+    coord_tick_done: object  # threading.Event
 
     def should_run_tracking(self) -> bool: ...
+
+
+class DeathDetectionWorkerContext(
+    CanStop,
+    CanLog,
+    CanCapture,
+    CanTrack,
+    Protocol,
+):
+    """Hunt runtime subset consumed by DeathDetectionWorker."""
+
+    coord_tick_done: object  # threading.Event
+    tracker: object  # DetectorSession (for ensure_descriptor + config)
 
 
 class DiscoveryWorkerContext(
