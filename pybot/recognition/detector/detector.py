@@ -75,11 +75,9 @@ REQUIRED_CONFIG_KEYS = {
 # [_GEOMETRY_ASPECT_MIN_RATIO, _GEOMETRY_ASPECT_MAX_RATIO].
 _GEOMETRY_AREA_SIL_FRAC_DIVISOR = 4.0
 _GEOMETRY_AREA_MAX_RATIO = 2.0
-# Tall character-like CCs (Hunter on gray desert) sit as low as ~0.40;
-# real desert-wolf heat blobs can stretch ~1.68 wide. Keep those bounds asymmetric.
-# Extract pre-shrink band shares these constants (Noxious extracts bottom ~0.688).
-_GEOMETRY_ASPECT_MIN_RATIO = 0.60
-_GEOMETRY_ASPECT_MAX_RATIO = 1.75
+# Extract pre-shrink band floor still needs a universal guard; the runtime
+# gate uses the descriptor's per-mob min_aspect_ratio / max_aspect_ratio
+# (measured from sprite frames with a 45 % margin at build time).
 
 # Extract / content-noise thresholds shared by silhouette gate control flow
 # and the post-gate noisy_extract cleanup hook.
@@ -480,8 +478,9 @@ class MobDetector:
         ``min_area_ratio = sil_frac / _GEOMETRY_AREA_SIL_FRAC_DIVISOR`` uses the
         descriptor's stable silhouette occupancy as a lower bound on heat-CC area
         vs sprite area. ``_GEOMETRY_AREA_MAX_RATIO`` caps terrain mega-blobs.
-        Aspect vs descriptor sprite aspect must stay inside
-        ``[_GEOMETRY_ASPECT_MIN_RATIO, _GEOMETRY_ASPECT_MAX_RATIO]``.
+        Aspect vs descriptor sprite aspect uses the per-mob band
+        ``descriptor.min_aspect_ratio`` / ``descriptor.max_aspect_ratio``
+        (measured from sprite frames at build time with a 45 % margin).
         """
         _x, _y, hw, hh = comp_bbox
         return self._passes_size_aspect_vs_descriptor(
@@ -512,8 +511,11 @@ class MobDetector:
             return True
         min_groups = int(self.config["minRequiredPaletteGroups"])
         min_second = float(self.config["minSecondPaletteGroupShare"])
-        min_coverage = float(self.config["minRequiredPaletteCoverage"])
-        min_body_strong = float(self.config["minBodyClusterStrong"])
+        # Each descriptor defines its own floors from actual sprite data.
+        # Config values serve as universal fallbacks for old descriptors
+        # that predate build-time threshold derivation.
+        min_body_strong = float(descriptor.min_body_cluster_strong)
+        min_coverage = float(descriptor.min_required_palette_coverage)
         min_body_cov_ratio = float(self.config["minBodyToPaletteCoverageRatio"])
         if (
             min_groups <= 0

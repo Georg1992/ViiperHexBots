@@ -27,7 +27,7 @@ from pybot.recognition.detector.descriptors.palette_groups import (
     split_palette_groups_by_required,
 )
 
-DESCRIPTOR_VERSION = 43
+DESCRIPTOR_VERSION = 44
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -246,14 +246,33 @@ class DescriptorBuilder:
         )
         use_diversity = body_group_count <= 2
 
-        # Geometry aspect band derived from actual sprite frame bounding
-        # boxes. Hardcoded [0.60, 1.75] is a one-size-fits-all guess —
-        # tall-narrow mobs (Creamy 48x47) and wide mobs (Horn 309x160)
-        # need different bands. 15 % margin accounts for runtime blob
-        # imprecision.
+        # Geometry aspect band from sprite frame tight bboxes.
+        # Runtime blob imprecision (GaussianBlur + heat spread) distorts
+        # small sprites (Creamy 48 px → tall/narrow blobs). Frame aspect
+        # variation does not predict this — a flat 45 % margin is the
+        # empirically-determined minimum that covers Creamy's vertical
+        # heat spread without letting Wild Rose gray-world FPs through.
         aspect_margin = 0.45
         min_aspect, max_aspect = self._measure_aspect_band(
             all_facing_frames, margin=aspect_margin,
+        )
+
+        # Body_strong floor: measure on actual sprite frames, set at 8 %
+        # of median (capped at 0.10). A runtime impostor must clear at
+        # least this fraction of the real sprite's body signal. Universal:
+        # every mob defines its own floor from its own pixel data.
+        min_body_strong = self._measure_body_cluster_floor(
+            all_facing_frames, mass_body,
+        )
+
+        # Palette coverage floor: measure required-group coverage on
+        # actual sprite frames, set at 50 % of median. Same principle —
+        # the mob's own coverage defines the floor.
+        min_palette_coverage = self._measure_palette_coverage_floor(
+            all_facing_frames,
+            match_palette_bgr,
+            match_palette_required_groups,
+            max_sprite_palette_distance,
         )
 
         descriptor = MobDescriptor(
@@ -278,6 +297,8 @@ class DescriptorBuilder:
             use_body_cluster_diversity=use_diversity,
             min_aspect_ratio=min_aspect,
             max_aspect_ratio=max_aspect,
+            min_body_cluster_strong=min_body_strong,
+            min_required_palette_coverage=min_palette_coverage,
         )
         descriptor.save(descriptor_path)
         return descriptor
@@ -947,6 +968,97 @@ class DescriptorBuilder:
         raw_min = float(np.min(aspects))
         raw_max = float(np.max(aspects))
         return max(0.35, raw_min * (1.0 - margin)), raw_max * (1.0 + margin)
+
+    @staticmethod
+    def _measure_body_cluster_floor(
+        frames: list[np.ndarray],
+        body_clusters: list[ColorCluster],
+    ) -> float:
+        """Measure body_strong on actual sprite frames; floor at 8 % of median.
+
+        body_strong = fraction of opaque pixels whose best body-cluster
+        similarity >= 0.5. On the mob's own sprite this should be high;
+        a runtime impostor must clear at least 8 % of that signal (capped
+        at 0.10 so tight-cluster mobs like Horn don't get an unreachable
+        floor). Falls back to 0.03 (config default) when no frames are
+        available.
+        """
+        if not body_clusters:
+            return 0.03
+        _body_strong_sim = 0.5
+        values: list[float] = []
+        for bgra in frames:
+            opaque = bgra[:, :, 3] >= 128
+            if not np.any(opaque):
+                continue
+            bgr_f = bgra[:, :, :3].astype(np.float32)
+            best = np.zeros(bgr_f.shape[:2], dtype=np.float32)
+            for cluster in body_clusters:
+                center = np.array(cluster.bgr, dtype=np.float32)
+                diff = bgr_f - center
+                dist = np.sqrt(np.sum(diff * diff, axis=2))
+                max_d = max(float(cluster.max_distance), 1.0)
+                sim = np.clip(1.0 - dist / max_d, 0.0, 1.0).astype(np.float32)
+                np.maximum(best, sim, out=best)
+            strong = float((best[opaque] >= _body_strong_sim).mean())
+            values.append(strong)
+        if not values:
+            return 0.03
+        median = float(np.median(values))
+        # Runtime body_strong degrades ~5-15× from sprite measurement
+        # (anti-aliased edges, lighting, background mixing). Use 8 %
+        # of median with a soft cap at 0.10 so tight-cluster mobs
+        # (Horn) don't get an unreachable floor.
+        return max(0.02, min(0.10, median * 0.08))
+
+    @staticmethod
+    def _measure_palette_coverage_floor(
+        frames: list[np.ndarray],
+        palette_bgr: list[tuple[int, int, int]],
+        required_groups: list[list[int]],
+        max_distance: float,
+    ) -> float:
+        """Measure required-palette coverage on actual sprite frames.
+
+        Coverage = fraction of opaque pixels within max_distance of any
+        required-group palette color. On the mob's own sprite this is
+        near 1.0 — runtime background dilution dominates, so the floor
+        is capped at the config default (0.28). Per-mob differentiation
+        only lowers the floor for mobs with genuinely patchy sprite
+        coverage. Falls back to 0.28 (config default).
+        """
+        if not palette_bgr or not required_groups:
+            return 0.28
+        palette = np.asarray(palette_bgr, dtype=np.float32)
+        req_indices = sorted({idx for group in required_groups for idx in group})
+        if not req_indices:
+            return 0.28
+        req_palette = palette[req_indices]
+        max_d = max(max_distance, 1.0)
+        values: list[float] = []
+        for bgra in frames:
+            opaque = bgra[:, :, 3] >= 128
+            if not np.any(opaque):
+                continue
+            bgr_f = bgra[:, :, :3].astype(np.float32)
+            min_dist_sq = np.full(bgr_f.shape[:2], np.inf, dtype=np.float32)
+            for start in range(0, len(req_palette), 128):
+                chunk = req_palette[start : start + 128]
+                diff = bgr_f[:, :, None, :] - chunk[None, None, :, :]
+                dist_sq = np.sum(diff * diff, axis=3)
+                min_dist_sq = np.minimum(min_dist_sq, dist_sq.min(axis=2))
+            within = np.sqrt(min_dist_sq) <= max_d
+            coverage = float(within[opaque].mean())
+            values.append(coverage)
+        if not values:
+            return 0.28
+        median = float(np.median(values))
+        # Runtime background dilution dominates coverage — the sprite
+        # measurement at 100 % does not capture runtime conditions.
+        # Cap at 0.28 (config default) so legitimate mobs are not
+        # rejected; only lower the floor for mobs with genuinely
+        # patchy palette coverage on their own sprite.
+        return max(0.08, min(0.28, median * 0.25))
 
     def _build_frame_silhouette_masks(
         self,

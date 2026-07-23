@@ -69,6 +69,8 @@ class MobDescriptor:
     use_body_cluster_diversity: bool = True
     min_aspect_ratio: float = 0.60
     max_aspect_ratio: float = 1.75
+    min_body_cluster_strong: float = 0.03
+    min_required_palette_coverage: float = 0.28
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MobDescriptor":
@@ -166,6 +168,8 @@ class MobDescriptor:
             use_body_cluster_diversity=data.get("useBodyClusterDiversity", True),
             min_aspect_ratio=float(data.get("minAspectRatio", 0.60)),
             max_aspect_ratio=float(data.get("maxAspectRatio", 1.75)),
+            min_body_cluster_strong=float(data.get("minBodyClusterStrong", 0.03)),
+            min_required_palette_coverage=float(data.get("minRequiredPaletteCoverage", 0.28)),
         )
 
     @classmethod
@@ -212,6 +216,8 @@ class MobDescriptor:
             "useBodyClusterDiversity": self.use_body_cluster_diversity,
             "minAspectRatio": self.min_aspect_ratio,
             "maxAspectRatio": self.max_aspect_ratio,
+            "minBodyClusterStrong": self.min_body_cluster_strong,
+            "minRequiredPaletteCoverage": self.min_required_palette_coverage,
         }
 
     def save(self, path: Path) -> None:

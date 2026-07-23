@@ -43,6 +43,10 @@ _BLOB_DEDUP_SIZE_FRAC = 0.85
 _MIN_BLOB_COMPONENT_AREA = 6
 # Gaussian blur kernel ≈ this fraction of sprite size at work resolution.
 _GAUSSIAN_BLUR_SIZE_FRAC = 0.8
+# Cap kernel at this fraction of work-res sprite size so small sprites
+# (Creamy 48 px → 24 px at downscale 2) are not over-blurred. A 19 px
+# kernel on a 24 px field smears heat across the full frame.
+_GAUSSIAN_BLUR_MAX_WORK_SIZE_FRAC = 0.40
 # Edge-density mixes as 0.5 + 0.5 * normalized edge map.
 _EDGE_DENSITY_BASE = np.float32(0.5)
 _EDGE_DENSITY_WEIGHT = np.float32(0.5)
@@ -541,8 +545,16 @@ class HeatmapDetector:
         edge_density = box_blurred_edge_density(gray)
         sprite = sprite * (_EDGE_DENSITY_BASE + _EDGE_DENSITY_WEIGHT * edge_density)
 
-        w = max(3, int(round(descriptor.avg_width * _GAUSSIAN_BLUR_SIZE_FRAC / downscale)) | 1)
-        h = max(3, int(round(descriptor.avg_height * _GAUSSIAN_BLUR_SIZE_FRAC / downscale)) | 1)
+        work_w = descriptor.avg_width / max(downscale, 1)
+        work_h = descriptor.avg_height / max(downscale, 1)
+        w = max(3, int(round(work_w * _GAUSSIAN_BLUR_SIZE_FRAC)) | 1)
+        h = max(3, int(round(work_h * _GAUSSIAN_BLUR_SIZE_FRAC)) | 1)
+        # Cap at 50 % of work-res sprite size so small sprites are not
+        # over-blurred into featureless smears.
+        cap_w = max(3, int(round(work_w * _GAUSSIAN_BLUR_MAX_WORK_SIZE_FRAC)) | 1)
+        cap_h = max(3, int(round(work_h * _GAUSSIAN_BLUR_MAX_WORK_SIZE_FRAC)) | 1)
+        w = min(w, cap_w)
+        h = min(h, cap_h)
         final = cv2.GaussianBlur(sprite, (w, h), 0)
 
         if downscale > 1:

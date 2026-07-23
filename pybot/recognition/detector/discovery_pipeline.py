@@ -176,7 +176,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
         items=(
             "new peaks only (known-track blobs skip)",
             "heat area in [sil_frac/4, 2.0] vs descriptor sprite area",
-            "heat aspect in [0.68, 1.75] vs descriptor aspect",
+            "heat aspect vs per-mob descriptor.min_aspect_ratio / max_aspect_ratio",
         ),
         sources=(
             SourceCheck(
@@ -185,8 +185,8 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "sil_frac",
                     "min_area_ratio",
                     "_GEOMETRY_AREA_MAX_RATIO",
-                    "_GEOMETRY_ASPECT_MIN_RATIO",
-                    "_GEOMETRY_ASPECT_MAX_RATIO",
+                    "descriptor.min_aspect_ratio",
+                    "descriptor.max_aspect_ratio",
                 ),
             ),
             SourceCheck(
@@ -205,8 +205,8 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             "dominant+supporting mass body-cluster strong-match fraction",
             "reject when present < minRequiredPaletteGroups (fail-closed)",
             "reject when second_share < minSecondPaletteGroupShare (fail-closed)",
-            "reject when coverage < minRequiredPaletteCoverage (fail-closed)",
-            "reject when body_strong < minBodyClusterStrong (fail-closed)",
+            "reject when coverage < descriptor.min_required_palette_coverage (fail-closed)",
+            "reject when body_strong < descriptor.min_body_cluster_strong (fail-closed)",
             "reject when body_strong < minBodyToPaletteCoverageRatio * coverage (fail-closed)",
             "skip gate when descriptor has no required groups",
         ),
@@ -217,8 +217,8 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "required_groups_structure",
                     "minRequiredPaletteGroups",
                     "minSecondPaletteGroupShare",
-                    "minRequiredPaletteCoverage",
-                    "minBodyClusterStrong",
+                    "min_required_palette_coverage",
+                    "min_body_cluster_strong",
                     "minBodyToPaletteCoverageRatio",
                     "match_palette_required_groups",
                     "max_sprite_palette_distance",
