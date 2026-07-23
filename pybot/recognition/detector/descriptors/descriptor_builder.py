@@ -27,7 +27,8 @@ from pybot.recognition.detector.descriptors.palette_groups import (
     split_palette_groups_by_required,
 )
 
-DESCRIPTOR_VERSION = 45
+
+DESCRIPTOR_VERSION = 46
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -257,12 +258,14 @@ class DescriptorBuilder:
             all_facing_frames, margin=aspect_margin,
         )
 
-        # Body_strong floor: measure on actual sprite frames, set at 8 %
-        # of median (capped at 0.10). A runtime impostor must clear at
-        # least this fraction of the real sprite's body signal. Universal:
-        # every mob defines its own floor from its own pixel data.
+        # Body_strong floor: measure on actual sprite frames. Diversity-
+        # enabled mobs use 6 % of median (tight clusters degrade ~17×);
+        # diversity-disabled mobs use 2 % of median — their k-means
+        # centroids spanning 3+ Lab groups cause exponentially worse
+        # runtime heat mixing (diverse colours average into background).
         min_body_strong = self._measure_body_cluster_floor(
             all_facing_frames, mass_body,
+            use_diversity=use_diversity,
         )
 
         # Palette coverage floor: measure required-group coverage on
@@ -976,13 +979,17 @@ class DescriptorBuilder:
     def _measure_body_cluster_floor(
         frames: list[np.ndarray],
         body_clusters: list[ColorCluster],
+        *,
+        use_diversity: bool = True,
     ) -> float:
-        """Measure body_strong on actual sprite frames; floor at 6 % of median.
+        """Measure body_strong on actual sprite frames.
 
-        body_strong = fraction of opaque pixels whose best body-cluster
-        similarity >= 0.5. The floor is 6 % of the median sprite measurement
-        (capped at 0.08) so tight-cluster mobs like Horn don't get an
-        unreachable floor.
+        Diversity-enabled mobs (1-2 Lab groups): 6 % of median.
+        Diversity-disabled mobs (3+ Lab groups): 2 % of median — k-means
+        centroids spanning diverse colour families cause exponentially worse
+        runtime heat mixing (colours average into background).
+        Capped at 0.08 (tight-cluster) / 0.04 (diverse) with absolute floor
+        at 0.010.
         """
         if not body_clusters:
             raise RuntimeError("no body clusters to measure body_strong floor")
@@ -1006,11 +1013,9 @@ class DescriptorBuilder:
         if not values:
             raise RuntimeError("no opaque sprite frames to measure body_strong")
         median = float(np.median(values))
-        # Runtime body_strong degrades ~10-20× from sprite measurement
-        # (anti-aliased edges, lighting, background mixing). Use 6 %
-        # of median with a soft cap at 0.08 so tight-cluster mobs
-        # (Horn) don't get an unreachable floor.
-        return max(0.015, min(0.08, median * 0.06))
+        multiplier = 0.02 if not use_diversity else 0.06
+        cap = 0.04 if not use_diversity else 0.08
+        return max(0.010, min(cap, median * multiplier))
 
     @staticmethod
     def _measure_palette_coverage_floor(
