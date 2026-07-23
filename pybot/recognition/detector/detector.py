@@ -78,6 +78,11 @@ _GEOMETRY_AREA_MAX_RATIO = 2.0
 # gate uses the descriptor's per-mob min_aspect_ratio / max_aspect_ratio
 # (measured from sprite frames with a 45 % margin at build time).
 
+# Very small sprites at 2× downscale lose too much signal — GaussianBlur on
+# a sub-24px field smears heat into gate-rejected speckles. Below this work
+# resolution the detector runs at native scale to preserve blob shape.
+_DOWNSCALE_MIN_WORK_RESOLUTION_PX = 24.0
+
 # Extract / content-noise thresholds shared by silhouette gate control flow
 # and the post-gate noisy_extract cleanup hook.
 _EXTRACT_BLOAT_AREA_RATIO = 2.0
@@ -278,13 +283,13 @@ class MobDetector:
         if self.discovery_heatmap_downscale > 1 and min(fw, fh) >= self.discovery_heatmap_downscale_min_side:
             downscale = self.discovery_heatmap_downscale
         # Very small sprites lose too much signal at 2× downscale —
-        # GaussianBlur on a <24 px field smears heat into speckles
-        # rejected by the area gate. Gated behind diversity-off to
-        # avoid regressions (Noxious is size-eligible but div-on).
+        # GaussianBlur smears heat into area-gate-rejected speckles.
+        # FPs from native-resolution heatmaps are caught by geometry /
+        # color-structure / silhouette gates (no safety valve).
         if (
             downscale > 1
-            and not descriptor.use_body_cluster_diversity
-            and min(descriptor.avg_width, descriptor.avg_height) / downscale < 24.0
+            and min(descriptor.avg_width, descriptor.avg_height) / downscale
+            < _DOWNSCALE_MIN_WORK_RESOLUTION_PX
         ):
             downscale = 1
 
