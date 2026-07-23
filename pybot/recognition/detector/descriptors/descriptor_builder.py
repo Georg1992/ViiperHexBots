@@ -250,12 +250,11 @@ class DescriptorBuilder:
         # Geometry aspect band from sprite frame tight bboxes.
         # Small sprites get GaussianBlur shape distortion at 2×
         # downscale — heat spreads asymmetrically, producing
-        # tall/narrow blobs. Margin scales inversely with size:
-        # base 50 % below 72 px, proportional above. Keeps large
-        # sprite bands tight (no Desert Wolf FPs) while small
-        # sprites (Creamy 48 px → 75 %) pass distorted blobs.
+        # tall/narrow blobs. Margin scales inversely with size
+        # so small sprites get wider bands while large sprites
+        # stay tight (no Desert Wolf FPs from band widening).
         min_dim = min(profile["size"].avg_width, profile["size"].avg_height)
-        aspect_margin = max(0.50, 0.50 * (72.0 / max(min_dim, 1.0)))
+        aspect_margin = max(0.50, 0.50 * (78.0 / max(min_dim, 1.0)))
         min_aspect, max_aspect = self._measure_aspect_band(
             all_facing_frames, margin=aspect_margin,
         )
