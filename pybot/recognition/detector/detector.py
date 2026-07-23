@@ -558,12 +558,24 @@ class MobDetector:
             return False
         if min_coverage > 0.0 and match_coverage < min_coverage:
             return False
-        if min_body_strong > 0.0 and body_strong < min_body_strong:
+        # Body_strong is unreliable for diversity-disabled mobs whose
+        # k-means centroids span 3+ Lab groups (Creamy). Skip this
+        # check — the other gates (groups, second-share, coverage)
+        # still apply to reject impostors.
+        if (
+            min_body_strong > 0.0
+            and body_strong < min_body_strong
+            and descriptor.use_body_cluster_diversity
+        ):
             return False
+        # body_strong / coverage ratio — also unreliable when body
+        # clusters span 3+ Lab groups (same rationale as the direct
+        # body_strong check above).
         if (
             min_body_cov_ratio > 0.0
             and match_coverage > 1e-6
             and body_strong < min_body_cov_ratio * match_coverage
+            and descriptor.use_body_cluster_diversity
         ):
             return False
 
