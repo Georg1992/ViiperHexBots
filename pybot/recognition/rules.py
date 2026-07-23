@@ -3,19 +3,22 @@
 Used by tests to lock the pipeline contract.
 
 Ownership:
-- **Discovery** creates tracks for new mobs, marks in-ROI unmatched tracks as
-  ``discovery_absent``, may drop unmatched tracks that are already outside the
-  hunt ROI (left the search area), on match publishes a soft position prior
-  (``discovery_obs_*``), and on static death-silhouette win removes the track
-  immediately (rediscovery ghost at the death site). It never overwrites
-  authoritative ``x``/``y``.
-- **Tracking** is the sole writer of authoritative position, movement, opacity
-  death, lost_count, and unreachable removal. It consumes discovery priors on
-  miss, drops on joint absence, and removes on opacity confirm (ghost at the
-  opacity hit). A leftover ``discovery_death`` flag is still honored if present.
+- **Discovery** creates tracks for new mobs, marks unmatched tracks as
+  ``discovery_absent``, on match publishes a soft position prior
+  (``discovery_obs_*``), and on static death-silhouette win sets
+  ``discovery_death`` (notification only). It never overwrites authoritative
+  ``x``/``y`` and never deletes tracks. Tracking wakes discovery on local miss
+  so priors / absence / death can be refreshed promptly.
+- **Tracking** is the sole remover of tracks. It owns authoritative position
+  and movement, consumes discovery priors on miss, keeps searching while local
+  follow fails, and drops on sustained joint absence
+  (discovery_absent + local miss for ``trackJointAbsentConfirmMs``),
+  ``discovery_death`` notifications, opacity death (when enabled), or
+  unreachable.
 - **Attack** records attack_count / last_attack_tick only; it reads position
   snapshots for clicks but must not mutate tracking fields or remove tracks.
-- Rediscovery ghosts block immediate recreates at corpse sites.
+- Rediscovery ghosts (placed by tracking on death) block immediate recreates
+  at corpse sites.
 """
 
 from __future__ import annotations
@@ -28,10 +31,6 @@ from typing import Literal
 # (typically smaller) so nearby distinct mobs are not merged.
 HUNT_OBJECT_RADIUS = 90
 HUNT_DISCOVERY_CLUSTER_RADIUS = 48
-
-# Consecutive local-follow misses before a track is dropped as lost. Tracking
-# ticks every WORKER_POLL_INTERVAL_S; default 40 misses ≈ 2s at 50ms.
-HUNT_TRACK_LOST_LIMIT = 40
 
 TrackState = Literal["alive"]
 
@@ -70,6 +69,7 @@ class MobTrack:
     mob_name: str = ""
     created_tick: int = 0
     updated_tick: int = 0
+    last_found_tick: int = 0
     last_attack_tick: int = 0
     last_discovery_tick: int = 0
     discovery_scale: float = 0.0
@@ -78,6 +78,7 @@ class MobTrack:
     area_epoch: int = 0
     opacity_baseline: float = 0.0
     opacity_baseline_samples: int = 0
+    # Monotonic tick when a meaningful opacity fade began; 0 = not fading.
     opacity_decay_streak: int = 0
     moving: bool = False
     vel_x: float = 0.0
@@ -119,6 +120,7 @@ class MobTrack:
             mob_name=mob_name,
             created_tick=now_tick,
             updated_tick=now_tick,
+            last_found_tick=now_tick,
             last_discovery_tick=now_tick,
             discovery_scale=discovery_scale,
             candidate_scale=discovery_scale,
@@ -318,6 +320,7 @@ def apply_track_observation(
         track.x = x
         track.y = y
         track.updated_tick = now_tick
+        track.last_found_tick = now_tick
         track.lost_count = 0
         clear_discovery_observation(track)
         track.discovery_absent = False
@@ -336,6 +339,7 @@ def apply_track_observation(
         track.vel_x *= 0.5
         track.vel_y *= 0.5
     track.lost_count += 1
+    track.updated_tick = now_tick
 
 
 def apply_opacity_observation(
@@ -373,6 +377,11 @@ def death_movement_thresholds(config: dict) -> tuple[int, int]:
     )
 
 
+def joint_absent_confirm_ms(config: dict) -> int:
+    """Wall-clock local-miss duration required with discovery_absent to drop."""
+    return int(config["trackJointAbsentConfirmMs"])
+
+
 def apply_movement_observation(
     track: MobTrack,
     *,
@@ -390,10 +399,3 @@ def apply_movement_observation(
         stop_threshold_px=stop_threshold_px,
     )
 
-
-def is_track_lost(track: MobTrack, *, miss_limit: int = HUNT_TRACK_LOST_LIMIT) -> bool:
-    return track.lost_count >= miss_limit
-
-
-def track_lost_miss_limit(config: dict) -> int:
-    return int(config.get("trackLostMissLimit", HUNT_TRACK_LOST_LIMIT))

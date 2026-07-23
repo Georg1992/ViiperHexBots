@@ -1,10 +1,10 @@
 {
   "mob": "wild_rose",
   "folder": "WildRose",
-  "description": "Wild Rose detection fixtures. Leading digit is mob count. *_Gray* = gray world textures.",
+  "description": "Wild Rose detection fixtures. Leading digit is living mob count. *_Gray* = gray world textures. *False* = impostor scenes (Kobold Archer) that must not be accepted.",
   "strictAcceptCount": true,
-  "fixtureCount": 4,
-  "normalFixtureCount": 0,
-  "grayFixtureCount": 4,
-  "filenamePattern": "^(\\d+)WildRose(?:_Gray\\d*)?\\.png$"
+  "fixtureCount": 9,
+  "normalFixtureCount": 2,
+  "grayFixtureCount": 7,
+  "filenamePattern": "^(\\d+)WildRose(?:_Gray\\d*|False\\d*)?\\.png$"
 }

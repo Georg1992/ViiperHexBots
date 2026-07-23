@@ -1,4 +1,4 @@
-"""Tracking wakes discovery for lost/unreachable, not for confirmed deaths."""
+"""Tracking wakes discovery on local miss / unreachable, not on confirmed deaths."""
 
 from __future__ import annotations
 
@@ -65,11 +65,10 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         )
         self.assertEqual(summary.added_count, 0)
 
-    def test_lost_wakes_discovery(self) -> None:
+    def test_local_miss_wakes_discovery_and_keeps_track(self) -> None:
         track = self.tracks.create_track(
             "horn", 100, 100, 0.8, 0.9, now_tick=1
         )
-        miss_limit = int(load_detector_config()["trackLostMissLimit"])
         self.ctx.tracker.track_locals_frame.return_value = SimpleNamespace(
             results=[
                 SimpleNamespace(
@@ -85,11 +84,11 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
                 )
             ]
         )
-        for _ in range(miss_limit):
-            self.ctx.discovery_wake.clear()
-            self.worker._tick()
+        self.worker._tick()
         self.assertTrue(self.ctx.discovery_wake.is_set())
-        self.assertIsNone(self.tracks.get_track_by_id(track.id))
+        kept = self.tracks.get_track_by_id(track.id)
+        assert kept is not None
+        self.assertEqual(kept.lost_count, 1)
 
 
 if __name__ == "__main__":

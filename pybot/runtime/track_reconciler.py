@@ -1,8 +1,8 @@
-"""Discovery reconciliation — create new tracks; list off-screen absences.
+"""Discovery reconciliation — create new tracks; list absences for tracking.
 
 Discovery finds NEW mobs and publishes soft position priors on match.
-Authoritative position updates still belong to tracking (LocalTracker); this
-service never overwrites existing track ``x``/``y``.
+Authoritative position updates and all track removal belong to tracking;
+this service never overwrites existing track ``x``/``y`` and never deletes.
 
 Dedup uses ``existing_positions`` — known-object (x, y) at frame-capture time
 (alive tracks plus recent removal sites). Absence uses
@@ -10,8 +10,7 @@ Dedup uses ``existing_positions`` — known-object (x, y) at frame-capture time
 instant. A detection within one object radius of a known position (or of a
 track just created earlier in this same scan) is skipped; only genuinely new
 detections create a track. Alive tracks with no matching detection are listed
-in ``removed_ids``; the caller decides which of those actually left the hunt
-ROI and may be dropped.
+in ``removed_ids``; the caller marks them ``discovery_absent`` (notification).
 
 Tracks already flagged ``discovery_death`` are excluded from living match and
 from absence listing — tracking owns their removal via the death flag.

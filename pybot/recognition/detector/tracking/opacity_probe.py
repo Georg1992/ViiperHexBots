@@ -109,38 +109,43 @@ def evaluate_opacity_death(
     decay_streak: int,
     config: dict,
     moving: bool = False,
+    now_tick: int,
 ) -> tuple[float, int, int, bool]:
     """Update opacity baseline state and return whether death is confirmed.
 
-    Any drop below the living baseline starts the decay streak. Dead sprites
-    stop moving, so the streak only advances while stationary; a drop while
-    ``moving`` holds the streak (no reset). Recovery to baseline clears it.
-    Death requires ``deathOpacityConfirmTicks`` consecutive stationary drops.
+    ``decay_streak`` stores the monotonic tick when a meaningful fade began
+    (0 = not fading). A meaningful drop is ``opacity_score`` below
+    ``baseline * deathOpacityDropRatio``. Dead sprites stop moving, so the
+    fade clock only runs while stationary; a drop while ``moving`` holds the
+    start tick (not opacity loss). Recovery clears it. Death requires the fade
+    to last ``deathOpacityConfirmMs`` wall-clock while stationary.
+
+    Tracking runs unbound, so tick-count confirms are not used.
     """
     min_samples = int(config["deathOpacityBaselineSamples"])
     min_baseline = float(config["deathOpacityMinBaseline"])
-    confirm_ticks = int(config["deathOpacityConfirmTicks"])
+    drop_ratio = float(config["deathOpacityDropRatio"])
+    confirm_ms = int(config["deathOpacityConfirmMs"])
 
     if baseline_samples < min_samples:
         baseline = max(baseline, opacity_score)
         baseline_samples += 1
-        decay_streak = 0
-        return baseline, baseline_samples, decay_streak, False
+        return baseline, baseline_samples, 0, False
 
     if baseline < min_baseline:
         baseline = max(baseline, opacity_score)
         return baseline, baseline_samples, decay_streak, False
 
-    dropped = opacity_score < baseline
+    dropped = opacity_score < (baseline * drop_ratio)
     if dropped and not moving:
-        decay_streak += 1
-    elif dropped and moving:
-        # Fall / walk blur can look like a drop — hold streak until stopped.
-        pass
-    else:
-        decay_streak = 0
+        if decay_streak <= 0:
+            decay_streak = now_tick
+        dead = (now_tick - decay_streak) >= confirm_ms
+        if dead:
+            return baseline, baseline_samples, 0, True
+        return baseline, baseline_samples, decay_streak, False
+    if dropped and moving:
+        # Walk / attack blur can look like a drop — hold the fade clock.
+        return baseline, baseline_samples, decay_streak, False
 
-    dead = decay_streak >= confirm_ticks
-    if dead:
-        decay_streak = 0
-    return baseline, baseline_samples, decay_streak, dead
+    return baseline, baseline_samples, 0, False

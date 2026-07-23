@@ -121,7 +121,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
         items=(
             "downscale frame when large enough",
             "weighted_sprite_palette_heatmap",
-            "optional palette diversity",
+            "body-cluster diversity (boost body+required groups; optional-group boost; press weak/mono)",
             "edge-density boost",
             "GaussianBlur",
             "upscale",
@@ -133,6 +133,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "downscale",
                     "weighted_sprite_palette_heatmap",
                     "use_palette_diversity",
+                    "apply_body_cluster_diversity",
                     "_finish_heatmap",
                 ),
             ),
@@ -173,6 +174,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
     PipelineStage(
         title="Geometry pre-gate",
         items=(
+            "new peaks only (known-track blobs skip)",
             "heat area in [sil_frac/4, 2.0] vs descriptor sprite area",
             "heat aspect in [0.68, 1.75] vs descriptor aspect",
         ),
@@ -187,19 +189,25 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "_GEOMETRY_ASPECT_MAX_RATIO",
                 ),
             ),
+            SourceCheck(
+                _detect,
+                ("known_hit is None", "_passes_discovery_geometry_gate"),
+            ),
         ),
     ),
     PipelineStage(
         title="Color structure pre-gate",
         items=(
+            "new peaks only (known-track blobs skip)",
             "heat-CC crop required palette groups present count",
             "second-largest required-group share among matched pixels",
             "required-group match coverage of crop pixels",
-            "dominant+supporting body-cluster strong-match fraction",
+            "dominant+supporting mass body-cluster strong-match fraction",
             "reject when present < minRequiredPaletteGroups (fail-closed)",
             "reject when second_share < minSecondPaletteGroupShare (fail-closed)",
             "reject when coverage < minRequiredPaletteCoverage (fail-closed)",
             "reject when body_strong < minBodyClusterStrong (fail-closed)",
+            "reject when body_strong < minBodyToPaletteCoverageRatio * coverage (fail-closed)",
             "skip gate when descriptor has no required groups",
         ),
         sources=(
@@ -211,9 +219,14 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "minSecondPaletteGroupShare",
                     "minRequiredPaletteCoverage",
                     "minBodyClusterStrong",
+                    "minBodyToPaletteCoverageRatio",
                     "match_palette_required_groups",
                     "max_sprite_palette_distance",
                 ),
+            ),
+            SourceCheck(
+                _detect,
+                ("known_hit is None", "_passes_color_structure_gate"),
             ),
         ),
     ),
@@ -231,6 +244,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             "dual gate recall AND precision",
             "reject solid-fill hard occupancy (>=95% of gate grid)",
             "noisy extract flags (bloated / soft-hard) on SilhouetteCheck",
+            "known tracks: score same extract vs death silhouettes; death wins when death_passed and death_sim > living_sim",
             "pass / fail per blob",
         ),
         sources=(
@@ -287,6 +301,14 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "content_noisy",
                     "soft_hard_ratio",
                     "noisy_extract",
+                ),
+            ),
+            SourceCheck(
+                _detect,
+                (
+                    "_score_death_vs_living_extract",
+                    "death_wins",
+                    "death_confirmed",
                 ),
             ),
         ),

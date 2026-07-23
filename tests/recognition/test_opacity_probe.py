@@ -16,7 +16,8 @@ class OpacityDeathProbeTests(unittest.TestCase):
         return {
             "deathOpacityBaselineSamples": 2,
             "deathOpacityMinBaseline": 0.20,
-            "deathOpacityConfirmTicks": 3,
+            "deathOpacityDropRatio": 0.85,
+            "deathOpacityConfirmMs": 450,
         }
 
     def test_baseline_calibration_blocks_death(self) -> None:
@@ -39,133 +40,175 @@ class OpacityDeathProbeTests(unittest.TestCase):
             )
         )
 
-    def test_any_drop_advances_streak_when_stationary(self) -> None:
+    def test_tiny_jitter_below_peak_is_not_a_fade(self) -> None:
         baseline = 0.60
         samples = 2
-        streak = 0
         config = self._config()
-
-        # Tiny drop below baseline still counts.
-        baseline, samples, streak, dead = evaluate_opacity_death(
+        # Living animation often sits a hair under the peak baseline.
+        baseline, samples, since, dead = evaluate_opacity_death(
             opacity_score=0.59,
             baseline=baseline,
             baseline_samples=samples,
-            decay_streak=streak,
+            decay_streak=0,
             config=config,
+            now_tick=1000,
         )
         self.assertFalse(dead)
-        self.assertEqual(streak, 1)
+        self.assertEqual(since, 0)
 
-    def test_decay_requires_three_consecutive_stationary_ticks(self) -> None:
+    def test_meaningful_fade_requires_confirm_ms(self) -> None:
         baseline = 0.60
         samples = 2
-        streak = 0
         config = self._config()
+        since = 0
 
-        baseline, samples, streak, dead = evaluate_opacity_death(
+        baseline, samples, since, dead = evaluate_opacity_death(
             opacity_score=0.20,
             baseline=baseline,
             baseline_samples=samples,
-            decay_streak=streak,
+            decay_streak=since,
             config=config,
+            now_tick=1000,
         )
         self.assertFalse(dead)
-        self.assertEqual(streak, 1)
+        self.assertEqual(since, 1000)
 
-        baseline, samples, streak, dead = evaluate_opacity_death(
+        baseline, samples, since, dead = evaluate_opacity_death(
             opacity_score=0.60,
             baseline=baseline,
             baseline_samples=samples,
-            decay_streak=streak,
+            decay_streak=since,
             config=config,
+            now_tick=1100,
         )
         self.assertFalse(dead)
-        self.assertEqual(streak, 0)
+        self.assertEqual(since, 0)
 
-        for score in (0.18, 0.17, 0.16):
-            baseline, samples, streak, dead = evaluate_opacity_death(
-                opacity_score=score,
-                baseline=baseline,
-                baseline_samples=samples,
-                decay_streak=streak,
-                config=config,
-            )
+        baseline, samples, since, dead = evaluate_opacity_death(
+            opacity_score=0.18,
+            baseline=baseline,
+            baseline_samples=samples,
+            decay_streak=since,
+            config=config,
+            now_tick=2000,
+        )
+        self.assertFalse(dead)
+        self.assertEqual(since, 2000)
+
+        baseline, samples, since, dead = evaluate_opacity_death(
+            opacity_score=0.17,
+            baseline=baseline,
+            baseline_samples=samples,
+            decay_streak=since,
+            config=config,
+            now_tick=2449,
+        )
+        self.assertFalse(dead)
+
+        baseline, samples, since, dead = evaluate_opacity_death(
+            opacity_score=0.16,
+            baseline=baseline,
+            baseline_samples=samples,
+            decay_streak=since,
+            config=config,
+            now_tick=2450,
+        )
         self.assertTrue(dead)
-        self.assertEqual(streak, 0)
+        self.assertEqual(since, 0)
 
-    def test_recovery_to_baseline_resets_streak(self) -> None:
+    def test_recovery_above_drop_ratio_resets_fade(self) -> None:
         baseline = 0.60
         samples = 2
-        streak = 0
         config = self._config()
 
-        baseline, samples, streak, dead = evaluate_opacity_death(
-            opacity_score=0.50,
+        baseline, samples, since, dead = evaluate_opacity_death(
+            opacity_score=0.40,
             baseline=baseline,
             baseline_samples=samples,
-            decay_streak=streak,
+            decay_streak=0,
             config=config,
+            now_tick=1000,
         )
-        self.assertEqual(streak, 1)
-        baseline, samples, streak, dead = evaluate_opacity_death(
-            opacity_score=0.60,
+        self.assertEqual(since, 1000)
+        baseline, samples, since, dead = evaluate_opacity_death(
+            opacity_score=0.55,
             baseline=baseline,
             baseline_samples=samples,
-            decay_streak=streak,
+            decay_streak=since,
             config=config,
+            now_tick=1200,
         )
         self.assertFalse(dead)
-        self.assertEqual(streak, 0)
+        self.assertEqual(since, 0)
 
     def test_weak_baseline_never_triggers_death(self) -> None:
         baseline = 0.10
         samples = 4
-        streak = 0
-        baseline, samples, streak, dead = evaluate_opacity_death(
+        baseline, samples, since, dead = evaluate_opacity_death(
             opacity_score=0.01,
             baseline=baseline,
             baseline_samples=samples,
-            decay_streak=streak,
+            decay_streak=0,
             config=self._config(),
+            now_tick=5000,
         )
         self.assertFalse(dead)
 
-    def test_drop_while_moving_holds_streak(self) -> None:
+    def test_drop_while_moving_holds_fade_clock(self) -> None:
         baseline = 0.60
         samples = 2
-        streak = 0
         config = self._config()
-        baseline, samples, streak, dead = evaluate_opacity_death(
-            opacity_score=0.45,
-            baseline=baseline,
-            baseline_samples=samples,
-            decay_streak=streak,
-            config=config,
-            moving=True,
-        )
-        self.assertFalse(dead)
-        self.assertEqual(streak, 0)
-
-        # Stationary drop starts the streak; moving drop holds it.
-        baseline, samples, streak, dead = evaluate_opacity_death(
-            opacity_score=0.45,
-            baseline=baseline,
-            baseline_samples=samples,
-            decay_streak=streak,
-            config=config,
-            moving=False,
-        )
-        self.assertEqual(streak, 1)
-        baseline, samples, streak, dead = evaluate_opacity_death(
+        baseline, samples, since, dead = evaluate_opacity_death(
             opacity_score=0.40,
             baseline=baseline,
             baseline_samples=samples,
-            decay_streak=streak,
+            decay_streak=0,
             config=config,
             moving=True,
+            now_tick=1000,
         )
         self.assertFalse(dead)
-        self.assertEqual(streak, 1)
+        self.assertEqual(since, 0)
+
+        baseline, samples, since, dead = evaluate_opacity_death(
+            opacity_score=0.40,
+            baseline=baseline,
+            baseline_samples=samples,
+            decay_streak=since,
+            config=config,
+            moving=False,
+            now_tick=1000,
+        )
+        self.assertEqual(since, 1000)
+        baseline, samples, since, dead = evaluate_opacity_death(
+            opacity_score=0.35,
+            baseline=baseline,
+            baseline_samples=samples,
+            decay_streak=since,
+            config=config,
+            moving=True,
+            now_tick=2000,
+        )
+        self.assertFalse(dead)
+        self.assertEqual(since, 1000)
+
+    def test_moving_never_confirms_death_even_after_confirm_ms(self) -> None:
+        baseline = 0.60
+        samples = 2
+        config = self._config()
+        since = 1000
+        for tick, score in ((1500, 0.10), (2000, 0.05), (3000, 0.01)):
+            baseline, samples, since, dead = evaluate_opacity_death(
+                opacity_score=score,
+                baseline=baseline,
+                baseline_samples=samples,
+                decay_streak=since,
+                config=config,
+                moving=True,
+                now_tick=tick,
+            )
+            self.assertFalse(dead)
+            self.assertEqual(since, 1000)
 
 
 if __name__ == "__main__":

@@ -45,9 +45,17 @@ class DescriptorV8Tests(unittest.TestCase):
             len(descriptor.death_silhouette_masks), MIN_DEATH_GATE_SILHOUETTE_MASKS
         )
         self.assertEqual(len(descriptor.death_silhouette_masks[0].avg_mask), 256)
+        # Early Die frames (belly-up fall poses) may overlap living
+        # silhouettes. Final decay frames (at least DEAD_ACTION_COUNT)
+        # must be distinct from any living pose so corpses are still visible.
         living_avgs = {tuple(m.avg_mask) for m in descriptor.silhouette_masks}
         death_avgs = {tuple(m.avg_mask) for m in descriptor.death_silhouette_masks}
-        self.assertFalse(living_avgs & death_avgs)
+        distinct = death_avgs - living_avgs
+        self.assertGreaterEqual(
+            len(distinct),
+            DEAD_ACTION_COUNT,
+            f"need at least {DEAD_ACTION_COUNT} death silhouettes distinct from living, got {len(distinct)}",
+        )
 
     def test_death_action_indices_are_act_editor_die_group(self) -> None:
         # 5 animations × 8 dirs → Die = animation 4 → actions 32..39
@@ -65,27 +73,22 @@ class DescriptorV8Tests(unittest.TestCase):
         self.assertEqual(ACTIONS_PER_ANIMATION, 8)
         self.assertEqual(DEAD_ACTION_COUNT, 8)
 
-    def test_death_gate_keeps_last_frame_per_die_facing(self) -> None:
+    def test_death_gate_keeps_early_and_last_per_die_facing(self) -> None:
         asset_dir = self.builder.asset_dir("horn")
         spr = SprReader(asset_dir / "horn.spr").load()
         act = ActReader(asset_dir / "horn.act").load()
-        indices = DescriptorBuilder._death_action_indices(len(act.actions))
-        corpse_pool = self.builder._build_death_corpse_silhouette_masks(
-            spr, act, indices,
+        death_masks = self.builder._build_death_gate_silhouette_masks(
+            spr, act, living_masks=[],
         )
-        self.assertGreater(len(corpse_pool), 0)
-        self.assertLessEqual(len(corpse_pool), DEAD_ACTION_COUNT)
-        coherent = [
-            m for m in corpse_pool if self.builder._is_coherent_gate_silhouette(m)
-        ]
-        expected = coherent if coherent else corpse_pool
+        self.assertGreater(len(death_masks), 0)
+        self.assertLessEqual(len(death_masks), MIN_DEATH_GATE_SILHOUETTE_MASKS)
 
         descriptor = self.builder.build("horn", force=True)
         death = descriptor.death_silhouette_masks
-        self.assertEqual(len(death), len(expected))
-        expected_avgs = {tuple(m.avg_mask) for m in expected}
+        self.assertEqual(len(death), len(death_masks))
+        death_avgs = {tuple(m.avg_mask) for m in death_masks}
         for mask in death:
-            self.assertIn(tuple(mask.avg_mask), expected_avgs)
+            self.assertIn(tuple(mask.avg_mask), death_avgs)
 
     def test_gate_masks_are_selected_from_frames(self) -> None:
         asset_dir = self.builder.asset_dir("horn")

@@ -71,20 +71,36 @@ def split_palette_groups_by_required(
     groups: list[list[int]],
     color_required: list[bool],
 ) -> tuple[list[list[int]], list[list[int]]]:
-    """Split Lab groups into required vs optional-only.
+    """Split Lab groups into required vs optional color index sets.
 
-    A group is required when it contains at least one frame-stable palette color.
-    Optional-only groups (eyes / intermittents) boost heat when present but do
-    not raise the diversity bar when absent.
+    Frame-stable palette colors form required groups (hard gate + diversity
+    bar). Frame-intermittent colors (eyes, blinks, rare accents) form optional
+    groups even when Lab-merged with a required family — they must not raise
+    the diversity bar, but soft heatmap diversity can still boost when they
+    are locally present.
+
+    Mixed Lab families are peeled: required indices stay in the required set,
+    optional indices become their own optional group (never swallowed).
     """
     required: list[list[int]] = []
     optional: list[list[int]] = []
     for group in groups:
-        if any(
-            idx < len(color_required) and color_required[idx]
-            for idx in group
-        ):
-            required.append(list(group))
-        else:
-            optional.append(list(group))
+        req_idx = [
+            idx for idx in group
+            if idx < len(color_required) and color_required[idx]
+        ]
+        opt_idx = [
+            idx for idx in group
+            if idx < len(color_required) and not color_required[idx]
+        ]
+        # Indices outside color_required (should not happen) stay required-side
+        # so they are not silently dropped.
+        stray = [
+            idx for idx in group
+            if idx >= len(color_required)
+        ]
+        if req_idx or stray:
+            required.append(sorted(req_idx + stray))
+        if opt_idx:
+            optional.append(sorted(opt_idx))
     return required, optional

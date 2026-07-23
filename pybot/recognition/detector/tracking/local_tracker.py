@@ -2,9 +2,9 @@
 
 Scores at the predicted center first (or a discovery soft prior when present
 and drifted), searches nearby heatmap peaks when that misses, and measures
-opacity only on successful hits. A tracking miss is not opacity decay —
-empty/background windows must not register death. Mild decay confirms only
-while stationary; strong decay can confirm while moving.
+opacity on successful hits. A tracking miss is not opacity decay. Meaningful
+fade confirms only while stationary; this-frame displacement gates the probe
+so walk/fall motion is not treated as fade.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from pybot.recognition.detector.tracking.opacity_probe import (
     is_opacity_calibrated,
     measure_opacity_score,
 )
+from pybot.recognition.rules import death_movement_thresholds, evaluate_track_moving
 
 if TYPE_CHECKING:
     from pybot.recognition.detector.detector import MobDetector
@@ -72,7 +73,8 @@ def track_local(
 
     if search_radius_px is not None:
         radius = int(search_radius_px)
-    elif moving:
+    elif moving or lost_count > 0:
+        # Widen search when walking or after a miss so discovery can re-point us.
         radius = int(detector.local_track_moving_search_radius_px)
     else:
         radius = int(detector.local_track_search_radius_px)
@@ -143,6 +145,7 @@ def track_local(
         detector, frame_bgr, descriptor,
         track_id=track_id, bbox=hit_bbox, similarity=hit_sim,
         offset_x=offset_x, offset_y=offset_y,
+        prev_x=cx, prev_y=cy,
         created_tick=created_tick, now_tick=now_tick,
         opacity_baseline=opacity_baseline,
         opacity_baseline_samples=opacity_baseline_samples,
@@ -177,6 +180,7 @@ def _finalize_track_hit(
     bbox: tuple[int, int, int, int],
     similarity: float,
     offset_x: int, offset_y: int,
+    prev_x: int, prev_y: int,
     created_tick: int, now_tick: int,
     opacity_baseline: float,
     opacity_baseline_samples: int,
@@ -187,9 +191,19 @@ def _finalize_track_hit(
     x = bx + bw // 2 + offset_x
     y = by + bh // 2 + offset_y
 
-    # Probe as soon as the track is old enough (default 0). Any opacity drop
-    # starts the streak; confirm ticks only advance while stationary (corpses
-    # stop moving after the short fall animation).
+    # Use this-frame displacement, not only the prior moving flag — otherwise
+    # the first walk frames still look "stationary" and motion blur advances
+    # the opacity death clock.
+    move_px, stop_px = death_movement_thresholds(detector.config)
+    dx = x - (prev_x + offset_x)
+    dy = y - (prev_y + offset_y)
+    moving_now = evaluate_track_moving(
+        was_moving=moving,
+        displacement_sq=(dx * dx) + (dy * dy),
+        move_threshold_px=move_px,
+        stop_threshold_px=stop_px,
+    )
+
     if _track_old_enough(
         detector.config,
         created_tick=created_tick,
@@ -220,7 +234,8 @@ def _finalize_track_hit(
                     baseline_samples=opacity_baseline_samples,
                     decay_streak=opacity_decay_streak,
                     config=detector.config,
-                    moving=moving,
+                    moving=moving_now,
+                    now_tick=now_tick,
                 )
             )
             if dead:

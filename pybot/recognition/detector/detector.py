@@ -43,6 +43,7 @@ REQUIRED_CONFIG_KEYS = {
     "minSecondPaletteGroupShare",
     "minRequiredPaletteCoverage",
     "minBodyClusterStrong",
+    "minBodyToPaletteCoverageRatio",
     "usePaletteDiversity",
     "topCandidateCenters",
     "minCenterHeat",
@@ -55,12 +56,13 @@ REQUIRED_CONFIG_KEYS = {
     "localTrackMovingSearchRadiusPx",
     "discoveryClusterRadiusPx",
     "trackDedupRadiusPx",
-    "trackLostMissLimit",
     "debugOutputDir",
     # death-detection keys (local_tracker / opacity_probe / hunt)
     "deathOpacityBaselineSamples",
     "deathOpacityMinBaseline",
-    "deathOpacityConfirmTicks",
+    "deathOpacityDropRatio",
+    "deathOpacityConfirmMs",
+    "trackJointAbsentConfirmMs",
     "deathRediscoveryCooldownMs",
     "deathOpacityMoveThresholdPx",
     "deathOpacityStopThresholdPx",
@@ -74,10 +76,10 @@ REQUIRED_CONFIG_KEYS = {
 # [_GEOMETRY_ASPECT_MIN_RATIO, _GEOMETRY_ASPECT_MAX_RATIO].
 _GEOMETRY_AREA_SIL_FRAC_DIVISOR = 4.0
 _GEOMETRY_AREA_MAX_RATIO = 2.0
-# Tall character-like CCs (Hunter on gray desert) sit ~0.68; real desert-wolf
-# heat blobs can stretch ~1.68 wide. Keep those bounds asymmetric.
+# Tall character-like CCs (Hunter on gray desert) sit as low as ~0.40;
+# real desert-wolf heat blobs can stretch ~1.68 wide. Keep those bounds asymmetric.
 # Extract pre-shrink band shares these constants (Noxious extracts bottom ~0.688).
-_GEOMETRY_ASPECT_MIN_RATIO = 0.68
+_GEOMETRY_ASPECT_MIN_RATIO = 0.60
 _GEOMETRY_ASPECT_MAX_RATIO = 1.75
 
 # Extract / content-noise thresholds shared by silhouette gate control flow
@@ -266,7 +268,9 @@ class MobDetector:
     ) -> DetectionResult:
         """Heatmap discovery with optional known-track dual silhouette check.
 
-        Order: heatmap → blobs → geometry → color structure → silhouette.
+        Order: heatmap → blobs → (new peaks: geometry + color structure) →
+        silhouette. Known-track blobs skip geometry/color and score living vs
+        death silhouettes so fading corpses still reach the death check.
         * First scan (no ``known_tracks``): living silhouette gate only.
         * Later scans: heatmap blobs near known tracks are extracted and scored
           against living and death silhouettes; death is confirmed only when the
@@ -299,7 +303,7 @@ class MobDetector:
         blob_to_known = self._mark_known_blobs(blobs, known, dedup_radius)
         death_masks = list(descriptor.death_silhouette_masks)
 
-        # --- geometry → color structure → silhouette -------------------
+        # --- gates → silhouette (known tracks skip pre-gates) ----------
         candidates: list[DetectionCandidate] = []
         death_confirmed: list[tuple[int, int, int]] = []
         silhouette_checks: list[SilhouetteCheck] = []
@@ -310,27 +314,31 @@ class MobDetector:
             bbox = (bx, by, bw, bh)
             known_hit = blob_to_known.get(blob_index)
 
-            if not self._passes_discovery_geometry_gate(comp_bbox, descriptor):
-                silhouette_checks.append(SilhouetteCheck(
-                    center_x=cx,
-                    center_y=cy,
-                    heat_score=heat_score,
-                    passed=False,
-                    similarity=0.0,
-                ))
-                continue
+            # New peaks must clear geometry + color structure. Known tracks were
+            # already silhouette-confirmed when created — skip those pre-gates so
+            # fading corpses can still reach living-vs-death silhouette scoring.
+            if known_hit is None:
+                if not self._passes_discovery_geometry_gate(comp_bbox, descriptor):
+                    silhouette_checks.append(SilhouetteCheck(
+                        center_x=cx,
+                        center_y=cy,
+                        heat_score=heat_score,
+                        passed=False,
+                        similarity=0.0,
+                    ))
+                    continue
 
-            if not self._passes_color_structure_gate(
-                frame_bgr, descriptor, comp_bbox,
-            ):
-                silhouette_checks.append(SilhouetteCheck(
-                    center_x=cx,
-                    center_y=cy,
-                    heat_score=heat_score,
-                    passed=False,
-                    similarity=0.0,
-                ))
-                continue
+                if not self._passes_color_structure_gate(
+                    frame_bgr, descriptor, comp_bbox,
+                ):
+                    silhouette_checks.append(SilhouetteCheck(
+                        center_x=cx,
+                        center_y=cy,
+                        heat_score=heat_score,
+                        passed=False,
+                        similarity=0.0,
+                    ))
+                    continue
 
             (
                 passed,
@@ -519,8 +527,10 @@ class MobDetector:
         - enough required groups present (diversity presence)
         - non-trivial second-group share (rejects mono-family, e.g. Poring)
         - enough crop pixels match required-group colors (coverage)
-        - enough crop pixels strongly match body clusters (dominant+supporting)
+        - enough crop pixels strongly match mass body clusters
           (rejects obviously foreign palettes)
+        - body_strong scales with palette coverage (rejects high-coverage
+          impostors with weak real body)
 
         Skips when the descriptor has no required groups.
         """
@@ -531,11 +541,13 @@ class MobDetector:
         min_second = float(self.config["minSecondPaletteGroupShare"])
         min_coverage = float(self.config["minRequiredPaletteCoverage"])
         min_body_strong = float(self.config["minBodyClusterStrong"])
+        min_body_cov_ratio = float(self.config["minBodyToPaletteCoverageRatio"])
         if (
             min_groups <= 0
             and min_second <= 0.0
             and min_coverage <= 0.0
             and min_body_strong <= 0.0
+            and min_body_cov_ratio <= 0.0
         ):
             return True
         bx, by, bw, bh = comp_bbox
@@ -560,6 +572,12 @@ class MobDetector:
         if min_coverage > 0.0 and match_coverage < min_coverage:
             return False
         if min_body_strong > 0.0 and body_strong < min_body_strong:
+            return False
+        if (
+            min_body_cov_ratio > 0.0
+            and match_coverage > 1e-6
+            and body_strong < min_body_cov_ratio * match_coverage
+        ):
             return False
         return True
 

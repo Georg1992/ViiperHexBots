@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pybot.recognition.rules import HUNT_OBJECT_RADIUS, HUNT_TRACK_LOST_LIMIT
+from pybot.recognition.rules import HUNT_OBJECT_RADIUS
 
 HUNT_DISCOVERY_INTERVAL_MS = 1000
 HUNT_TELEPORT_DURATION_MS = 800
@@ -67,7 +67,6 @@ __all__ = [
     "HUNT_OBJECT_RADIUS",
     "HUNT_TELEPORT_DURATION_MS",
     "WORKER_SHUTDOWN_TIMEOUT_S",
-    "HUNT_TRACK_LOST_LIMIT",
     "CELL_SIZE_PX",
     "DEFAULT_SEARCH_RANGE_CELLS",
     "WORKER_POLL_INTERVAL_S",

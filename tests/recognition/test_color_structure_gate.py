@@ -67,7 +67,7 @@ class ColorStructureGateTests(unittest.TestCase):
             float(self.descriptor.max_sprite_palette_distance),
         )
         self.assertGreaterEqual(present, 2)
-        self.assertGreaterEqual(second, 0.11)
+        self.assertGreaterEqual(second, 0.09)
         self.assertGreaterEqual(coverage, 0.28)
         self.assertGreaterEqual(body_strong, 0.03)
         self.assertTrue(
@@ -76,15 +76,33 @@ class ColorStructureGateTests(unittest.TestCase):
             )
         )
 
-    def test_poring_crop_fails_second_share(self) -> None:
-        comp, crop = self._heat_crop(self.frame, self.descriptor, (838, 430))
-        present, second, _coverage, _body = required_groups_structure(
+    def test_poring_crop_fails_body_strong(self) -> None:
+        # Locate Poring on the base palette heatmap (body diversity may press
+        # the final heat peak away). Foreign pink blob has no Wild Rose body.
+        from pybot.recognition.detector.scoring.heatmap_detector import (
+            weighted_sprite_palette_heatmap,
+        )
+
+        base, _sim = weighted_sprite_palette_heatmap(
+            self.frame,
+            self.descriptor,
+            float(self.descriptor.max_sprite_palette_distance),
+            return_similarity=True,
+        )
+        y0, x0 = 400, 800
+        patch = base[y0 : y0 + 80, x0 : x0 + 80]
+        py, px = np.unravel_index(int(patch.argmax()), patch.shape)
+        cx, cy = int(x0 + px), int(y0 + py)
+        size = 24
+        comp = (cx - size // 2, cy - size // 2, size, size)
+        x, y, bw, bh = comp
+        crop = self.frame[y : y + bh, x : x + bw]
+        _present, _second, _coverage, body_strong = required_groups_structure(
             crop,
             self.descriptor,
             float(self.descriptor.max_sprite_palette_distance),
         )
-        self.assertGreaterEqual(present, 2)
-        self.assertLess(second, 0.11)
+        self.assertLess(body_strong, 0.03)
         self.assertFalse(
             self.detector._passes_color_structure_gate(
                 self.frame, self.descriptor, comp
@@ -129,7 +147,7 @@ class ColorStructureGateTests(unittest.TestCase):
             float(self.descriptor.max_sprite_palette_distance),
         )
         self.assertTrue(
-            coverage < 0.28 or body_strong < 0.03 or _s < 0.11 or _p < 2,
+            coverage < 0.28 or body_strong < 0.03 or _s < 0.09 or _p < 2,
             f"wolf crop should look foreign to WR "
             f"(cov={coverage:.3f} body_strong={body_strong:.3f})",
         )

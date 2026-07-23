@@ -27,7 +27,7 @@ from pybot.recognition.detector.descriptors.palette_groups import (
     split_palette_groups_by_required,
 )
 
-DESCRIPTOR_VERSION = 40
+DESCRIPTOR_VERSION = 41
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -49,11 +49,15 @@ ACTIONS_PER_ANIMATION = 8
 DEAD_ACTION_COUNT = ACTIONS_PER_ANIMATION
 MIN_ACTIONS_FOR_DEATH = LIVING_FACING_ACTION_LIMIT + DEAD_ACTION_COUNT
 # Static decay corpse: last opaque Die frame per facing (all used at death check).
-MIN_DEATH_GATE_SILHOUETTE_MASKS = DEAD_ACTION_COUNT
+# Also keep the first N opaque Die frames — early fall poses (belly-up) that the
+# final decay sprite does not cover.
+DEATH_GATE_EARLY_FRAME_COUNT = 2
+MIN_DEATH_GATE_SILHOUETTE_MASKS = DEAD_ACTION_COUNT * (DEATH_GATE_EARLY_FRAME_COUNT + 1)
 MATCH_PALETTE_MAX_COLORS = 32
 MATCH_PALETTE_MAX_ACCENT_COLORS = 8
 # Palette shades present in at least this fraction of opaque frames are
-# "required" for diversity; rarer intermittents (eyes) stay optional.
+# "required" for the hard color-structure gate; rarer intermittents (eyes)
+# stay optional.
 MIN_PALETTE_REQUIRED_FRAME_FRACTION = 0.75
 PALETTE_DEDUP_H_THRESH = 12.0
 PALETTE_DEDUP_SV_THRESH = 25.0
@@ -469,7 +473,7 @@ class DescriptorBuilder:
 
         Presence uses hue/sat/val near-match (same thresholds as shade dedup), not
         exact BGR — animation shifts exact values. Colors that only appear in some
-        facings/frames (eyes, blinks) stay optional for diversity.
+        facings/frames (eyes, blinks) stay optional for the hard gate.
         """
         if not palette:
             return []
@@ -922,27 +926,35 @@ class DescriptorBuilder:
         *,
         living_masks: list[SilhouetteMask],
     ) -> list[SilhouetteMask]:
-        """Keep static decay corpse silhouettes for every Die facing.
+        """Death gate refs: early Die frames + final decay per facing.
 
-        Die clips fall quickly then hold one opaque decay sprite. Gate refs =
-        last non-transparent frame per Die directional action (up to 8), so
-        discovery death match covers all facings.
+        Die clips fall quickly then hold one opaque decay sprite. Final decay
+        alone misses belly-up mid-fall corpses on discovery. Keep the first
+        ``DEATH_GATE_EARLY_FRAME_COUNT`` opaque frames plus the last opaque
+        frame from each Die directional action.
         """
-        del living_masks  # corpse pose is fixed; no farthest-from-living cull
+        del living_masks  # keep every facing; no farthest-from-living cull
         action_indices = self._death_action_indices(len(act_file.actions))
         if not action_indices:
             return []
-        frame_masks = self._build_death_corpse_silhouette_masks(
-            spr_file, act_file, action_indices,
-        )
-        if not frame_masks:
+        selected: list[SilhouetteMask] = []
+        for action_index in action_indices:
+            frames = self._collect_frames(
+                spr_file, act_file, (action_index,), frame_start=0,
+            )
+            if not frames:
+                continue
+            early_n = min(DEATH_GATE_EARLY_FRAME_COUNT, len(frames))
+            for bgra in frames[:early_n]:
+                selected.append(self._build_silhouette_mask([bgra]))
+            if len(frames) > early_n:
+                selected.append(self._build_silhouette_mask([frames[-1]]))
+        if not selected:
             return []
         coherent = [
-            mask for mask in frame_masks if self._is_coherent_gate_silhouette(mask)
+            mask for mask in selected if self._is_coherent_gate_silhouette(mask)
         ]
-        # Prefer coherent facings; if none pass, keep every facing corpse.
-        pool = coherent if coherent else frame_masks
-        return list(pool)
+        return list(coherent if coherent else selected)
 
     def _farthest_from_anchors_mask_order(
         self,
