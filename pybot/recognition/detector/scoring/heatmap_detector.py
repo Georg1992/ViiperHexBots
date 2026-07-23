@@ -504,7 +504,6 @@ class HeatmapDetector:
         self.center_scales = [float(scale) for scale in config["centerScales"]]
         self.small_scale_min_frame_width = int(config["smallScaleMinFrameWidth"])
         self.small_scale_cutoff = float(config["smallScaleCutoff"])
-        self.use_palette_diversity = bool(config["usePaletteDiversity"])
         self.min_body_cluster_strong = float(config["minBodyClusterStrong"])
         self.min_required_groups = int(config["minRequiredPaletteGroups"])
         # Cached full-frame body map from the last build_sprite_heatmap call
@@ -564,7 +563,7 @@ class HeatmapDetector:
         work_bgr = self._work_bgr(frame_bgr, downscale)
 
         # --- 1. Weighted sprite-palette-distance heatmap ---
-        if self.use_palette_diversity:
+        if descriptor.use_body_cluster_diversity:
             base_sprite, similarity = weighted_sprite_palette_heatmap(
                 work_bgr,
                 descriptor,

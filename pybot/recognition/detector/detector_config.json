@@ -13,7 +13,6 @@
   "minBodyToPaletteCoverageRatio": 0.08,
   "discoveryHeatmapDownscale": 2,
   "discoveryHeatmapDownscaleMinSide": 800,
-  "usePaletteDiversity": true,
   "localTrackSearchRadiusPx": 120,
   "localTrackMovingSearchRadiusPx": 180,
   "topCandidateCenters": 32,

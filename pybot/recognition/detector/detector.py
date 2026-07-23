@@ -44,7 +44,6 @@ REQUIRED_CONFIG_KEYS = {
     "minRequiredPaletteCoverage",
     "minBodyClusterStrong",
     "minBodyToPaletteCoverageRatio",
-    "usePaletteDiversity",
     "topCandidateCenters",
     "minCenterHeat",
     "peakRelativeThreshold",
@@ -615,7 +614,7 @@ class MobDetector:
             return False
         if enforce_max_area and area_ratio > _GEOMETRY_AREA_MAX_RATIO:
             return False
-        if aspect_ratio < _GEOMETRY_ASPECT_MIN_RATIO or aspect_ratio > _GEOMETRY_ASPECT_MAX_RATIO:
+        if aspect_ratio < descriptor.min_aspect_ratio or aspect_ratio > descriptor.max_aspect_ratio:
             return False
         return True
 

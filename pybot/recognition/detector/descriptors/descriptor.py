@@ -66,6 +66,9 @@ class MobDescriptor:
     accent_pixels_bgr: list[list[int]]
     silhouette_masks: list[SilhouetteMask]
     death_silhouette_masks: list[SilhouetteMask]
+    use_body_cluster_diversity: bool = True
+    min_aspect_ratio: float = 0.60
+    max_aspect_ratio: float = 1.75
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MobDescriptor":
@@ -160,6 +163,9 @@ class MobDescriptor:
             accent_pixels_bgr=accent_pixels_bgr,
             silhouette_masks=silhouette_masks,
             death_silhouette_masks=death_silhouette_masks,
+            use_body_cluster_diversity=data.get("useBodyClusterDiversity", True),
+            min_aspect_ratio=float(data.get("minAspectRatio", 0.60)),
+            max_aspect_ratio=float(data.get("maxAspectRatio", 1.75)),
         )
 
     @classmethod
@@ -203,6 +209,9 @@ class MobDescriptor:
                 }
                 for mask in self.death_silhouette_masks
             ],
+            "useBodyClusterDiversity": self.use_body_cluster_diversity,
+            "minAspectRatio": self.min_aspect_ratio,
+            "maxAspectRatio": self.max_aspect_ratio,
         }
 
     def save(self, path: Path) -> None:

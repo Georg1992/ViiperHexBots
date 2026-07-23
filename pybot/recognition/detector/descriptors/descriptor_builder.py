@@ -27,7 +27,7 @@ from pybot.recognition.detector.descriptors.palette_groups import (
     split_palette_groups_by_required,
 )
 
-DESCRIPTOR_VERSION = 41
+DESCRIPTOR_VERSION = 43
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -235,6 +235,27 @@ class DescriptorBuilder:
             living_masks=frame_silhouette_masks,
         )
 
+        # Body-cluster diversity helps when body mass lives in 1-2 Lab
+        # groups (Horn: all grays). It hurts when mass fans across 3+
+        # groups (Creamy: brown body, blue wings, purple accents) — the
+        # diversity AND gate never passes because body and groups don't
+        # co-occur in a 0.6x coverage window.
+        mass_body = [profile_dominant] + profile_supporting
+        body_group_count = self._body_cluster_lab_groups(
+            mass_body, match_palette_bgr, match_palette_groups,
+        )
+        use_diversity = body_group_count <= 2
+
+        # Geometry aspect band derived from actual sprite frame bounding
+        # boxes. Hardcoded [0.60, 1.75] is a one-size-fits-all guess —
+        # tall-narrow mobs (Creamy 48x47) and wide mobs (Horn 309x160)
+        # need different bands. 15 % margin accounts for runtime blob
+        # imprecision.
+        aspect_margin = 0.45
+        min_aspect, max_aspect = self._measure_aspect_band(
+            all_facing_frames, margin=aspect_margin,
+        )
+
         descriptor = MobDescriptor(
             mob_name=mob_name,
             version=DESCRIPTOR_VERSION,
@@ -254,6 +275,9 @@ class DescriptorBuilder:
             accent_pixels_bgr=accent_pixels_bgr,
             silhouette_masks=silhouette_masks,
             death_silhouette_masks=death_silhouette_masks,
+            use_body_cluster_diversity=use_diversity,
+            min_aspect_ratio=min_aspect,
+            max_aspect_ratio=max_aspect,
         )
         descriptor.save(descriptor_path)
         return descriptor
@@ -844,7 +868,15 @@ class DescriptorBuilder:
             fraction = float((labels.ravel() == idx).mean())
             if fraction < 0.015:
                 continue
-            center_bgr = samples[labels.ravel() == idx].mean(axis=0)
+            # k-means centroid averaged from cluster pixels — snap to the
+            # nearest actual opaque sprite pixel so the reference BGR is
+            # guaranteed to exist (prevents phantom centroids in empty BGR
+            # space between diverse colour regions).
+            cluster_pixels = samples[labels.ravel() == idx]
+            mean_bgr = cluster_pixels.mean(axis=0)
+            dists = np.sum((cluster_pixels - mean_bgr) ** 2, axis=1)
+            nearest_idx = int(np.argmin(dists))
+            center_bgr = cluster_pixels[nearest_idx]
             clusters.append(
                 ColorCluster(
                     label=f"{label}_{idx}",
@@ -855,6 +887,66 @@ class DescriptorBuilder:
             )
         clusters.sort(key=lambda c: c.fraction, reverse=True)
         return clusters
+
+    @staticmethod
+    def _body_cluster_lab_groups(
+        body_clusters: list[ColorCluster],
+        palette_bgr: list[tuple[int, int, int]],
+        palette_groups: list[list[int]],
+    ) -> int:
+        """Count unique Lab groups spanned by mass body cluster centroids.
+
+        Each body cluster centroid is snapped to the nearest palette entry;
+        its Lab group index is recorded. The count of unique groups indicates
+        how many colour families the mob's structural mass spans. When body
+        clusters fan across 3+ Lab groups the diversity AND gate (body density
+        AND required groups in the same 0.6x coverage window) rarely passes
+        — the mob's colours are too spatially diverse. In that case body-
+        cluster diversity is counterproductive and the descriptor flags it off.
+        """
+        if not palette_bgr or not palette_groups or not body_clusters:
+            return 1
+        palette_arr = np.asarray(palette_bgr, dtype=np.float32)
+        groups_seen: set[int] = set()
+        for cluster in body_clusters:
+            if float(cluster.fraction) < 0.15:
+                continue  # low-mass accent, not structural
+            center = np.asarray(cluster.bgr, dtype=np.float32)
+            nearest = int(np.argmin(np.sum((palette_arr - center) ** 2, axis=1)))
+            for gi, group in enumerate(palette_groups):
+                if nearest in group:
+                    groups_seen.add(gi)
+                    break
+        return max(len(groups_seen), 1)
+
+    @staticmethod
+    def _measure_aspect_band(
+        frames: list[np.ndarray],
+        *,
+        margin: float = 0.15,
+    ) -> tuple[float, float]:
+        """Measure sprite tight-bbox aspect ratios from rendered frames.
+
+        Each frame's opaque bounding box gives a width/height ratio.
+        The band is [min * (1-margin), max * (1+margin)] so runtime
+        blob imprecision does not reject valid detections. Falls back
+        to [0.60, 1.75] when no frames are available.
+        """
+        aspects: list[float] = []
+        for bgra in frames:
+            alpha = bgra[:, :, 3]
+            ys, xs = np.where(alpha >= 128)
+            if len(xs) < 2:
+                continue
+            w = float(int(xs.max()) - int(xs.min()) + 1)
+            h = float(int(ys.max()) - int(ys.min()) + 1)
+            if h > 1.0:
+                aspects.append(w / h)
+        if not aspects:
+            return 0.60, 1.75
+        raw_min = float(np.min(aspects))
+        raw_max = float(np.max(aspects))
+        return max(0.35, raw_min * (1.0 - margin)), raw_max * (1.0 + margin)
 
     def _build_frame_silhouette_masks(
         self,

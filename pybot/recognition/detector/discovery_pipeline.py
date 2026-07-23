@@ -132,7 +132,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                 (
                     "downscale",
                     "weighted_sprite_palette_heatmap",
-                    "use_palette_diversity",
+                    "use_body_cluster_diversity",
                     "apply_body_cluster_diversity",
                     "_finish_heatmap",
                 ),
