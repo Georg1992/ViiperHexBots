@@ -175,17 +175,16 @@ class DeathDetectionWorker:
             local_x = int(track.x) - int(roi.x)
             local_y = int(track.y) - int(roi.y)
 
-            # Search around the track position for the corpse center — the
-            # death pose may have shifted slightly from the last living position.
-            best_x, best_y = self._find_death_peak(
-                frame, descriptor, local_x, local_y, scale,
-            )
-
-            death_sil_hit = bool(
-                ctx.tracker.death_wins_living_at(
-                    frame, best_x, best_y, scale,
+            # Only search for the corpse when the coord worker has lost the
+            # track (moving=False). Living mobs are actively tracked — skip
+            # the expensive peak search and let opacity handle the rare case
+            # where a moving mob dies mid-stride.
+            if not track.moving:
+                best_x, best_y, death_sil_hit = self._find_death_peak(
+                    frame, descriptor, local_x, local_y, scale,
                 )
-            )
+            else:
+                best_x, best_y, death_sil_hit = local_x, local_y, False
 
             sp_no_spend = self._sp_no_spend_for_track(track.id, now_ms=now_ms)
 
@@ -246,12 +245,15 @@ class DeathDetectionWorker:
         descriptor,
         cx: int, cy: int,
         scale: float,
-    ) -> tuple[int, int]:
-        """Re-center on the corpse near (cx, cy) using sprite palette heat.
+    ) -> tuple[int, int, bool]:
+        """Re-center on the corpse near (cx, cy) using death silhouette.
 
-        Builds a fast single-scale heatmap, blurs at descriptor size, and
-        returns the position of the strongest peak within the search radius.
-        Falls back to the original center if no peak is found.
+        Searches the top palette-heat peaks within the search radius and
+        validates each with ``death_wins_living_at()``. Returns
+        ``(x, y, death_hit)`` — ``death_hit`` is True when a peak passes
+        the death silhouette gate and beats living similarity.
+        Falls back to the original center with ``death_hit=False`` if no
+        peak validates.
         """
         radius = max(
             self._DEATH_PEAK_SEARCH_RADIUS_PX,
@@ -267,7 +269,7 @@ class DeathDetectionWorker:
         x1 = min(fw, cx + pad + 1)
         y1 = min(fh, cy + pad + 1)
         if x1 <= x0 or y1 <= y0:
-            return cx, cy
+            return cx, cy, False
 
         crop = frame_bgr[y0:y1, x0:x1]
         heat = sprite_palette_heatmap(
@@ -276,7 +278,7 @@ class DeathDetectionWorker:
             float(descriptor.max_sprite_palette_distance),
         )
         if heat.size == 0:
-            return cx, cy
+            return cx, cy, False
 
         # Blur at descriptor size so the peak is the blob center, not a single pixel.
         blur_w = max(3, w | 1)
@@ -288,11 +290,33 @@ class DeathDetectionWorker:
         anchor_y = cy - y0
         yy, xx = np.ogrid[:blurred.shape[0], :blurred.shape[1]]
         dist_sq = (xx - anchor_x) ** 2 + (yy - anchor_y) ** 2
-        masked = np.where(dist_sq <= (radius * radius), blurred, 0.0)
+        mask = dist_sq <= (radius * radius)
 
-        peak_val = float(masked.max())
-        if peak_val <= 0.0:
-            return cx, cy
+        work = np.where(mask, blurred, 0.0).copy()
+        # Suppress found peaks so we iterate through distinct candidates.
+        suppress_radius = max(6, radius // 4)
 
-        peak_y_local, peak_x_local = np.unravel_index(int(masked.argmax()), masked.shape)
-        return int(peak_x_local + x0), int(peak_y_local + y0)
+        for _ in range(3):
+            peak_val = float(work.max())
+            if peak_val <= 0.0:
+                break
+            peak_y_local, peak_x_local = np.unravel_index(
+                int(work.argmax()), work.shape,
+            )
+            peak_x = int(peak_x_local + x0)
+            peak_y = int(peak_y_local + y0)
+
+            if self._ctx.tracker.death_wins_living_at(
+                frame_bgr, peak_x, peak_y, scale,
+            ):
+                return peak_x, peak_y, True
+
+            cv2.circle(
+                work,
+                (peak_x_local, peak_y_local),
+                suppress_radius,
+                0.0,
+                thickness=-1,
+            )
+
+        return cx, cy, False
