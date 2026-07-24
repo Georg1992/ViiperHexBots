@@ -183,25 +183,26 @@ class HuntRuntimeContext:
     def active_teleport_scan_code(self) -> int:
         """Teleport key for area clear / sit / storage.
 
-        While Take Fly Wings is active (not exhausted): mob teleport key
-        (Creamy mob → Creamy TP Key, else Teleport Key).
-
-        When Take Fly Wings is off or wings are exhausted: Creamy TP Key if
-        assigned, otherwise the same mob teleport key. Neither key is required.
+        Uses Teleport Key by default (Creamy mob uses Creamy TP Key only when
+        that key is assigned). After fly-wing restock is exhausted, Creamy TP
+        is used when assigned as an alternate; otherwise Teleport Key stays.
         """
         mob_tp = self.config.active_teleport_scan_code()
-        if self.config.take_fly_wings and not self.fly_wings_exhausted:
-            return mob_tp
-        creamy = int(self.config.creamy_tp_scan_code)
-        if creamy > 0:
-            return creamy
+        if (
+            self.config.take_fly_wings
+            and self.fly_wings_exhausted
+            and int(self.config.creamy_tp_scan_code) > 0
+        ):
+            return int(self.config.creamy_tp_scan_code)
         return mob_tp
 
     def active_teleport_button(self) -> str:
         mob_tp = self.config.active_teleport_button()
-        if self.config.take_fly_wings and not self.fly_wings_exhausted:
-            return mob_tp
-        if int(self.config.creamy_tp_scan_code) > 0:
+        if (
+            self.config.take_fly_wings
+            and self.fly_wings_exhausted
+            and int(self.config.creamy_tp_scan_code) > 0
+        ):
             return self.config.creamy_tp_button
         return mob_tp
 

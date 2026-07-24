@@ -541,14 +541,16 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.ctx.note_teleport_for_wings()
         self.assertEqual(self.ctx.wingcount, 0)
 
-    def test_take_fly_wings_off_uses_creamy_tp(self) -> None:
+    def test_take_fly_wings_off_uses_mob_teleport_even_if_creamy_set(self) -> None:
         self.config.teleport_button = "q"
         self.config.teleport_scan_code = 16
+        self.config.active_teleport_button.return_value = "q"
+        self.config.active_teleport_scan_code.return_value = 16
         self.config.creamy_tp_button = "w"
         self.config.creamy_tp_scan_code = 17
         self.config.take_fly_wings = False
-        self.assertEqual(self.ctx.active_teleport_button(), "w")
-        self.assertEqual(self.ctx.active_teleport_scan_code(), 17)
+        self.assertEqual(self.ctx.active_teleport_button(), "q")
+        self.assertEqual(self.ctx.active_teleport_scan_code(), 16)
 
     def test_take_fly_wings_off_without_creamy_uses_mob_teleport(self) -> None:
         self.config.teleport_button = "q"
