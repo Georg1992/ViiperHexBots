@@ -391,43 +391,30 @@ class HuntTracks:
         *,
         now_tick: int | None = None,
         area_epoch: int | None = None,
-    ) -> tuple[list[int], list[int], list[int]]:
-        """Tracking step: refresh coordinates from LocalTracker and drop gone tracks.
+    ) -> list[int]:
+        """Refresh coordinates from LocalTracker results (pure tracking only).
 
         ``results`` is any iterable of objects exposing ``track_id``, ``found``,
         ``x``, ``y`` and ``confidence`` (e.g. ``LocalTrackResult``). Returns
-        ``(dead_ids, lost_ids, unreachable_ids)`` for tracks removed this tick.
-        ``lost_ids`` means joint absence (discovery_absent + sustained local
-        miss for ``trackJointAbsentConfirmMs``), not a single-frame miss —
-        tracking keeps searching until discovery confirms.
+        ``missed_ids`` — track ids that were not found this tick (so discovery
+        can be woken).
 
-        Death detection is handled separately by ``apply_death_results()`` —
-        this method expects results without death flags (from the coords worker).
+        This method never removes tracks. Cleanup (joint absence, unreachable)
+        and death removal are handled by ``apply_tracking_cleanup()`` and
+        ``apply_death_results()`` respectively.
 
         ``area_epoch`` is the epoch sampled with the tracking frame. If the store
         advanced (teleport / area_reset) while local follow was running, discard
         the whole batch so stale ids cannot mutate post-reset tracks.
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
-        dead_ids: list[int] = []
+        missed_ids: list[int] = []
         with self._lock:
             if area_epoch is not None and area_epoch != self._area_epoch:
-                return [], [], []
-            joint_absent_ids: list[int] = []
+                return []
             for result in results:
                 track = self._get_track_by_id_locked(result.track_id)
                 if track is None:
-                    continue
-                if getattr(result, "dead", False):
-                    # Legacy path for direct LocalTracker API callers that
-                    # still set dead=True. Production coords worker always
-                    # uses skip_opacity=True; death worker owns removal via
-                    # apply_death_results().
-                    sample = self._kill_sample_attack_count_locked(track)
-                    self._pending_attack_track_ids.discard(result.track_id)
-                    self._record_kill_locked(sample)
-                    self._record_removed_site_locked(result.x, result.y, tick)
-                    dead_ids.append(result.track_id)
                     continue
 
                 if result.found:
@@ -447,13 +434,6 @@ class HuntTracks:
                         confidence=result.confidence,
                         now_tick=tick,
                     )
-                    if hasattr(result, "opacity_baseline"):
-                        apply_opacity_observation(
-                            track,
-                            opacity_baseline=result.opacity_baseline,
-                            opacity_baseline_samples=result.opacity_baseline_samples,
-                            opacity_decay_streak=result.opacity_decay_streak,
-                        )
                     continue
                 if has_discovery_observation(track):
                     # Local miss but discovery still sees the mob — snap once
@@ -469,35 +449,47 @@ class HuntTracks:
                     confidence=result.confidence,
                     now_tick=tick,
                 )
-                if hasattr(result, "opacity_baseline"):
-                    apply_opacity_observation(
-                        track,
-                        opacity_baseline=result.opacity_baseline,
-                        opacity_baseline_samples=result.opacity_baseline_samples,
-                        opacity_decay_streak=result.opacity_decay_streak,
-                    )
-                if track.discovery_absent:
-                    # Discovery unmatched + local miss: clock starts when
-                    # discovery first marked absent (not at create time).
-                    confirm_ms = joint_absent_confirm_ms(self._detector_config())
-                    if is_joint_absent_confirmed(
-                        track, now_tick=tick, confirm_ms=confirm_ms,
-                    ):
-                        joint_absent_ids.append(result.track_id)
+                missed_ids.append(result.track_id)
+            return missed_ids
 
-            remove_ids = set(dead_ids)
-            remove_ids.update(joint_absent_ids)
-            # "Lost" for callers = joint absence only. Do not drop on local miss
-            # timeout — tracking keeps searching; discovery confirms gone/dead.
-            lost_ids = list(joint_absent_ids)
-            remove_ids.update(lost_ids)
+    def apply_tracking_cleanup(
+        self,
+        *,
+        now_tick: int | None = None,
+        area_epoch: int | None = None,
+    ) -> tuple[list[int], list[int]]:
+        """Remove tracks that are jointly absent or unreachable.
+
+        Returns ``(lost_ids, unreachable_ids)`` for tracks removed this tick.
+        ``lost_ids`` means joint absence (discovery_absent + sustained local
+        miss for ``trackJointAbsentConfirmMs``).
+
+        Call after death detection so all removal is centralized.
+        """
+        tick = now_tick if now_tick is not None else monotonic_ms()
+        with self._lock:
+            if area_epoch is not None and area_epoch != self._area_epoch:
+                return [], []
+            joint_absent_ids: list[int] = []
+            for track in self._tracks:
+                if not is_alive(track):
+                    continue
+                if not track.discovery_absent:
+                    continue
+                confirm_ms = joint_absent_confirm_ms(self._detector_config())
+                if is_joint_absent_confirmed(
+                    track, now_tick=tick, confirm_ms=confirm_ms,
+                ):
+                    joint_absent_ids.append(track.id)
+
+            remove_ids = set(joint_absent_ids)
             unreachable_ids = self._expire_unreachable_locked(
                 tick, exclude_ids=remove_ids
             )
             remove_ids.update(unreachable_ids)
             if remove_ids:
                 self._remove_tracks_locked(remove_ids)
-            return dead_ids, lost_ids, unreachable_ids
+            return joint_absent_ids, unreachable_ids
 
     @property
     def last_reconcile_summary(self) -> ReconcileSummary | None:

@@ -1,4 +1,4 @@
-"""Tracking wakes discovery on local miss / unreachable, not on confirmed deaths."""
+"""Tracking wakes discovery on local miss; death removal is death-worker-owned."""
 
 from __future__ import annotations
 
@@ -29,7 +29,8 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         )
         self.worker = CoordTrackingWorker(self.ctx)
 
-    def test_death_does_not_wake_discovery(self) -> None:
+    def test_coord_worker_treats_dead_flag_as_miss(self) -> None:
+        """Coord worker no longer special-cases dead=True — it's just a miss."""
         track = self.tracks.create_track(
             "horn", 100, 100, 0.8, 0.9, now_tick=1
         )
@@ -49,21 +50,10 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
             ]
         )
         self.worker._tick()
-        self.assertFalse(self.ctx.discovery_wake.is_set())
-        self.assertIsNone(self.tracks.get_track_by_id(track.id))
-        # Death site still blocks rediscovery.
-        from pybot.recognition.rules import DiscoveryDetection
-
-        summary = self.tracks.reconcile_detections(
-            [
-                DiscoveryDetection(
-                    x=100, y=100, confidence=0.8, candidate_scale=0.9, living=True
-                )
-            ],
-            mob_name="horn",
-            now_tick=50,
-        )
-        self.assertEqual(summary.added_count, 0)
+        # Coord worker only tracks — dead=True is just a miss, so discovery wakes.
+        self.assertTrue(self.ctx.discovery_wake.is_set())
+        # Coord worker never removes tracks; death worker owns removal.
+        self.assertIsNotNone(self.tracks.get_track_by_id(track.id))
 
     def test_local_miss_wakes_discovery_and_keeps_track(self) -> None:
         track = self.tracks.create_track(

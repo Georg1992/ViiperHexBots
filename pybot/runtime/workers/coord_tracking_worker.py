@@ -1,13 +1,12 @@
-"""Coordinate tracking loop — own thread, follows positions only (no death).
+"""Coordinate tracking loop — own thread, follows positions only.
 
 Runs as fast as capture + local follow allow. Each tick captures a frame and
 follows every alive track with the LocalTracker (skip_opacity=True), writing
-fresh coordinates into the shared HuntTracks store. Death detection is the
-responsibility of the separate DeathDetectionWorker.
+fresh coordinates into the shared HuntTracks store.
 
-Tracking is the sole writer of authoritative position. It consumes discovery
-priors on miss, keeps searching while local follow fails, and drops on
-sustained joint absence (discovery_absent + local miss) or unreachable.
+This worker owns position tracking exclusively. It never removes tracks —
+death detection, joint-absence cleanup, and unreachable expiry are
+handled by the DeathDetectionWorker.
 """
 
 from __future__ import annotations
@@ -54,15 +53,6 @@ class CoordTrackingWorker:
         now_ms = monotonic_ms()
         area_epoch, alive_tracks = ctx.tracks.tracking_frame_snapshot(now_ms)
         if not alive_tracks:
-            # Still run apply_tracking for unreachable expiry.
-            dead_ids, lost_ids, unreachable_ids = ctx.tracks.apply_tracking(
-                [],
-                now_tick=now_ms,
-                area_epoch=area_epoch,
-            )
-            self._log_drops(dead_ids, lost_ids, unreachable_ids)
-            if (lost_ids or unreachable_ids) and not ctx.discovery_suspend.is_set():
-                ctx.discovery_wake.set()
             self._update_overlay(now_ms)
             return
 
@@ -99,45 +89,17 @@ class CoordTrackingWorker:
         batch = ctx.tracker.track_locals_frame(frame, roi, snapshots)
         results = batch.results
 
-        dead_ids, lost_ids, unreachable_ids = ctx.tracks.apply_tracking(
+        missed_ids = ctx.tracks.apply_tracking(
             results,
             now_tick=now_ms,
             area_epoch=area_epoch,
         )
-        self._log_drops(dead_ids, lost_ids, unreachable_ids)
 
-        # Local miss → wake discovery so it can refresh soft priors, mark
-        # absent. Do not drop the track here — keep searching.
-        # Deaths do not wake discovery (ghost sites already block recreate).
-        need_discovery = bool(unreachable_ids) or any(
-            (not getattr(r, "found", False)) and (not getattr(r, "dead", False))
-            for r in results
-        )
-        if need_discovery and not ctx.discovery_suspend.is_set():
+        # Local miss → wake discovery so it can refresh soft priors.
+        if missed_ids and not ctx.discovery_suspend.is_set():
             ctx.discovery_wake.set()
 
         self._update_overlay(now_ms)
-
-    def _log_drops(
-        self,
-        dead_ids: list[int],
-        lost_ids: list[int],
-        unreachable_ids: list[int],
-    ) -> None:
-        ctx = self._ctx
-        if dead_ids:
-            ctx.logger.behavior(
-                f"[COORD] dropped {len(dead_ids)} dead track(s): {dead_ids}"
-            )
-        if lost_ids:
-            ctx.logger.behavior(
-                f"[COORD] dropped {len(lost_ids)} lost track(s): {lost_ids}"
-            )
-        if unreachable_ids:
-            ctx.logger.behavior(
-                f"[COORD] dropped {len(unreachable_ids)} unreachable track(s): "
-                f"{unreachable_ids}"
-            )
 
     def _update_overlay(self, now_ms: int) -> None:
         ctx = self._ctx

@@ -20,18 +20,9 @@ def _miss(track_id: int) -> SimpleNamespace:
     return SimpleNamespace(track_id=track_id, found=False, x=0, y=0, confidence=0.0)
 
 
-def _dead(track_id: int, x: int = 0, y: int = 0) -> SimpleNamespace:
-    return SimpleNamespace(
-        track_id=track_id,
-        found=False,
-        x=x,
-        y=y,
-        confidence=0.8,
-        dead=True,
-        opacity_baseline=0.6,
-        opacity_baseline_samples=4,
-        opacity_decay_streak=0,
-    )
+def _death_result(track_id: int) -> tuple[int, float, int, int, bool]:
+    """Return a death-result tuple for apply_death_results()."""
+    return (track_id, 0.6, 4, 0, True)
 
 
 def det(x: int, y: int, confidence: float = 0.71, scale: float = 0.9) -> DiscoveryDetection:
@@ -110,13 +101,11 @@ class HuntTracksRulesTests(unittest.TestCase):
             mob_name="horn",
             now_tick=self.now + 500,
         )
-        dead_ids, lost_ids, unreachable_ids = self.tracks.apply_tracking(
+        missed_ids = self.tracks.apply_tracking(
             [_miss(track_id)],
             now_tick=self.now + 600,
         )
-        self.assertEqual(dead_ids, [])
-        self.assertEqual(lost_ids, [])
-        self.assertEqual(unreachable_ids, [])
+        self.assertEqual(missed_ids, [])  # reanchor succeeded — not a miss
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
         self.assertEqual((track.x, track.y), (900, 610))
@@ -220,20 +209,24 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(track.discovery_absent_tick, absent_at)
         confirm_ms = int(load_detector_config()["trackJointAbsentConfirmMs"])
         # First miss while absent — still searching (clock from absent_at).
-        dead_ids, lost_ids, unreachable_ids = self.tracks.apply_tracking(
+        self.tracks.apply_tracking(
             [_miss(track_id)],
             now_tick=absent_at + 100,
         )
-        self.assertEqual(dead_ids, [])
+        lost_ids, unreachable_ids = self.tracks.apply_tracking_cleanup(
+            now_tick=absent_at + 100,
+        )
         self.assertEqual(lost_ids, [])
         self.assertEqual(unreachable_ids, [])
         self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
         # Sustained miss past confirm window from discovery_absent_tick.
-        dead_ids, lost_ids, unreachable_ids = self.tracks.apply_tracking(
+        self.tracks.apply_tracking(
             [_miss(track_id)],
             now_tick=absent_at + confirm_ms,
         )
-        self.assertEqual(dead_ids, [])
+        lost_ids, unreachable_ids = self.tracks.apply_tracking_cleanup(
+            now_tick=absent_at + confirm_ms,
+        )
         self.assertEqual(lost_ids, [track_id])
         self.assertEqual(unreachable_ids, [])
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
@@ -249,11 +242,13 @@ class HuntTracksRulesTests(unittest.TestCase):
             mob_name="horn",
             now_tick=self.now + confirm_ms + 1000,
         )
-        dead_ids, lost_ids, unreachable_ids = self.tracks.apply_tracking(
+        self.tracks.apply_tracking(
             [_miss(track_id)],
             now_tick=self.now + confirm_ms + 1000,
         )
-        self.assertEqual(dead_ids, [])
+        lost_ids, unreachable_ids = self.tracks.apply_tracking_cleanup(
+            now_tick=self.now + confirm_ms + 1000,
+        )
         self.assertEqual(lost_ids, [])
         self.assertEqual(unreachable_ids, [])
         self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
@@ -347,13 +342,11 @@ class HuntTracksRulesTests(unittest.TestCase):
 
     def test_tracking_miss_keeps_track(self) -> None:
         track_id = self._create(874, 578)
-        dead_ids, lost_ids, unreachable_ids = self.tracks.apply_tracking(
+        missed_ids = self.tracks.apply_tracking(
             [_miss(track_id)],
             now_tick=self.now + 5_000,
         )
-        self.assertEqual(dead_ids, [])
-        self.assertEqual(lost_ids, [])
-        self.assertEqual(unreachable_ids, [])
+        self.assertEqual(missed_ids, [track_id])
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
         self.assertEqual(track.lost_count, 1)
@@ -372,6 +365,7 @@ class HuntTracksRulesTests(unittest.TestCase):
             [_miss(track_id)],
             now_tick=drop_at,
         )
+        self.tracks.apply_tracking_cleanup(now_tick=drop_at)
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
         summary = self.tracks.reconcile_detections(
             [det(874, 578, 0.75, 0.9)],
@@ -383,20 +377,18 @@ class HuntTracksRulesTests(unittest.TestCase):
 
     def test_tracking_death_removes_track_immediately(self) -> None:
         track_id = self._create(874, 578)
-        dead_ids, lost_ids, unreachable_ids = self.tracks.apply_tracking(
-            [_dead(track_id, 874, 578)],
+        dead_ids = self.tracks.apply_death_results(
+            [_death_result(track_id)],
             now_tick=self.now + 1,
         )
         self.assertEqual(dead_ids, [track_id])
-        self.assertEqual(lost_ids, [])
-        self.assertEqual(unreachable_ids, [])
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
     def test_death_site_blocks_discovery_rediscovery(self) -> None:
         track_id = self._create(874, 578)
         death_at = self.now + 1
-        self.tracks.apply_tracking(
-            [_dead(track_id, 874, 578)], now_tick=death_at,
+        self.tracks.apply_death_results(
+            [_death_result(track_id)], now_tick=death_at,
         )
         summary = self.tracks.reconcile_detections(
             [det(874, 578, 0.75, 0.9)],
@@ -412,7 +404,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         tracks = HuntTracks(config)
         track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
         death_at = self.now + 1
-        tracks.apply_tracking([_dead(track_id, 874, 578)], now_tick=death_at)
+        tracks.apply_death_results([_death_result(track_id)], now_tick=death_at)
         blocked = tracks.reconcile_detections(
             [det(874, 578)],
             mob_name="horn",
@@ -434,7 +426,7 @@ class HuntTracksRulesTests(unittest.TestCase):
                 tracks.apply_attack_event(track_id, now_tick=self.now + i + 1)
             )
         self.assertFalse(tracks.apply_attack_event(track_id, now_tick=self.now + 3))
-        _, _, unreachable_ids = tracks.apply_tracking([], now_tick=self.now + 3)
+        _, unreachable_ids = tracks.apply_tracking_cleanup(now_tick=self.now + 3)
         self.assertEqual(unreachable_ids, [track_id])
         self.assertIsNone(tracks.get_track_by_id(track_id))
 
@@ -444,7 +436,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         second = tracks.create_track("horn", 980, 640, 0.65, 0.9, now_tick=self.now).id
         for i in range(3):
             tracks.apply_attack_event(first, now_tick=self.now + i + 1)
-        _, _, unreachable_ids = tracks.apply_tracking([], now_tick=self.now + 3)
+        _, unreachable_ids = tracks.apply_tracking_cleanup(now_tick=self.now + 3)
         self.assertEqual(unreachable_ids, [first])
         self.assertIsNone(tracks.get_track_by_id(first))
         self.assertIsNotNone(tracks.get_track_by_id(second))
@@ -457,7 +449,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
         tracks.apply_attack_event(track_id, now_tick=self.now + 1)
         tracks.apply_attack_event(track_id, now_tick=self.now + 2)
-        tracks.apply_tracking([], now_tick=self.now + 2)
+        tracks.apply_tracking_cleanup(now_tick=self.now + 2)
         self.assertIsNone(tracks.get_track_by_id(track_id))
         summary = tracks.reconcile_detections(
             [det(874, 578, 0.75, 0.9)],
@@ -476,14 +468,12 @@ class HuntTracksRulesTests(unittest.TestCase):
             "horn", 900, 600, 0.7, 0.9, now_tick=self.now + 1
         ).id
         self.assertEqual(new_id, track_id)  # ids reuse after reset
-        dead_ids, lost_ids, unreachable_ids = self.tracks.apply_tracking(
-            [_dead(track_id, 874, 578)],
+        missed_ids = self.tracks.apply_tracking(
+            [_miss(track_id)],
             now_tick=self.now + 2,
             area_epoch=epoch,
         )
-        self.assertEqual(dead_ids, [])
-        self.assertEqual(lost_ids, [])
-        self.assertEqual(unreachable_ids, [])
+        self.assertEqual(missed_ids, [])
         surviving = self.tracks.get_track_by_id(new_id)
         assert surviving is not None
         self.assertEqual((surviving.x, surviving.y), (900, 600))
@@ -498,8 +488,8 @@ class HuntTracksRulesTests(unittest.TestCase):
         for i in range(2):
             tracks.apply_attack_event(track_id, now_tick=self.now + i + 1)
         death_at = self.now + 1
-        tracks.apply_tracking(
-            [_dead(track_id, 874, 578)],
+        tracks.apply_death_results(
+            [_death_result(track_id)],
             now_tick=death_at,
         )
         self.assertIsNone(tracks.get_track_by_id(track_id))
@@ -533,8 +523,8 @@ class HuntTracksRulesTests(unittest.TestCase):
         ).created_ids[0]
         for i in range(4):
             tracks.apply_attack_event(track_id, now_tick=self.now + i + 1)
-        tracks.apply_tracking(
-            [_dead(track_id, 874, 578)],
+        tracks.apply_death_results(
+            [_death_result(track_id)],
             now_tick=self.now + 1,
         )
         self.assertEqual(tracks.kill_sample_count, 1)
@@ -548,11 +538,11 @@ class HuntTracksRulesTests(unittest.TestCase):
         for i in range(4):
             tracks.apply_attack_event(first, now_tick=self.now + i + 1)
         first_death = self.now + 1
-        tracks.apply_tracking([_dead(first, 874, 578)], now_tick=first_death)
+        tracks.apply_death_results([_death_result(first)], now_tick=first_death)
         for i in range(2):
             tracks.apply_attack_event(second, now_tick=first_death + 20 + i)
-        tracks.apply_tracking(
-            [_dead(second, 980, 640)], now_tick=first_death + 30,
+        tracks.apply_death_results(
+            [_death_result(second)], now_tick=first_death + 30,
         )
         self.assertEqual(tracks.kill_sample_count, 2)
         self.assertEqual(tracks.average_attacks_till_death, 3.0)
@@ -563,8 +553,8 @@ class HuntTracksRulesTests(unittest.TestCase):
         track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
         for i in range(3):
             tracks.apply_attack_event(track_id, now_tick=self.now + i + 1)
-        tracks.apply_tracking(
-            [_dead(track_id, 874, 578)],
+        tracks.apply_death_results(
+            [_death_result(track_id)],
             now_tick=self.now + 1,
         )
         tracks.area_reset()
@@ -587,8 +577,8 @@ class HuntTracksRulesTests(unittest.TestCase):
             ).id
             for i in range(2):
                 tracks.apply_attack_event(track_id, now_tick=created_at + i + 1)
-            tracks.apply_tracking(
-                [_dead(track_id, 874 + n * 10, 578)],
+            tracks.apply_death_results(
+                [_death_result(track_id)],
                 now_tick=created_at + 1,
             )
         self.assertEqual(tracks.kill_sample_count, 3)
@@ -600,8 +590,8 @@ class HuntTracksRulesTests(unittest.TestCase):
         tracks.apply_attack_event(track_id, now_tick=self.now + 1)
         tracks.apply_attack_event(track_id, now_tick=self.now + 2)
         tracks.mark_attack_pending(track_id)
-        tracks.apply_tracking(
-            [_dead(track_id, 874, 578)],
+        tracks.apply_death_results(
+            [_death_result(track_id)],
             now_tick=self.now + 1,
         )
         self.assertEqual(tracks.kill_sample_count, 1)
@@ -675,8 +665,8 @@ class HuntTracksRulesTests(unittest.TestCase):
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
         # Death sample must not credit a phantom pending click.
-        self.tracks.apply_tracking(
-            [_dead(track_id, x=874, y=578)],
+        self.tracks.apply_death_results(
+            [_death_result(track_id)],
             now_tick=self.now + 1,
         )
         self.assertIsNone(self.tracks.get_track_by_id(track_id))

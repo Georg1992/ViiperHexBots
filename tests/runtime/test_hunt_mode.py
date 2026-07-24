@@ -18,7 +18,7 @@ from pybot.runtime.logging import HuntLogger
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.validation_log import HuntValidationLogger
 from pybot.runtime.detection.detector_session import DetectorSession
-from tests.runtime.test_hunt_tracks import _dead
+from tests.runtime.test_hunt_tracks import _death_result
 
 
 def make_config(**overrides) -> HuntRuntimeConfig:
@@ -136,7 +136,7 @@ class HuntModeTests(unittest.TestCase):
         track_id = self.tracks.create_track(
             "horn", 874, 578, 0.65, 0.9, now_tick=now
         ).id
-        self.tracks.apply_tracking([_dead(track_id, 874, 578)], now_tick=now + 1)
+        self.tracks.apply_death_results([_death_result(track_id)], now_tick=now + 1)
         summary = self.tracks.reconcile_detections(
             [
                 DiscoveryDetection(

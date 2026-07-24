@@ -209,3 +209,20 @@ class DeathDetectionWorker:
             ctx.logger.behavior(
                 f"[DEATH] confirmed {len(dead_ids)} dead track(s): {dead_ids}"
             )
+
+        # Cleanup: joint absence and unreachable tracks.
+        lost_ids, unreachable_ids = ctx.tracks.apply_tracking_cleanup(
+            now_tick=now_ms,
+            area_epoch=area_epoch,
+        )
+        if lost_ids:
+            ctx.logger.behavior(
+                f"[DEATH] dropped {len(lost_ids)} lost track(s): {lost_ids}"
+            )
+        if unreachable_ids:
+            ctx.logger.behavior(
+                f"[DEATH] dropped {len(unreachable_ids)} unreachable track(s): "
+                f"{unreachable_ids}"
+            )
+        if (lost_ids or unreachable_ids) and not ctx.discovery_suspend.is_set():
+            ctx.discovery_wake.set()
