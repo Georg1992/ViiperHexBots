@@ -84,6 +84,11 @@ _BODY_STRONG_SMALL_HEAT_AREA_MIN_AREA_MULT = 2.0
 # weakest admissible blob so gray-world fringe peaks (e.g. 0.28 of peak) drop
 # while multi-mob secondary TPs (~0.47+) remain.
 _SMALL_HEAT_RELATIVE_PEAK_MULT = 1.5
+# Post-silhouette extract body floor as a fraction of descriptor.min_body_cluster_strong.
+# Extract is sprite-scale and tighter than the heat CC; 0.5× still rejects wrong-fill
+# shapes while leaving margin for patchy mobs (Creamy TP sits ~0.79× full floor).
+_EXTRACT_BODY_STRONG_FLOOR_FRAC = 0.5
+
 
 
 # Very small sprites at 2× downscale lose too much signal — GaussianBlur on
@@ -383,6 +388,13 @@ class MobDetector:
                 bbox,
                 comp_bbox=comp_bbox,
             )
+            # New peaks: confirm body mass on the final extract crop (sprite-scale).
+            # Known tracks skip — fading corpses can lose body fill before opacity death.
+            if passed and known_hit is None:
+                if not self._passes_extract_body_gate(
+                    frame_bgr, descriptor, extract_bbox,
+                ):
+                    passed = False
             candidate_mask = (
                 candidate.reshape(-1).tolist() if candidate is not None else None
             )
@@ -418,21 +430,6 @@ class MobDetector:
                 soft_hard_ratio=soft_hard_ratio,
             ))
 
-            if known_hit is None:
-                # Newly detected peak: living silhouettes only.
-                if passed:
-                    candidates.append(DetectionCandidate(
-                        mob_name=descriptor.mob_name,
-                        center_x=cx, center_y=cy,
-                        bbox=bbox,
-                        final_score=heat_score,
-                        heatmap_score=heat_score,
-                        accepted=True,
-                        rejection_reason="",
-                    ))
-                continue
-
-            # Known track: living silhouette only (death is tracker-owned).
             if passed:
                 candidates.append(DetectionCandidate(
                     mob_name=descriptor.mob_name,
@@ -443,6 +440,7 @@ class MobDetector:
                     accepted=True,
                     rejection_reason="",
                 ))
+
 
         gate_end = time.perf_counter()
         max_candidates = int(self.config["maxCandidates"])
@@ -642,12 +640,51 @@ class MobDetector:
 
         return True
 
+    def _passes_extract_body_gate(
+        self,
+        frame_bgr: np.ndarray,
+        descriptor: MobDescriptor,
+        extract_bbox: tuple[int, int, int, int] | None,
+    ) -> bool:
+        """Post-silhouette body confirm on the final extract crop.
 
+        Heat-CC color can pass on a small/tinted blob that later silhouette-matches
+        a wrong shape. The extract is descriptor-scaled and bridged — re-check
+        mass body density there at a soft fraction of the build-time floor so
+        patchy true mobs (Creamy) still clear while wrong-fill impostors fail.
 
-
+        Skips when the descriptor has no body floor or no extract.
+        """
+        min_body_strong = float(descriptor.min_body_cluster_strong)
+        if min_body_strong <= 0.0:
+            return True
+        if extract_bbox is None:
+            return False
+        x, y, w, h = extract_bbox
+        fh, fw = frame_bgr.shape[:2]
+        x0 = max(0, int(x))
+        y0 = max(0, int(y))
+        x1 = min(fw, x0 + max(0, int(w)))
+        y1 = min(fh, y0 + max(0, int(h)))
+        if x1 <= x0 or y1 <= y0:
+            return False
+        crop = frame_bgr[y0:y1, x0:x1]
+        if crop.size == 0:
+            return False
+        # Body only — groups/coverage already cleared on the heat CC; extract can
+        # be tighter and drop intermittent second-group share.
+        _p, _s, _c, body_strong = required_groups_structure(
+            crop,
+            descriptor,
+            float(descriptor.max_sprite_palette_distance),
+            downscale=1,
+        )
+        floor = min_body_strong * _EXTRACT_BODY_STRONG_FLOOR_FRAC
+        return body_strong >= floor
 
     def _descriptor_min_area_ratio(self, descriptor: MobDescriptor) -> float:
         """Mean stable silhouette occupancy across all facings, cached per descriptor.
+
 
         Cached on the descriptor object to avoid recomputing stable_bits per
         blob.  ``_GEOMETRY_AREA_SIL_FRAC_DIVISOR = 5.0`` already provides an

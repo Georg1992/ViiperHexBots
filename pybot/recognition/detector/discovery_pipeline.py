@@ -69,6 +69,12 @@ def _silhouette_gate() -> Callable:
     return MobDetector._evaluate_silhouette_gate
 
 
+def _extract_body_gate() -> Callable:
+    from pybot.recognition.detector.detector import MobDetector
+    return MobDetector._passes_extract_body_gate
+
+
+
 def _silhouette_search() -> Callable:
     from pybot.recognition.detector.detector import MobDetector
     return MobDetector._silhouette_search_window
@@ -110,8 +116,10 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "_passes_discovery_geometry_gate",
                     "_passes_color_structure_gate",
                     "_evaluate_silhouette_gate",
+                    "_passes_extract_body_gate",
                     "_noisy_extraction_signal",
                     "_finalize_accepted",
+
                 ),
             ),
         ),
@@ -251,6 +259,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             "candidate_silhouette vs descriptor masks",
             "dual gate recall AND precision",
             "reject solid-fill hard occupancy (>=95% of gate grid)",
+            "new peaks: extract body_strong >= 0.5 * descriptor.min_body_cluster_strong",
             "noisy extract flags (bloated / soft-hard) on SilhouetteCheck",
             "pass / fail per blob",
         ),
@@ -274,6 +283,17 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "_maybe_deform_noisy_candidate",
                 ),
             ),
+            SourceCheck(
+                _extract_body_gate,
+                (
+                    "min_body_cluster_strong",
+                    "_EXTRACT_BODY_STRONG_FLOOR_FRAC",
+                    "required_groups_structure",
+                    "extract_bbox",
+                ),
+            ),
+
+
             SourceCheck(
                 _silhouette_search,
                 ("search_region", "comp_bbox", "desc_w", "desc_h"),
