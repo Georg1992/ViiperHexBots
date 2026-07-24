@@ -550,6 +550,30 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.assertEqual(self.ctx.active_teleport_button(), "w")
         self.assertEqual(self.ctx.active_teleport_scan_code(), 17)
 
+    def test_take_fly_wings_off_without_creamy_uses_mob_teleport(self) -> None:
+        self.config.teleport_button = "q"
+        self.config.teleport_scan_code = 16
+        self.config.active_teleport_button.return_value = "q"
+        self.config.active_teleport_scan_code.return_value = 16
+        self.config.creamy_tp_button = ""
+        self.config.creamy_tp_scan_code = 0
+        self.config.take_fly_wings = False
+        self.assertEqual(self.ctx.active_teleport_button(), "q")
+        self.assertEqual(self.ctx.active_teleport_scan_code(), 16)
+
+    def test_exhausted_wings_without_creamy_keep_mob_teleport(self) -> None:
+        self.config.teleport_button = "q"
+        self.config.teleport_scan_code = 16
+        self.config.active_teleport_button.return_value = "q"
+        self.config.active_teleport_scan_code.return_value = 16
+        self.config.creamy_tp_button = ""
+        self.config.creamy_tp_scan_code = 0
+        self.config.take_fly_wings = True
+        self.config.open_storage_steps = (("f8", 66, 0),)
+        self.ctx.mark_fly_wings_exhausted()
+        self.assertEqual(self.ctx.active_teleport_button(), "q")
+        self.assertEqual(self.ctx.active_teleport_scan_code(), 16)
+
     @patch("pybot.runtime.workers.items_to_storage_worker.time.sleep", return_value=None)
     @patch("pybot.runtime.workers.items_to_storage_worker.is_storage_open")
     @patch("pybot.runtime.workers.items_to_storage_worker.is_inventory_open")

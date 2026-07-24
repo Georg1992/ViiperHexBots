@@ -166,29 +166,44 @@ class HuntRuntimeContext:
             self.wingcount -= 1
 
     def should_restock_fly_wings(self) -> bool:
-        """True when GetFlyWings should run (enabled, not exhausted, count 0)."""
+        """True when GetFlyWings should run (enabled, amount set, count 0)."""
         return (
             bool(self.config.open_storage_steps)
             and self.config.take_fly_wings
+            and int(self.config.fly_wings_amount) > 0
             and not self.fly_wings_exhausted
             and self.wingcount <= 0
         )
 
     def mark_fly_wings_exhausted(self) -> None:
-        """Stop fly-wing restock for this hunt; teleports switch to Creamy TP."""
+        """Stop fly-wing restock for this hunt; prefer Creamy TP when assigned."""
         self.fly_wings_exhausted = True
         self.wingcount = 0
 
     def active_teleport_scan_code(self) -> int:
-        """Fly-wing teleport, or Creamy TP when Take Fly Wings is off / exhausted."""
-        if self.fly_wings_exhausted or not self.config.take_fly_wings:
-            return self.config.creamy_tp_scan_code
-        return self.config.active_teleport_scan_code()
+        """Teleport key for area clear / sit / storage.
+
+        While Take Fly Wings is active (not exhausted): mob teleport key
+        (Creamy mob → Creamy TP Key, else Teleport Key).
+
+        When Take Fly Wings is off or wings are exhausted: Creamy TP Key if
+        assigned, otherwise the same mob teleport key. Neither key is required.
+        """
+        mob_tp = self.config.active_teleport_scan_code()
+        if self.config.take_fly_wings and not self.fly_wings_exhausted:
+            return mob_tp
+        creamy = int(self.config.creamy_tp_scan_code)
+        if creamy > 0:
+            return creamy
+        return mob_tp
 
     def active_teleport_button(self) -> str:
-        if self.fly_wings_exhausted or not self.config.take_fly_wings:
+        mob_tp = self.config.active_teleport_button()
+        if self.config.take_fly_wings and not self.fly_wings_exhausted:
+            return mob_tp
+        if int(self.config.creamy_tp_scan_code) > 0:
             return self.config.creamy_tp_button
-        return self.config.active_teleport_button()
+        return mob_tp
 
     def is_stopped(self) -> bool:
         return self.stop_event.is_set()

@@ -646,9 +646,8 @@ class ItemsToStorageWorker:
         ctx = self._ctx
         wings = int(ctx.config.fly_wings_amount)
         if wings <= 0:
-            raise InventoryUiError(
-                f"fly_wings_amount must be > 0 (got {wings})"
-            )
+            self._abandon_fly_wings("fly_wings_amount is 0")
+            return False
         amount = str(wings)
         enter_sc = key_name_to_scan_code("enter")
         if enter_sc <= 0:
@@ -782,13 +781,19 @@ class ItemsToStorageWorker:
         return slot_looks_empty(frame, cx, cy)
 
     def _abandon_fly_wings(self, reason: str) -> None:
-        """Close menus, disable GetFlyWings for this hunt, switch to Creamy TP."""
+        """Close menus, disable GetFlyWings for this hunt."""
         ctx = self._ctx
         log = ctx.logger.behavior
+        creamy = ctx.config.creamy_tp_button.strip()
+        alt = (
+            f"Creamy TP ({creamy!r})"
+            if ctx.config.creamy_tp_scan_code > 0 and creamy
+            else "mob teleport key"
+        )
         log(
             f"[STORAGE] fly wings unavailable ({reason}) — "
             "close panels, disable fly-wing restock for session, "
-            f"teleport key → Creamy TP ({ctx.config.creamy_tp_button!r})"
+            f"teleport key → {alt}"
         )
         try:
             self._close_menus()
