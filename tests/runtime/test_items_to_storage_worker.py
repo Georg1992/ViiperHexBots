@@ -523,56 +523,11 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.assertTrue(self.ctx.fly_wings_exhausted)
         self.assertEqual(self.ctx.wingcount, 0)
         self.assertFalse(self.ctx.should_restock_fly_wings())
-        self.assertEqual(self.ctx.active_teleport_button(), "w")
         self.assertNotIn(("type", "150"), self.input.calls)
 
-    def test_exhausted_wings_use_creamy_tp(self) -> None:
-        self.config.teleport_button = "q"
-        self.config.teleport_scan_code = 16
-        self.config.creamy_tp_button = "w"
-        self.config.creamy_tp_scan_code = 17
-        self.config.take_fly_wings = True
-        self.config.open_storage_steps = (("f8", 66, 0),)
-        self.ctx.wingcount = 0
-        self.assertTrue(self.ctx.should_restock_fly_wings())
-        self.ctx.mark_fly_wings_exhausted()
-        self.assertFalse(self.ctx.should_restock_fly_wings())
-        self.assertEqual(self.ctx.active_teleport_scan_code(), 17)
-        self.ctx.note_teleport_for_wings()
-        self.assertEqual(self.ctx.wingcount, 0)
-
-    def test_take_fly_wings_off_uses_mob_teleport_even_if_creamy_set(self) -> None:
-        self.config.teleport_button = "q"
-        self.config.teleport_scan_code = 16
+    def test_active_teleport_delegates_to_config(self) -> None:
         self.config.active_teleport_button.return_value = "q"
         self.config.active_teleport_scan_code.return_value = 16
-        self.config.creamy_tp_button = "w"
-        self.config.creamy_tp_scan_code = 17
-        self.config.take_fly_wings = False
-        self.assertEqual(self.ctx.active_teleport_button(), "q")
-        self.assertEqual(self.ctx.active_teleport_scan_code(), 16)
-
-    def test_take_fly_wings_off_without_creamy_uses_mob_teleport(self) -> None:
-        self.config.teleport_button = "q"
-        self.config.teleport_scan_code = 16
-        self.config.active_teleport_button.return_value = "q"
-        self.config.active_teleport_scan_code.return_value = 16
-        self.config.creamy_tp_button = ""
-        self.config.creamy_tp_scan_code = 0
-        self.config.take_fly_wings = False
-        self.assertEqual(self.ctx.active_teleport_button(), "q")
-        self.assertEqual(self.ctx.active_teleport_scan_code(), 16)
-
-    def test_exhausted_wings_without_creamy_keep_mob_teleport(self) -> None:
-        self.config.teleport_button = "q"
-        self.config.teleport_scan_code = 16
-        self.config.active_teleport_button.return_value = "q"
-        self.config.active_teleport_scan_code.return_value = 16
-        self.config.creamy_tp_button = ""
-        self.config.creamy_tp_scan_code = 0
-        self.config.take_fly_wings = True
-        self.config.open_storage_steps = (("f8", 66, 0),)
-        self.ctx.mark_fly_wings_exhausted()
         self.assertEqual(self.ctx.active_teleport_button(), "q")
         self.assertEqual(self.ctx.active_teleport_scan_code(), 16)
 

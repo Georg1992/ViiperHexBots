@@ -16,9 +16,9 @@ class OpacityDeathProbeTests(unittest.TestCase):
         return {
             "deathOpacityBaselineSamples": 2,
             "deathOpacityMinBaseline": 0.20,
-            "deathOpacityDropRatio": 0.85,
-            "deathOpacityConfirmMs": 450,
-            "deathSpNoSpendConfirmMs": 200,
+            "deathOpacityDropRatio": 0.80,
+            "deathOpacityConfirmMs": 300,
+            "deathSpNoSpendConfirmMs": 150,
         }
 
     def test_baseline_calibration_blocks_death(self) -> None:
@@ -102,7 +102,7 @@ class OpacityDeathProbeTests(unittest.TestCase):
             baseline_samples=samples,
             decay_streak=since,
             config=config,
-            now_tick=2449,
+            now_tick=2299,
         )
         self.assertFalse(dead)
 
@@ -112,7 +112,7 @@ class OpacityDeathProbeTests(unittest.TestCase):
             baseline_samples=samples,
             decay_streak=since,
             config=config,
-            now_tick=2450,
+            now_tick=2300,
         )
         self.assertTrue(dead)
         self.assertEqual(since, 0)
@@ -248,7 +248,7 @@ class OpacityDeathProbeTests(unittest.TestCase):
             baseline_samples=samples,
             decay_streak=since,
             config=config,
-            now_tick=1200,
+            now_tick=1150,
             sp_no_spend=True,
         )
         self.assertTrue(dead)

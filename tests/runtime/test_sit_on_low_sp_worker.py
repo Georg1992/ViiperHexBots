@@ -133,7 +133,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
 
         self.assertGreaterEqual(self.input.teleport_key.call_count, 3)
         # First press clears area with teleport key; sit/stand use sit key.
-        self.assertEqual(self.input.teleport_key.call_args_list[0].args[0], 17)
+        self.assertEqual(self.input.teleport_key.call_args_list[0].args[0], 16)
         sit_presses = [
             c.args[0] for c in self.input.teleport_key.call_args_list if c.args[0] == 82
         ]

@@ -63,13 +63,13 @@ class HuntRuntimeConfig:
     client_profile: str = "Generic"
 
     def active_teleport_scan_code(self) -> int:
-        """Teleport key: Creamy TP for creamy mob when set, else Teleport Key."""
-        if self.mob_name.casefold() == "creamy" and self.creamy_tp_scan_code > 0:
+        """Teleport key: fall back to Creamy TP only when Teleport Key is unset."""
+        if self.teleport_scan_code <= 0 and self.creamy_tp_scan_code > 0:
             return self.creamy_tp_scan_code
         return self.teleport_scan_code
 
     def active_teleport_button(self) -> str:
-        if self.mob_name.casefold() == "creamy" and self.creamy_tp_scan_code > 0:
+        if self.teleport_scan_code <= 0 and self.creamy_tp_scan_code > 0:
             return self.creamy_tp_button
         return self.teleport_button
 

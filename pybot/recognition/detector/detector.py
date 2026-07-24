@@ -39,6 +39,8 @@ REQUIRED_CONFIG_KEYS = {
     "gateRefUniqueIoU",
     "minSilhouetteRecall",
     "minSilhouettePrecision",
+    "deathMinSilhouetteRecall",
+    "deathMinSilhouettePrecision",
     "minRequiredPaletteGroups",
     "minSecondPaletteGroupShare",
     "minRequiredPaletteCoverage",
@@ -812,6 +814,7 @@ class MobDetector:
         *,
         comp_bbox: tuple[int, int, int, int] | None = None,
         masks: list | None = None,
+        is_death: bool = False,
     ) -> tuple[
         bool,
         float,
@@ -955,6 +958,7 @@ class MobDetector:
         )
         candidate = self._maybe_deform_noisy_candidate(
             candidate, refs, mob_region, descriptor, palette, silhouette_distance, gate_mask,
+            is_death=is_death,
         )
 
         similarity, matched_idx, scores, precision, recall = best_silhouette_match(
@@ -966,8 +970,16 @@ class MobDetector:
             grid_n > 0 and (float(hard_n) / float(grid_n)) >= _SOLID_FILL_HARD_FRACTION
         )
         dual_ok = (
-            recall >= float(self.config["minSilhouetteRecall"])
-            and precision >= float(self.config["minSilhouettePrecision"])
+            recall >= float(
+                self.config["deathMinSilhouetteRecall"]
+                if is_death
+                else self.config["minSilhouetteRecall"]
+            )
+            and precision >= float(
+                self.config["deathMinSilhouettePrecision"]
+                if is_death
+                else self.config["minSilhouettePrecision"]
+            )
         )
         # Content veto: solid palette fill of the gate grid (color smear in a
         # desc-sized window). Bloated CCs may still shrink after pre-shrink
@@ -1105,6 +1117,8 @@ class MobDetector:
         palette: np.ndarray,
         silhouette_distance: float,
         gate_mask,
+        *,
+        is_death: bool = False,
     ) -> np.ndarray:
         """If soft/hard is noisy but recall is already ok, deform best ref into heat."""
         soft_hard_ratio = _occupancy_soft_hard_ratio(candidate)
@@ -1113,7 +1127,11 @@ class MobDetector:
         _sim0, facing_idx, _scores0, _prec0, rec0 = best_silhouette_match(
             candidate, refs,
         )
-        if rec0 < float(self.config["minSilhouetteRecall"]):
+        if rec0 < float(
+            self.config["deathMinSilhouetteRecall"]
+            if is_death
+            else self.config["minSilhouetteRecall"]
+        ):
             return candidate
         ref_avg, ref_stable = refs[facing_idx]
         deformed_mask = self._deform_silhouette_occupancy(
@@ -1267,6 +1285,8 @@ class MobDetector:
         """Score a point against death/corpse silhouette refs.
 
         Returns (accepted, bbox, similarity). Empty death masks never accept.
+        Death-specific silhouette thresholds are more lenient than living
+        because corpses fade and lose body pixels.
         """
         if not descriptor.death_silhouette_masks:
             return False, None, 0.0
@@ -1277,6 +1297,7 @@ class MobDetector:
             cy,
             scale,
             masks=descriptor.death_silhouette_masks,
+            is_death=True,
         )
 
     def death_wins_living_at(
@@ -1311,6 +1332,7 @@ class MobDetector:
         scale: float,
         *,
         masks: list,
+        is_death: bool = False,
     ) -> tuple[bool, tuple[int, int, int, int] | None, float]:
         w = max(_MIN_DESCRIPTOR_PX, int(round(descriptor.avg_width * scale)))
         h = max(_MIN_DESCRIPTOR_PX, int(round(descriptor.avg_height * scale)))
@@ -1324,6 +1346,7 @@ class MobDetector:
         passed, sim, _cand, _idx, _scores, extract_bbox, _prec, _rec, _area = (
             self._evaluate_silhouette_gate(
                 frame_bgr, descriptor, bbox, comp_bbox=bbox, masks=masks,
+                is_death=is_death,
             )
         )
         return passed, extract_bbox if extract_bbox is not None else bbox, float(sim)
