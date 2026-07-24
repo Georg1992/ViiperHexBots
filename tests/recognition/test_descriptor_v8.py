@@ -14,7 +14,7 @@ from pybot.recognition.detector.descriptors.descriptor_builder import (
     DESCRIPTOR_VERSION,
     DescriptorBuilder,
     GATE_SILHOUETTE_REF_COUNTS,
-    MIN_DEATH_GATE_SILHOUETTE_MASKS,
+    MAX_DEATH_GATE_SILHOUETTE_MASKS,
     MIN_GATE_SILHOUETTE_MASKS,
 )
 from pybot.recognition.spr_reader import SprReader
@@ -42,19 +42,18 @@ class DescriptorV8Tests(unittest.TestCase):
             len(descriptor.death_silhouette_masks), 1
         )
         self.assertLessEqual(
-            len(descriptor.death_silhouette_masks), MIN_DEATH_GATE_SILHOUETTE_MASKS
+            len(descriptor.death_silhouette_masks), MAX_DEATH_GATE_SILHOUETTE_MASKS
         )
         self.assertEqual(len(descriptor.death_silhouette_masks[0].avg_mask), 256)
-        # Early Die frames (belly-up fall poses) may overlap living
-        # silhouettes. Final decay frames (at least DEAD_ACTION_COUNT)
-        # must be distinct from any living pose so corpses are still visible.
+        # Death refs are farthest-from-living: every kept mask must differ
+        # from the living gate set (no identical living pose as a death ref).
         living_avgs = {tuple(m.avg_mask) for m in descriptor.silhouette_masks}
         death_avgs = {tuple(m.avg_mask) for m in descriptor.death_silhouette_masks}
         distinct = death_avgs - living_avgs
-        self.assertGreaterEqual(
+        self.assertEqual(
             len(distinct),
-            DEAD_ACTION_COUNT,
-            f"need at least {DEAD_ACTION_COUNT} death silhouettes distinct from living, got {len(distinct)}",
+            len(death_avgs),
+            "death gate refs must not reuse living silhouette masks",
         )
 
     def test_death_action_indices_are_act_editor_die_group(self) -> None:
@@ -73,15 +72,17 @@ class DescriptorV8Tests(unittest.TestCase):
         self.assertEqual(ACTIONS_PER_ANIMATION, 8)
         self.assertEqual(DEAD_ACTION_COUNT, 8)
 
-    def test_death_gate_keeps_early_and_last_per_die_facing(self) -> None:
+    def test_death_gate_picks_farthest_from_living_capped(self) -> None:
         asset_dir = self.builder.asset_dir("horn")
         spr = SprReader(asset_dir / "horn.spr").load()
         act = ActReader(asset_dir / "horn.act").load()
+        facing_pairs = self.builder._living_action_pairs(act, spr)
+        living = self.builder._build_frame_silhouette_masks(spr, act, facing_pairs)
         death_masks = self.builder._build_death_gate_silhouette_masks(
-            spr, act, living_masks=[],
+            spr, act, living_masks=living,
         )
         self.assertGreater(len(death_masks), 0)
-        self.assertLessEqual(len(death_masks), MIN_DEATH_GATE_SILHOUETTE_MASKS)
+        self.assertLessEqual(len(death_masks), MAX_DEATH_GATE_SILHOUETTE_MASKS)
 
         descriptor = self.builder.build("horn", force=True)
         death = descriptor.death_silhouette_masks
@@ -89,6 +90,26 @@ class DescriptorV8Tests(unittest.TestCase):
         death_avgs = {tuple(m.avg_mask) for m in death_masks}
         for mask in death:
             self.assertIn(tuple(mask.avg_mask), death_avgs)
+
+        # First pick is the global farthest from living among the Die pool.
+        if living and death_masks:
+            living_avgs = [
+                np.asarray(m.avg_mask, dtype=np.float32) for m in living
+            ]
+            first = np.asarray(death_masks[0].avg_mask, dtype=np.float32)
+            first_sim = max(
+                self.builder._soft_jaccard(first, la) for la in living_avgs
+            )
+            pool = self.builder._build_death_frame_silhouette_masks(
+                spr, act, self.builder._death_action_indices(len(act.actions)),
+            )
+            pool_sims = []
+            for mask in pool:
+                avg = np.asarray(mask.avg_mask, dtype=np.float32)
+                pool_sims.append(
+                    max(self.builder._soft_jaccard(avg, la) for la in living_avgs)
+                )
+            self.assertAlmostEqual(first_sim, min(pool_sims), places=5)
 
     def test_gate_masks_are_selected_from_frames(self) -> None:
         asset_dir = self.builder.asset_dir("horn")

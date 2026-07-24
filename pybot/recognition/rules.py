@@ -8,11 +8,14 @@ Ownership:
   (``discovery_obs_*``). It never overwrites authoritative ``x``/``y`` and
   never deletes tracks. Tracking wakes discovery on local miss so priors /
   absence can be refreshed promptly.
-- **Tracking** is the sole remover of tracks and the sole death detector.
-  It owns authoritative position and movement, consumes discovery priors on
-  miss, keeps searching while local follow fails, and drops on opacity death,
-  sustained joint absence (discovery_absent + local miss for
-  ``trackJointAbsentConfirmMs``), or unreachable.
+- **Tracking** is the sole remover of tracks. The death worker is the sole
+  death detector (opacity fade while stationary, accelerated by death
+  silhouette match and SP no-spend after attack). Tracking owns authoritative
+  position and movement, consumes discovery priors on miss, keeps searching
+  while local follow fails, and drops on death confirmation, sustained joint
+  absence (discovery_absent + local miss for ``trackJointAbsentConfirmMs``),
+  or unreachable.
+
 - **Attack** records attack_count / last_attack_tick only; it reads position
   snapshots for clicks but must not mutate tracking fields or remove tracks.
 - Rediscovery ghosts (placed by tracking on death) block immediate recreates
@@ -86,6 +89,11 @@ class MobTrack:
     # Set by discovery when this track's coords were unmatched on a scan.
     # Tracking removes the track when it also misses (joint absence).
     discovery_absent: bool = False
+    # Monotonic tick when discovery_absent became True; 0 = not absent.
+    # Joint-absence confirm is measured from this tick (not created_tick), so a
+    # brand-new track cannot be dropped before discovery has actually missed it.
+    discovery_absent_tick: int = 0
+
     # Soft position prior from the latest discovery match (0 tick = none).
     # Tracking searches/snaps from these coords; authoritative x/y stay tracking-owned.
     discovery_obs_x: int = 0
@@ -259,6 +267,7 @@ def apply_discovery_observation(
     track.discovery_obs_tick = now_tick
     track.last_discovery_tick = now_tick
     track.discovery_absent = False
+    track.discovery_absent_tick = 0
 
 
 def clear_discovery_observation(track: MobTrack) -> None:
@@ -288,6 +297,7 @@ def apply_discovery_reanchor(
     track.vel_x = 0.0
     track.vel_y = 0.0
     track.discovery_absent = False
+    track.discovery_absent_tick = 0
     return True
 
 
@@ -313,6 +323,7 @@ def apply_track_observation(
         track.lost_count = 0
         clear_discovery_observation(track)
         track.discovery_absent = False
+        track.discovery_absent_tick = 0
         if confidence > 0:
             track.confidence = confidence
         return
@@ -367,8 +378,40 @@ def death_movement_thresholds(config: dict) -> tuple[int, int]:
 
 
 def joint_absent_confirm_ms(config: dict) -> int:
-    """Wall-clock local-miss duration required with discovery_absent to drop."""
+    """Wall-clock duration discovery_absent + local miss must last to drop."""
     return int(config["trackJointAbsentConfirmMs"])
+
+
+def death_min_track_age_ms(config: dict) -> int:
+    """Tracks younger than this are never death-probed / death-removed."""
+    return int(config["deathOpacityMinTrackAgeMs"])
+
+
+def mark_discovery_absent(track: MobTrack, *, now_tick: int) -> None:
+    """Discovery unmatched this scan — start joint-absence clock once."""
+    if not track.discovery_absent:
+        track.discovery_absent_tick = now_tick
+    track.discovery_absent = True
+
+
+def is_joint_absent_confirmed(
+    track: MobTrack,
+    *,
+    now_tick: int,
+    confirm_ms: int,
+) -> bool:
+    """True when discovery has marked absent long enough and local follow misses.
+
+    Clock starts when discovery first set ``discovery_absent``, not at track
+    creation — so a newly discovered mob cannot be dropped before discovery
+    has actually failed to re-see it.
+    """
+    if not track.discovery_absent:
+        return False
+    since = track.discovery_absent_tick if track.discovery_absent_tick > 0 else 0
+    if since <= 0:
+        return False
+    return (now_tick - since) >= confirm_ms
 
 
 def apply_movement_observation(

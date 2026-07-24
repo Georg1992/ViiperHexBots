@@ -28,7 +28,7 @@ from pybot.recognition.detector.descriptors.palette_groups import (
 )
 
 
-DESCRIPTOR_VERSION = 49
+DESCRIPTOR_VERSION = 50
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -49,11 +49,9 @@ GATE_SILHOUETTE_REF_COUNTS = (
 ACTIONS_PER_ANIMATION = 8
 DEAD_ACTION_COUNT = ACTIONS_PER_ANIMATION
 MIN_ACTIONS_FOR_DEATH = LIVING_FACING_ACTION_LIMIT + DEAD_ACTION_COUNT
-# Static decay corpse: last opaque Die frame per facing (all used at death check).
-# Also keep the first N opaque Die frames — early fall poses (belly-up) that the
-# final decay sprite does not cover.
-DEATH_GATE_EARLY_FRAME_COUNT = 2
-MIN_DEATH_GATE_SILHOUETTE_MASKS = DEAD_ACTION_COUNT * (DEATH_GATE_EARLY_FRAME_COUNT + 1)
+# Death gate refs: pool all opaque Die frames, keep those farthest from living
+# silhouettes (and from each other), capped so the death gate stays cheap.
+MAX_DEATH_GATE_SILHOUETTE_MASKS = 6
 MATCH_PALETTE_MAX_COLORS = 32
 MATCH_PALETTE_MAX_ACCENT_COLORS = 8
 # Palette shades present in at least this fraction of opaque frames are
@@ -1157,35 +1155,35 @@ class DescriptorBuilder:
         *,
         living_masks: list[SilhouetteMask],
     ) -> list[SilhouetteMask]:
-        """Death gate refs: early Die frames + final decay per facing.
+        """Death gate refs: Die frames farthest from living silhouettes.
 
-        Die clips fall quickly then hold one opaque decay sprite. Final decay
-        alone misses belly-up mid-fall corpses on discovery. Keep the first
-        ``DEATH_GATE_EARLY_FRAME_COUNT`` opaque frames plus the last opaque
-        frame from each Die directional action.
+        Pool every opaque Die frame (all facings), drop incoherent multi-body
+        masks, then greedily pick up to ``MAX_DEATH_GATE_SILHOUETTE_MASKS``
+        masks that minimize soft-Jaccard to living anchors and to each other.
+        Living-like fall poses are deprioritized so the death gate does not
+        false-accept standing/walking sprites.
         """
-        del living_masks  # keep every facing; no farthest-from-living cull
         action_indices = self._death_action_indices(len(act_file.actions))
         if not action_indices:
             return []
-        selected: list[SilhouetteMask] = []
-        for action_index in action_indices:
-            frames = self._collect_frames(
-                spr_file, act_file, (action_index,), frame_start=0,
-            )
-            if not frames:
-                continue
-            early_n = min(DEATH_GATE_EARLY_FRAME_COUNT, len(frames))
-            for bgra in frames[:early_n]:
-                selected.append(self._build_silhouette_mask([bgra]))
-            if len(frames) > early_n:
-                selected.append(self._build_silhouette_mask([frames[-1]]))
-        if not selected:
+        pool = self._build_death_frame_silhouette_masks(
+            spr_file, act_file, action_indices,
+        )
+        if not pool:
             return []
         coherent = [
-            mask for mask in selected if self._is_coherent_gate_silhouette(mask)
+            mask for mask in pool if self._is_coherent_gate_silhouette(mask)
         ]
-        return list(coherent if coherent else selected)
+        candidates = coherent if coherent else pool
+        if not living_masks:
+            # No living anchors: farthest-first among death frames only.
+            order = self._farthest_first_mask_order(candidates)
+        else:
+            order = self._farthest_from_anchors_mask_order(
+                candidates, living_masks,
+            )
+        limit = min(MAX_DEATH_GATE_SILHOUETTE_MASKS, len(order))
+        return [candidates[idx] for idx in order[:limit]]
 
     def _farthest_from_anchors_mask_order(
         self,

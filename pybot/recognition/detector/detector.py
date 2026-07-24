@@ -60,6 +60,8 @@ REQUIRED_CONFIG_KEYS = {
     "deathOpacityMinBaseline",
     "deathOpacityDropRatio",
     "deathOpacityConfirmMs",
+    "deathSilhouetteConfirmMs",
+    "deathSpNoSpendConfirmMs",
     "trackJointAbsentConfirmMs",
     "deathRediscoveryCooldownMs",
     "deathOpacityMoveThresholdPx",

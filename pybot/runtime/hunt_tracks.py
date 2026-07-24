@@ -18,11 +18,14 @@ from pybot.recognition.rules import (
     apply_opacity_observation,
     apply_track_observation,
     clear_discovery_observation,
+    death_min_track_age_ms,
     death_movement_thresholds,
     has_discovery_observation,
+    is_joint_absent_confirmed,
     joint_absent_confirm_ms,
     is_alive,
     is_track_unreachable_by_attacks,
+    mark_discovery_absent,
     mob_attack_anchor_key,
     max_attacks_per_mob_before_unreachable,
 )
@@ -334,7 +337,7 @@ class HuntTracks:
                 if track is None:
                     continue
                 # Notify tracking only — never delete from discovery.
-                track.discovery_absent = True
+                mark_discovery_absent(track, now_tick=tick)
                 clear_discovery_observation(track)
             summary.removed_ids = []
             summary.removed_count = 0
@@ -362,11 +365,19 @@ class HuntTracks:
         with self._lock:
             if area_epoch is not None and area_epoch != self._area_epoch:
                 return []
+            min_age = death_min_track_age_ms(self._detector_config())
             for tid, baseline, samples, streak, dead in death_results:
                 track = self._get_track_by_id_locked(tid)
                 if track is None:
                     continue
-                if dead:
+                # Brand-new tracks are never death-removed (opacity baseline
+                # still calibrating; living pose can look corpse-like briefly).
+                age_ok = (
+                    track.created_tick <= 0
+                    or tick <= 0
+                    or (tick - track.created_tick) >= min_age
+                )
+                if dead and age_ok:
                     sample = self._kill_sample_attack_count_locked(track)
                     self._pending_attack_track_ids.discard(tid)
                     self._record_kill_locked(sample)
@@ -377,7 +388,7 @@ class HuntTracks:
                         track,
                         opacity_baseline=baseline,
                         opacity_baseline_samples=samples,
-                        opacity_decay_streak=streak,
+                        opacity_decay_streak=streak if age_ok else 0,
                     )
             if dead_ids:
                 self._remove_tracks_locked(set(dead_ids))
@@ -417,15 +428,24 @@ class HuntTracks:
                 if track is None:
                     continue
                 if getattr(result, "dead", False):
-                    # Opacity death (from direct API callers or if coords
-                    # worker ever flags death). The death worker uses
-                    # apply_death_results() instead.
-                    sample = self._kill_sample_attack_count_locked(track)
-                    self._pending_attack_track_ids.discard(result.track_id)
-                    self._record_kill_locked(sample)
-                    self._record_removed_site_locked(result.x, result.y, tick)
-                    dead_ids.append(result.track_id)
+                    # Legacy path for direct LocalTracker API callers that
+                    # still set dead=True. Production coords worker always
+                    # uses skip_opacity=True; death worker owns removal via
+                    # apply_death_results(). Still enforce min track age.
+                    min_age = death_min_track_age_ms(self._detector_config())
+                    age_ok = (
+                        track.created_tick <= 0
+                        or tick <= 0
+                        or (tick - track.created_tick) >= min_age
+                    )
+                    if age_ok:
+                        sample = self._kill_sample_attack_count_locked(track)
+                        self._pending_attack_track_ids.discard(result.track_id)
+                        self._record_kill_locked(sample)
+                        self._record_removed_site_locked(result.x, result.y, tick)
+                        dead_ids.append(result.track_id)
                     continue
+
                 if result.found:
                     move_px, stop_px = death_movement_thresholds(self._detector_config())
                     apply_movement_observation(
@@ -473,17 +493,14 @@ class HuntTracks:
                         opacity_decay_streak=result.opacity_decay_streak,
                     )
                 if track.discovery_absent:
-                    # Discovery unmatched + local miss: keep searching until
-                    # the miss has lasted long enough (one wake/scan is not
-                    # enough — living movers briefly look absent).
-                    last_found = (
-                        track.last_found_tick
-                        if track.last_found_tick > 0
-                        else track.created_tick
-                    )
+                    # Discovery unmatched + local miss: clock starts when
+                    # discovery first marked absent (not at create time).
                     confirm_ms = joint_absent_confirm_ms(self._detector_config())
-                    if (tick - last_found) >= confirm_ms:
+                    if is_joint_absent_confirmed(
+                        track, now_tick=tick, confirm_ms=confirm_ms,
+                    ):
                         joint_absent_ids.append(result.track_id)
+
             remove_ids = set(dead_ids)
             remove_ids.update(joint_absent_ids)
             # "Lost" for callers = joint absence only. Do not drop on local miss

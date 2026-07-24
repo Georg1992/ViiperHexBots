@@ -46,9 +46,11 @@ def det(x: int, y: int, confidence: float = 0.71, scale: float = 0.9) -> Discove
 
 class HuntTracksRulesTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tracks = HuntTracks(load_detector_config(), skill_delay_ms=5000)
+        self.config = load_detector_config()
+        self.tracks = HuntTracks(self.config, skill_delay_ms=5000)
         self.policy = HuntPolicy()
         self.now = 1_000_000
+        self.min_death_age = int(self.config["deathOpacityMinTrackAgeMs"])
 
     def _create(self, x: int, y: int) -> int:
         summary = self.tracks.reconcile_detections(
@@ -207,33 +209,74 @@ class HuntTracksRulesTests(unittest.TestCase):
 
     def test_joint_discovery_tracking_miss_removes_track(self) -> None:
         track_id = self._create(874, 578)
+        absent_at = self.now + 50
         self.tracks.reconcile_detections(
             [],
             mob_name="horn",
-            now_tick=self.now + 50,
+            now_tick=absent_at,
         )
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
         self.assertTrue(track.discovery_absent)
+        self.assertEqual(track.discovery_absent_tick, absent_at)
         confirm_ms = int(load_detector_config()["trackJointAbsentConfirmMs"])
-        # First miss while absent — still searching.
+        # First miss while absent — still searching (clock from absent_at).
         dead_ids, lost_ids, unreachable_ids = self.tracks.apply_tracking(
             [_miss(track_id)],
-            now_tick=self.now + 100,
+            now_tick=absent_at + 100,
         )
         self.assertEqual(dead_ids, [])
         self.assertEqual(lost_ids, [])
         self.assertEqual(unreachable_ids, [])
         self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
-        # Sustained miss past confirm window → joint absence drop.
+        # Sustained miss past confirm window from discovery_absent_tick.
         dead_ids, lost_ids, unreachable_ids = self.tracks.apply_tracking(
             [_miss(track_id)],
-            now_tick=self.now + confirm_ms,
+            now_tick=absent_at + confirm_ms,
         )
         self.assertEqual(dead_ids, [])
         self.assertEqual(lost_ids, [track_id])
         self.assertEqual(unreachable_ids, [])
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
+
+    def test_new_track_not_joint_absent_dropped_immediately(self) -> None:
+        """Joint-absence clock starts at discovery miss, not create time."""
+        track_id = self._create(874, 578)
+        confirm_ms = int(load_detector_config()["trackJointAbsentConfirmMs"])
+        # Even if create was long ago relative to confirm_ms, a brand-new
+        # discovery_absent mark must wait the full confirm window.
+        self.tracks.reconcile_detections(
+            [],
+            mob_name="horn",
+            now_tick=self.now + confirm_ms + 1000,
+        )
+        dead_ids, lost_ids, unreachable_ids = self.tracks.apply_tracking(
+            [_miss(track_id)],
+            now_tick=self.now + confirm_ms + 1000,
+        )
+        self.assertEqual(dead_ids, [])
+        self.assertEqual(lost_ids, [])
+        self.assertEqual(unreachable_ids, [])
+        self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
+
+    def test_young_track_not_removed_by_death_results(self) -> None:
+        track_id = self._create(874, 578)
+        min_age = int(load_detector_config()["deathOpacityMinTrackAgeMs"])
+        # Death worker claims dead immediately after create — must be ignored.
+        dead_ids = self.tracks.apply_death_results(
+            [(track_id, 0.6, 4, self.now, True)],
+            now_tick=self.now + min_age - 1,
+        )
+        self.assertEqual(dead_ids, [])
+        self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
+        # After min age, death is allowed.
+        dead_ids = self.tracks.apply_death_results(
+            [(track_id, 0.6, 4, self.now, True)],
+            now_tick=self.now + min_age,
+        )
+        self.assertEqual(dead_ids, [track_id])
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
+
 
     def test_discovery_absent_cleared_when_tracking_hits(self) -> None:
         track_id = self._create(874, 578)
@@ -241,6 +284,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
         self.assertTrue(track.discovery_absent)
+        self.assertGreater(track.discovery_absent_tick, 0)
         self.tracks.apply_tracking(
             [_hit(track_id, 880, 580)],
             now_tick=self.now + 100,
@@ -248,6 +292,8 @@ class HuntTracksRulesTests(unittest.TestCase):
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
         self.assertFalse(track.discovery_absent)
+        self.assertEqual(track.discovery_absent_tick, 0)
+
 
     def test_discovery_marks_absent_outside_hunt_roi_without_removing(self) -> None:
         from pybot.runtime.capture.window_roi import HuntRoi
@@ -333,21 +379,23 @@ class HuntTracksRulesTests(unittest.TestCase):
 
     def test_joint_absent_drop_allows_discovery_recreate(self) -> None:
         track_id = self._create(874, 578)
-        confirm_ms = int(load_detector_config()["trackJointAbsentConfirmMs"])
+        confirm_ms = int(self.config["trackJointAbsentConfirmMs"])
+        absent_at = self.now + 50
         self.tracks.reconcile_detections(
             [],
             mob_name="horn",
-            now_tick=self.now + 50,
+            now_tick=absent_at,
         )
+        drop_at = absent_at + confirm_ms
         self.tracks.apply_tracking(
             [_miss(track_id)],
-            now_tick=self.now + confirm_ms,
+            now_tick=drop_at,
         )
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
         summary = self.tracks.reconcile_detections(
             [det(874, 578, 0.75, 0.9)],
             mob_name="horn",
-            now_tick=self.now + confirm_ms + 1,
+            now_tick=drop_at + 1,
         )
         self.assertEqual(summary.added_count, 1)
         self.assertEqual(summary.alive_after, 1)
@@ -356,7 +404,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         track_id = self._create(874, 578)
         dead_ids, lost_ids, unreachable_ids = self.tracks.apply_tracking(
             [_dead(track_id, 874, 578)],
-            now_tick=self.now + 1,
+            now_tick=self.now + self.min_death_age,
         )
         self.assertEqual(dead_ids, [track_id])
         self.assertEqual(lost_ids, [])
@@ -365,31 +413,35 @@ class HuntTracksRulesTests(unittest.TestCase):
 
     def test_death_site_blocks_discovery_rediscovery(self) -> None:
         track_id = self._create(874, 578)
-        self.tracks.apply_tracking([_dead(track_id, 874, 578)], now_tick=self.now + 1)
+        death_at = self.now + self.min_death_age
+        self.tracks.apply_tracking(
+            [_dead(track_id, 874, 578)], now_tick=death_at,
+        )
         summary = self.tracks.reconcile_detections(
             [det(874, 578, 0.75, 0.9)],
             mob_name="horn",
-            now_tick=self.now + 100,
+            now_tick=death_at + 100,
         )
         self.assertEqual(summary.added_count, 0)
         self.assertEqual(summary.matched_count, 1)
         self.assertEqual(self.tracks.get_track_count(), 0)
 
     def test_death_site_expires_after_cooldown(self) -> None:
-        config = {**load_detector_config(), "deathRediscoveryCooldownMs": 1000}
+        config = {**self.config, "deathRediscoveryCooldownMs": 1000}
         tracks = HuntTracks(config)
         track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
-        tracks.apply_tracking([_dead(track_id, 874, 578)], now_tick=self.now + 1)
+        death_at = self.now + self.min_death_age
+        tracks.apply_tracking([_dead(track_id, 874, 578)], now_tick=death_at)
         blocked = tracks.reconcile_detections(
             [det(874, 578)],
             mob_name="horn",
-            now_tick=self.now + 500,
+            now_tick=death_at + 500,
         )
         self.assertEqual(blocked.added_count, 0)
         allowed = tracks.reconcile_detections(
             [det(874, 578)],
             mob_name="horn",
-            now_tick=self.now + 2000,
+            now_tick=death_at + 2000,
         )
         self.assertEqual(allowed.added_count, 1)
 
@@ -457,28 +509,29 @@ class HuntTracksRulesTests(unittest.TestCase):
 
     def test_mob_attack_count_inherits_after_death_recreation(self) -> None:
         config = {
-            **load_detector_config(),
+            **self.config,
             "deathRediscoveryCooldownMs": 1000,
         }
         tracks = HuntTracks(config, skill_delay_ms=5000)
         track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
         for i in range(2):
             tracks.apply_attack_event(track_id, now_tick=self.now + i + 1)
+        death_at = self.now + self.min_death_age
         tracks.apply_tracking(
             [_dead(track_id, 874, 578)],
-            now_tick=self.now + 2,
+            now_tick=death_at,
         )
         self.assertIsNone(tracks.get_track_by_id(track_id))
         summary = tracks.reconcile_detections(
             [det(874, 578, 0.75, 0.9)],
             mob_name="horn",
-            now_tick=self.now + 500,
+            now_tick=death_at + 500,
         )
         self.assertEqual(summary.added_count, 0)
         summary = tracks.reconcile_detections(
             [det(874, 578, 0.75, 0.9)],
             mob_name="horn",
-            now_tick=self.now + 2000,
+            now_tick=death_at + 2000,
         )
         self.assertEqual(summary.added_count, 1)
         created = summary.created_ids or []
@@ -486,10 +539,12 @@ class HuntTracksRulesTests(unittest.TestCase):
         track = tracks.get_track_by_id(created[0])
         assert track is not None
         self.assertEqual(track.attack_count, 2)
-        self.assertFalse(tracks.apply_attack_event(created[0], now_tick=self.now + 2001))
+        self.assertFalse(
+            tracks.apply_attack_event(created[0], now_tick=death_at + 2001)
+        )
 
     def test_death_records_attacks_till_death_sample(self) -> None:
-        tracks = HuntTracks(load_detector_config(), skill_delay_ms=500)
+        tracks = HuntTracks(self.config, skill_delay_ms=500)
         track_id = tracks.reconcile_detections(
             [det(874, 578)],
             mob_name="horn",
@@ -497,63 +552,77 @@ class HuntTracksRulesTests(unittest.TestCase):
         ).created_ids[0]
         for i in range(4):
             tracks.apply_attack_event(track_id, now_tick=self.now + i + 1)
-        tracks.apply_tracking([_dead(track_id, 874, 578)], now_tick=self.now + 10)
+        tracks.apply_tracking(
+            [_dead(track_id, 874, 578)],
+            now_tick=self.now + self.min_death_age,
+        )
         self.assertEqual(tracks.kill_sample_count, 1)
         self.assertEqual(tracks.average_attacks_till_death, 4.0)
         self.assertEqual(tracks.max_attacks_per_mob_before_unreachable, 10)
 
     def test_kill_history_builds_rolling_average(self) -> None:
-        tracks = HuntTracks(load_detector_config(), skill_delay_ms=500)
+        tracks = HuntTracks(self.config, skill_delay_ms=500)
         first = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
         second = tracks.create_track("horn", 980, 640, 0.65, 0.9, now_tick=self.now).id
         for i in range(4):
             tracks.apply_attack_event(first, now_tick=self.now + i + 1)
-        tracks.apply_tracking([_dead(first, 874, 578)], now_tick=self.now + 10)
+        first_death = self.now + self.min_death_age
+        tracks.apply_tracking([_dead(first, 874, 578)], now_tick=first_death)
         for i in range(2):
-            tracks.apply_attack_event(second, now_tick=self.now + 20 + i)
-        tracks.apply_tracking([_dead(second, 980, 640)], now_tick=self.now + 30)
+            tracks.apply_attack_event(second, now_tick=first_death + 20 + i)
+        tracks.apply_tracking(
+            [_dead(second, 980, 640)], now_tick=first_death + 30,
+        )
         self.assertEqual(tracks.kill_sample_count, 2)
         self.assertEqual(tracks.average_attacks_till_death, 3.0)
         self.assertEqual(tracks.max_attacks_per_mob_before_unreachable, 9)
 
     def test_kill_history_survives_area_reset(self) -> None:
-        tracks = HuntTracks(load_detector_config(), skill_delay_ms=500)
+        tracks = HuntTracks(self.config, skill_delay_ms=500)
         track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
         for i in range(3):
             tracks.apply_attack_event(track_id, now_tick=self.now + i + 1)
-        tracks.apply_tracking([_dead(track_id, 874, 578)], now_tick=self.now + 10)
+        tracks.apply_tracking(
+            [_dead(track_id, 874, 578)],
+            now_tick=self.now + self.min_death_age,
+        )
         tracks.area_reset()
         self.assertEqual(tracks.kill_sample_count, 1)
         self.assertEqual(tracks.average_attacks_till_death, 3.0)
 
     def test_kill_history_caps_at_configured_window(self) -> None:
-        config = {**load_detector_config(), "attacksTillDeathHistoryWindow": 3}
+        config = {**self.config, "attacksTillDeathHistoryWindow": 3}
         tracks = HuntTracks(config, skill_delay_ms=500)
+        step = self.min_death_age + 20
         for n in range(4):
+            created_at = self.now + n * step
             track_id = tracks.create_track(
                 "horn",
                 874 + n * 10,
                 578,
                 0.65,
                 0.9,
-                now_tick=self.now + n,
+                now_tick=created_at,
             ).id
             for i in range(2):
-                tracks.apply_attack_event(track_id, now_tick=self.now + n * 10 + i + 1)
+                tracks.apply_attack_event(track_id, now_tick=created_at + i + 1)
             tracks.apply_tracking(
                 [_dead(track_id, 874 + n * 10, 578)],
-                now_tick=self.now + n * 10 + 5,
+                now_tick=created_at + self.min_death_age,
             )
         self.assertEqual(tracks.kill_sample_count, 3)
         self.assertEqual(tracks.average_attacks_till_death, 2.0)
 
     def test_pending_attack_credits_killing_blow_sample(self) -> None:
-        tracks = HuntTracks(load_detector_config(), skill_delay_ms=500)
+        tracks = HuntTracks(self.config, skill_delay_ms=500)
         track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
         tracks.apply_attack_event(track_id, now_tick=self.now + 1)
         tracks.apply_attack_event(track_id, now_tick=self.now + 2)
         tracks.mark_attack_pending(track_id)
-        tracks.apply_tracking([_dead(track_id, 874, 578)], now_tick=self.now + 3)
+        tracks.apply_tracking(
+            [_dead(track_id, 874, 578)],
+            now_tick=self.now + self.min_death_age,
+        )
         self.assertEqual(tracks.kill_sample_count, 1)
         self.assertEqual(tracks.average_attacks_till_death, 3.0)
 
@@ -625,7 +694,10 @@ class HuntTracksRulesTests(unittest.TestCase):
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
         # Death sample must not credit a phantom pending click.
-        self.tracks.apply_tracking([_dead(track_id, x=874, y=578)], now_tick=self.now + 1)
+        self.tracks.apply_tracking(
+            [_dead(track_id, x=874, y=578)],
+            now_tick=self.now + self.min_death_age,
+        )
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
     def test_thread_safe_concurrent_reads(self) -> None:

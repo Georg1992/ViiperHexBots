@@ -1,4 +1,14 @@
-"""Opacity decay probe — death detection during local tracking."""
+"""Multi-signal death probe — opacity decay + death silhouette + SP no-spend.
+
+Death properties used for confirmation:
+1. Track stops moving (stationary).
+2. Death animation / corpse silhouette match, then opacity decays.
+3. Attacking a dead mob does not spend SP (optional when SP is readable).
+
+Opacity fade while stationary remains the primary clock. Death-silhouette
+match and SP no-spend are independent confirmations that can accelerate
+or reinforce the decision.
+"""
 
 from __future__ import annotations
 
@@ -110,6 +120,8 @@ def evaluate_opacity_death(
     config: dict,
     moving: bool = False,
     now_tick: int,
+    death_silhouette_hit: bool = False,
+    sp_no_spend: bool = False,
 ) -> tuple[float, int, int, bool]:
     """Update opacity baseline state and return whether death is confirmed.
 
@@ -117,8 +129,16 @@ def evaluate_opacity_death(
     (0 = not fading). A meaningful drop is ``opacity_score`` below
     ``baseline * deathOpacityDropRatio``. Dead sprites stop moving, so the
     fade clock only runs while stationary; a drop while ``moving`` holds the
-    start tick (not opacity loss). Recovery clears it. Death requires the fade
-    to last ``deathOpacityConfirmMs`` wall-clock while stationary.
+    start tick (not opacity loss). Recovery clears it.
+
+    Confirmation paths (all require stationary):
+    - Opacity fade lasting ``deathOpacityConfirmMs`` wall-clock.
+    - Opacity fade started + death silhouette match for
+      ``deathSilhouetteConfirmMs`` (shorter — corpse pose is strong evidence).
+    - Opacity fade started + SP did not drop after an attack
+      (``sp_no_spend``) held for ``deathSpNoSpendConfirmMs``.
+    - Strong multi-signal: death silhouette + SP no-spend together confirm
+      immediately once a fade has begun (no extra wait).
 
     Tracking runs unbound, so tick-count confirms are not used.
     """
@@ -126,6 +146,8 @@ def evaluate_opacity_death(
     min_baseline = float(config["deathOpacityMinBaseline"])
     drop_ratio = float(config["deathOpacityDropRatio"])
     confirm_ms = int(config["deathOpacityConfirmMs"])
+    sil_confirm_ms = int(config["deathSilhouetteConfirmMs"])
+    sp_confirm_ms = int(config["deathSpNoSpendConfirmMs"])
 
     if baseline_samples < min_samples:
         baseline = max(baseline, opacity_score)
@@ -140,8 +162,15 @@ def evaluate_opacity_death(
     if dropped and not moving:
         if decay_streak <= 0:
             decay_streak = now_tick
-        dead = (now_tick - decay_streak) >= confirm_ms
-        if dead:
+        elapsed = now_tick - decay_streak
+        # Strong multi-signal: corpse pose + SP not spent → dead now.
+        if death_silhouette_hit and sp_no_spend:
+            return baseline, baseline_samples, 0, True
+        if elapsed >= confirm_ms:
+            return baseline, baseline_samples, 0, True
+        if death_silhouette_hit and elapsed >= sil_confirm_ms:
+            return baseline, baseline_samples, 0, True
+        if sp_no_spend and elapsed >= sp_confirm_ms:
             return baseline, baseline_samples, 0, True
         return baseline, baseline_samples, decay_streak, False
     if dropped and moving:
@@ -164,12 +193,17 @@ def probe_track_death(
     config: dict,
     moving: bool,
     now_tick: int,
+    death_silhouette_hit: bool = False,
+    sp_no_spend: bool = False,
 ) -> tuple[float, int, int, bool]:
     """Measure opacity at a track position and evaluate death.
 
     Called by the death-detection worker. Does not do local follow — reads
     the track's current position (set by the coordinate-tracking worker) and
     probes opacity at a descriptor-sized window around it.
+
+    ``death_silhouette_hit`` and ``sp_no_spend`` are optional confirmations
+    supplied by the death worker (silhouette gate / SP delta after attack).
 
     Returns ``(baseline, samples, decay_streak, dead)``.
     """
@@ -213,4 +247,6 @@ def probe_track_death(
         config=config,
         moving=moving,
         now_tick=now_tick,
+        death_silhouette_hit=death_silhouette_hit,
+        sp_no_spend=sp_no_spend,
     )
