@@ -101,20 +101,6 @@ class DetectorSession:
         """Return the detector config dict (for opacity probe thresholds)."""
         return self._detector.config
 
-    def death_wins_living_at(
-        self,
-        frame_bgr: np.ndarray,
-        x: int,
-        y: int,
-        scale: float = 1.0,
-    ) -> bool:
-        """ROI-local (x, y): death silhouette accepts and beats living."""
-        with self._lock:
-            descriptor = self._detector.ensure_descriptor(self._mob_name)
-            return self._detector.death_wins_living_at(
-                frame_bgr, descriptor, x, y, scale,
-            )
-
     @property
     def mob_name(self) -> str:
         return self._mob_name

@@ -18,7 +18,6 @@ from pybot.runtime.logging import HuntLogger
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.validation_log import HuntValidationLogger
 from pybot.runtime.detection.detector_session import DetectorSession
-from tests.runtime.test_hunt_tracks import _death_result
 
 
 def make_config(**overrides) -> HuntRuntimeConfig:
@@ -128,34 +127,7 @@ class HuntModeTests(unittest.TestCase):
         self.assertTrue(self.mode.discovery_confirmed_clear)
         self.assertTrue(self.mode.on_no_attackable_targets())
 
-    def test_death_site_ghost_detections_block_clear(self) -> None:
-        # After a kill, discovery may still heat the corpse. Ghost matching
-        # keeps alive_after=0, but the scan still saw a living candidate — that
-        # must block teleport clear so we do not wipe ghosts and recreate it.
-        now = monotonic_ms()
-        track_id = self.tracks.create_track(
-            "horn", 874, 578, 0.65, 0.9, now_tick=now
-        ).id
-        self.tracks.apply_death_results([_death_result(track_id)], now_tick=now + 1)
-        summary = self.tracks.reconcile_detections(
-            [
-                DiscoveryDetection(
-                    x=874, y=578, confidence=0.75, candidate_scale=0.9, living=True
-                )
-            ],
-            mob_name="horn",
-            now_tick=now + 100,
-        )
-        self.assertEqual(summary.alive_after, 0)
-        self.assertEqual(summary.matched_count, 1)
-        self.mode.note_discovery_scan_completed(
-            living_count=1,
-            added_count=summary.added_count,
-            area_epoch=self.tracks.area_epoch,
-        )
-        self.assertFalse(self.mode.discovery_confirmed_clear)
-
-    def test_blocks_teleport_until_post_teleport_discovery(self) -> None:
+    def test_discovery_confirmed_clear_after_scan(self) -> None:
         self.mode.note_discovery_scan_completed(
             living_count=0,
             added_count=0,

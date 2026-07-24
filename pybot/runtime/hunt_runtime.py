@@ -28,7 +28,7 @@ from pybot.recognition.detector.detector import load_detector_config
 from pybot.runtime.detection.detector_session import DetectorSession
 from pybot.runtime.workers.attack_loop import AttackLoop
 from pybot.runtime.workers.coord_tracking_worker import CoordTrackingWorker
-from pybot.runtime.workers.death_detection_worker import DeathDetectionWorker
+
 from pybot.runtime.workers.discovery_worker import DiscoveryWorker
 from pybot.runtime.workers.skill_timer_worker import SkillTimerWorker
 from pybot.config.clients import (
@@ -159,12 +159,10 @@ def create_runtime_deps(
     tracking = CoordTrackingWorker(ctx)
     profile = load_client_profile(ctx.config.client_profile)
     memory = MemoryAddresses() if profile is None else profile.memory
-    death = DeathDetectionWorker(ctx, memory)
     discovery = DiscoveryWorker(ctx, hunt_mode)
     attack = AttackLoop(ctx, hunt_mode, input_backend)
     workers: list[tuple[str, Callable[[], None]]] = [
         ("coord", tracking.run),
-        ("death", death.run),
         ("discovery", discovery.run),
         ("attack", attack.run),
     ]

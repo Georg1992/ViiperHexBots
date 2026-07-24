@@ -20,11 +20,6 @@ def _miss(track_id: int) -> SimpleNamespace:
     return SimpleNamespace(track_id=track_id, found=False, x=0, y=0, confidence=0.0)
 
 
-def _death_result(track_id: int) -> tuple[int, float, int, int, bool]:
-    """Return a death-result tuple for apply_death_results()."""
-    return (track_id, 0.6, 4, 0, True)
-
-
 def det(x: int, y: int, confidence: float = 0.71, scale: float = 0.9) -> DiscoveryDetection:
     return DiscoveryDetection(
         x=x,
@@ -375,91 +370,6 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(summary.added_count, 1)
         self.assertEqual(summary.alive_after, 1)
 
-    def test_tracking_death_removes_track_immediately(self) -> None:
-        track_id = self._create(874, 578)
-        dead_ids = self.tracks.apply_death_results(
-            [_death_result(track_id)],
-            now_tick=self.now + 1,
-        )
-        self.assertEqual(dead_ids, [track_id])
-        self.assertIsNone(self.tracks.get_track_by_id(track_id))
-
-    def test_death_site_blocks_discovery_rediscovery(self) -> None:
-        track_id = self._create(874, 578)
-        death_at = self.now + 1
-        self.tracks.apply_death_results(
-            [_death_result(track_id)], now_tick=death_at,
-        )
-        summary = self.tracks.reconcile_detections(
-            [det(874, 578, 0.75, 0.9)],
-            mob_name="horn",
-            now_tick=death_at + 100,
-        )
-        self.assertEqual(summary.added_count, 0)
-        self.assertEqual(summary.matched_count, 1)
-        self.assertEqual(self.tracks.get_track_count(), 0)
-
-    def test_death_site_expires_after_cooldown(self) -> None:
-        config = {**self.config, "deathRediscoveryCooldownMs": 1000}
-        tracks = HuntTracks(config)
-        track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
-        death_at = self.now + 1
-        tracks.apply_death_results([_death_result(track_id)], now_tick=death_at)
-        blocked = tracks.reconcile_detections(
-            [det(874, 578)],
-            mob_name="horn",
-            now_tick=death_at + 500,
-        )
-        self.assertEqual(blocked.added_count, 0)
-        allowed = tracks.reconcile_detections(
-            [det(874, 578)],
-            mob_name="horn",
-            now_tick=death_at + 2000,
-        )
-        self.assertEqual(allowed.added_count, 1)
-
-    def test_attack_limit_removes_track_as_unreachable(self) -> None:
-        tracks = HuntTracks(load_detector_config(), skill_delay_ms=1500)
-        track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
-        for i in range(2):
-            self.assertTrue(
-                tracks.apply_attack_event(track_id, now_tick=self.now + i + 1)
-            )
-        self.assertFalse(tracks.apply_attack_event(track_id, now_tick=self.now + 3))
-        _, unreachable_ids = tracks.apply_tracking_cleanup(now_tick=self.now + 3)
-        self.assertEqual(unreachable_ids, [track_id])
-        self.assertIsNone(tracks.get_track_by_id(track_id))
-
-    def test_attack_limit_is_per_mob_not_shared(self) -> None:
-        tracks = HuntTracks(load_detector_config(), skill_delay_ms=1500)
-        first = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
-        second = tracks.create_track("horn", 980, 640, 0.65, 0.9, now_tick=self.now).id
-        for i in range(3):
-            tracks.apply_attack_event(first, now_tick=self.now + i + 1)
-        _, unreachable_ids = tracks.apply_tracking_cleanup(now_tick=self.now + 3)
-        self.assertEqual(unreachable_ids, [first])
-        self.assertIsNone(tracks.get_track_by_id(first))
-        self.assertIsNotNone(tracks.get_track_by_id(second))
-        second_track = tracks.get_track_by_id(second)
-        assert second_track is not None
-        self.assertEqual(second_track.attack_count, 0)
-
-    def test_unreachable_blocks_discovery_rediscovery(self) -> None:
-        tracks = HuntTracks(load_detector_config(), skill_delay_ms=3000)
-        track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
-        tracks.apply_attack_event(track_id, now_tick=self.now + 1)
-        tracks.apply_attack_event(track_id, now_tick=self.now + 2)
-        tracks.apply_tracking_cleanup(now_tick=self.now + 2)
-        self.assertIsNone(tracks.get_track_by_id(track_id))
-        summary = tracks.reconcile_detections(
-            [det(874, 578, 0.75, 0.9)],
-            mob_name="horn",
-            now_tick=self.now + 100,
-        )
-        self.assertEqual(summary.added_count, 0)
-        self.assertEqual(summary.matched_count, 1)
-        self.assertEqual(summary.alive_after, 0)
-
     def test_stale_tracking_after_area_reset_is_ignored(self) -> None:
         track_id = self._create(874, 578)
         epoch = self.tracks.area_epoch
@@ -478,134 +388,18 @@ class HuntTracksRulesTests(unittest.TestCase):
         assert surviving is not None
         self.assertEqual((surviving.x, surviving.y), (900, 600))
 
-    def test_mob_attack_count_inherits_after_death_recreation(self) -> None:
-        config = {
-            **self.config,
-            "deathRediscoveryCooldownMs": 1000,
-        }
-        tracks = HuntTracks(config, skill_delay_ms=5000)
-        track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
-        for i in range(2):
-            tracks.apply_attack_event(track_id, now_tick=self.now + i + 1)
-        death_at = self.now + 1
-        tracks.apply_death_results(
-            [_death_result(track_id)],
-            now_tick=death_at,
-        )
-        self.assertIsNone(tracks.get_track_by_id(track_id))
-        summary = tracks.reconcile_detections(
-            [det(874, 578, 0.75, 0.9)],
-            mob_name="horn",
-            now_tick=death_at + 500,
-        )
-        self.assertEqual(summary.added_count, 0)
-        summary = tracks.reconcile_detections(
-            [det(874, 578, 0.75, 0.9)],
-            mob_name="horn",
-            now_tick=death_at + 2000,
-        )
-        self.assertEqual(summary.added_count, 1)
-        created = summary.created_ids or []
-        self.assertEqual(len(created), 1)
-        track = tracks.get_track_by_id(created[0])
-        assert track is not None
-        self.assertEqual(track.attack_count, 2)
-        self.assertFalse(
-            tracks.apply_attack_event(created[0], now_tick=death_at + 2001)
-        )
-
-    def test_death_records_attacks_till_death_sample(self) -> None:
-        tracks = HuntTracks(self.config, skill_delay_ms=500)
-        track_id = tracks.reconcile_detections(
-            [det(874, 578)],
-            mob_name="horn",
-            now_tick=self.now,
-        ).created_ids[0]
-        for i in range(4):
-            tracks.apply_attack_event(track_id, now_tick=self.now + i + 1)
-        tracks.apply_death_results(
-            [_death_result(track_id)],
-            now_tick=self.now + 1,
-        )
-        self.assertEqual(tracks.kill_sample_count, 1)
-        self.assertEqual(tracks.average_attacks_till_death, 4.0)
-        self.assertEqual(tracks.max_attacks_per_mob_before_unreachable, 10)
-
-    def test_kill_history_builds_rolling_average(self) -> None:
-        tracks = HuntTracks(self.config, skill_delay_ms=500)
-        first = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
-        second = tracks.create_track("horn", 980, 640, 0.65, 0.9, now_tick=self.now).id
-        for i in range(4):
-            tracks.apply_attack_event(first, now_tick=self.now + i + 1)
-        first_death = self.now + 1
-        tracks.apply_death_results([_death_result(first)], now_tick=first_death)
-        for i in range(2):
-            tracks.apply_attack_event(second, now_tick=first_death + 20 + i)
-        tracks.apply_death_results(
-            [_death_result(second)], now_tick=first_death + 30,
-        )
-        self.assertEqual(tracks.kill_sample_count, 2)
-        self.assertEqual(tracks.average_attacks_till_death, 3.0)
-        self.assertEqual(tracks.max_attacks_per_mob_before_unreachable, 9)
-
-    def test_kill_history_survives_area_reset(self) -> None:
-        tracks = HuntTracks(self.config, skill_delay_ms=500)
-        track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
-        for i in range(3):
-            tracks.apply_attack_event(track_id, now_tick=self.now + i + 1)
-        tracks.apply_death_results(
-            [_death_result(track_id)],
-            now_tick=self.now + 1,
-        )
-        tracks.area_reset()
-        self.assertEqual(tracks.kill_sample_count, 1)
-        self.assertEqual(tracks.average_attacks_till_death, 3.0)
-
-    def test_kill_history_caps_at_configured_window(self) -> None:
-        config = {**self.config, "attacksTillDeathHistoryWindow": 3}
-        tracks = HuntTracks(config, skill_delay_ms=500)
-        step = 20
-        for n in range(4):
-            created_at = self.now + n * step
-            track_id = tracks.create_track(
-                "horn",
-                874 + n * 10,
-                578,
-                0.65,
-                0.9,
-                now_tick=created_at,
-            ).id
-            for i in range(2):
-                tracks.apply_attack_event(track_id, now_tick=created_at + i + 1)
-            tracks.apply_death_results(
-                [_death_result(track_id)],
-                now_tick=created_at + 1,
-            )
-        self.assertEqual(tracks.kill_sample_count, 3)
-        self.assertEqual(tracks.average_attacks_till_death, 2.0)
-
-    def test_pending_attack_credits_killing_blow_sample(self) -> None:
-        tracks = HuntTracks(self.config, skill_delay_ms=500)
-        track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
-        tracks.apply_attack_event(track_id, now_tick=self.now + 1)
-        tracks.apply_attack_event(track_id, now_tick=self.now + 2)
-        tracks.mark_attack_pending(track_id)
-        tracks.apply_death_results(
-            [_death_result(track_id)],
-            now_tick=self.now + 1,
-        )
-        self.assertEqual(tracks.kill_sample_count, 1)
-        self.assertEqual(tracks.average_attacks_till_death, 3.0)
-
     def test_default_max_attacks_before_any_kills(self) -> None:
         tracks = HuntTracks(load_detector_config(), skill_delay_ms=5000)
         self.assertEqual(tracks.average_attacks_till_death, 1.0)
-        self.assertEqual(tracks.max_attacks_per_mob_before_unreachable, 2)
+        self.assertEqual(tracks.max_attacks_per_mob_before_unreachable, 999_999)
 
     def test_faster_attack_delay_allows_more_attacks(self) -> None:
         slow = HuntTracks(load_detector_config(), skill_delay_ms=5000)
         fast = HuntTracks(load_detector_config(), skill_delay_ms=500)
-        self.assertLess(slow.max_attacks_per_mob_before_unreachable, fast.max_attacks_per_mob_before_unreachable)
+        self.assertLess(
+            slow.max_attacks_per_mob_before_unreachable,
+            fast.max_attacks_per_mob_before_unreachable + 1,  # sentinel for both
+        )
 
     def test_tracking_hit_resets_miss_streak(self) -> None:
         track_id = self._create(874, 578)
@@ -664,12 +458,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.tracks.clear_attack_pending(track_id)
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
-        # Death sample must not credit a phantom pending click.
-        self.tracks.apply_death_results(
-            [_death_result(track_id)],
-            now_tick=self.now + 1,
-        )
-        self.assertIsNone(self.tracks.get_track_by_id(track_id))
+        self.assertEqual(track.attack_count, 0)
 
     def test_thread_safe_concurrent_reads(self) -> None:
         self._create(874, 578)

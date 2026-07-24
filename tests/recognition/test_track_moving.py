@@ -1,4 +1,4 @@
-"""Tests for track movement state used by death detection."""
+"""Tests for track movement state."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ import unittest
 from pybot.recognition.rules import (
     MobTrack,
     apply_movement_observation,
-    death_movement_thresholds,
     evaluate_track_moving,
+    movement_thresholds,
 )
 
 
@@ -53,10 +53,10 @@ class TrackMovingTests(unittest.TestCase):
 
     def test_apply_movement_observation_updates_track(self) -> None:
         track = MobTrack(id=1, x=100, y=100)
-        move_px, stop_px = death_movement_thresholds(
+        move_px, stop_px = movement_thresholds(
             {
-                "deathOpacityMoveThresholdPx": 12,
-                "deathOpacityStopThresholdPx": 6,
+                "movementMoveThresholdPx": 12,
+                "movementStopThresholdPx": 6,
             }
         )
         apply_movement_observation(

@@ -141,8 +141,8 @@ def is_alive(track: MobTrack) -> bool:
 
 
 def mob_attack_anchor_key(x: int, y: int, *, cell_px: int) -> tuple[int, int]:
-    """Snap a mob position to a stable cell for per-mob attack accounting."""
-    return (x // cell_px * cell_px, y // cell_px * cell_px)
+    """Deprecated: unreachable budget removed."""
+    return (x, y)
 
 
 def apply_attack_event(track: MobTrack, now_tick: int) -> None:
@@ -153,8 +153,8 @@ def apply_attack_event(track: MobTrack, now_tick: int) -> None:
 
 
 def is_track_unreachable_by_attacks(track: MobTrack, max_attacks: int) -> bool:
-    """True when this track exceeded the attack budget without being killed."""
-    return track.attack_count >= max_attacks
+    """Deprecated: unreachable budget removed. Always returns False."""
+    return False
 
 
 def max_attacks_per_mob_before_unreachable(
@@ -163,10 +163,8 @@ def max_attacks_per_mob_before_unreachable(
     skill_delay_ms: int,
     attack_window_ms: int = 3000,
 ) -> int:
-    """Unreachable budget: attacks that fit in 3s at current delay, plus session average."""
-    delay_ms = max(skill_delay_ms, 1)
-    attacks_in_window = attack_window_ms / delay_ms
-    return max(1, round(attacks_in_window + average_attacks_till_death))
+    """Deprecated: unreachable budget removed. Returns a large sentinel."""
+    return 999_999
 
 
 def select_target_id(
@@ -176,16 +174,8 @@ def select_target_id(
     *,
     max_attacks: int | None = None,
 ) -> int:
-    """Round-robin through alive tracks that are still within the attack budget."""
-    alive_ids = sorted(
-        track.id
-        for track in tracks
-        if is_alive(track)
-        and (
-            max_attacks is None
-            or not is_track_unreachable_by_attacks(track, max_attacks)
-        )
-    )
+    """Round-robin through alive tracks."""
+    alive_ids = sorted(track.id for track in tracks if is_alive(track))
     if not alive_ids:
         return 0
     if last_attack_target_id not in alive_ids:
@@ -349,9 +339,9 @@ def apply_opacity_observation(
     opacity_baseline_samples: int,
     opacity_decay_streak: int,
 ) -> None:
-    track.opacity_baseline = opacity_baseline
-    track.opacity_baseline_samples = opacity_baseline_samples
-    track.opacity_decay_streak = opacity_decay_streak
+    """Deprecated: death detection removed. No-op kept for API compatibility."""
+    # No-op — death detection pipeline removed.
+    pass
 
 
 def evaluate_track_moving(
@@ -369,11 +359,11 @@ def evaluate_track_moving(
     return displacement_sq > enter_sq
 
 
-def death_movement_thresholds(config: dict) -> tuple[int, int]:
+def movement_thresholds(config: dict) -> tuple[int, int]:
     """Pixel thresholds for entering and leaving the track ``moving`` state."""
     return (
-        int(config["deathOpacityMoveThresholdPx"]),
-        int(config["deathOpacityStopThresholdPx"]),
+        int(config["movementMoveThresholdPx"]),
+        int(config["movementStopThresholdPx"]),
     )
 
 

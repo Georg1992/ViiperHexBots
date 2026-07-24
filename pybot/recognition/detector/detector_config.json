@@ -26,15 +26,7 @@
   "debugOutputDir": "pybot/recognition/debug/detector",
   "deathMinSilhouetteRecall": 0.35,
   "deathMinSilhouettePrecision": 0.55,
-  "deathOpacityBaselineSamples": 2,
-  "deathOpacityMinBaseline": 0.20,
-  "deathOpacityDropRatio": 0.80,
-  "deathOpacityConfirmMs": 300,
-  "deathSpNoSpendConfirmMs": 150,
   "trackJointAbsentConfirmMs": 750,
-  "deathRediscoveryCooldownMs": 4000,
-  "deathOpacityMoveThresholdPx": 12,
-  "deathOpacityStopThresholdPx": 6,
-  "defaultAverageAttacksTillDeath": 1,
-  "attacksTillDeathHistoryWindow": 20
+  "movementMoveThresholdPx": 12,
+  "movementStopThresholdPx": 6
 }

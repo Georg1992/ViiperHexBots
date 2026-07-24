@@ -49,8 +49,7 @@ check("discovery_worker",
     lambda: __import__("pybot.runtime.workers.discovery_worker", fromlist=["DiscoveryWorker"]))
 check("coord_tracking_worker",
     lambda: __import__("pybot.runtime.workers.coord_tracking_worker", fromlist=["CoordTrackingWorker"]))
-check("death_detection_worker",
-    lambda: __import__("pybot.runtime.workers.death_detection_worker", fromlist=["DeathDetectionWorker"]))
+# death_detection_worker removed
 check("attack_loop",
     lambda: __import__("pybot.runtime.workers.attack_loop", fromlist=["AttackLoop"]))
 check("skill_timer_worker",

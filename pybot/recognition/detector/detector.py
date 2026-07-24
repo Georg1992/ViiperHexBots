@@ -57,18 +57,10 @@ REQUIRED_CONFIG_KEYS = {
     "discoveryClusterRadiusPx",
     "trackDedupRadiusPx",
     "debugOutputDir",
-    # death-detection keys (local_tracker / opacity_probe / hunt)
-    "deathOpacityBaselineSamples",
-    "deathOpacityMinBaseline",
-    "deathOpacityDropRatio",
-    "deathOpacityConfirmMs",
-    "deathSpNoSpendConfirmMs",
+    # track-removal keys (joint absence, movement)
     "trackJointAbsentConfirmMs",
-    "deathRediscoveryCooldownMs",
-    "deathOpacityMoveThresholdPx",
-    "deathOpacityStopThresholdPx",
-    "defaultAverageAttacksTillDeath",
-    "attacksTillDeathHistoryWindow",
+    "movementMoveThresholdPx",
+    "movementStopThresholdPx",
 }
 
 # Geometry pre-gate: heat-CC area must sit in [min_area_ratio, max_area_ratio]
@@ -1273,55 +1265,6 @@ class MobDetector:
             scale,
             masks=descriptor.silhouette_masks,
         )
-
-    def score_death_at(
-        self,
-        frame_bgr: np.ndarray,
-        descriptor: MobDescriptor,
-        cx: int,
-        cy: int,
-        scale: float = 1.0,
-    ) -> tuple[bool, tuple[int, int, int, int] | None, float]:
-        """Score a point against death/corpse silhouette refs.
-
-        Returns (accepted, bbox, similarity). Empty death masks never accept.
-        Death-specific silhouette thresholds are more lenient than living
-        because corpses fade and lose body pixels.
-        """
-        if not descriptor.death_silhouette_masks:
-            return False, None, 0.0
-        return self._score_at_with_masks(
-            frame_bgr,
-            descriptor,
-            cx,
-            cy,
-            scale,
-            masks=descriptor.death_silhouette_masks,
-            is_death=True,
-        )
-
-    def death_wins_living_at(
-        self,
-        frame_bgr: np.ndarray,
-        descriptor: MobDescriptor,
-        cx: int,
-        cy: int,
-        scale: float = 1.0,
-    ) -> bool:
-        """True when death silhouette accepts and beats living similarity.
-
-        Living sprites often get a weak death-gate score; only a corpse pose
-        that outranks living refs counts as death evidence.
-        """
-        death_ok, _bbox, death_sim = self.score_death_at(
-            frame_bgr, descriptor, cx, cy, scale,
-        )
-        if not death_ok:
-            return False
-        _living_ok, _living_bbox, living_sim = self.score_at(
-            frame_bgr, descriptor, cx, cy, scale,
-        )
-        return death_sim > living_sim
 
     def _score_at_with_masks(
         self,

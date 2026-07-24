@@ -31,9 +31,7 @@ class AttackLoop:
 
                 tick = monotonic_ms()
                 policy_tracks = self._ctx.tracks.tracks_for_policy(tick)
-                self._ctx.policy.set_max_attacks(
-                    self._ctx.tracks.max_attacks_per_mob_before_unreachable
-                )
+        
 
                 # Respect skill delay after each attack
                 if self._is_on_cooldown(tick):
@@ -64,47 +62,27 @@ class AttackLoop:
     def _attack_one(self, target_id: int, now_tick: int) -> None:
         ctx = self._ctx
 
-        # Snapshot coords under the store lock. The tracking thread mutates
-        # (and may remove) the live MobTrack concurrently, so we must not read
-        # a live reference outside the lock.
+        # Snapshot coords under the store lock.
         snap = ctx.tracks.snapshot_for_track(target_id, now_tick)
         if snap is None:
             return
 
         click_x, click_y = snap.x, snap.y
 
-        ctx.tracks.mark_attack_pending(target_id)
-
-        # Move mouse and click skill – wrap in try/except so input
-        # failures (Viiper connection, game window, etc.) don't kill
-        # the entire attack loop thread.
         try:
             self._input.move_mouse(click_x, click_y)
             self._input.skill_click(ctx.config.skill_scan_code)
         except Exception as exc:
-            ctx.tracks.clear_attack_pending(target_id)
             ctx.logger.behavior(
                 f"[ATTACK] input error id={target_id}: {exc}"
             )
             return
 
-        # Record attack and start cooldown
-        still_tracked = ctx.tracks.apply_attack_event(target_id, now_tick=now_tick)
+        ctx.tracks.apply_attack_event(target_id, now_tick=now_tick)
         ctx.policy.note_attack_target(target_id)
         self._last_attack_ms = now_tick
         ctx.overlay.increment_attacks()
-
-        if still_tracked:
-            ctx.logger.behavior(
-                f"[ATTACK] id={target_id} @{click_x},{click_y} "
-                f"mob_attacks={snap.attack_count + 1}"
-            )
-        else:
-            limit = ctx.tracks.max_attacks_per_mob_before_unreachable
-            avg = ctx.tracks.average_attacks_till_death
-            ctx.logger.behavior(
-                f"[ATTACK] id={target_id} @{click_x},{click_y} "
-                f"unreachable after {snap.attack_count + 1} attacks "
-                f"(max={limit} avg={avg:.1f} delay={ctx.config.skill_delay_ms}ms) "
-                f"— tracking will drop on next tick"
-            )
+        ctx.logger.behavior(
+            f"[ATTACK] id={target_id} @{click_x},{click_y} "
+            f"mob_attacks={snap.attack_count + 1}"
+        )

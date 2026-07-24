@@ -64,7 +64,6 @@ class HuntArchitectureTests(unittest.TestCase):
         self.assertIn("DetectorSession", runtime)
         self.assertIn("HuntWindowCapture", runtime)
         self.assertIn("CoordTrackingWorker", runtime)
-        self.assertIn("DeathDetectionWorker", runtime)
         self.assertIn("DiscoveryWorker", runtime)
         self.assertIn("AttackLoop", runtime)
 

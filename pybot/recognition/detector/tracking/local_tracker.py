@@ -17,13 +17,7 @@ import numpy as np
 
 from pybot.recognition.detector.descriptors.descriptor import MobDescriptor
 from pybot.recognition.detector.scoring.heatmap_detector import palette_heatmap, sprite_palette_heatmap
-from pybot.recognition.detector.tracking.opacity_probe import (
-    calibrate_opacity_baseline,
-    evaluate_opacity_death,
-    is_opacity_calibrated,
-    measure_opacity_score,
-)
-from pybot.recognition.rules import death_movement_thresholds, evaluate_track_moving
+from pybot.recognition.rules import evaluate_track_moving, movement_thresholds
 
 if TYPE_CHECKING:
     from pybot.recognition.detector.detector import MobDetector
@@ -196,7 +190,7 @@ def _finalize_track_hit(
     # Use this-frame displacement, not only the prior moving flag — otherwise
     # the first walk frames still look "stationary" and motion blur advances
     # the opacity death clock.
-    move_px, stop_px = death_movement_thresholds(detector.config)
+    move_px, stop_px = movement_thresholds(detector.config)
     dx = x - (prev_x + offset_x)
     dy = y - (prev_y + offset_y)
     moving_now = evaluate_track_moving(
@@ -207,46 +201,7 @@ def _finalize_track_hit(
     )
 
     if not skip_opacity:
-        # opacity probing runs here for direct API callers;
-        # the coord worker sets skip_opacity=True and defers to death worker.
-        max_dist = float(descriptor.max_sprite_palette_distance)
-        min_match = float(detector.config["minSpritePaletteMatch"])
-        opacity_score = measure_opacity_score(
-            frame_bgr, descriptor, bbox, max_dist, min_match,
-        )
-        if not is_opacity_calibrated(
-            baseline=opacity_baseline,
-            baseline_samples=opacity_baseline_samples,
-            config=detector.config,
-        ):
-            opacity_baseline, opacity_baseline_samples = calibrate_opacity_baseline(
-                opacity_score=opacity_score,
-                baseline=opacity_baseline,
-                baseline_samples=opacity_baseline_samples,
-                config=detector.config,
-            )
-            opacity_decay_streak = 0
-        else:
-            opacity_baseline, opacity_baseline_samples, opacity_decay_streak, dead = (
-                evaluate_opacity_death(
-                    opacity_score=opacity_score,
-                    baseline=opacity_baseline,
-                    baseline_samples=opacity_baseline_samples,
-                    decay_streak=opacity_decay_streak,
-                    config=detector.config,
-                    moving=moving_now,
-                    now_tick=now_tick,
-                )
-            )
-            if dead:
-                return LocalTrackResult(
-                    track_id=track_id, found=False, x=x, y=y,
-                    confidence=similarity,
-                    miss_reason="opacity_decay", dead=True,
-                    opacity_baseline=opacity_baseline,
-                    opacity_baseline_samples=opacity_baseline_samples,
-                    opacity_decay_streak=opacity_decay_streak,
-                )
+        pass  # opacity probing removed — coord worker always skips
 
     return LocalTrackResult(
         track_id=track_id, found=True, x=x, y=y,
