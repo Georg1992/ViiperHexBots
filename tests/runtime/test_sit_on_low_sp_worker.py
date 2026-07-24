@@ -96,7 +96,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             detections=[],
             duration_ms=1,
             elapsed_s=0.001,
-            death_ids=[],
         )
         living_scan = DiscoveryScanResult(
             ok=True,
@@ -106,7 +105,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             detections=[living],
             duration_ms=1,
             elapsed_s=0.001,
-            death_ids=[],
         )
         self.ctx.detector.discover_frame.side_effect = [
             living_scan,
@@ -164,7 +162,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             detections=[],
             duration_ms=1,
             elapsed_s=0.001,
-            death_ids=[],
         )
         living_scan = DiscoveryScanResult(
             ok=True,
@@ -174,7 +171,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             detections=[living],
             duration_ms=1,
             elapsed_s=0.001,
-            death_ids=[],
         )
         self.ctx.detector.discover_frame.side_effect = [
             living_scan,
