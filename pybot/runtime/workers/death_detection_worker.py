@@ -5,13 +5,12 @@ and probes every alive track at its own cadence, reading the freshest
 positions from HuntTracks (written by the coords worker).
 
 Death properties confirmed here:
-1. Track is stationary (``moving`` false) — fade / silhouette clocks only
-   advance then.
-2. Death silhouette wins over living at the track position (confirms
-   immediately on a corpse frame).
-3. Opacity decays vs living baseline (primary clock when silhouette does
+1. Death silhouette wins over living near the track position (confirms
+   immediately on a corpse frame) — a local peak search re-centers on
+   the corpse when it shifted from the last known living position.
+2. Opacity decays vs living baseline (primary clock when silhouette does
    not fire).
-4. Attacking the track did not spend SP (when SP is readable; accelerates
+3. Attacking the track did not spend SP (when SP is readable; accelerates
    opacity confirm).
 
 Dead tracks are removed and kill samples are recorded. This worker is the
@@ -23,8 +22,12 @@ from __future__ import annotations
 
 import traceback
 
+import cv2
+import numpy as np
+
 from pybot.config.clients import MemoryAddresses
 from pybot.game_state import GameMemoryPoller
+from pybot.recognition.detector.scoring.heatmap_detector import sprite_palette_heatmap
 from pybot.recognition.detector.tracking.opacity_probe import probe_track_death
 from pybot.runtime.constants import LOG_REPEAT_INTERVAL_MS, WORKER_POLL_INTERVAL_S
 from pybot.runtime.hunt_tracks import monotonic_ms
@@ -38,6 +41,8 @@ class DeathDetectionWorker:
     _TICK_INTERVAL_S = 0.08
     # How long after an attack we still treat "SP did not drop" as evidence.
     _SP_NO_SPEND_WINDOW_MS = 900
+    # Search radius around track position for corpse re-center (px).
+    _DEATH_PEAK_SEARCH_RADIUS_PX = 24
 
     def __init__(
         self,
@@ -170,21 +175,25 @@ class DeathDetectionWorker:
             local_x = int(track.x) - int(roi.x)
             local_y = int(track.y) - int(roi.y)
 
-            death_sil_hit = False
-            if not track.moving:
-                death_sil_hit = bool(
-                    ctx.tracker.death_wins_living_at(
-                        frame, local_x, local_y, scale,
-                    )
+            # Search around the track position for the corpse center — the
+            # death pose may have shifted slightly from the last living position.
+            best_x, best_y = self._find_death_peak(
+                frame, descriptor, local_x, local_y, scale,
+            )
+
+            death_sil_hit = bool(
+                ctx.tracker.death_wins_living_at(
+                    frame, best_x, best_y, scale,
                 )
+            )
 
             sp_no_spend = self._sp_no_spend_for_track(track.id, now_ms=now_ms)
 
             baseline, samples, streak, dead = probe_track_death(
                 frame,
                 descriptor,
-                x=local_x,
-                y=local_y,
+                x=best_x,
+                y=best_y,
                 scale=scale,
                 opacity_baseline=track.opacity_baseline,
                 opacity_baseline_samples=track.opacity_baseline_samples,
@@ -226,3 +235,64 @@ class DeathDetectionWorker:
             )
         if (lost_ids or unreachable_ids) and not ctx.discovery_suspend.is_set():
             ctx.discovery_wake.set()
+
+    # ------------------------------------------------------------------
+    #  Local death-peak search
+    # ------------------------------------------------------------------
+
+    def _find_death_peak(
+        self,
+        frame_bgr: np.ndarray,
+        descriptor,
+        cx: int, cy: int,
+        scale: float,
+    ) -> tuple[int, int]:
+        """Re-center on the corpse near (cx, cy) using sprite palette heat.
+
+        Builds a fast single-scale heatmap, blurs at descriptor size, and
+        returns the position of the strongest peak within the search radius.
+        Falls back to the original center if no peak is found.
+        """
+        radius = max(
+            self._DEATH_PEAK_SEARCH_RADIUS_PX,
+            int(max(descriptor.avg_width, descriptor.avg_height) * scale) // 2,
+        )
+        w = max(4, int(round(descriptor.avg_width * scale)))
+        h = max(4, int(round(descriptor.avg_height * scale)))
+        margin = max(w, h) // 2
+        pad = radius + margin
+        fh, fw = frame_bgr.shape[:2]
+        x0 = max(0, cx - pad)
+        y0 = max(0, cy - pad)
+        x1 = min(fw, cx + pad + 1)
+        y1 = min(fh, cy + pad + 1)
+        if x1 <= x0 or y1 <= y0:
+            return cx, cy
+
+        crop = frame_bgr[y0:y1, x0:x1]
+        heat = sprite_palette_heatmap(
+            crop,
+            descriptor.match_palette_bgr,
+            float(descriptor.max_sprite_palette_distance),
+        )
+        if heat.size == 0:
+            return cx, cy
+
+        # Blur at descriptor size so the peak is the blob center, not a single pixel.
+        blur_w = max(3, w | 1)
+        blur_h = max(3, h | 1)
+        blurred = cv2.blur(heat, (blur_w, blur_h))
+
+        # Mask to search radius from anchor.
+        anchor_x = cx - x0
+        anchor_y = cy - y0
+        yy, xx = np.ogrid[:blurred.shape[0], :blurred.shape[1]]
+        dist_sq = (xx - anchor_x) ** 2 + (yy - anchor_y) ** 2
+        masked = np.where(dist_sq <= (radius * radius), blurred, 0.0)
+
+        peak_val = float(masked.max())
+        if peak_val <= 0.0:
+            return cx, cy
+
+        peak_y_local, peak_x_local = np.unravel_index(int(masked.argmax()), masked.shape)
+        return int(peak_x_local + x0), int(peak_y_local + y0)

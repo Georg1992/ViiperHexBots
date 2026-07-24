@@ -269,10 +269,11 @@ class OpacityDeathProbeTests(unittest.TestCase):
         self.assertFalse(dead)
         self.assertEqual(since, 0)
 
-    def test_death_silhouette_while_moving_does_not_confirm(self) -> None:
+    def test_death_silhouette_confirms_even_while_moving(self) -> None:
         baseline = 0.60
         samples = 2
         config = self._config()
+        # Corpse pose always confirms — movement state is irrelevant.
         baseline, samples, since, dead = evaluate_opacity_death(
             opacity_score=0.59,
             baseline=baseline,
@@ -283,7 +284,7 @@ class OpacityDeathProbeTests(unittest.TestCase):
             now_tick=1000,
             death_silhouette_hit=True,
         )
-        self.assertFalse(dead)
+        self.assertTrue(dead)
         self.assertEqual(since, 0)
 
 

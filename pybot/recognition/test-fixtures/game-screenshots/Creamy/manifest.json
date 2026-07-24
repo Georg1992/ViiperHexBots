@@ -3,8 +3,8 @@
   "folder": "Creamy",
   "description": "Creamy detection fixtures. Leading digit is mob count. *_Gray* = gray world textures.",
   "strictAcceptCount": true,
-  "fixtureCount": 7,
+  "fixtureCount": 10,
   "normalFixtureCount": 3,
-  "grayFixtureCount": 4,
+  "grayFixtureCount": 7,
   "filenamePattern": "^(\\d+)Creamy(?:_Gray)?\\.png$"
 }

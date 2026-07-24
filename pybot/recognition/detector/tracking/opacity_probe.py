@@ -145,7 +145,7 @@ def evaluate_opacity_death(
     sp_confirm_ms = int(config["deathSpNoSpendConfirmMs"])
 
     # Corpse pose that beats living: confirm without waiting for opacity fade.
-    if death_silhouette_hit and not moving:
+    if death_silhouette_hit:
         return baseline, baseline_samples, 0, True
 
     if baseline_samples < min_samples:

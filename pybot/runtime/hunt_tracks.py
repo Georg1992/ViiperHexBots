@@ -449,6 +449,9 @@ class HuntTracks:
                     confidence=result.confidence,
                     now_tick=tick,
                 )
+                # Track lost by local follow — treat as stationary so the
+                # death worker can probe opacity decay at last known position.
+                track.moving = False
                 missed_ids.append(result.track_id)
             return missed_ids
 
