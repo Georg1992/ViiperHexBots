@@ -341,6 +341,20 @@ class HuntTracks:
                 missed_ids.append(result.track_id)
             return missed_ids
 
+    def remove_tracks_by_death(self, death_ids: list[int]) -> list[int]:
+        """Instantly remove tracks confirmed dead by death silhouette."""
+        if not death_ids:
+            return []
+        removed: list[int] = []
+        with self._lock:
+            for tid in death_ids:
+                track = self._get_track_by_id_locked(tid)
+                if track is not None and is_alive(track):
+                    removed.append(tid)
+            if removed:
+                self._remove_tracks_locked(set(removed))
+        return removed
+
     def apply_tracking_cleanup(
         self,
         *,

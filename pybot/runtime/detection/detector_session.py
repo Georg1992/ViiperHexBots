@@ -34,6 +34,7 @@ class DiscoveryScanResult:
     detections: list[RawDetection]
     duration_ms: int
     elapsed_s: float
+    death_ids: list[int]
 
 
 
@@ -116,6 +117,7 @@ class DetectorSession:
                 detections=[],
                 duration_ms=0,
                 elapsed_s=0.0,
+                death_ids=[],
             )
         return self.discover_frame(frame, roi)
 
@@ -142,6 +144,7 @@ class DetectorSession:
                 detections=[],
                 duration_ms=0,
                 elapsed_s=0.0,
+                death_ids=[],
             )
         frame_known: list[tuple[int, int, int, float]] = [
             (int(track_id), int(screen_x) - roi.x, int(screen_y) - roi.y, float(scale))
@@ -175,6 +178,7 @@ class DetectorSession:
             detections=accepted,
             duration_ms=duration_ms,
             elapsed_s=elapsed_s,
+            death_ids=result.death_ids,
         )
 
     def track_locals(

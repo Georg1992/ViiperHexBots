@@ -139,6 +139,10 @@ class DiscoveryWorker:
             for item in filtered
         ]
 
+        # Death silhouette hits on known tracks → instant removal.
+        if scan.death_ids:
+            ctx.tracks.remove_tracks_by_death(scan.death_ids)
+
         # area_epoch gates create/remove under the tracks lock so a teleport
         # between detect and reconcile cannot spawn or clear into the new area.
         summary = ctx.tracks.reconcile_detections(

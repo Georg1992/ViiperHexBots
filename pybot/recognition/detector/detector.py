@@ -195,6 +195,7 @@ class DetectionResult:
     timing: dict[str, float]
     sprite_heatmap: np.ndarray
     silhouette_checks: list[SilhouetteCheck]
+    death_ids: list[int]
 
 
 
@@ -321,6 +322,7 @@ class MobDetector:
         # --- gates → silhouette (known tracks skip pre-gates) ----------
         candidates: list[DetectionCandidate] = []
         silhouette_checks: list[SilhouetteCheck] = []
+        death_ids: list[int] = []
 
         for blob_index, (cx, cy, heat_score, comp_bbox) in enumerate(blobs):
             bx, by, bw, bh = comp_bbox
@@ -435,6 +437,12 @@ class MobDetector:
                     rejection_reason="",
                 ))
 
+            # Known tracks: also check death silhouette. If death wins,
+            # flag the track for instant removal.
+            if known_hit is not None and descriptor.death_silhouette_masks:
+                track_id = known_hit[0]
+                if self.death_wins_living_at(frame_bgr, descriptor, cx, cy):
+                    death_ids.append(track_id)
 
         gate_end = time.perf_counter()
         max_candidates = int(self.config["maxCandidates"])
@@ -458,6 +466,7 @@ class MobDetector:
             timing=timing,
             sprite_heatmap=sprite_heatmap,
             silhouette_checks=silhouette_checks,
+            death_ids=death_ids,
         )
 
     @staticmethod
@@ -1265,6 +1274,46 @@ class MobDetector:
             scale,
             masks=descriptor.silhouette_masks,
         )
+
+    def score_death_at(
+        self,
+        frame_bgr: np.ndarray,
+        descriptor: MobDescriptor,
+        cx: int,
+        cy: int,
+        scale: float = 1.0,
+    ) -> tuple[bool, tuple[int, int, int, int] | None, float]:
+        """Score a point against death/corpse silhouette refs."""
+        if not descriptor.death_silhouette_masks:
+            return False, None, 0.0
+        return self._score_at_with_masks(
+            frame_bgr,
+            descriptor,
+            cx,
+            cy,
+            scale,
+            masks=descriptor.death_silhouette_masks,
+            is_death=True,
+        )
+
+    def death_wins_living_at(
+        self,
+        frame_bgr: np.ndarray,
+        descriptor: MobDescriptor,
+        cx: int,
+        cy: int,
+        scale: float = 1.0,
+    ) -> bool:
+        """True when death silhouette accepts and beats living similarity."""
+        death_ok, _bbox, death_sim = self.score_death_at(
+            frame_bgr, descriptor, cx, cy, scale,
+        )
+        if not death_ok:
+            return False
+        _living_ok, _living_bbox, living_sim = self.score_at(
+            frame_bgr, descriptor, cx, cy, scale,
+        )
+        return death_sim > living_sim
 
     def _score_at_with_masks(
         self,
