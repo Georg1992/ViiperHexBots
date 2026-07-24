@@ -18,7 +18,6 @@ from pybot.recognition.rules import (
     apply_opacity_observation,
     apply_track_observation,
     clear_discovery_observation,
-    death_min_track_age_ms,
     death_movement_thresholds,
     has_discovery_observation,
     is_joint_absent_confirmed,
@@ -365,19 +364,11 @@ class HuntTracks:
         with self._lock:
             if area_epoch is not None and area_epoch != self._area_epoch:
                 return []
-            min_age = death_min_track_age_ms(self._detector_config())
             for tid, baseline, samples, streak, dead in death_results:
                 track = self._get_track_by_id_locked(tid)
                 if track is None:
                     continue
-                # Brand-new tracks are never death-removed (opacity baseline
-                # still calibrating; living pose can look corpse-like briefly).
-                age_ok = (
-                    track.created_tick <= 0
-                    or tick <= 0
-                    or (tick - track.created_tick) >= min_age
-                )
-                if dead and age_ok:
+                if dead:
                     sample = self._kill_sample_attack_count_locked(track)
                     self._pending_attack_track_ids.discard(tid)
                     self._record_kill_locked(sample)
@@ -388,7 +379,7 @@ class HuntTracks:
                         track,
                         opacity_baseline=baseline,
                         opacity_baseline_samples=samples,
-                        opacity_decay_streak=streak if age_ok else 0,
+                        opacity_decay_streak=streak,
                     )
             if dead_ids:
                 self._remove_tracks_locked(set(dead_ids))
@@ -431,19 +422,12 @@ class HuntTracks:
                     # Legacy path for direct LocalTracker API callers that
                     # still set dead=True. Production coords worker always
                     # uses skip_opacity=True; death worker owns removal via
-                    # apply_death_results(). Still enforce min track age.
-                    min_age = death_min_track_age_ms(self._detector_config())
-                    age_ok = (
-                        track.created_tick <= 0
-                        or tick <= 0
-                        or (tick - track.created_tick) >= min_age
-                    )
-                    if age_ok:
-                        sample = self._kill_sample_attack_count_locked(track)
-                        self._pending_attack_track_ids.discard(result.track_id)
-                        self._record_kill_locked(sample)
-                        self._record_removed_site_locked(result.x, result.y, tick)
-                        dead_ids.append(result.track_id)
+                    # apply_death_results().
+                    sample = self._kill_sample_attack_count_locked(track)
+                    self._pending_attack_track_ids.discard(result.track_id)
+                    self._record_kill_locked(sample)
+                    self._record_removed_site_locked(result.x, result.y, tick)
+                    dead_ids.append(result.track_id)
                     continue
 
                 if result.found:

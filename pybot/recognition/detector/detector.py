@@ -60,13 +60,11 @@ REQUIRED_CONFIG_KEYS = {
     "deathOpacityMinBaseline",
     "deathOpacityDropRatio",
     "deathOpacityConfirmMs",
-    "deathSilhouetteConfirmMs",
     "deathSpNoSpendConfirmMs",
     "trackJointAbsentConfirmMs",
     "deathRediscoveryCooldownMs",
     "deathOpacityMoveThresholdPx",
     "deathOpacityStopThresholdPx",
-    "deathOpacityMinTrackAgeMs",
     "defaultAverageAttacksTillDeath",
     "attacksTillDeathHistoryWindow",
 }
@@ -285,8 +283,8 @@ class MobDetector:
 
         Order: heatmap → blobs → (new peaks: geometry + color structure) →
         silhouette. Known-track blobs skip geometry/color and score against
-        living silhouettes only — death detection is owned by the tracker's
-        opacity probe.
+        living silhouettes only — death detection is owned by the death
+        worker (death silhouette + opacity / SP signals).
         """
         start = time.perf_counter()
         descriptor = self.ensure_descriptor(mob_name)
@@ -1280,6 +1278,29 @@ class MobDetector:
             scale,
             masks=descriptor.death_silhouette_masks,
         )
+
+    def death_wins_living_at(
+        self,
+        frame_bgr: np.ndarray,
+        descriptor: MobDescriptor,
+        cx: int,
+        cy: int,
+        scale: float = 1.0,
+    ) -> bool:
+        """True when death silhouette accepts and beats living similarity.
+
+        Living sprites often get a weak death-gate score; only a corpse pose
+        that outranks living refs counts as death evidence.
+        """
+        death_ok, _bbox, death_sim = self.score_death_at(
+            frame_bgr, descriptor, cx, cy, scale,
+        )
+        if not death_ok:
+            return False
+        _living_ok, _living_bbox, living_sim = self.score_at(
+            frame_bgr, descriptor, cx, cy, scale,
+        )
+        return death_sim > living_sim
 
     def _score_at_with_masks(
         self,

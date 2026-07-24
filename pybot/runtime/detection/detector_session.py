@@ -101,6 +101,20 @@ class DetectorSession:
         """Return the detector config dict (for opacity probe thresholds)."""
         return self._detector.config
 
+    def death_wins_living_at(
+        self,
+        frame_bgr: np.ndarray,
+        x: int,
+        y: int,
+        scale: float = 1.0,
+    ) -> bool:
+        """ROI-local (x, y): death silhouette accepts and beats living."""
+        with self._lock:
+            descriptor = self._detector.ensure_descriptor(self._mob_name)
+            return self._detector.death_wins_living_at(
+                frame_bgr, descriptor, x, y, scale,
+            )
+
     @property
     def mob_name(self) -> str:
         return self._mob_name
@@ -126,12 +140,12 @@ class DetectorSession:
         *,
         known_tracks: list[tuple[int, int, int, float]] | None = None,
     ) -> DiscoveryScanResult:
-        """Discovery scan: living silhouette gate only. Death is tracker-owned.
+        """Discovery scan: living silhouette gate only. Death is death-worker-owned.
 
         ``known_tracks`` are ``(track_id, screen_x, screen_y, scale)`` at capture
         time. Empty on the first scan (living-only). Later scans find heatmap
         peaks near known-track coords, skip pre-gates, and score against living
-        silhouettes.
+        silhouettes so an existing track is matched rather than created anew.
         """
         if frame is None or frame.size == 0:
             return DiscoveryScanResult(

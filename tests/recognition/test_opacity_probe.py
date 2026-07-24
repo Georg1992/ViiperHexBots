@@ -18,7 +18,6 @@ class OpacityDeathProbeTests(unittest.TestCase):
             "deathOpacityMinBaseline": 0.20,
             "deathOpacityDropRatio": 0.85,
             "deathOpacityConfirmMs": 450,
-            "deathSilhouetteConfirmMs": 200,
             "deathSpNoSpendConfirmMs": 200,
         }
 
@@ -212,12 +211,13 @@ class OpacityDeathProbeTests(unittest.TestCase):
             self.assertFalse(dead)
             self.assertEqual(since, 1000)
 
-    def test_death_silhouette_accelerates_confirm(self) -> None:
+    def test_death_silhouette_confirms_immediately(self) -> None:
         baseline = 0.60
         samples = 2
         config = self._config()
+        # Corpse pose that beats living: one stationary frame is enough.
         baseline, samples, since, dead = evaluate_opacity_death(
-            opacity_score=0.20,
+            opacity_score=0.59,
             baseline=baseline,
             baseline_samples=samples,
             decay_streak=0,
@@ -225,19 +225,8 @@ class OpacityDeathProbeTests(unittest.TestCase):
             now_tick=1000,
             death_silhouette_hit=True,
         )
-        self.assertFalse(dead)
-        self.assertEqual(since, 1000)
-        # Before full opacity confirm (450ms) but past silhouette confirm (200ms).
-        baseline, samples, since, dead = evaluate_opacity_death(
-            opacity_score=0.18,
-            baseline=baseline,
-            baseline_samples=samples,
-            decay_streak=since,
-            config=config,
-            now_tick=1200,
-            death_silhouette_hit=True,
-        )
         self.assertTrue(dead)
+        self.assertEqual(since, 0)
 
     def test_sp_no_spend_accelerates_confirm(self) -> None:
         baseline = 0.60
@@ -264,24 +253,7 @@ class OpacityDeathProbeTests(unittest.TestCase):
         )
         self.assertTrue(dead)
 
-    def test_silhouette_plus_sp_confirms_immediately_on_fade(self) -> None:
-        baseline = 0.60
-        samples = 2
-        config = self._config()
-        baseline, samples, since, dead = evaluate_opacity_death(
-            opacity_score=0.20,
-            baseline=baseline,
-            baseline_samples=samples,
-            decay_streak=0,
-            config=config,
-            now_tick=1000,
-            death_silhouette_hit=True,
-            sp_no_spend=True,
-        )
-        self.assertTrue(dead)
-        self.assertEqual(since, 0)
-
-    def test_extra_signals_without_fade_do_not_confirm(self) -> None:
+    def test_sp_without_fade_does_not_confirm(self) -> None:
         baseline = 0.60
         samples = 2
         config = self._config()
@@ -292,8 +264,24 @@ class OpacityDeathProbeTests(unittest.TestCase):
             decay_streak=0,
             config=config,
             now_tick=1000,
-            death_silhouette_hit=True,
             sp_no_spend=True,
+        )
+        self.assertFalse(dead)
+        self.assertEqual(since, 0)
+
+    def test_death_silhouette_while_moving_does_not_confirm(self) -> None:
+        baseline = 0.60
+        samples = 2
+        config = self._config()
+        baseline, samples, since, dead = evaluate_opacity_death(
+            opacity_score=0.59,
+            baseline=baseline,
+            baseline_samples=samples,
+            decay_streak=0,
+            config=config,
+            moving=True,
+            now_tick=1000,
+            death_silhouette_hit=True,
         )
         self.assertFalse(dead)
         self.assertEqual(since, 0)

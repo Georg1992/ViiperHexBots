@@ -28,13 +28,11 @@
   "deathOpacityMinBaseline": 0.20,
   "deathOpacityDropRatio": 0.85,
   "deathOpacityConfirmMs": 450,
-  "deathSilhouetteConfirmMs": 200,
   "deathSpNoSpendConfirmMs": 200,
   "trackJointAbsentConfirmMs": 750,
   "deathRediscoveryCooldownMs": 4000,
   "deathOpacityMoveThresholdPx": 12,
   "deathOpacityStopThresholdPx": 6,
-  "deathOpacityMinTrackAgeMs": 750,
   "defaultAverageAttacksTillDeath": 1,
   "attacksTillDeathHistoryWindow": 20
 }

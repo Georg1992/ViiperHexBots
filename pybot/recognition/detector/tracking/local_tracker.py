@@ -62,7 +62,6 @@ def track_local(
     opacity_baseline = float(track.get("opacityBaseline", 0.0))
     opacity_baseline_samples = int(track.get("opacityBaselineSamples", 0))
     opacity_decay_streak = int(track.get("opacityDecayStreak", 0))
-    created_tick = int(track.get("createdTick", 0))
     now_tick = int(track.get("nowTick", 0))
     moving = bool(track.get("moving", False))
     vel_x = float(track.get("velX", 0.0))
@@ -147,7 +146,7 @@ def track_local(
         track_id=track_id, bbox=hit_bbox, similarity=hit_sim,
         offset_x=offset_x, offset_y=offset_y,
         prev_x=cx, prev_y=cy,
-        created_tick=created_tick, now_tick=now_tick,
+        now_tick=now_tick,
         opacity_baseline=opacity_baseline,
         opacity_baseline_samples=opacity_baseline_samples,
         opacity_decay_streak=opacity_decay_streak,
@@ -183,7 +182,7 @@ def _finalize_track_hit(
     similarity: float,
     offset_x: int, offset_y: int,
     prev_x: int, prev_y: int,
-    created_tick: int, now_tick: int,
+    now_tick: int,
     opacity_baseline: float,
     opacity_baseline_samples: int,
     opacity_decay_streak: int,
@@ -207,11 +206,7 @@ def _finalize_track_hit(
         stop_threshold_px=stop_px,
     )
 
-    if not skip_opacity and _track_old_enough(
-        detector.config,
-        created_tick=created_tick,
-        now_tick=now_tick,
-    ):
+    if not skip_opacity:
         # opacity probing runs here for direct API callers;
         # the coord worker sets skip_opacity=True and defers to death worker.
         max_dist = float(descriptor.max_sprite_palette_distance)
@@ -260,15 +255,6 @@ def _finalize_track_hit(
         opacity_baseline_samples=opacity_baseline_samples,
         opacity_decay_streak=opacity_decay_streak,
     )
-
-
-def _track_old_enough(
-    config: dict, *, created_tick: int, now_tick: int,
-) -> bool:
-    min_age_ms = int(config["deathOpacityMinTrackAgeMs"])
-    if now_tick > 0 and created_tick > 0 and (now_tick - created_tick) < min_age_ms:
-        return False
-    return True
 
 
 def _find_local_peak(

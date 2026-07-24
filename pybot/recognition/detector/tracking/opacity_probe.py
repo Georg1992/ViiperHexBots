@@ -1,13 +1,11 @@
 """Multi-signal death probe — opacity decay + death silhouette + SP no-spend.
 
-Death properties used for confirmation:
-1. Track stops moving (stationary).
-2. Death animation / corpse silhouette match, then opacity decays.
-3. Attacking a dead mob does not spend SP (optional when SP is readable).
-
-Opacity fade while stationary remains the primary clock. Death-silhouette
-match and SP no-spend are independent confirmations that can accelerate
-or reinforce the decision.
+Death properties used for confirmation (all require stationary):
+1. Death silhouette wins over living at the track (corpse pose) — confirms
+   immediately. Living sprites must not pass this gate.
+2. Opacity fades vs living baseline for ``deathOpacityConfirmMs``.
+3. Opacity fade started + SP did not drop after an attack for
+   ``deathSpNoSpendConfirmMs`` (when SP is readable).
 """
 
 from __future__ import annotations
@@ -132,13 +130,11 @@ def evaluate_opacity_death(
     start tick (not opacity loss). Recovery clears it.
 
     Confirmation paths (all require stationary):
+    - ``death_silhouette_hit`` (death refs beat living at this point) confirms
+      immediately — one corpse frame is enough.
     - Opacity fade lasting ``deathOpacityConfirmMs`` wall-clock.
-    - Opacity fade started + death silhouette match for
-      ``deathSilhouetteConfirmMs`` (shorter — corpse pose is strong evidence).
-    - Opacity fade started + SP did not drop after an attack
-      (``sp_no_spend``) held for ``deathSpNoSpendConfirmMs``.
-    - Strong multi-signal: death silhouette + SP no-spend together confirm
-      immediately once a fade has begun (no extra wait).
+    - Opacity fade started + ``sp_no_spend`` held for
+      ``deathSpNoSpendConfirmMs``.
 
     Tracking runs unbound, so tick-count confirms are not used.
     """
@@ -146,8 +142,11 @@ def evaluate_opacity_death(
     min_baseline = float(config["deathOpacityMinBaseline"])
     drop_ratio = float(config["deathOpacityDropRatio"])
     confirm_ms = int(config["deathOpacityConfirmMs"])
-    sil_confirm_ms = int(config["deathSilhouetteConfirmMs"])
     sp_confirm_ms = int(config["deathSpNoSpendConfirmMs"])
+
+    # Corpse pose that beats living: confirm without waiting for opacity fade.
+    if death_silhouette_hit and not moving:
+        return baseline, baseline_samples, 0, True
 
     if baseline_samples < min_samples:
         baseline = max(baseline, opacity_score)
@@ -163,12 +162,7 @@ def evaluate_opacity_death(
         if decay_streak <= 0:
             decay_streak = now_tick
         elapsed = now_tick - decay_streak
-        # Strong multi-signal: corpse pose + SP not spent → dead now.
-        if death_silhouette_hit and sp_no_spend:
-            return baseline, baseline_samples, 0, True
         if elapsed >= confirm_ms:
-            return baseline, baseline_samples, 0, True
-        if death_silhouette_hit and elapsed >= sil_confirm_ms:
             return baseline, baseline_samples, 0, True
         if sp_no_spend and elapsed >= sp_confirm_ms:
             return baseline, baseline_samples, 0, True

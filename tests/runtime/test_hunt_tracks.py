@@ -50,7 +50,6 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.tracks = HuntTracks(self.config, skill_delay_ms=5000)
         self.policy = HuntPolicy()
         self.now = 1_000_000
-        self.min_death_age = int(self.config["deathOpacityMinTrackAgeMs"])
 
     def _create(self, x: int, y: int) -> int:
         summary = self.tracks.reconcile_detections(
@@ -259,24 +258,6 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(unreachable_ids, [])
         self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
 
-    def test_young_track_not_removed_by_death_results(self) -> None:
-        track_id = self._create(874, 578)
-        min_age = int(load_detector_config()["deathOpacityMinTrackAgeMs"])
-        # Death worker claims dead immediately after create — must be ignored.
-        dead_ids = self.tracks.apply_death_results(
-            [(track_id, 0.6, 4, self.now, True)],
-            now_tick=self.now + min_age - 1,
-        )
-        self.assertEqual(dead_ids, [])
-        self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
-        # After min age, death is allowed.
-        dead_ids = self.tracks.apply_death_results(
-            [(track_id, 0.6, 4, self.now, True)],
-            now_tick=self.now + min_age,
-        )
-        self.assertEqual(dead_ids, [track_id])
-        self.assertIsNone(self.tracks.get_track_by_id(track_id))
-
 
     def test_discovery_absent_cleared_when_tracking_hits(self) -> None:
         track_id = self._create(874, 578)
@@ -404,7 +385,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         track_id = self._create(874, 578)
         dead_ids, lost_ids, unreachable_ids = self.tracks.apply_tracking(
             [_dead(track_id, 874, 578)],
-            now_tick=self.now + self.min_death_age,
+            now_tick=self.now + 1,
         )
         self.assertEqual(dead_ids, [track_id])
         self.assertEqual(lost_ids, [])
@@ -413,7 +394,7 @@ class HuntTracksRulesTests(unittest.TestCase):
 
     def test_death_site_blocks_discovery_rediscovery(self) -> None:
         track_id = self._create(874, 578)
-        death_at = self.now + self.min_death_age
+        death_at = self.now + 1
         self.tracks.apply_tracking(
             [_dead(track_id, 874, 578)], now_tick=death_at,
         )
@@ -430,7 +411,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         config = {**self.config, "deathRediscoveryCooldownMs": 1000}
         tracks = HuntTracks(config)
         track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
-        death_at = self.now + self.min_death_age
+        death_at = self.now + 1
         tracks.apply_tracking([_dead(track_id, 874, 578)], now_tick=death_at)
         blocked = tracks.reconcile_detections(
             [det(874, 578)],
@@ -516,7 +497,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         track_id = tracks.create_track("horn", 874, 578, 0.65, 0.9, now_tick=self.now).id
         for i in range(2):
             tracks.apply_attack_event(track_id, now_tick=self.now + i + 1)
-        death_at = self.now + self.min_death_age
+        death_at = self.now + 1
         tracks.apply_tracking(
             [_dead(track_id, 874, 578)],
             now_tick=death_at,
@@ -554,7 +535,7 @@ class HuntTracksRulesTests(unittest.TestCase):
             tracks.apply_attack_event(track_id, now_tick=self.now + i + 1)
         tracks.apply_tracking(
             [_dead(track_id, 874, 578)],
-            now_tick=self.now + self.min_death_age,
+            now_tick=self.now + 1,
         )
         self.assertEqual(tracks.kill_sample_count, 1)
         self.assertEqual(tracks.average_attacks_till_death, 4.0)
@@ -566,7 +547,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         second = tracks.create_track("horn", 980, 640, 0.65, 0.9, now_tick=self.now).id
         for i in range(4):
             tracks.apply_attack_event(first, now_tick=self.now + i + 1)
-        first_death = self.now + self.min_death_age
+        first_death = self.now + 1
         tracks.apply_tracking([_dead(first, 874, 578)], now_tick=first_death)
         for i in range(2):
             tracks.apply_attack_event(second, now_tick=first_death + 20 + i)
@@ -584,7 +565,7 @@ class HuntTracksRulesTests(unittest.TestCase):
             tracks.apply_attack_event(track_id, now_tick=self.now + i + 1)
         tracks.apply_tracking(
             [_dead(track_id, 874, 578)],
-            now_tick=self.now + self.min_death_age,
+            now_tick=self.now + 1,
         )
         tracks.area_reset()
         self.assertEqual(tracks.kill_sample_count, 1)
@@ -593,7 +574,7 @@ class HuntTracksRulesTests(unittest.TestCase):
     def test_kill_history_caps_at_configured_window(self) -> None:
         config = {**self.config, "attacksTillDeathHistoryWindow": 3}
         tracks = HuntTracks(config, skill_delay_ms=500)
-        step = self.min_death_age + 20
+        step = 20
         for n in range(4):
             created_at = self.now + n * step
             track_id = tracks.create_track(
@@ -608,7 +589,7 @@ class HuntTracksRulesTests(unittest.TestCase):
                 tracks.apply_attack_event(track_id, now_tick=created_at + i + 1)
             tracks.apply_tracking(
                 [_dead(track_id, 874 + n * 10, 578)],
-                now_tick=created_at + self.min_death_age,
+                now_tick=created_at + 1,
             )
         self.assertEqual(tracks.kill_sample_count, 3)
         self.assertEqual(tracks.average_attacks_till_death, 2.0)
@@ -621,7 +602,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         tracks.mark_attack_pending(track_id)
         tracks.apply_tracking(
             [_dead(track_id, 874, 578)],
-            now_tick=self.now + self.min_death_age,
+            now_tick=self.now + 1,
         )
         self.assertEqual(tracks.kill_sample_count, 1)
         self.assertEqual(tracks.average_attacks_till_death, 3.0)
@@ -696,7 +677,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         # Death sample must not credit a phantom pending click.
         self.tracks.apply_tracking(
             [_dead(track_id, x=874, y=578)],
-            now_tick=self.now + self.min_death_age,
+            now_tick=self.now + 1,
         )
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
 

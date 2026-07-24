@@ -157,7 +157,9 @@ def create_runtime_deps(
     )
     hunt_mode = create_hunt_mode(ctx, input_backend)
     tracking = CoordTrackingWorker(ctx)
-    death = DeathDetectionWorker(ctx)
+    profile = load_client_profile(ctx.config.client_profile)
+    memory = MemoryAddresses() if profile is None else profile.memory
+    death = DeathDetectionWorker(ctx, memory)
     discovery = DiscoveryWorker(ctx, hunt_mode)
     attack = AttackLoop(ctx, hunt_mode, input_backend)
     workers: list[tuple[str, Callable[[], None]]] = [

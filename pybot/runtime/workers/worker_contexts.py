@@ -80,13 +80,14 @@ class CoordTrackingWorkerContext(
 class DeathDetectionWorkerContext(
     CanStop,
     CanLog,
+    HasConfig,
     CanCapture,
     CanTrack,
     Protocol,
 ):
     """Hunt runtime subset consumed by DeathDetectionWorker."""
 
-    tracker: object  # DetectorSession (for ensure_descriptor + config)
+    tracker: object  # DetectorSession (ensure_descriptor, config, death_wins_living_at)
 
 
 class DiscoveryWorkerContext(

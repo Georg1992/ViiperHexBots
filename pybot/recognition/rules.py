@@ -9,8 +9,8 @@ Ownership:
   never deletes tracks. Tracking wakes discovery on local miss so priors /
   absence can be refreshed promptly.
 - **Tracking** is the sole remover of tracks. The death worker is the sole
-  death detector (opacity fade while stationary, accelerated by death
-  silhouette match and SP no-spend after attack). Tracking owns authoritative
+  death detector (opacity fade while stationary, death silhouette that beats
+  living, and SP no-spend after attack). Tracking owns authoritative
   position and movement, consumes discovery priors on miss, keeps searching
   while local follow fails, and drops on death confirmation, sustained joint
   absence (discovery_absent + local miss for ``trackJointAbsentConfirmMs``),
@@ -380,11 +380,6 @@ def death_movement_thresholds(config: dict) -> tuple[int, int]:
 def joint_absent_confirm_ms(config: dict) -> int:
     """Wall-clock duration discovery_absent + local miss must last to drop."""
     return int(config["trackJointAbsentConfirmMs"])
-
-
-def death_min_track_age_ms(config: dict) -> int:
-    """Tracks younger than this are never death-probed / death-removed."""
-    return int(config["deathOpacityMinTrackAgeMs"])
 
 
 def mark_discovery_absent(track: MobTrack, *, now_tick: int) -> None:
