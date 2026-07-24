@@ -104,7 +104,9 @@ Use `mob-detect` for CLI examples (`mob-detect detect --mob horn --help`). Pipel
 | `scripts/smoke_test.py` | Import/init check before GUI launch |
 | `scripts/test_detection.py` | Live detection overlay on game window |
 | `scripts/capture_detect.py` | One-shot screenshot + detect |
-| `pybot/recognition/bench_*.py` | Manual detection benchmarks |
+| `debug_vis.py` | Discovery pipeline fixture visualization (`_debug_vis/`) |
+| `python -m pybot.recognition fixtures --mob <name>` | Run screenshot fixture suite for one mob |
+
 
 ## Logs
 

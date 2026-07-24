@@ -273,9 +273,10 @@ def cmd_detect(args: argparse.Namespace) -> int:
 
 
 def cmd_fixtures(args: argparse.Namespace) -> int:
-    from dataset_runner import main as fixtures_main
+    from pybot.recognition.detector.dataset_runner import main as fixtures_main
 
     argv = ["--mob", args.mob.lower()]
+
     if args.fixtures:
         argv.extend(["--fixtures", args.fixtures])
     if args.debug:

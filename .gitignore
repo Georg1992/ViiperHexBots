@@ -20,4 +20,7 @@ nul
 scripts/test_overlay.py
 _debug_vis/
 _debug_*/
+_tmp_*.py
 _commit_msg.txt
+
+
