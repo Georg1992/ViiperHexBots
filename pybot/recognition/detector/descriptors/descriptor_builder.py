@@ -28,7 +28,7 @@ from pybot.recognition.detector.descriptors.palette_groups import (
 )
 
 
-DESCRIPTOR_VERSION = 48
+DESCRIPTOR_VERSION = 49
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -79,6 +79,27 @@ _KMEANS_RNG_SEED = 42
 SILHOUETTE_WIDTH = 16
 SILHOUETTE_HEIGHT = 16
 STABLE_SILHOUETTE_VALUE = 0.20
+
+# Body-cluster strong-threshold computation (runtime color-structure gate).
+BODY_STRONG_SIMILARITY = 0.5  # similarity threshold for "strong" body match
+BODY_STRONG_DIVERSITY_MULTIPLIER = 0.06  # % of median for diversity-enabled (1-2 Lab groups)
+BODY_STRONG_NO_DIVERSITY_MULTIPLIER = 0.04  # % of median for diversity-disabled (3+ Lab groups)
+BODY_STRONG_DIVERSITY_CAP = 0.08  # cap for diversity-enabled
+BODY_STRONG_NO_DIVERSITY_CAP = 0.04  # cap for diversity-disabled
+BODY_STRONG_ABSOLUTE_FLOOR = 0.010  # absolute floor regardless of multiplier
+
+# Aspect band floor (geometry gate pre-filter).
+MIN_ASPECT_FLOOR = 0.45  # per-mob band clamps to at least this normalized ratio
+
+# Aspect margin formula — scales inversely with sprite size so small sprites
+# (e.g. Noxious 42x33) get wider bands, large sprites stay tight.
+ASPECT_MARGIN_BASE = 0.50
+ASPECT_MARGIN_REF_SIZE = 78.0  # px — reference sprite dimension for margin formula
+
+# Palette coverage floor (color-structure gate).
+PALETTE_COVERAGE_FLOOR = 0.08
+PALETTE_COVERAGE_CAP = 0.28
+PALETTE_COVERAGE_MULTIPLIER = 0.25  # % of median sprite coverage
 
 
 def _bgr_value_saturation(bgr: tuple[int, int, int] | np.ndarray) -> tuple[float, float] | tuple[np.ndarray, np.ndarray]:
@@ -256,14 +277,14 @@ class DescriptorBuilder:
         # so small sprites get wider bands while large sprites
         # stay tight (no Desert Wolf FPs from band widening).
         min_dim = min(profile["size"].avg_width, profile["size"].avg_height)
-        aspect_margin = max(0.50, 0.50 * (78.0 / max(min_dim, 1.0)))
+        aspect_margin = max(ASPECT_MARGIN_BASE, ASPECT_MARGIN_BASE * (ASPECT_MARGIN_REF_SIZE / max(min_dim, 1.0)))
         min_aspect, max_aspect = self._measure_aspect_band(
             all_facing_frames, margin=aspect_margin,
         )
 
         # Body_strong floor: measure on actual sprite frames. Diversity-
-        # enabled mobs use 6 % of median (tight clusters degrade ~17×);
-        # diversity-disabled mobs use 2 % of median — their k-means
+        # enabled mobs use 6 % of median (tight clusters degrade ~17x);
+        # diversity-disabled mobs use 4 % of median — their k-means
         # centroids spanning 3+ Lab groups cause exponentially worse
         # runtime heat mixing (diverse colours average into background).
         min_body_strong = self._measure_body_cluster_floor(
@@ -979,7 +1000,7 @@ class DescriptorBuilder:
             raise RuntimeError("no opaque sprite frames to measure aspect band")
         raw_min = float(np.min(aspects))
         raw_max = float(np.max(aspects))
-        return max(0.35, raw_min * (1.0 - margin)), raw_max * (1.0 + margin)
+        return max(MIN_ASPECT_FLOOR, raw_min * (1.0 - margin)), raw_max * (1.0 + margin)
 
     @staticmethod
     def _measure_body_cluster_floor(
@@ -988,18 +1009,16 @@ class DescriptorBuilder:
         *,
         use_diversity: bool = True,
     ) -> float:
-        """Measure body_strong on actual sprite frames.
+        """Measure body_strong on opaque sprite pixels.
 
-        Diversity-enabled mobs (1-2 Lab groups): 6 % of median.
-        Diversity-disabled mobs (3+ Lab groups): 2 % of median — k-means
-        centroids spanning diverse colour families cause exponentially worse
-        runtime heat mixing (colours average into background).
-        Capped at 0.08 (tight-cluster) / 0.04 (diverse) with absolute floor
-        at 0.010.
+        The threshold is derived by applying the multiplier*median formula
+        (with diversity-aware cap) to the all-pixel measurement. The runtime
+        color-structure gate measures body_strong on foreground pixels only
+        to eliminate crop-boundary waffling.
         """
         if not body_clusters:
             raise RuntimeError("no body clusters to measure body_strong floor")
-        _body_strong_sim = 0.5
+        _body_strong_sim = BODY_STRONG_SIMILARITY
         values: list[float] = []
         for bgra in frames:
             opaque = bgra[:, :, 3] >= 128
@@ -1019,9 +1038,9 @@ class DescriptorBuilder:
         if not values:
             raise RuntimeError("no opaque sprite frames to measure body_strong")
         median = float(np.median(values))
-        multiplier = 0.02 if not use_diversity else 0.06
-        cap = 0.04 if not use_diversity else 0.08
-        return max(0.010, min(cap, median * multiplier))
+        multiplier = BODY_STRONG_NO_DIVERSITY_MULTIPLIER if not use_diversity else BODY_STRONG_DIVERSITY_MULTIPLIER
+        cap = BODY_STRONG_NO_DIVERSITY_CAP if not use_diversity else BODY_STRONG_DIVERSITY_CAP
+        return max(BODY_STRONG_ABSOLUTE_FLOOR, min(cap, median * multiplier))
 
     @staticmethod
     def _measure_palette_coverage_floor(
@@ -1064,7 +1083,7 @@ class DescriptorBuilder:
         median = float(np.median(values))
         # Cap at 0.28 so legitimate mobs are not rejected; only lower
         # the floor for mobs with genuinely patchy palette coverage.
-        return max(0.08, min(0.28, median * 0.25))
+        return max(PALETTE_COVERAGE_FLOOR, min(PALETTE_COVERAGE_CAP, median * PALETTE_COVERAGE_MULTIPLIER))
 
     def _build_frame_silhouette_masks(
         self,
