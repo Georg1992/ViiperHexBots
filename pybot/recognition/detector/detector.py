@@ -72,7 +72,7 @@ REQUIRED_CONFIG_KEYS = {
 # Geometry pre-gate: heat-CC area must sit in [min_area_ratio, max_area_ratio]
 # vs sprite area; aspect vs descriptor in
 # [_GEOMETRY_ASPECT_MIN_RATIO, _GEOMETRY_ASPECT_MAX_RATIO].
-_GEOMETRY_AREA_SIL_FRAC_DIVISOR = 4.0
+_GEOMETRY_AREA_SIL_FRAC_DIVISOR = 5.0
 _GEOMETRY_AREA_MAX_RATIO = 2.0
 # Extract pre-shrink band floor still needs a universal guard; the runtime
 # gate uses the descriptor's per-mob min_aspect_ratio / max_aspect_ratio
@@ -574,8 +574,8 @@ class MobDetector:
         """Mean stable silhouette occupancy across all facings, cached per descriptor.
 
         Cached on the descriptor object to avoid recomputing stable_bits per
-        blob.  ``_GEOMETRY_AREA_SIL_FRAC_DIVISOR = 4.0`` already provides a
-        75 % margin below the representative sprite footprint, so per-mask
+        blob.  ``_GEOMETRY_AREA_SIL_FRAC_DIVISOR = 5.0`` already provides an
+        80 % margin below the representative sprite footprint, so per-mask
         minimums are unnecessary leniency.
         """
         cached = getattr(descriptor, "_min_area_ratio", None)
