@@ -1,6 +1,7 @@
 viiper-input.exe
 viiper-input.exe.new
 viiper-input.exe.bak
+config.ini
 logs/sessions/
 logs/debug_saves/
 logs/detect_debug/
