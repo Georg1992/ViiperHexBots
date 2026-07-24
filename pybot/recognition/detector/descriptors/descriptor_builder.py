@@ -1012,10 +1012,12 @@ class DescriptorBuilder:
         """Measure body_strong on opaque sprite pixels.
 
         The threshold is derived by applying the multiplier*median formula
-        (with diversity-aware cap) to the all-pixel measurement. The runtime
-        color-structure gate measures body_strong on foreground pixels only
-        to eliminate crop-boundary waffling.
+        (with diversity-aware cap) to the opaque-pixel measurement. The runtime
+        color-structure gate measures body_strong on the full descriptor-sized
+        crop at native resolution (same BGR distance test) so the floor is
+        comparable — not on a downscaled diversity body map.
         """
+
         if not body_clusters:
             raise RuntimeError("no body clusters to measure body_strong floor")
         _body_strong_sim = BODY_STRONG_SIMILARITY

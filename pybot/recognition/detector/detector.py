@@ -70,13 +70,21 @@ REQUIRED_CONFIG_KEYS = {
 }
 
 # Geometry pre-gate: heat-CC area must sit in [min_area_ratio, max_area_ratio]
-# vs sprite area; aspect vs descriptor in
-# [_GEOMETRY_ASPECT_MIN_RATIO, _GEOMETRY_ASPECT_MAX_RATIO].
+# vs sprite area. Aspect uses per-mob descriptor.min/max_aspect_ratio
+# (build-time sprite tight-bbox band, floored by MIN_ASPECT_FLOOR).
 _GEOMETRY_AREA_SIL_FRAC_DIVISOR = 5.0
 _GEOMETRY_AREA_MAX_RATIO = 2.0
-# Extract pre-shrink band floor still needs a universal guard; the runtime
-# gate uses the descriptor's per-mob min_aspect_ratio / max_aspect_ratio
-# (measured from sprite frames with a 45 % margin at build time).
+# Heat CCs smaller than this multiple of the geometry min-area floor get the
+# conservative body path (descriptor-sized crop) and a relative-heat check.
+# 2× min_area = 2/5 of stable silhouette fraction — still below a full body
+# footprint, where heat-crop body density is no longer inflated by tiny crops.
+_BODY_STRONG_SMALL_HEAT_AREA_MIN_AREA_MULT = 2.0
+# Small-CC relative heat vs frame peak must clear this multiple of
+# peakRelativeThreshold (blob-formation floor). 1.5× is a mild lift above the
+# weakest admissible blob so gray-world fringe peaks (e.g. 0.28 of peak) drop
+# while multi-mob secondary TPs (~0.47+) remain.
+_SMALL_HEAT_RELATIVE_PEAK_MULT = 1.5
+
 
 # Very small sprites at 2× downscale lose too much signal — GaussianBlur on
 # a sub-24px field smears heat into gate-rejected speckles. Below this work
@@ -307,6 +315,9 @@ class MobDetector:
         dedup_radius = int(self.config["trackDedupRadiusPx"])
         known = list(known_tracks or ())
         blob_to_known = self._mark_known_blobs(blobs, known, dedup_radius)
+        heatmap_peak = float(sprite_heatmap.max()) if sprite_heatmap.size else 0.0
+        peak_rel = float(self.config["peakRelativeThreshold"])
+        small_rel_heat = _SMALL_HEAT_RELATIVE_PEAK_MULT * peak_rel
 
         # --- gates → silhouette (known tracks skip pre-gates) ----------
         candidates: list[DetectionCandidate] = []
@@ -331,6 +342,18 @@ class MobDetector:
                     ))
                     continue
 
+                # Tiny heat CCs: require relative heat vs frame peak (config-derived).
+                if self._is_small_heat_cc(comp_bbox, descriptor):
+                    if heatmap_peak <= 0.0 or (float(heat_score) / heatmap_peak) < small_rel_heat:
+                        silhouette_checks.append(SilhouetteCheck(
+                            center_x=cx,
+                            center_y=cy,
+                            heat_score=heat_score,
+                            passed=False,
+                            similarity=0.0,
+                        ))
+                        continue
+
                 if not self._passes_color_structure_gate(
                     frame_bgr, descriptor, comp_bbox,
                 ):
@@ -342,6 +365,7 @@ class MobDetector:
                         similarity=0.0,
                     ))
                     continue
+
 
             (
                 passed,
@@ -482,6 +506,36 @@ class MobDetector:
     #  Geometry pre-gate + silhouette gate
     # ------------------------------------------------------------------
 
+    def _heat_area_ratio(
+        self,
+        comp_bbox: tuple[int, int, int, int],
+        descriptor: MobDescriptor,
+    ) -> float:
+        """Heat-CC area / descriptor sprite area."""
+        _x, _y, bw, bh = comp_bbox
+        desc_area = max(float(descriptor.avg_width) * float(descriptor.avg_height), 1.0)
+        return (float(max(int(bw), 0)) * float(max(int(bh), 0))) / desc_area
+
+    def _small_heat_area_cutoff(self, descriptor: MobDescriptor) -> float:
+        """Area ratio below which heat-CC body density is treated as unreliable.
+
+        ``2 × min_area_ratio`` = ``2/5`` of mean stable silhouette fraction —
+        derived from the same silhouette occupancy that sets the geometry floor.
+        """
+        return (
+            self._descriptor_min_area_ratio(descriptor)
+            * _BODY_STRONG_SMALL_HEAT_AREA_MIN_AREA_MULT
+        )
+
+    def _is_small_heat_cc(
+        self,
+        comp_bbox: tuple[int, int, int, int],
+        descriptor: MobDescriptor,
+    ) -> bool:
+        return self._heat_area_ratio(comp_bbox, descriptor) < self._small_heat_area_cutoff(
+            descriptor,
+        )
+
     def _passes_discovery_geometry_gate(
         self,
         comp_bbox: tuple[int, int, int, int],
@@ -492,9 +546,8 @@ class MobDetector:
         ``min_area_ratio = sil_frac / _GEOMETRY_AREA_SIL_FRAC_DIVISOR`` uses the
         descriptor's stable silhouette occupancy as a lower bound on heat-CC area
         vs sprite area. ``_GEOMETRY_AREA_MAX_RATIO`` caps terrain mega-blobs.
-        Aspect vs descriptor sprite aspect uses the per-mob band
-        ``descriptor.min_aspect_ratio`` / ``descriptor.max_aspect_ratio``
-        (measured from sprite frames at build time with a 45 % margin).
+        Aspect uses the per-mob band ``descriptor.min_aspect_ratio`` /
+        ``descriptor.max_aspect_ratio`` (sprite tight-bboxes at build time).
         """
         _x, _y, hw, hh = comp_bbox
         return self._passes_size_aspect_vs_descriptor(
@@ -515,6 +568,13 @@ class MobDetector:
         - enough crop pixels match required-group colors (coverage)
         - enough crop pixels strongly match mass body clusters
           (rejects obviously foreign palettes)
+
+        Group presence / second-share / coverage always use the heat-CC crop.
+        ``body_strong`` is full-resolution BGR only (never the downscaled
+        diversity body map).  Normal heat CCs use the heat crop.  Small heat
+        CCs (area < ``2 × descriptor min_area_ratio``) re-measure body on a
+        descriptor-sized window so a few matching pixels cannot clear the
+        per-mob floor (0WildRose_Gray).
 
         Skips when the descriptor has no required groups.
         """
@@ -540,24 +600,12 @@ class MobDetector:
         y1 = min(fh, y0 + max(0, int(bh)))
         if x1 <= x0 or y1 <= y0:
             return False
-        crop = frame_bgr[y0:y1, x0:x1]
-        # Only use cached body map when it belongs to the same descriptor
-        # to avoid cross-mob poisoning when detect() is called for
-        # different mobs on the same HeatmapDetector instance.
-        body_map = None
-        body_ds = 0
-        if self.heatmap_detector._last_body_descriptor_id == id(descriptor):
-            body_map = self.heatmap_detector._last_body_best
-            body_ds = self.heatmap_detector._last_body_downscale
+        heat_crop = frame_bgr[y0:y1, x0:x1]
         present, second_share, match_coverage, body_strong = required_groups_structure(
-            crop,
+            heat_crop,
             descriptor,
             float(descriptor.max_sprite_palette_distance),
             downscale=1,
-            body_best_full=body_map,
-            body_best_downscale=body_ds,
-            crop_x=x0,
-            crop_y=y0,
         )
         if min_groups > 0 and present < min_groups:
             return False
@@ -565,10 +613,38 @@ class MobDetector:
             return False
         if min_coverage > 0.0 and match_coverage < min_coverage:
             return False
-        if min_body_strong > 0.0 and body_strong < min_body_strong:
-            return False
+
+        if min_body_strong > 0.0:
+            if self._is_small_heat_cc(comp_bbox, descriptor):
+                # Tiny heat CC: body density on heat crop is inflated — use
+                # descriptor-sized full-res crop (same scale as build floor).
+                desc_w = max(1, int(round(descriptor.avg_width)))
+                desc_h = max(1, int(round(descriptor.avg_height)))
+                cc_cx = bx + bw // 2
+                cc_cy = by + bh // 2
+                bx0 = max(0, cc_cx - desc_w // 2)
+                by0 = max(0, cc_cy - desc_h // 2)
+                bx1 = min(fw, bx0 + desc_w)
+                by1 = min(fh, by0 + desc_h)
+                bx0 = max(0, bx1 - desc_w)
+                by0 = max(0, by1 - desc_h)
+                if bx1 <= bx0 or by1 <= by0:
+                    return False
+                body_crop = frame_bgr[by0:by1, bx0:bx1]
+                _p, _s, _c, body_strong = required_groups_structure(
+                    body_crop,
+                    descriptor,
+                    float(descriptor.max_sprite_palette_distance),
+                    downscale=1,
+                )
+            if body_strong < min_body_strong:
+                return False
 
         return True
+
+
+
+
 
     def _descriptor_min_area_ratio(self, descriptor: MobDescriptor) -> float:
         """Mean stable silhouette occupancy across all facings, cached per descriptor.
@@ -602,7 +678,14 @@ class MobDetector:
         require_min_area: bool,
         enforce_max_area: bool = True,
     ) -> bool:
-        """Descriptor-relative area + aspect band shared by heat and extract."""
+        """Descriptor-relative area + aspect band shared by heat and extract.
+
+        Aspect is normalized by the mean sprite aspect (``(w/h) / (desc_w/desc_h)``)
+        then compared to ``min_aspect_ratio`` / ``max_aspect_ratio``. Those bounds
+        are measured from sprite tight-bboxes at build time (with margin) and
+        floored by ``MIN_ASPECT_FLOOR`` so the band is expressed in the same
+        normalized units the gate uses.
+        """
         if width < 1 or height < 1:
             return False
         desc_w = float(descriptor.avg_width)
@@ -620,6 +703,8 @@ class MobDetector:
         if aspect_ratio < descriptor.min_aspect_ratio or aspect_ratio > descriptor.max_aspect_ratio:
             return False
         return True
+
+
 
     def _noisy_extraction_signal(
         self,

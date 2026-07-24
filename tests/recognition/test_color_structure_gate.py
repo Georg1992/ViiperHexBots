@@ -76,6 +76,24 @@ class ColorStructureGateTests(unittest.TestCase):
             )
         )
 
+    def test_zero_wild_rose_gray_rejects_impostor(self) -> None:
+        """0WildRose_Gray: tiny heat CC must not clear body_strong via cache/inflation."""
+        path = (
+            PROJECT_ROOT
+            / "pybot"
+            / "recognition"
+            / "test-fixtures"
+            / "game-screenshots"
+            / "WildRose"
+            / "0WildRose_Gray.png"
+        )
+        frame = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        self.assertIsNotNone(frame)
+        frame = fixture_search_frame(frame)
+        result = self.detector.detect(frame, "wild_rose")
+        self.assertEqual(len(result.accepted), 0)
+
+
     def test_poring_crop_fails_body_strong(self) -> None:
         # Locate Poring on the base palette heatmap (body diversity may press
         # the final heat peak away). Foreign pink blob has no Wild Rose body.

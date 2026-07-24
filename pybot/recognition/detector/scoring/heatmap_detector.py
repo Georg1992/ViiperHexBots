@@ -230,10 +230,16 @@ def required_groups_structure(
 
     Returns ``(present_count, second_share, match_coverage, body_strong)``.
 
-    When ``body_best_full`` is provided (precomputed body-cluster similarity
-    map at ``body_best_downscale`` resolution), ``body_strong`` is sampled from
-    it at ``(crop_x, crop_y)`` in O(1) instead of recomputed on the crop.
+    ``body_strong`` is always measured on the full-resolution *crop_bgr*.
+    A downscaled ``body_best_full`` cache must not be used here: nearest-neighbour
+    work-res sampling inflates the strong-pixel fraction (one hot work pixel
+    covers a 2×2 full-res block) and lets gray-world impostors clear the
+    per-mob floor (see 0WildRose_Gray).
+
+    ``body_best_full`` / ``body_best_downscale`` / ``crop_x`` / ``crop_y`` are
+    accepted for call-site compatibility but ignored for ``body_strong``.
     """
+    del body_best_full, body_best_downscale, crop_x, crop_y
     empty = (0, 0.0, 0.0, 0.0)
     groups = list(descriptor.match_palette_required_groups)
     if (
@@ -273,27 +279,17 @@ def required_groups_structure(
     any_match = matched.any(axis=1)
     match_coverage = float(any_match.mean()) if any_match.size else 0.0
 
-    # Body_strong: prefer O(1) sampling from precomputed full-frame body map.
-    dscale = max(body_best_downscale, 1)
-    if body_best_full is not None and body_best_full.size > 0:
-        ch, cw = crop_bgr.shape[:2]
-        bh, bw = body_best_full.shape[:2]
-        y0_sc = max(0, min(bh - 1, crop_y // dscale))
-        y1_sc = max(y0_sc + 1, min(bh, (crop_y + ch + dscale - 1) // dscale))
-        x0_sc = max(0, min(bw - 1, crop_x // dscale))
-        x1_sc = max(x0_sc + 1, min(bw, (crop_x + cw + dscale - 1) // dscale))
-        body_patch = body_best_full[y0_sc:y1_sc, x0_sc:x1_sc]
-        body_strong = float((body_patch >= _BODY_STRONG_SIM).mean()) if body_patch.size else 0.0
+    # Full-resolution crop measurement — matches descriptor build calibration
+    # (opaque sprite pixels at native scale).
+    body_clusters = mass_body_clusters(descriptor)
+    if body_clusters:
+        body_best = np.stack(
+            [_cluster_match(crop_bgr.astype(np.float32), cluster) for cluster in body_clusters],
+            axis=2,
+        ).max(axis=2)
+        body_strong = float((body_best >= _BODY_STRONG_SIM).mean())
     else:
-        body_clusters = mass_body_clusters(descriptor)
-        if body_clusters:
-            body_best = np.stack(
-                [_cluster_match(crop_bgr.astype(np.float32), cluster) for cluster in body_clusters],
-                axis=2,
-            ).max(axis=2)
-            body_strong = float((body_best >= _BODY_STRONG_SIM).mean())
-        else:
-            body_strong = 0.0
+        body_strong = 0.0
 
     if int(any_match.sum()) <= 0:
         return present_count, 0.0, match_coverage, body_strong
@@ -303,6 +299,7 @@ def required_groups_structure(
         return present_count, 0.0, match_coverage, body_strong
     ordered = np.sort(shares)[::-1]
     return present_count, float(ordered[1]), match_coverage, body_strong
+
 
 
 def apply_body_cluster_diversity(

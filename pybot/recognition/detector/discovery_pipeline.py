@@ -175,8 +175,9 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
         title="Geometry pre-gate",
         items=(
             "new peaks only (known-track blobs skip)",
-            "heat area in [sil_frac/4, 2.0] vs descriptor sprite area",
+            "heat area in [sil_frac/5, 2.0] vs descriptor sprite area",
             "heat aspect vs per-mob descriptor.min_aspect_ratio / max_aspect_ratio",
+            "small heat CC: peak-relative heat >= 1.5 * peakRelativeThreshold",
         ),
         sources=(
             SourceCheck(
@@ -191,9 +192,17 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             ),
             SourceCheck(
                 _detect,
-                ("known_hit is None", "_passes_discovery_geometry_gate"),
+                (
+                    "known_hit is None",
+                    "_passes_discovery_geometry_gate",
+                    "_is_small_heat_cc",
+                    "peakRelativeThreshold",
+                    "_SMALL_HEAT_RELATIVE_PEAK_MULT",
+                ),
             ),
         ),
+
+
     ),
     PipelineStage(
         title="Color structure pre-gate",
@@ -206,7 +215,8 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             "reject when present < minRequiredPaletteGroups (fail-closed)",
             "reject when second_share < minSecondPaletteGroupShare (fail-closed)",
             "reject when coverage < descriptor.min_required_palette_coverage (fail-closed)",
-            "reject when body_strong < descriptor.min_body_cluster_strong (fail-closed; soft 0.01 floor when diversity off)",
+            "reject when body_strong < descriptor.min_body_cluster_strong (fail-closed; full-res; desc-sized when heat area < 2*min_area_ratio)",
+
             "skip gate when descriptor has no required groups",
         ),
         sources=(
