@@ -116,6 +116,12 @@ class HuntTracks:
     def get_area_clear_candidate(self, now_tick: int | None = None) -> AreaClearStatus:
         with self._lock:
             alive = sum(1 for track in self._tracks if is_alive(track))
+            if alive == 0:
+                # No tracks left — reset ID counter to prevent unbounded
+                # growth across many create/remove cycles.
+                self._tracks = []
+                self._next_id = 1
+                self._last_reconcile_summary = None
         return AreaClearStatus(
             clear=alive == 0,
             reason="" if alive == 0 else "alive_tracks",
