@@ -129,6 +129,7 @@ def track_local(
         detector, frame_bgr, descriptor, cx, cy, scale,
         search_radius_px=peak_radius,
         suppress_positions=suppress_positions,
+        lost_count=lost_count,
     )
     if peak is not None:
         _peak_x, _peak_y, _heat_score, peak_sim, peak_bbox = peak
@@ -184,6 +185,7 @@ def _find_local_peak(
     *,
     search_radius_px: int,
     suppress_positions: list[tuple[int, int]] | None = None,
+    lost_count: int = 0,
 ) -> tuple[int, int, float] | None:
     frame_h, frame_w = frame_bgr.shape[:2]
     margin_x = int(round(descriptor.avg_width * scale * 0.6))
@@ -204,8 +206,12 @@ def _find_local_peak(
         return None
 
     # Suppress heat near other tracks so each track grabs its own mob.
-    if suppress_positions:
-        suppress_radius = int(detector.config["trackDedupRadiusPx"]) // 2
+    # Active tracks (lost_count == 0): suppress aggressively — search radius / 2
+    # prevents locking onto a neighbor mob.
+    # Lost tracks (lost_count > 0): no suppression — locking onto ANY mob is
+    # better than remaining lost (discovery will sort out identity later).
+    if suppress_positions and lost_count == 0:
+        suppress_radius = max(8, search_radius_px // 2)
         for sx, sy in suppress_positions:
             lsx = sx - x0
             lsy = sy - y0
