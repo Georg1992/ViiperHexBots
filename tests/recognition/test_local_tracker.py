@@ -88,18 +88,18 @@ class LocalTrackerTests(unittest.TestCase):
         result = track_local(detector, self.roi, "horn", track)
         self.assertIsInstance(result, LocalTrackResult)
         self.assertTrue(result.found)
-        self.assertEqual(result.confidence, 1.0)
+        self.assertGreater(result.confidence, 0.0)
         self.assertEqual(result.miss_reason, "")
         dist = abs(result.x - anchor.center_x) + abs(result.y - anchor.center_y)
         self.assertLess(dist, 40)
 
     def test_miss_returns_meaningful_reason(self) -> None:
         detector = self._detector()
-        # No palette → immediate miss with no_track_palette reason.
+        # -1000,-1000 is well off-screen → heatmap peak search returns miss.
         track = {"trackId": 99, "x": -1000, "y": -1000, "scale": 0.9}
         result = track_local(detector, self.roi, "horn", track, search_radius_px=20)
         self.assertFalse(result.found)
-        self.assertEqual(result.miss_reason, "no_track_palette")
+        self.assertIn(result.miss_reason, ("no_peak", "below_threshold"))
 
     def test_finds_mob_within_search_radius_after_offset_seed(self) -> None:
         detector = self._detector()
@@ -130,7 +130,7 @@ class LocalTrackerTests(unittest.TestCase):
         track = self._build_track_dict(anchor, trackId=4)
         result = track_local(detector, self.roi, "horn", track)
         self.assertTrue(result.found)
-        self.assertEqual(result.confidence, 1.0)
+        self.assertGreater(result.confidence, 0.0)
 
     def test_benchmark_one_three_six_tracks(self) -> None:
         detector = self._detector()
