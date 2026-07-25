@@ -282,16 +282,17 @@ class HuntTracks:
             remove_ids: set[int] = set()
 
             # Factor 1: Tracks that left the hunt ROI
-            remove_ids.update(
-                self._evaluate_out_of_range_removal(
-                    unmatched_ids, hunt_roi, track_positions,
-                )
+            out_of_range = self._evaluate_out_of_range_removal(
+                unmatched_ids, hunt_roi, track_positions,
             )
+            remove_ids.update(out_of_range)
 
             # Factor 2: Tracks missed by discovery 2+ scans in a row
-            # (also increments miss_count and returns first-miss tracks)
+            # Only the remaining in-range tracks are evaluated — out-of-range
+            # tracks were already handled by Factor 1.
+            remaining_ids = unmatched_ids - out_of_range
             miss_remove, first_miss_ids = self._evaluate_discovery_miss_removal(
-                unmatched_ids, hunt_roi, track_positions,
+                remaining_ids,
             )
             remove_ids.update(miss_remove)
 
@@ -341,12 +342,12 @@ class HuntTracks:
     def _evaluate_discovery_miss_removal(
         self,
         unmatched_ids: set[int],
-        hunt_roi: HuntRoi | None,
-        track_positions: list[tuple[int, int, int]] | list[tuple[int, int, int, float]],
     ) -> tuple[set[int], list[int]]:
         """Factor 2: Remove tracks missed by 2+ consecutive discovery scans.
 
-        Side-effect: increments ``discovery_miss_count`` for in-range tracks.
+        Only receives in-range tracks (out-of-range handled by Factor 1).
+
+        Side-effect: increments ``discovery_miss_count``.
 
         Returns ``(remove_ids, first_miss_ids)`` where:
         - ``remove_ids``: tracks with miss_count >= 2 (to be removed).
@@ -354,23 +355,7 @@ class HuntTracks:
         """
         remove_ids: set[int] = set()
         first_miss_ids: list[int] = []
-
-        # Determine which unmatched tracks are still in-range (skip already
-        # removed by out-of-range factor).
-        in_range_unmatched: set[int] = set()
         for track_id in unmatched_ids:
-            if hunt_roi is not None:
-                tx, ty = self._capture_position(track_id, track_positions)
-                if tx is None:
-                    continue
-                if not (
-                    hunt_roi.x <= tx < hunt_roi.x + hunt_roi.w
-                    and hunt_roi.y <= ty < hunt_roi.y + hunt_roi.h
-                ):
-                    continue  # already handled by out-of-range factor
-            in_range_unmatched.add(track_id)
-
-        for track_id in in_range_unmatched:
             track = self._get_track_by_id_locked(track_id)
             if track is None:
                 continue
@@ -379,7 +364,6 @@ class HuntTracks:
                 remove_ids.add(track_id)
             else:
                 first_miss_ids.append(track_id)
-
         return remove_ids, first_miss_ids
 
     def apply_tracking(
