@@ -17,10 +17,7 @@ from pybot.recognition.rules import (
     apply_track_observation,
     clear_discovery_observation,
     has_discovery_observation,
-    is_joint_absent_confirmed,
-    joint_absent_confirm_ms,
     is_alive,
-    mark_discovery_absent,
     movement_thresholds,
 )
 
@@ -150,6 +147,19 @@ class HuntTracks:
                     return track
             return None
 
+    def set_track_palette(
+        self,
+        track_id: int,
+        palette: list[tuple[int, int, int]],
+    ) -> bool:
+        """Store exact BGR palette for a track (sampled from frame at creation)."""
+        with self._lock:
+            track = self._get_track_by_id_locked(track_id)
+            if track is None:
+                return False
+            track.track_palette_bgr = list(palette)
+            return True
+
     def snapshot_for_track(self, track_id: int, now_tick: int | None = None) -> MobTrackSnapshot | None:
         with self._lock:
             track = self._get_track_by_id_locked(track_id)
@@ -229,14 +239,14 @@ class HuntTracks:
         area_epoch: int | None = None,
         hunt_roi: HuntRoi | None = None,
     ) -> ReconcileSummary:
-        """Discovery step: create new tracks; notify on unmatched tracks.
+        """Discovery step: create new tracks; remove out-of-range; mark absent.
 
-        Unmatched tracks are marked ``discovery_absent`` so tracking can drop
-        them after a sustained local miss (``trackJointAbsentConfirmMs``).
-        Discovery never deletes tracks — tracking owns removal.
+        Tracks whose capture-time position falls outside the hunt ROI are
+        removed immediately. In-range unmatched tracks are marked
+        ``discovery_absent`` so tracking can drop them after a sustained
+        local miss (``trackJointAbsentConfirmMs``).
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
-        del hunt_roi
         with self._lock:
             if area_epoch is not None and area_epoch != self._area_epoch:
                 empty = ReconcileSummary(
@@ -273,14 +283,59 @@ class HuntTracks:
                 existing_track_positions=track_positions,
             )
             unmatched_ids = set(summary.removed_ids or [])
-            for track_id in unmatched_ids:
+
+            # Split unmatched tracks:
+            # - Outside hunt ROI → removed immediately
+            # - Inside ROI, miss_count >= 2 (2nd miss) → removed immediately
+            # - Inside ROI, miss_count = 0 (1st miss) → mark discovery_absent
+            out_of_range_ids: list[int] = []
+            two_miss_ids: list[int] = []
+            first_miss_ids: list[int] = []
+            if hunt_roi is not None:
+                for track_id in unmatched_ids:
+                    tx, ty = self._capture_position(
+                        track_id, track_positions,
+                    )
+                    if tx is None:
+                        continue
+                    in_roi = (
+                        hunt_roi.x <= tx < hunt_roi.x + hunt_roi.w
+                        and hunt_roi.y <= ty < hunt_roi.y + hunt_roi.h
+                    )
+                    if not in_roi:
+                        out_of_range_ids.append(track_id)
+                        continue
+                    track = self._get_track_by_id_locked(track_id)
+                    if track is None:
+                        continue
+                    track.discovery_miss_count += 1
+                    if track.discovery_miss_count >= 2:
+                        two_miss_ids.append(track_id)
+                    else:
+                        first_miss_ids.append(track_id)
+            else:
+                for track_id in unmatched_ids:
+                    track = self._get_track_by_id_locked(track_id)
+                    if track is None:
+                        continue
+                    track.discovery_miss_count += 1
+                    if track.discovery_miss_count >= 2:
+                        two_miss_ids.append(track_id)
+                    else:
+                        first_miss_ids.append(track_id)
+
+            remove_ids = set(out_of_range_ids + two_miss_ids)
+            if remove_ids:
+                self._remove_tracks_locked(remove_ids)
+
+            for track_id in first_miss_ids:
                 track = self._get_track_by_id_locked(track_id)
                 if track is None:
                     continue
-                mark_discovery_absent(track, now_tick=tick)
                 clear_discovery_observation(track)
-            summary.removed_ids = []
-            summary.removed_count = 0
+
+            summary.removed_ids = list(out_of_range_ids + two_miss_ids)
+            summary.removed_count = len(remove_ids)
             summary.tracks_after = len(self._tracks)
             summary.alive_after = sum(1 for t in self._tracks if is_alive(t))
             self._last_reconcile_summary = summary
@@ -293,13 +348,17 @@ class HuntTracks:
         now_tick: int | None = None,
         area_epoch: int | None = None,
     ) -> list[int]:
-        """Refresh coordinates from LocalTracker results (pure tracking only).
+        """Refresh coordinates from LocalTracker results.
 
-        This method never removes tracks. Cleanup is handled by
-        ``apply_tracking_cleanup()``.
+        Detects palette decay (exact-match count dropping far below peak on
+        a stationary mob) and removes the track immediately — the corpse
+        is no longer showing the mob's colors.
+
+        Returns track IDs that were not found (missed).
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
         missed_ids: list[int] = []
+        death_ids: list[int] = []
         with self._lock:
             if area_epoch is not None and area_epoch != self._area_epoch:
                 return []
@@ -309,6 +368,22 @@ class HuntTracks:
                     continue
 
                 if result.found:
+                    # Palette decay check: if match count is far below the
+                    # peak AND the mob isn't moving → corpse, remove now.
+                    match_count = result.match_count
+                    if (
+                        match_count > 0
+                        and not track.moving
+                        and track.peak_match_count > 5
+                        and match_count < max(5, track.peak_match_count * 0.2)
+                    ):
+                        death_ids.append(result.track_id)
+                        continue
+
+                    # Update peak match count
+                    if match_count > track.peak_match_count:
+                        track.peak_match_count = match_count
+
                     move_px, stop_px = movement_thresholds(self._detector_config())
                     apply_movement_observation(
                         track,
@@ -339,37 +414,12 @@ class HuntTracks:
                 )
                 track.moving = False
                 missed_ids.append(result.track_id)
+
+            # Remove tracks killed by palette decay
+            if death_ids:
+                self._remove_tracks_locked(set(death_ids))
+
             return missed_ids
-
-    def apply_tracking_cleanup(
-        self,
-        *,
-        now_tick: int | None = None,
-        area_epoch: int | None = None,
-    ) -> tuple[list[int], list[int]]:
-        """Remove tracks that are jointly absent.
-
-        Returns ``(lost_ids, unreachable_ids)`` — unreachable_ids always empty.
-        """
-        tick = now_tick if now_tick is not None else monotonic_ms()
-        with self._lock:
-            if area_epoch is not None and area_epoch != self._area_epoch:
-                return [], []
-            joint_absent_ids: list[int] = []
-            for track in self._tracks:
-                if not is_alive(track):
-                    continue
-                if not track.discovery_absent:
-                    continue
-                confirm_ms = joint_absent_confirm_ms(self._detector_config())
-                if is_joint_absent_confirmed(
-                    track, now_tick=tick, confirm_ms=confirm_ms,
-                ):
-                    joint_absent_ids.append(track.id)
-
-            if joint_absent_ids:
-                self._remove_tracks_locked(set(joint_absent_ids))
-            return joint_absent_ids, []
 
     @property
     def last_reconcile_summary(self) -> ReconcileSummary | None:
@@ -426,6 +476,17 @@ class HuntTracks:
         if not remove_ids:
             return
         self._tracks = [track for track in self._tracks if track.id not in remove_ids]
+
+    @staticmethod
+    def _capture_position(
+        track_id: int,
+        track_positions: list[tuple[int, int, int]] | list[tuple[int, int, int, float]],
+    ) -> tuple[int | None, int | None]:
+        """Get capture-time (x, y) for a track from the snapshot positions."""
+        for entry in track_positions:
+            if entry[0] == track_id:
+                return int(entry[1]), int(entry[2])
+        return None, None
 
     def _detector_config(self) -> dict:
         return self._detector_config_ref if self._detector_config_ref is not None else load_detector_config()

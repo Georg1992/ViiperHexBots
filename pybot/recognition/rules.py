@@ -3,28 +3,18 @@
 Used by tests to lock the pipeline contract.
 
 Ownership:
-- **Discovery** creates tracks for new mobs, marks unmatched tracks as
-  ``discovery_absent``, on match publishes a soft position prior
-  (``discovery_obs_*``). It never overwrites authoritative ``x``/``y`` and
-  never deletes tracks. Tracking wakes discovery on local miss so priors /
-  absence can be refreshed promptly.
-- **Tracking** is the sole remover of tracks. The death worker is the sole
-  death detector (opacity fade while stationary, death silhouette that beats
-  living, and SP no-spend after attack). Tracking owns authoritative
-  position and movement, consumes discovery priors on miss, keeps searching
-  while local follow fails, and drops on death confirmation, sustained joint
-  absence (discovery_absent + local miss for ``trackJointAbsentConfirmMs``),
-  or unreachable.
-
+- **Discovery** creates tracks for new mobs, publishes soft position priors
+  on match (``discovery_obs_*``). It never overwrites authoritative ``x``/``y``.
+  Tracks unmatched for 2 consecutive scans are removed as dead/out-of-range.
+- **Tracking** follows tracks every frame, reports hits/misses. Tracking also
+  re-scores missed tracks via the silhouette gate to confirm or remove.
 - **Attack** records attack_count / last_attack_tick only; it reads position
   snapshots for clicks but must not mutate tracking fields or remove tracks.
-- Rediscovery ghosts (placed by tracking on death) block immediate recreates
-  at corpse sites.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 # Same-object dedup radius for discovery vs existing tracks. Clustering of raw
@@ -86,24 +76,26 @@ class MobTrack:
     vel_y: float = 0.0
     attack_anchor_x: int = 0
     attack_anchor_y: int = 0
-    # Set by discovery when this track's coords were unmatched on a scan.
-    # Tracking removes the track when it also misses (joint absence).
-    discovery_absent: bool = False
-    # Monotonic tick when discovery_absent became True; 0 = not absent.
-    # Joint-absence confirm is measured from this tick (not created_tick), so a
-    # brand-new track cannot be dropped before discovery has actually missed it.
-    discovery_absent_tick: int = 0
+    # Consecutive discovery scans that failed to see this track (unmatched).
+    # At >= 2 the track is removed immediately — it failed discovery gates
+    # twice in a row, meaning it's dead or gone.
+    discovery_miss_count: int = 0
 
     # Soft position prior from the latest discovery match (0 tick = none).
     # Tracking searches/snaps from these coords; authoritative x/y stay tracking-owned.
     discovery_obs_x: int = 0
     discovery_obs_y: int = 0
     discovery_obs_tick: int = 0
-    # Discovery helper: death silhouette won over living. Tracking removes.
-    discovery_death: bool = False
-    # Screen coords of the death site at confirmation (ghost / anti-rediscovery).
-    discovery_death_x: int = 0
-    discovery_death_y: int = 0
+
+    # Exact BGR palette sampled from the frame when this track was first created.
+    # Used by the local tracker for exact-match pixel following — no distance
+    # threshold, no descriptor palette. Empty list until first discovery sample.
+    track_palette_bgr: list[tuple[int, int, int]] = field(default_factory=list)
+
+    # Peak exact-palette match count observed by tracking so far.
+    # When match_count drops far below peak AND the mob is stationary,
+    # the track is removed immediately — palette decay = death.
+    peak_match_count: int = 0
 
     @classmethod
     def from_discovery(
@@ -256,8 +248,7 @@ def apply_discovery_observation(
     track.discovery_obs_y = y
     track.discovery_obs_tick = now_tick
     track.last_discovery_tick = now_tick
-    track.discovery_absent = False
-    track.discovery_absent_tick = 0
+    track.discovery_miss_count = 0
 
 
 def clear_discovery_observation(track: MobTrack) -> None:
@@ -286,8 +277,7 @@ def apply_discovery_reanchor(
     track.moving = False
     track.vel_x = 0.0
     track.vel_y = 0.0
-    track.discovery_absent = False
-    track.discovery_absent_tick = 0
+    track.discovery_miss_count = 0
     return True
 
 
@@ -312,8 +302,7 @@ def apply_track_observation(
         track.last_found_tick = now_tick
         track.lost_count = 0
         clear_discovery_observation(track)
-        track.discovery_absent = False
-        track.discovery_absent_tick = 0
+        track.discovery_miss_count = 0
         if confidence > 0:
             track.confidence = confidence
         return
@@ -330,18 +319,6 @@ def apply_track_observation(
         track.vel_y *= 0.5
     track.lost_count += 1
     track.updated_tick = now_tick
-
-
-def apply_opacity_observation(
-    track: MobTrack,
-    *,
-    opacity_baseline: float,
-    opacity_baseline_samples: int,
-    opacity_decay_streak: int,
-) -> None:
-    """Deprecated: death detection removed. No-op kept for API compatibility."""
-    # No-op — death detection pipeline removed.
-    pass
 
 
 def evaluate_track_moving(
@@ -365,38 +342,6 @@ def movement_thresholds(config: dict) -> tuple[int, int]:
         int(config["movementMoveThresholdPx"]),
         int(config["movementStopThresholdPx"]),
     )
-
-
-def joint_absent_confirm_ms(config: dict) -> int:
-    """Wall-clock duration discovery_absent + local miss must last to drop."""
-    return int(config["trackJointAbsentConfirmMs"])
-
-
-def mark_discovery_absent(track: MobTrack, *, now_tick: int) -> None:
-    """Discovery unmatched this scan — start joint-absence clock once."""
-    if not track.discovery_absent:
-        track.discovery_absent_tick = now_tick
-    track.discovery_absent = True
-
-
-def is_joint_absent_confirmed(
-    track: MobTrack,
-    *,
-    now_tick: int,
-    confirm_ms: int,
-) -> bool:
-    """True when discovery has marked absent long enough and local follow misses.
-
-    Clock starts when discovery first set ``discovery_absent``, not at track
-    creation — so a newly discovered mob cannot be dropped before discovery
-    has actually failed to re-see it.
-    """
-    if not track.discovery_absent:
-        return False
-    since = track.discovery_absent_tick if track.discovery_absent_tick > 0 else 0
-    if since <= 0:
-        return False
-    return (now_tick - since) >= confirm_ms
 
 
 def apply_movement_observation(

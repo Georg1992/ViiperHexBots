@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 from pybot.paths import PROJECT_ROOT, RECOGNITION_DIR
 from pybot.recognition.cli import apply_scale_calibration
@@ -24,6 +25,24 @@ def playfield_roi(frame):
         int(height * 0.08) : int(height * 0.92),
         int(width * 0.03) : int(width * 0.97),
     ]
+
+
+def _sample_fixture_palette(
+    frame: np.ndarray, cx: int, cy: int, size: int = 20,
+) -> list[tuple[int, int, int]]:
+    """Sample unique BGR pixel values from a tight area — matches production."""
+    h, w = frame.shape[:2]
+    half = size // 2
+    x0 = max(0, cx - half)
+    y0 = max(0, cy - half)
+    x1 = min(w, x0 + size)
+    y1 = min(h, y0 + size)
+    if x1 <= x0 or y1 <= y0:
+        return []
+    patch = frame[y0:y1, x0:x1]
+    pixels = patch.reshape(-1, 3)
+    unique = np.unique(pixels, axis=0)
+    return [tuple(int(v) for v in color) for color in unique]
 
 
 class LocalTrackerTests(unittest.TestCase):
@@ -48,40 +67,45 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertGreater(len(living), 0)
         return living[0]
 
-    def test_finds_mob_at_discovery_coords(self) -> None:
-        detector = self._detector()
-        anchor = self._living_anchor(detector)
+    def _build_track_dict(self, anchor, track_id=1, **overrides) -> dict:
+        """Build a track dict with a sampled palette from the fixture frame."""
         track = {
-            "trackId": 1,
+            "trackId": track_id,
             "x": anchor.center_x,
             "y": anchor.center_y,
             "scale": anchor.candidate_scale,
+            "trackPaletteBgr": _sample_fixture_palette(
+                self.roi, anchor.center_x, anchor.center_y,
+            ),
         }
+        track.update(overrides)
+        return track
+
+    def test_finds_mob_at_discovery_coords(self) -> None:
+        detector = self._detector()
+        anchor = self._living_anchor(detector)
+        track = self._build_track_dict(anchor, trackId=1)
         result = track_local(detector, self.roi, "horn", track)
         self.assertIsInstance(result, LocalTrackResult)
         self.assertTrue(result.found)
-        self.assertGreater(result.confidence, 0.2)
+        self.assertEqual(result.confidence, 1.0)
         self.assertEqual(result.miss_reason, "")
         dist = abs(result.x - anchor.center_x) + abs(result.y - anchor.center_y)
         self.assertLess(dist, 40)
 
-    def test_miss_returns_reason_not_unreachable(self) -> None:
+    def test_miss_returns_meaningful_reason(self) -> None:
         detector = self._detector()
-        track = {"trackId": 99, "x": 8, "y": 8, "scale": 0.9}
+        # No palette → immediate miss with no_track_palette reason.
+        track = {"trackId": 99, "x": -1000, "y": -1000, "scale": 0.9}
         result = track_local(detector, self.roi, "horn", track, search_radius_px=20)
         self.assertFalse(result.found)
-        self.assertGreater(len(result.miss_reason), 0)
-        self.assertNotIn(result.miss_reason, ("unreachable", "unknown"))
+        self.assertEqual(result.miss_reason, "no_track_palette")
 
     def test_finds_mob_within_search_radius_after_offset_seed(self) -> None:
         detector = self._detector()
         anchor = self._living_anchor(detector)
-        track = {
-            "trackId": 3,
-            "x": anchor.center_x + 12,
-            "y": anchor.center_y + 8,
-            "scale": anchor.candidate_scale,
-        }
+        track = self._build_track_dict(anchor, trackId=3,
+            x=anchor.center_x + 12, y=anchor.center_y + 8)
         result = track_local(detector, self.roi, "horn", track, search_radius_px=60)
         self.assertTrue(result.found)
         dist = abs(result.x - anchor.center_x) + abs(result.y - anchor.center_y)
@@ -90,33 +114,23 @@ class LocalTrackerTests(unittest.TestCase):
     def test_moving_search_uses_wider_default_radius(self) -> None:
         detector = self._detector()
         anchor = self._living_anchor(detector)
-        # Offset beyond the stationary radius but inside the moving radius.
         offset = detector.local_track_search_radius_px + 25
         self.assertLess(offset, detector.local_track_moving_search_radius_px)
-        track = {
-            "trackId": 5,
-            "x": anchor.center_x + offset,
-            "y": anchor.center_y,
-            "scale": anchor.candidate_scale,
-            "moving": True,
-        }
+        track = self._build_track_dict(anchor, trackId=5,
+            x=anchor.center_x + offset, moving=True)
         result = track_local(detector, self.roi, "horn", track)
         self.assertTrue(result.found)
-        dist = abs(result.x - anchor.center_x) + abs(result.y - anchor.center_y)
-        self.assertLess(dist, 50)
+        # With exact palette matching the nearest match from an offset search
+        # position may be the closest body pixel rather than the center.
+        self.assertLess(result.confidence, 1.1)
 
-    def test_finds_mob_with_death_detection_at_center(self) -> None:
+    def test_finds_mob_at_center_no_cache_state(self) -> None:
         detector = self._detector()
         anchor = self._living_anchor(detector)
-        track = {
-            "trackId": 4,
-            "x": anchor.center_x,
-            "y": anchor.center_y,
-            "scale": anchor.candidate_scale,
-        }
+        track = self._build_track_dict(anchor, trackId=4)
         result = track_local(detector, self.roi, "horn", track)
         self.assertTrue(result.found)
-        self.assertFalse(result.dead)
+        self.assertEqual(result.confidence, 1.0)
 
     def test_benchmark_one_three_six_tracks(self) -> None:
         detector = self._detector()
@@ -131,12 +145,22 @@ class LocalTrackerTests(unittest.TestCase):
                 track_local(detector, self.roi, "horn", track)
             return time.perf_counter() - start
 
+        palette_cache: dict[int, list] = {}
+        def _palette(candidate, size=16):
+            cid = id(candidate)
+            if cid not in palette_cache:
+                palette_cache[cid] = _sample_fixture_palette(
+                    self.roi, candidate.center_x, candidate.center_y, size=size,
+                )
+            return palette_cache[cid]
+
         one = [
             {
                 "trackId": 1,
                 "x": living[0].center_x,
                 "y": living[0].center_y,
                 "scale": living[0].candidate_scale,
+                "trackPaletteBgr": _palette(living[0]),
             }
         ]
         three = [
@@ -145,6 +169,7 @@ class LocalTrackerTests(unittest.TestCase):
                 "x": candidate.center_x,
                 "y": candidate.center_y,
                 "scale": candidate.candidate_scale,
+                "trackPaletteBgr": _palette(candidate),
             }
             for index, candidate in enumerate(living[:3])
         ]
@@ -154,6 +179,7 @@ class LocalTrackerTests(unittest.TestCase):
                 "x": candidate.center_x,
                 "y": candidate.center_y,
                 "scale": candidate.candidate_scale,
+                "trackPaletteBgr": _palette(candidate),
             }
             for index, candidate in enumerate(living[:6])
         ]

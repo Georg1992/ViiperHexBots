@@ -58,6 +58,8 @@ class StateTrackSnapshot:
     discovery_obs_x: int = 0
     discovery_obs_y: int = 0
     discovery_obs_tick: int = 0
+    # Exact BGR palette sampled at track creation; empty = use descriptor.
+    track_palette_bgr: tuple[tuple[int, int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -98,7 +100,7 @@ class DetectorSession:
         return self._detector.ensure_descriptor(self._mob_name)
 
     def detector_config(self) -> dict:
-        """Return the detector config dict (for opacity probe thresholds)."""
+        """Return the detector config dict."""
         return self._detector.config
 
     @property
@@ -243,6 +245,8 @@ class DetectorSession:
                     track["discoveryObsX"] = snapshot.discovery_obs_x - roi.x
                     track["discoveryObsY"] = snapshot.discovery_obs_y - roi.y
                     track["discoveryObsTick"] = snapshot.discovery_obs_tick
+                if snapshot.track_palette_bgr:
+                    track["trackPaletteBgr"] = list(snapshot.track_palette_bgr)
                 results.append(
                     self._detector.track_local(
                         frame,
@@ -250,7 +254,6 @@ class DetectorSession:
                         track,
                         offset_x=roi.x,
                         offset_y=roi.y,
-                        skip_opacity=True,
                     )
                 )
         duration_ms = int((time.perf_counter() - start) * 1000)

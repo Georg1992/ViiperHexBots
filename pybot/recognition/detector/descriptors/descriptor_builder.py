@@ -44,14 +44,7 @@ GATE_SILHOUETTE_REF_COUNTS = (
     MIN_GATE_SILHOUETTE_MASKS + MIN_GATE_SILHOUETTE_MASKS // 2,
     STAND_WALK_ACTION_COUNT,
 )
-# Act Editor animation indexes are not stored in the ACT binary. Monster sheets
-# group actions in 8 directional clips per animation; the last group is Die.
-ACTIONS_PER_ANIMATION = 8
-DEAD_ACTION_COUNT = ACTIONS_PER_ANIMATION
-MIN_ACTIONS_FOR_DEATH = LIVING_FACING_ACTION_LIMIT + DEAD_ACTION_COUNT
-# Death gate refs: pool all opaque Die frames, keep those farthest from living
-# silhouettes (and from each other), capped so the death gate stays cheap.
-MAX_DEATH_GATE_SILHOUETTE_MASKS = 6
+
 MATCH_PALETTE_MAX_COLORS = 32
 MATCH_PALETTE_MAX_ACCENT_COLORS = 8
 # Palette shades present in at least this fraction of opaque frames are
@@ -251,12 +244,6 @@ class DescriptorBuilder:
         silhouette_masks = self._build_gate_silhouette_masks(
             spr_file, act_file, facing_pairs, frame_silhouette_masks,
         )
-        death_silhouette_masks = self._build_death_gate_silhouette_masks(
-            spr_file,
-            act_file,
-            living_masks=frame_silhouette_masks,
-        )
-
         # Body-cluster diversity helps when body mass lives in 1-2 Lab
         # groups (Horn: all grays). It hurts when mass fans across 3+
         # groups (Creamy: brown body, blue wings, purple accents) — the
@@ -318,7 +305,6 @@ class DescriptorBuilder:
             dominant_pixels_bgr=dominant_pixels_bgr,
             accent_pixels_bgr=accent_pixels_bgr,
             silhouette_masks=silhouette_masks,
-            death_silhouette_masks=death_silhouette_masks,
             use_body_cluster_diversity=use_diversity,
             min_aspect_ratio=min_aspect,
             max_aspect_ratio=max_aspect,
@@ -1098,137 +1084,6 @@ class DescriptorBuilder:
             for bgra in frames:
                 masks.append(self._build_silhouette_mask([bgra]))
         return masks
-
-    @staticmethod
-    def _death_action_indices(action_count: int) -> tuple[int, ...]:
-        """ACT actions for Act Editor animation index Die (last 8-dir group).
-
-        Names like Idle/Walk/Attack/Die are Act Editor labels only — the file
-        stores ordered clips. Monster Die is always the final animation group:
-        ``action_count // 8 - 1``, covering the last ``ACTIONS_PER_ANIMATION``
-        directional actions.
-        """
-        if action_count < MIN_ACTIONS_FOR_DEATH:
-            return ()
-        if action_count % ACTIONS_PER_ANIMATION != 0:
-            return ()
-        start = action_count - DEAD_ACTION_COUNT
-        return tuple(range(start, action_count))
-
-    def _build_death_frame_silhouette_masks(
-        self,
-        spr_file,
-        act_file,
-        action_indices: tuple[int, ...],
-    ) -> list[SilhouetteMask]:
-        """All non-empty frames from each Die directional action (debug pool)."""
-        masks: list[SilhouetteMask] = []
-        for action_index in action_indices:
-            frames = self._collect_frames(
-                spr_file, act_file, (action_index,), frame_start=0,
-            )
-            for bgra in frames:
-                masks.append(self._build_silhouette_mask([bgra]))
-        return masks
-
-    def _build_death_corpse_silhouette_masks(
-        self,
-        spr_file,
-        act_file,
-        action_indices: tuple[int, ...],
-    ) -> list[SilhouetteMask]:
-        """Last non-transparent frame from each Die action (static decay pose)."""
-        masks: list[SilhouetteMask] = []
-        for action_index in action_indices:
-            frames = self._collect_frames(
-                spr_file, act_file, (action_index,), frame_start=0,
-            )
-            if not frames:
-                continue
-            masks.append(self._build_silhouette_mask([frames[-1]]))
-        return masks
-
-    def _build_death_gate_silhouette_masks(
-        self,
-        spr_file,
-        act_file,
-        *,
-        living_masks: list[SilhouetteMask],
-    ) -> list[SilhouetteMask]:
-        """Death gate refs: Die frames farthest from living silhouettes.
-
-        Pool every opaque Die frame (all facings), drop incoherent multi-body
-        masks, then greedily pick up to ``MAX_DEATH_GATE_SILHOUETTE_MASKS``
-        masks that minimize soft-Jaccard to living anchors and to each other.
-        Living-like fall poses are deprioritized so the death gate does not
-        false-accept standing/walking sprites.
-        """
-        action_indices = self._death_action_indices(len(act_file.actions))
-        if not action_indices:
-            return []
-        pool = self._build_death_frame_silhouette_masks(
-            spr_file, act_file, action_indices,
-        )
-        if not pool:
-            return []
-        coherent = [
-            mask for mask in pool if self._is_coherent_gate_silhouette(mask)
-        ]
-        candidates = coherent if coherent else pool
-        if not living_masks:
-            # No living anchors: farthest-first among death frames only.
-            order = self._farthest_first_mask_order(candidates)
-        else:
-            order = self._farthest_from_anchors_mask_order(
-                candidates, living_masks,
-            )
-        limit = min(MAX_DEATH_GATE_SILHOUETTE_MASKS, len(order))
-        return [candidates[idx] for idx in order[:limit]]
-
-    def _farthest_from_anchors_mask_order(
-        self,
-        masks: list[SilhouetteMask],
-        anchors: list[SilhouetteMask],
-    ) -> list[int]:
-        """Greedy order: each pick minimizes max soft-Jaccard to anchors+kept."""
-        if not masks:
-            return []
-        avgs = [np.asarray(mask.avg_mask, dtype=np.float32) for mask in masks]
-        anchor_avgs = [
-            np.asarray(mask.avg_mask, dtype=np.float32) for mask in anchors
-        ]
-        # Precompute max similarity of each candidate to any living anchor.
-        living_sim = [
-            max(self._soft_jaccard(avg, anchor) for anchor in anchor_avgs)
-            for avg in avgs
-        ]
-        n = len(masks)
-        pair_iou = np.eye(n, dtype=np.float64)
-        for i in range(n):
-            for j in range(i + 1, n):
-                value = self._soft_jaccard(avgs[i], avgs[j])
-                pair_iou[i, j] = value
-                pair_iou[j, i] = value
-
-        first = int(np.argmin(np.asarray(living_sim, dtype=np.float64)))
-        selected: list[int] = [first]
-        remaining = set(range(n)) - {first}
-        while remaining:
-            best_c = -1
-            best_max_iou = 2.0
-            for candidate in remaining:
-                max_to_selected = max(
-                    float(pair_iou[candidate, s]) for s in selected
-                )
-                max_iou = max(living_sim[candidate], max_to_selected)
-                if max_iou < best_max_iou:
-                    best_max_iou = max_iou
-                    best_c = candidate
-            if best_c < 0:
-                break
-            selected.append(best_c)
-            remaining.remove(best_c)
-        return selected
 
     def _build_gate_silhouette_masks(
         self,

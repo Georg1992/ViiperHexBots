@@ -39,8 +39,6 @@ REQUIRED_CONFIG_KEYS = {
     "gateRefUniqueIoU",
     "minSilhouetteRecall",
     "minSilhouettePrecision",
-    "deathMinSilhouetteRecall",
-    "deathMinSilhouettePrecision",
     "minRequiredPaletteGroups",
     "minSecondPaletteGroupShare",
     "minRequiredPaletteCoverage",
@@ -57,8 +55,7 @@ REQUIRED_CONFIG_KEYS = {
     "discoveryClusterRadiusPx",
     "trackDedupRadiusPx",
     "debugOutputDir",
-    # track-removal keys (joint absence, movement)
-    "trackJointAbsentConfirmMs",
+    # track-removal keys (movement)
     "movementMoveThresholdPx",
     "movementStopThresholdPx",
 }
@@ -273,12 +270,10 @@ class MobDetector:
         *,
         known_tracks: list[tuple[int, int, int, float]] | None = None,
     ) -> DetectionResult:
-        """Heatmap discovery with known-track silhouette check.
+        """Heatmap discovery with silhouette check.
 
         Order: heatmap → blobs → (new peaks: geometry + color structure) →
-        silhouette. Known-track blobs skip geometry/color and score against
-        living silhouettes only — death detection is owned by the death
-        worker (death silhouette + opacity / SP signals).
+        silhouette. Known-track blobs skip geometry/color.
         """
         start = time.perf_counter()
         descriptor = self.ensure_descriptor(mob_name)
@@ -806,7 +801,6 @@ class MobDetector:
         *,
         comp_bbox: tuple[int, int, int, int] | None = None,
         masks: list | None = None,
-        is_death: bool = False,
     ) -> tuple[
         bool,
         float,
@@ -826,8 +820,7 @@ class MobDetector:
         Returns (passed, jaccard, candidate, matched_idx, scores, extract_bbox,
         precision, recall, bridged_extract_area_ratio).
 
-        *masks* defaults to living ``descriptor.silhouette_masks``; pass death
-        masks for corpse validation.
+        *masks* defaults to ``descriptor.silhouette_masks``.
         """
         fail = (False, 0.0, None, 0, [], None, 0.0, 0.0, 0.0)
         gate_masks = (
@@ -950,7 +943,6 @@ class MobDetector:
         )
         candidate = self._maybe_deform_noisy_candidate(
             candidate, refs, mob_region, descriptor, palette, silhouette_distance, gate_mask,
-            is_death=is_death,
         )
 
         similarity, matched_idx, scores, precision, recall = best_silhouette_match(
@@ -962,16 +954,8 @@ class MobDetector:
             grid_n > 0 and (float(hard_n) / float(grid_n)) >= _SOLID_FILL_HARD_FRACTION
         )
         dual_ok = (
-            recall >= float(
-                self.config["deathMinSilhouetteRecall"]
-                if is_death
-                else self.config["minSilhouetteRecall"]
-            )
-            and precision >= float(
-                self.config["deathMinSilhouettePrecision"]
-                if is_death
-                else self.config["minSilhouettePrecision"]
-            )
+            recall >= float(self.config["minSilhouetteRecall"])
+            and precision >= float(self.config["minSilhouettePrecision"])
         )
         # Content veto: solid palette fill of the gate grid (color smear in a
         # desc-sized window). Bloated CCs may still shrink after pre-shrink
@@ -1109,8 +1093,6 @@ class MobDetector:
         palette: np.ndarray,
         silhouette_distance: float,
         gate_mask,
-        *,
-        is_death: bool = False,
     ) -> np.ndarray:
         """If soft/hard is noisy but recall is already ok, deform best ref into heat."""
         soft_hard_ratio = _occupancy_soft_hard_ratio(candidate)
@@ -1119,11 +1101,7 @@ class MobDetector:
         _sim0, facing_idx, _scores0, _prec0, rec0 = best_silhouette_match(
             candidate, refs,
         )
-        if rec0 < float(
-            self.config["deathMinSilhouetteRecall"]
-            if is_death
-            else self.config["minSilhouetteRecall"]
-        ):
+        if rec0 < float(self.config["minSilhouetteRecall"]):
             return candidate
         ref_avg, ref_stable = refs[facing_idx]
         deformed_mask = self._deform_silhouette_occupancy(
@@ -1275,7 +1253,6 @@ class MobDetector:
         scale: float,
         *,
         masks: list,
-        is_death: bool = False,
     ) -> tuple[bool, tuple[int, int, int, int] | None, float]:
         w = max(_MIN_DESCRIPTOR_PX, int(round(descriptor.avg_width * scale)))
         h = max(_MIN_DESCRIPTOR_PX, int(round(descriptor.avg_height * scale)))
@@ -1289,7 +1266,6 @@ class MobDetector:
         passed, sim, _cand, _idx, _scores, extract_bbox, _prec, _rec, _area = (
             self._evaluate_silhouette_gate(
                 frame_bgr, descriptor, bbox, comp_bbox=bbox, masks=masks,
-                is_death=is_death,
             )
         )
         return passed, extract_bbox if extract_bbox is not None else bbox, float(sim)
@@ -1299,13 +1275,12 @@ class MobDetector:
     # ------------------------------------------------------------------
 
     def track_local(self, frame_bgr, mob_name, track, *, offset_x=0, offset_y=0,
-                    search_radius_px=None, skip_opacity=False):
+                    search_radius_px=None):
         from pybot.recognition.detector.tracking.local_tracker import track_local as run_track_local
         return run_track_local(
             self, frame_bgr, mob_name, track,
             offset_x=offset_x, offset_y=offset_y,
             search_radius_px=search_radius_px,
-            skip_opacity=skip_opacity,
         )
 
     # ------------------------------------------------------------------

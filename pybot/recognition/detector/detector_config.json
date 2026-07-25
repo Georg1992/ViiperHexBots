@@ -24,9 +24,6 @@
   "discoveryClusterRadiusPx": 48,
   "trackDedupRadiusPx": 90,
   "debugOutputDir": "pybot/recognition/debug/detector",
-  "deathMinSilhouetteRecall": 0.35,
-  "deathMinSilhouettePrecision": 0.55,
-  "trackJointAbsentConfirmMs": 750,
   "movementMoveThresholdPx": 12,
   "movementStopThresholdPx": 6
 }

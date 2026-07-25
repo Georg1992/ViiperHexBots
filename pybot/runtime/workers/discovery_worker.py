@@ -8,10 +8,11 @@ not scan — only waits for the post-delay wake / storage end.
 
 One discovery pass (same frame):
 1. Living heatmap → silhouette scan for new / matched mobs (living refs only).
-2. Reconcile: create / match / mark unmatched absent. Never deletes tracks.
+2. Reconcile: create / match / mark absent. Sample exact pixel palette for
+   newly created tracks from the capture frame.
 
-Tracking owns authoritative position and all track removal (opacity death,
-joint-absence, unreachable). Discovery never overwrites authoritative x/y;
+Tracking owns authoritative position and all track removal (joint-absence,
+out-of-range). Discovery never overwrites authoritative x/y;
 it only creates, soft-priors, absence marks, and refreshes priors when
 tracking wakes it on a local miss.
 
@@ -25,6 +26,8 @@ from __future__ import annotations
 import time
 import traceback
 
+import numpy as np
+
 from pybot.recognition.rules import DiscoveryDetection
 from pybot.runtime.constants import LOG_REPEAT_INTERVAL_MS, WORKER_POLL_INTERVAL_S
 from pybot.runtime.hunt_tracks import monotonic_ms
@@ -32,8 +35,33 @@ from pybot.runtime.detection.discovery_filter import filter_scan_candidates
 from pybot.runtime.workers.worker_contexts import DiscoveryWorkerContext
 
 
+def _sample_track_palette(
+    frame: np.ndarray,
+    cx: int,
+    cy: int,
+    size: int = 20,
+) -> list[tuple[int, int, int]]:
+    """Sample unique BGR pixel values from a tight area around (cx, cy) in the frame.
+
+    These are the actual rendered pixel colors — used by the local tracker
+    for exact-match following, no distance threshold, no descriptor palette.
+    """
+    h, w = frame.shape[:2]
+    half = size // 2
+    x0 = max(0, cx - half)
+    y0 = max(0, cy - half)
+    x1 = min(w, x0 + size)
+    y1 = min(h, y0 + size)
+    if x1 <= x0 or y1 <= y0:
+        return []
+    patch = frame[y0:y1, x0:x1]
+    pixels = patch.reshape(-1, 3)
+    unique = np.unique(pixels, axis=0)
+    return [tuple(int(v) for v in color) for color in unique]
+
+
 class DiscoveryWorker:
-    """Scans for living mobs, flags discovery deaths, creates/matches tracks."""
+    """Scans for living mobs, creates/matches tracks, marks absent for tracking."""
 
     def __init__(self, ctx: DiscoveryWorkerContext, hunt_mode) -> None:
         self._ctx = ctx
@@ -152,6 +180,20 @@ class DiscoveryWorker:
         )
         if ctx.tracks.area_epoch != area_epoch or ctx.discovery_suspend.is_set():
             return
+
+        # Sample exact pixel palette for newly created tracks from the capture
+        # frame. These colors are used by the local tracker for exact-match
+        # pixel following — no distance threshold, no descriptor palette.
+        if summary.created_ids and frame is not None:
+            for track_id in summary.created_ids:
+                track = ctx.tracks.get_track_by_id(track_id)
+                if track is None:
+                    continue
+                palette = _sample_track_palette(
+                    frame, track.x - roi.x, track.y - roi.y, size=20,
+                )
+                if palette:
+                    ctx.tracks.set_track_palette(track_id, palette)
 
         verbose = (
             summary.added_count > 0

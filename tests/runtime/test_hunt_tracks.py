@@ -12,12 +12,12 @@ from pybot.runtime.hunt_policy import HuntPolicy
 from pybot.runtime.hunt_tracks import HuntTracks
 
 
-def _hit(track_id: int, x: int, y: int, confidence: float = 0.8) -> SimpleNamespace:
-    return SimpleNamespace(track_id=track_id, found=True, x=x, y=y, confidence=confidence)
+def _hit(track_id: int, x: int, y: int, confidence: float = 0.8, match_count: int = 50) -> SimpleNamespace:
+    return SimpleNamespace(track_id=track_id, found=True, x=x, y=y, confidence=confidence, match_count=match_count)
 
 
 def _miss(track_id: int) -> SimpleNamespace:
-    return SimpleNamespace(track_id=track_id, found=False, x=0, y=0, confidence=0.0)
+    return SimpleNamespace(track_id=track_id, found=False, x=0, y=0, confidence=0.0, match_count=0)
 
 
 def det(x: int, y: int, confidence: float = 0.71, scale: float = 0.9) -> DiscoveryDetection:
@@ -87,7 +87,6 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(track.discovery_obs_x, 900)
         self.assertEqual(track.discovery_obs_y, 610)
         self.assertEqual(track.discovery_obs_tick, self.now + 500)
-        self.assertFalse(track.discovery_absent)
 
     def test_tracking_miss_snaps_to_discovery_obs(self) -> None:
         track_id = self._create(874, 578)
@@ -137,13 +136,11 @@ class HuntTracksRulesTests(unittest.TestCase):
         assert track is not None
         self.assertEqual((track.x, track.y), (905, 615))
         self.assertEqual(track.discovery_obs_tick, 0)
-        self.assertFalse(track.discovery_absent)
 
-    def test_outside_roi_unmatched_marks_absent_for_tracker(self) -> None:
+    def test_outside_roi_unmatched_removes_immediately(self) -> None:
         from pybot.runtime.capture.window_roi import HuntRoi
 
-        # Capture-time position is outside ROI; live track has since coasted in.
-        # Discovery only notifies absent — tracking owns the drop.
+        # Capture-time position is outside ROI — removed immediately.
         track_id = self.tracks.create_track(
             "horn", 50, 50, 0.65, 0.9, now_tick=self.now
         ).id
@@ -160,10 +157,9 @@ class HuntTracksRulesTests(unittest.TestCase):
             existing_positions=[],
             hunt_roi=roi,
         )
-        self.assertEqual(summary.removed_count, 0)
-        track = self.tracks.get_track_by_id(track_id)
-        assert track is not None
-        self.assertTrue(track.discovery_absent)
+        self.assertEqual(summary.removed_count, 1)
+        self.assertEqual(summary.removed_ids, [track_id])
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
     def test_discovery_marks_absent_inside_hunt_roi_without_removing(self) -> None:
         # In-ROI discovery miss marks the track; tracking removes on joint miss.
@@ -187,86 +183,45 @@ class HuntTracksRulesTests(unittest.TestCase):
         absent_track = self.tracks.get_track_by_id(also_inside)
         assert kept_track is not None
         assert absent_track is not None
-        self.assertFalse(kept_track.discovery_absent)
-        self.assertTrue(absent_track.discovery_absent)
+        self.assertEqual(kept_track.discovery_miss_count, 0)
+        self.assertEqual(absent_track.discovery_miss_count, 1)
 
-    def test_joint_discovery_tracking_miss_removes_track(self) -> None:
+    def test_two_discovery_misses_removes_track(self) -> None:
         track_id = self._create(874, 578)
-        absent_at = self.now + 50
-        self.tracks.reconcile_detections(
-            [],
-            mob_name="horn",
-            now_tick=absent_at,
+        # First miss → miss_count = 1, track survives
+        summary = self.tracks.reconcile_detections(
+            [], mob_name="horn", now_tick=self.now + 50,
         )
+        self.assertEqual(summary.removed_count, 0)
+        self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
-        self.assertTrue(track.discovery_absent)
-        self.assertEqual(track.discovery_absent_tick, absent_at)
-        confirm_ms = int(load_detector_config()["trackJointAbsentConfirmMs"])
-        # First miss while absent — still searching (clock from absent_at).
-        self.tracks.apply_tracking(
-            [_miss(track_id)],
-            now_tick=absent_at + 100,
+        self.assertEqual(track.discovery_miss_count, 1)
+        # Second miss → miss_count = 2, track removed
+        summary = self.tracks.reconcile_detections(
+            [], mob_name="horn", now_tick=self.now + 100,
         )
-        lost_ids, unreachable_ids = self.tracks.apply_tracking_cleanup(
-            now_tick=absent_at + 100,
-        )
-        self.assertEqual(lost_ids, [])
-        self.assertEqual(unreachable_ids, [])
-        self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
-        # Sustained miss past confirm window from discovery_absent_tick.
-        self.tracks.apply_tracking(
-            [_miss(track_id)],
-            now_tick=absent_at + confirm_ms,
-        )
-        lost_ids, unreachable_ids = self.tracks.apply_tracking_cleanup(
-            now_tick=absent_at + confirm_ms,
-        )
-        self.assertEqual(lost_ids, [track_id])
-        self.assertEqual(unreachable_ids, [])
+        self.assertEqual(summary.removed_count, 1)
+        self.assertEqual(summary.removed_ids, [track_id])
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
-    def test_new_track_not_joint_absent_dropped_immediately(self) -> None:
-        """Joint-absence clock starts at discovery miss, not create time."""
-        track_id = self._create(874, 578)
-        confirm_ms = int(load_detector_config()["trackJointAbsentConfirmMs"])
-        # Even if create was long ago relative to confirm_ms, a brand-new
-        # discovery_absent mark must wait the full confirm window.
-        self.tracks.reconcile_detections(
-            [],
-            mob_name="horn",
-            now_tick=self.now + confirm_ms + 1000,
-        )
-        self.tracks.apply_tracking(
-            [_miss(track_id)],
-            now_tick=self.now + confirm_ms + 1000,
-        )
-        lost_ids, unreachable_ids = self.tracks.apply_tracking_cleanup(
-            now_tick=self.now + confirm_ms + 1000,
-        )
-        self.assertEqual(lost_ids, [])
-        self.assertEqual(unreachable_ids, [])
-        self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
 
-
-    def test_discovery_absent_cleared_when_tracking_hits(self) -> None:
+    def test_discovery_miss_cleared_when_tracking_hits(self) -> None:
         track_id = self._create(874, 578)
         self.tracks.reconcile_detections([], mob_name="horn", now_tick=self.now + 50)
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
-        self.assertTrue(track.discovery_absent)
-        self.assertGreater(track.discovery_absent_tick, 0)
+        self.assertEqual(track.discovery_miss_count, 1)
         self.tracks.apply_tracking(
             [_hit(track_id, 880, 580)],
             now_tick=self.now + 100,
         )
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
-        self.assertFalse(track.discovery_absent)
-        self.assertEqual(track.discovery_absent_tick, 0)
+        self.assertEqual(track.discovery_miss_count, 0)
 
 
-    def test_discovery_marks_absent_outside_hunt_roi_without_removing(self) -> None:
+    def test_outside_roi_removed_gone_track_inside_roi_marked_absent(self) -> None:
         from pybot.runtime.capture.window_roi import HuntRoi
 
         kept = self._create(874, 578)
@@ -283,12 +238,11 @@ class HuntTracksRulesTests(unittest.TestCase):
         )
         self.assertEqual(summary.added_count, 0)
         self.assertEqual(summary.matched_count, 1)
-        self.assertEqual(summary.removed_count, 0)
-        self.assertEqual(summary.removed_ids, [])
+        # gone track was outside ROI — removed immediately
+        self.assertEqual(summary.removed_count, 1)
+        self.assertEqual(summary.removed_ids, [gone])
         self.assertIsNotNone(self.tracks.get_track_by_id(kept))
-        gone_track = self.tracks.get_track_by_id(gone)
-        assert gone_track is not None
-        self.assertTrue(gone_track.discovery_absent)
+        self.assertIsNone(self.tracks.get_track_by_id(gone))
 
     def test_discovery_without_roi_does_not_remove_absent_tracks(self) -> None:
         first = self._create(874, 578)
@@ -346,26 +300,20 @@ class HuntTracksRulesTests(unittest.TestCase):
         assert track is not None
         self.assertEqual(track.lost_count, 1)
 
-    def test_joint_absent_drop_allows_discovery_recreate(self) -> None:
+    def test_two_miss_drop_allows_recreate(self) -> None:
         track_id = self._create(874, 578)
-        confirm_ms = int(self.config["trackJointAbsentConfirmMs"])
-        absent_at = self.now + 50
+        # Two consecutive misses → removed
         self.tracks.reconcile_detections(
-            [],
-            mob_name="horn",
-            now_tick=absent_at,
+            [], mob_name="horn", now_tick=self.now + 50,
         )
-        drop_at = absent_at + confirm_ms
-        self.tracks.apply_tracking(
-            [_miss(track_id)],
-            now_tick=drop_at,
+        self.tracks.reconcile_detections(
+            [], mob_name="horn", now_tick=self.now + 100,
         )
-        self.tracks.apply_tracking_cleanup(now_tick=drop_at)
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
+        # Re-create after removal
         summary = self.tracks.reconcile_detections(
             [det(874, 578, 0.75, 0.9)],
-            mob_name="horn",
-            now_tick=drop_at + 1,
+            mob_name="horn", now_tick=self.now + 200,
         )
         self.assertEqual(summary.added_count, 1)
         self.assertEqual(summary.alive_after, 1)

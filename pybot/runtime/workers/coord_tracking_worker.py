@@ -4,9 +4,8 @@ Runs as fast as capture + local follow allow. Each tick captures a frame and
 follows every alive track with the LocalTracker (skip_opacity=True), writing
 fresh coordinates into the shared HuntTracks store.
 
-This worker owns position tracking exclusively. It never removes tracks —
-death detection, joint-absence cleanup, and unreachable expiry are
-handled by the DeathDetectionWorker.
+Tracking is pure follow — no silhouette checks. On local miss, wakes
+discovery so it can confirm the mob via its full detection pipeline.
 """
 
 from __future__ import annotations
@@ -82,6 +81,7 @@ class CoordTrackingWorker:
                 discovery_obs_x=track.discovery_obs_x,
                 discovery_obs_y=track.discovery_obs_y,
                 discovery_obs_tick=track.discovery_obs_tick,
+                track_palette_bgr=tuple(track.track_palette_bgr),
             )
             for track in alive_tracks
         ]
@@ -95,7 +95,7 @@ class CoordTrackingWorker:
             area_epoch=area_epoch,
         )
 
-        # Local miss → wake discovery so it can refresh soft priors.
+        # Local miss → wake discovery so it can confirm removal.
         if missed_ids and not ctx.discovery_suspend.is_set():
             ctx.discovery_wake.set()
 

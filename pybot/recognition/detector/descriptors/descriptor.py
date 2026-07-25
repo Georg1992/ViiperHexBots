@@ -65,7 +65,6 @@ class MobDescriptor:
     dominant_pixels_bgr: list[list[int]]
     accent_pixels_bgr: list[list[int]]
     silhouette_masks: list[SilhouetteMask]
-    death_silhouette_masks: list[SilhouetteMask]
     use_body_cluster_diversity: bool
     min_aspect_ratio: float
     max_aspect_ratio: float
@@ -110,12 +109,6 @@ class MobDescriptor:
         ]
         if not silhouette_masks:
             raise ValueError("descriptor silhouetteMasks must be non-empty")
-
-        if "deathSilhouetteMasks" not in data:
-            raise ValueError("descriptor missing deathSilhouetteMasks")
-        death_silhouette_masks = [
-            SilhouetteMask.from_dict(item) for item in data["deathSilhouetteMasks"]
-        ]
 
         if "accentColors" not in data:
             raise ValueError("descriptor missing accentColors")
@@ -164,7 +157,6 @@ class MobDescriptor:
             dominant_pixels_bgr=dominant_pixels_bgr,
             accent_pixels_bgr=accent_pixels_bgr,
             silhouette_masks=silhouette_masks,
-            death_silhouette_masks=death_silhouette_masks,
             use_body_cluster_diversity=bool(data["useBodyClusterDiversity"]),
             min_aspect_ratio=float(data["minAspectRatio"]),
             max_aspect_ratio=float(data["maxAspectRatio"]),
@@ -203,15 +195,6 @@ class MobDescriptor:
                     "stableMask": mask.stable_mask,
                 }
                 for mask in self.silhouette_masks
-            ],
-            "deathSilhouetteMasks": [
-                {
-                    "width": mask.width,
-                    "height": mask.height,
-                    "avgMask": mask.avg_mask,
-                    "stableMask": mask.stable_mask,
-                }
-                for mask in self.death_silhouette_masks
             ],
             "useBodyClusterDiversity": self.use_body_cluster_diversity,
             "minAspectRatio": self.min_aspect_ratio,

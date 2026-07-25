@@ -3,7 +3,6 @@
 Outputs under _debug_vis/:
   pipeline.txt                      — discovery pipeline structure (text)
   {mob}/descriptor.png              — descriptor fields used for that mob
-  {mob}/death_silhouettes.png       — death-check silhouette refs (runtime)
   {mob}/{fixture}_viz.png           — heatmap | frame+boxes | silhouettes
 """
 
@@ -16,7 +15,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from pybot.mobs.catalog import ensure_mob_assets, load_mob_catalog
+from pybot.mobs.catalog import ensure_mob_assets
 from pybot.paths import PROJECT_ROOT
 from pybot.recognition.detector.descriptors.descriptor import (
     ColorCluster,
@@ -489,50 +488,6 @@ def _pack_tiles(tiles: list[np.ndarray], *, cols: int, gap: int = 6) -> np.ndarr
     return canvas
 
 
-def render_death_silhouettes(descriptor: MobDescriptor) -> np.ndarray:
-    """Page of silhouette refs actually used for discovery death checks."""
-    gate = list(descriptor.death_silhouette_masks)
-    header = _text_block([
-        f"{descriptor.mob_name}  v{descriptor.version}  DEATH CHECK SILHOUETTES",
-        f"{len(gate)} ref(s) used by discovery death match (static decay pose)",
-        "Last opaque Die frame per facing — all facings kept for death check",
-    ], width=max(480, 160 + len(gate) * (_SIL_SIZE // 2 + 12)))
-
-    if not gate:
-        empty = np.full((80, header.shape[1], 3), 28, dtype=np.uint8)
-        cv2.putText(
-            empty, "(no death silhouette refs)", (12, 48),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (120, 120, 180), 1, cv2.LINE_AA,
-        )
-        return np.vstack([header, empty])
-
-    gate_tiles = [
-        _labeled_silhouette_tile(mask, f"DEATH {i}", _SIL_SIZE // 2)
-        for i, mask in enumerate(gate)
-    ]
-    grid = _pack_tiles(gate_tiles, cols=max(1, min(8, len(gate_tiles))))
-    title_bar = np.full((22, max(grid.shape[1], header.shape[1]), 3), 36, dtype=np.uint8)
-    cv2.putText(
-        title_bar,
-        f"DEATH CHECK REFS ({len(gate)})",
-        (6, 15),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.4,
-        (160, 200, 255),
-        1,
-        cv2.LINE_AA,
-    )
-    max_w = max(header.shape[1], title_bar.shape[1], grid.shape[1])
-
-    def _pad(img: np.ndarray) -> np.ndarray:
-        if img.shape[1] >= max_w:
-            return img
-        pad = np.full((img.shape[0], max_w - img.shape[1], 3), 28, dtype=np.uint8)
-        return np.hstack([img, pad])
-
-    return np.vstack([_pad(header), _pad(title_bar), _pad(grid)])
-
-
 def render_descriptor_info(
     descriptor: MobDescriptor,
     config: dict,
@@ -555,7 +510,6 @@ def render_descriptor_info(
             f"body={len(descriptor.body_palette)}  "
             f"accent={len(descriptor.accent_colors)}  "
             f"silMasks={len(descriptor.silhouette_masks)}  "
-            f"deathSilMasks={len(descriptor.death_silhouette_masks)}"
         ),
         (
             f"spriteDist={descriptor.max_sprite_palette_distance:.1f}  "
@@ -609,15 +563,7 @@ def render_descriptor_info(
         )
     sections.append(("SILHOUETTE REFS", np.hstack(sil_row_imgs)))
 
-    death_row_imgs: list[np.ndarray] = []
-    for idx, mask in enumerate(descriptor.death_silhouette_masks):
-        death_row_imgs.append(
-            _labeled_silhouette_tile(mask, f"DIE {idx}", _SIL_SIZE)
-        )
-    if death_row_imgs:
-        sections.append(("DEATH SILHOUETTE REFS", np.hstack(death_row_imgs)))
-    else:
-        sections.append(("DEATH SILHOUETTE REFS", _text_block(["(none)"], width=720)))
+
 
     rows: list[np.ndarray] = [header]
     max_w = header.shape[1]
@@ -668,27 +614,8 @@ def main() -> None:
 
     viz_count = 0
     descriptor_count = 0
-    death_viz_count = 0
     timing_totals: dict[str, float] = {}
     timing_runs = 0
-
-    # Death silhouette pages for every catalog mob (not only fixture suites).
-    for entry in load_mob_catalog():
-        mob_name = entry.descriptor_name
-        try:
-            descriptor = detector.ensure_descriptor(mob_name)
-        except (FileNotFoundError, RuntimeError) as exc:
-            print(f"  SKIP death viz {mob_name:15s}  {exc}")
-            continue
-        mob_dir = OUT_DIR / mob_name
-        mob_dir.mkdir(parents=True, exist_ok=True)
-        death_path = mob_dir / "death_silhouettes.png"
-        cv2.imwrite(str(death_path), render_death_silhouettes(descriptor))
-        death_viz_count += 1
-        print(
-            f"  {mob_name:15s} wrote death_silhouettes.png  "
-            f"death_refs={len(descriptor.death_silhouette_masks)}"
-        )
 
     for suite in MOB_FIXTURE_SUITES:
         mob_name = suite.mob_name
@@ -759,7 +686,7 @@ def main() -> None:
 
     print(
         f"\nDone — {viz_count} viz, {descriptor_count} descriptors, "
-        f"{death_viz_count} death_silhouettes, 1 pipeline in {OUT_DIR.resolve()}/"
+        f"1 pipeline in {OUT_DIR.resolve()}/"
     )
     if timing_runs:
         print(f"\nAverage discovery timing over {timing_runs} frames:")

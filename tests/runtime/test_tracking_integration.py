@@ -223,12 +223,27 @@ class TrackingIntegrationTests(unittest.TestCase):
         ]
         ctx.tracks.reconcile_detections(detections, mob_name="horn", now_tick=monotonic_ms())
 
+        def _sample(cx: int, cy: int, size: int = 20) -> tuple[tuple[int, int, int], ...]:
+            h, w = self.roi_frame.shape[:2]
+            half = size // 2
+            x0 = max(0, cx - half)
+            y0 = max(0, cy - half)
+            x1 = min(w, x0 + size)
+            y1 = min(h, y0 + size)
+            if x1 <= x0 or y1 <= y0:
+                return ()
+            patch = self.roi_frame[y0:y1, x0:x1]
+            pixels = patch.reshape(-1, 3)
+            unique = np.unique(pixels, axis=0)
+            return tuple(tuple(int(v) for v in c) for c in unique)
+
         snapshots = [
             StateTrackSnapshot(
                 track_id=s.id,
                 x=s.x,
                 y=s.y,
                 scale=s.discovery_scale if s.discovery_scale > 0 else 1.0,
+                track_palette_bgr=_sample(s.x, s.y),
             )
             for s in ctx.tracks.snapshot_alive(monotonic_ms())
         ]
@@ -237,15 +252,13 @@ class TrackingIntegrationTests(unittest.TestCase):
         batch = detector.track_locals_frame(self.roi_frame, self.roi, snapshots)
         now = monotonic_ms() + 50
         missed_ids = ctx.tracks.apply_tracking(batch.results, now_tick=now)
-        ctx.tracks.apply_tracking_cleanup(now_tick=now)
-        removed = missed_ids  # none should be removed on a static fixture
 
         # Static fixture: at least one track is re-found and stays alive, and no
         # found track is dropped.
         self.assertGreater(batch.found_count, 0)
         found_ids = {r.track_id for r in batch.results if r.found}
         for track_id in found_ids:
-            self.assertNotIn(track_id, removed)
+            self.assertNotIn(track_id, missed_ids)
             track = ctx.tracks.get_track_by_id(track_id)
             assert track is not None
             self.assertEqual(track.updated_tick, now)
