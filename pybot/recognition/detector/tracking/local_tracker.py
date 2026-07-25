@@ -21,6 +21,9 @@ from pybot.recognition.detector.scoring.heatmap_detector import palette_heatmap,
 if TYPE_CHECKING:
     from pybot.recognition.detector.detector import MobDetector
 
+# The fastest mob travels ~3 game cells per second at 64px per cell.
+_FASTEST_MOB_PX_PER_MS = (3 * 64) / 1000.0  # ~0.192 px/ms
+
 
 @dataclass(frozen=True)
 class LocalTrackResult:
@@ -101,8 +104,6 @@ def track_local(
         return _finalize_track_hit(
             track_id=track_id, bbox=center_bbox, similarity=sim,
             offset_x=offset_x, offset_y=offset_y,
-            prev_x=cx, prev_y=cy,
-            moving=moving,
         )
 
     # Center miss → search local heatmap peaks.
@@ -122,7 +123,7 @@ def track_local(
         created_tick = int(track.get("createdTick", 0))
         now_tick = int(track.get("nowTick", 0))
         delay_ms = max(0, now_tick - created_tick)
-        max_speed_px_per_ms = (3 * 64) / 1000.0  # ~0.192 px/ms
+        max_speed_px_per_ms = _FASTEST_MOB_PX_PER_MS
         extra_px = int(delay_ms * max_speed_px_per_ms)
         peak_radius = int(detector.local_track_search_radius_px) + extra_px
     peak = _find_local_peak(
@@ -136,8 +137,6 @@ def track_local(
         return _finalize_track_hit(
             track_id=track_id, bbox=peak_bbox, similarity=peak_sim,
             offset_x=offset_x, offset_y=offset_y,
-            prev_x=cx, prev_y=cy,
-            moving=moving,
         )
 
     return _miss_result(
@@ -163,8 +162,6 @@ def _finalize_track_hit(
     bbox: tuple[int, int, int, int],
     similarity: float,
     offset_x: int, offset_y: int,
-    prev_x: int, prev_y: int,
-    moving: bool,
 ) -> LocalTrackResult:
     bx, by, bw, bh = bbox
     x = bx + bw // 2 + offset_x
