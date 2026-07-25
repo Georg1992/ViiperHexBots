@@ -96,25 +96,6 @@ class HuntTracks:
         self._next_id = 1
         self._last_reconcile_summary = None
 
-    # Deprecated no-ops kept for API compatibility.
-    def mark_attack_pending(self, track_id: int) -> None:  # noqa: ARG002
-        pass
-
-    def clear_attack_pending(self, track_id: int) -> None:  # noqa: ARG002
-        pass
-
-    @property
-    def average_attacks_till_death(self) -> float:
-        return 1.0
-
-    @property
-    def kill_sample_count(self) -> int:
-        return 0
-
-    @property
-    def max_attacks_per_mob_before_unreachable(self) -> int:
-        return 999_999
-
     @property
     def area_epoch(self) -> int:
         with self._lock:
@@ -493,7 +474,6 @@ class HuntTracks:
             mob_name=mob_name,
             area_epoch=self._area_epoch,
         )
-        track.attack_anchor_x, track.attack_anchor_y = x, y
         track.attack_count = 0
         track.attack_count_baseline = 0
         self._next_id += 1

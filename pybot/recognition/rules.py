@@ -74,8 +74,6 @@ class MobTrack:
     moving: bool = False
     vel_x: float = 0.0
     vel_y: float = 0.0
-    attack_anchor_x: int = 0
-    attack_anchor_y: int = 0
     # Consecutive discovery scans that failed to see this track (unmatched).
     # At >= 2 the track is removed immediately — it failed discovery gates
     # twice in a row, meaning it's dead or gone.
@@ -118,8 +116,7 @@ class MobTrack:
             discovery_scale=discovery_scale,
             candidate_scale=discovery_scale,
             area_epoch=area_epoch,
-            attack_anchor_x=x,
-            attack_anchor_y=y,
+
         )
 
 
@@ -127,31 +124,11 @@ def is_alive(track: MobTrack) -> bool:
     return track.state == "alive"
 
 
-def mob_attack_anchor_key(x: int, y: int, *, cell_px: int) -> tuple[int, int]:
-    """Deprecated: unreachable budget removed."""
-    return (x, y)
-
-
 def apply_attack_event(track: MobTrack, now_tick: int) -> None:
     """Record one attack directed at this mob track (attack-owned fields only)."""
     track.attack_count += 1
     track.last_attack_tick = now_tick
     track.lost_count = 0
-
-
-def is_track_unreachable_by_attacks(track: MobTrack, max_attacks: int) -> bool:
-    """Deprecated: unreachable budget removed. Always returns False."""
-    return False
-
-
-def max_attacks_per_mob_before_unreachable(
-    *,
-    average_attacks_till_death: float,
-    skill_delay_ms: int,
-    attack_window_ms: int = 3000,
-) -> int:
-    """Deprecated: unreachable budget removed. Returns a large sentinel."""
-    return 999_999
 
 
 def select_target_id(

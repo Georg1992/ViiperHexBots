@@ -343,19 +343,6 @@ class HuntTracksRulesTests(unittest.TestCase):
         assert surviving is not None
         self.assertEqual((surviving.x, surviving.y), (900, 600))
 
-    def test_default_max_attacks_before_any_kills(self) -> None:
-        tracks = HuntTracks(load_detector_config(), skill_delay_ms=5000)
-        self.assertEqual(tracks.average_attacks_till_death, 1.0)
-        self.assertEqual(tracks.max_attacks_per_mob_before_unreachable, 999_999)
-
-    def test_faster_attack_delay_allows_more_attacks(self) -> None:
-        slow = HuntTracks(load_detector_config(), skill_delay_ms=5000)
-        fast = HuntTracks(load_detector_config(), skill_delay_ms=500)
-        self.assertLess(
-            slow.max_attacks_per_mob_before_unreachable,
-            fast.max_attacks_per_mob_before_unreachable + 1,  # sentinel for both
-        )
-
     def test_tracking_hit_resets_miss_streak(self) -> None:
         track_id = self._create(874, 578)
         self.tracks.apply_tracking(
@@ -406,14 +393,6 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(summary.added_count, 0)
         self.assertEqual(self.tracks.get_track_count(), 0)
         self.assertEqual(self.tracks.area_epoch, epoch + 1)
-
-    def test_clear_attack_pending_drops_inflight_mark(self) -> None:
-        track_id = self._create(874, 578)
-        self.tracks.mark_attack_pending(track_id)
-        self.tracks.clear_attack_pending(track_id)
-        track = self.tracks.get_track_by_id(track_id)
-        assert track is not None
-        self.assertEqual(track.attack_count, 0)
 
     def test_thread_safe_concurrent_reads(self) -> None:
         self._create(874, 578)
