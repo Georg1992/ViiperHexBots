@@ -153,12 +153,13 @@ class DiscoveryWorker:
             hunt_roi=roi,
         )
 
-        # Quick-fix: newly created tracks get an immediate track_local() pass
-        # using a freshly captured frame. This eliminates the delay between
-        # detection finishing and tracking's first tick, so fast-moving mobs
-        # like Creamy don't lag their first tracking position.
+        # Initial follow: newly created tracks get an immediate track_local()
+        # pass on a fresh frame. The detection position is stale by the time
+        # the track is created (detection processing latency), so this fast
+        # follow anchors the track at the mob's current position before
+        # tracking's next tick.
         if summary.added_count > 0:
-            self._apply_quick_fix(roi, summary.created_ids, now_ms)
+            self._initial_follow_new_tracks(roi, summary.created_ids, now_ms)
 
         if ctx.tracks.area_epoch != area_epoch or ctx.discovery_suspend.is_set():
             return
@@ -194,19 +195,22 @@ class DiscoveryWorker:
             area_epoch=area_epoch,
         )
 
-    def _apply_quick_fix(
+    def _initial_follow_new_tracks(
         self,
         roi,
         created_ids: list[int],
         now_ms: int,
     ) -> None:
-        """Run one-shot track_local() on newly created tracks using a fresh frame.
+        """Initialize newly created tracks with a fresh local follow.
 
-        Captures a new frame (not the stale detection frame) so the follow-up
-        ``track_local()`` finds the mob at its current position, not where it
-        was when discovery processed the detection frame. Overhead is one frame
-        capture + one local tracking pass per new track — negligible since new
-        tracks are created rarely (mob enters screen or spawns).
+        Standard initialization step in the discovery→tracking handoff: after
+        discovery creates a track, the detection-frame position is already
+        stale (detection processing takes time). This captures a fresh frame
+        and runs one ``track_local()`` per new track to anchor at the mob's
+        current position before the tracking loop can process its next tick.
+
+        Overhead: one frame capture + one local tracking pass per new track.
+        Negligible — new tracks are rare (mob enters screen or spawns).
         """
         ctx = self._ctx
         snapshots: list[StateTrackSnapshot] = []
@@ -245,7 +249,7 @@ class DiscoveryWorker:
             return
         for result in batch.results:
             if result.found:
-                ctx.tracks.apply_quick_fix_result(
+                ctx.tracks.apply_initial_follow(
                     result.track_id,
                     x=result.x,
                     y=result.y,

@@ -559,7 +559,7 @@ class HuntTracks:
                 return int(entry[1]), int(entry[2])
         return None, None
 
-    def apply_quick_fix_result(
+    def apply_initial_follow(
         self,
         track_id: int,
         *,
@@ -568,12 +568,14 @@ class HuntTracks:
         confidence: float,
         now_tick: int | None = None,
     ) -> bool:
-        """Fast position update from a quick-fix pass — no death checks.
+        """Initialize a newly created track's position from a fresh local follow.
 
-        Called by the discovery thread after creating a new track, running
-        a fresh ``track_local()`` pass, and needing to snap the position
-        immediately. Applies movement observation and track observation
-        but skips all death-factor evaluation.
+        Called by the discovery thread after creating a new track — captures a
+        fresh frame, runs ``track_local()``, and applies the found position
+        immediately. This is a standard initialization step: the detection
+        position is already stale by the time the track is created (detection
+        processing latency), so an immediate follow re-anchors the track at the
+        mob's current location before the tracking loop's next tick.
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
