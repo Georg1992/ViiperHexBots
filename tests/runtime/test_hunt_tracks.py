@@ -206,7 +206,13 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
 
-    def test_discovery_miss_cleared_when_tracking_hits(self) -> None:
+    def test_discovery_miss_preserved_when_tracking_hits(self) -> None:
+        """Tracker hit does NOT reset discovery_miss_count.
+
+        Only discovery (apply_discovery_observation / reanchor) determines
+        liveness. The tracker is a pure follower — if it finds background
+        noise it should not interfere with discovery's 2-miss removal.
+        """
         track_id = self._create(874, 578)
         self.tracks.reconcile_detections([], mob_name="horn", now_tick=self.now + 50)
         track = self.tracks.get_track_by_id(track_id)
@@ -218,7 +224,8 @@ class HuntTracksRulesTests(unittest.TestCase):
         )
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
-        self.assertEqual(track.discovery_miss_count, 0)
+        # tracker hit does NOT reset discovery_miss_count — stays at 1
+        self.assertEqual(track.discovery_miss_count, 1)
 
 
     def test_outside_roi_removed_gone_track_inside_roi_marked_absent(self) -> None:

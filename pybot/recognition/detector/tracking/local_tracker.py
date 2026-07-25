@@ -142,15 +142,6 @@ def track_local(
 
     match_count = int(candidates.sum())
 
-    # Require a minimum number of matching pixels to distinguish a real mob
-    # from background noise. A 240×240 search window (120px radius) can match
-    # 1-4 palette pixels by coincidence (e.g. green mob on grass). Below 5,
-    # it's almost certainly noise — treat as miss so discovery's 2-miss
-    # removal can fire.
-    MIN_EXACT_MATCHES = 5
-    if match_count < MIN_EXACT_MATCHES:
-        return _miss(track_id, screen_cx, screen_cy, reason="too_few_matches")
-
     return LocalTrackResult(
         track_id=track_id, found=True, x=hit_x, y=hit_y,
         confidence=1.0, miss_reason="", match_count=match_count,

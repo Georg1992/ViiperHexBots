@@ -307,7 +307,10 @@ def apply_track_observation(
         track.last_found_tick = now_tick
         track.lost_count = 0
         clear_discovery_observation(track)
-        track.discovery_miss_count = 0
+        # NOTE: discovery_miss_count is NOT reset here — only discovery
+        # (apply_discovery_observation / apply_discovery_reanchor) determines
+        # liveness. The tracker is a pure follower; if it reports found=True
+        # on background noise it should NOT block discovery's 2-miss removal.
         if confidence > 0:
             track.confidence = confidence
         return
