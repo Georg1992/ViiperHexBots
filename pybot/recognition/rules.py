@@ -87,11 +87,6 @@ class MobTrack:
     discovery_obs_y: int = 0
     discovery_obs_tick: int = 0
 
-    # Peak exact-palette match count observed by tracking so far.
-    # When match_count drops far below peak AND the mob is stationary,
-    # the track is removed immediately — palette decay = death.
-    peak_match_count: int = 0
-
     # Tick when the mob first registered as stationary at its current position
     # (within 3px). When this exceeds STATIONARY_DEATH_TIMEOUT_MS and the mob
     # hasn't moved, the track is removed as a corpse. 0 = not stationary.

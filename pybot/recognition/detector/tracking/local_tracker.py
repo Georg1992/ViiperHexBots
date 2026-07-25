@@ -33,11 +33,6 @@ class LocalTrackResult:
     y: int
     confidence: float
     miss_reason: str
-    # Number of exact palette-match pixels in the search window.
-    # Used by apply_tracking() to detect palette decay (corpse fading).
-    # Unused with heatmap tracking (stays 0); removal handled by stationary
-    # timeout + discovery 2-miss rule.
-    match_count: int = 0
 
 
 def track_local(

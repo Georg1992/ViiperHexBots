@@ -12,12 +12,12 @@ from pybot.runtime.hunt_policy import HuntPolicy
 from pybot.runtime.hunt_tracks import HuntTracks
 
 
-def _hit(track_id: int, x: int, y: int, confidence: float = 0.8, match_count: int = 50) -> SimpleNamespace:
-    return SimpleNamespace(track_id=track_id, found=True, x=x, y=y, confidence=confidence, match_count=match_count)
+def _hit(track_id: int, x: int, y: int, confidence: float = 0.8) -> SimpleNamespace:
+    return SimpleNamespace(track_id=track_id, found=True, x=x, y=y, confidence=confidence)
 
 
 def _miss(track_id: int) -> SimpleNamespace:
-    return SimpleNamespace(track_id=track_id, found=False, x=0, y=0, confidence=0.0, match_count=0)
+    return SimpleNamespace(track_id=track_id, found=False, x=0, y=0, confidence=0.0)
 
 
 def det(x: int, y: int, confidence: float = 0.71, scale: float = 0.9) -> DiscoveryDetection:

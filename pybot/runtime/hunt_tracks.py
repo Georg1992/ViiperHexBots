@@ -410,16 +410,7 @@ class HuntTracks:
                     continue
 
                 if result.found:
-                    # Factor 1: Palette decay death — tracked colors vanished
-                    if self._evaluate_palette_death(track, result):
-                        death_ids.append(result.track_id)
-                        continue
-
-                    # Update peak match count (used by palette decay above)
-                    if result.match_count > track.peak_match_count:
-                        track.peak_match_count = result.match_count
-
-                    # Factor 2: Stationary death timeout — hasn't moved for too long
+                    # Factor 1: Stationary death timeout — hasn't moved for too long
                     if self._evaluate_stationary_death(track, result, tick):
                         death_ids.append(result.track_id)
                         continue
@@ -460,18 +451,6 @@ class HuntTracks:
                 self._remove_tracks_locked(set(death_ids))
 
             return missed_ids
-
-    def _evaluate_palette_death(self, track: MobTrack, result) -> bool:
-        """Factor 1 (tracking): Palette decay — exact-match count dropped far
-        below the peak on a stationary mob, meaning the corpse is no longer
-        showing the mob's colors."""
-        match_count = result.match_count
-        return bool(
-            match_count > 0
-            and not track.moving
-            and track.peak_match_count > 5
-            and match_count < max(5, track.peak_match_count * 0.2)
-        )
 
     def _evaluate_stationary_death(self, track: MobTrack, result, tick: int) -> bool:
         """Factor 2 (tracking): Stationary death timeout — mob hasn't moved
