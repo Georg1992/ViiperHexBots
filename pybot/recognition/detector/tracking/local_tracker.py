@@ -115,37 +115,10 @@ def track_local(
             moving=moving,
         )
 
-    # No peak found. If the search position is within the frame, fall back
-    # to the predicted center as a low-confidence hit so the track position
-    # updates from a stale discovery position. The silhouette gate may reject
-    # a valid mob slightly off-center; the heatmap is used as a soft signal.
-    # Discovery handles removal if the mob is really gone (2-miss rule).
-    # If the position is off-screen, keep the miss.
-    fh, fw = frame_bgr.shape[:2]
-    if 0 <= search_x < fw and 0 <= search_y < fh:
-        fallback_bbox = _descriptor_sized_bbox(descriptor, search_x, search_y, scale)
-        return _finalize_track_hit(
-            track_id=track_id, bbox=fallback_bbox, similarity=0.0,
-            offset_x=offset_x, offset_y=offset_y,
-            prev_x=cx, prev_y=cy,
-            moving=moving,
-        )
     return _miss_result(
         track_id=track_id, x=screen_cx, y=screen_cy,
         reason="no_peak", confidence=sim,
     )
-
-
-def _descriptor_sized_bbox(
-    descriptor: MobDescriptor,
-    cx: int, cy: int,
-    scale: float,
-) -> tuple[int, int, int, int]:
-    """Build a descriptor-sized bbox centered at (cx, cy)."""
-    from pybot.recognition.detector.detector import _MIN_DESCRIPTOR_PX
-    w = max(_MIN_DESCRIPTOR_PX, int(round(descriptor.avg_width * scale)))
-    h = max(_MIN_DESCRIPTOR_PX, int(round(descriptor.avg_height * scale)))
-    return (cx - w // 2, cy - h // 2, w, h)
 
 
 def _miss_result(

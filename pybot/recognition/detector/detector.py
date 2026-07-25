@@ -419,10 +419,18 @@ class MobDetector:
                 soft_hard_ratio=soft_hard_ratio,
             ))
 
-            if passed:
+            if passed and extract_bbox is not None:
+                # Use silhouette extract bbox center (refined by palette CC)
+                # instead of the raw heatmap-blob center. The heatmap center
+                # can be off for asymmetrical mobs or clustered blobs;
+                # the extract bbox is the silhouette-matched palette region.
+                ex, ey, ew, eh = extract_bbox
+                refined_cx = ex + ew // 2
+                refined_cy = ey + eh // 2
                 candidates.append(DetectionCandidate(
                     mob_name=descriptor.mob_name,
-                    center_x=cx, center_y=cy,
+                    center_x=refined_cx,
+                    center_y=refined_cy,
                     bbox=bbox,
                     final_score=heat_score,
                     heatmap_score=heat_score,
