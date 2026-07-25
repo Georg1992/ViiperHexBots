@@ -107,16 +107,18 @@ def track_local(
     #
     # Age-scaled search radius: the older the detection (time between
     # track creation and this tracking tick), the further the mob may have
-    # moved. Scale the search radius by the age so stale detections from
-    # slow processing (e.g. 1x-scale mobs like Creamy) still find the mob.
-    # 0ms delay → 1x, 500ms delay → 2x, capped at 3x.
+    # moved. Calculate how many pixels the fastest mob (~3 cells/s at 64px/cell
+    # = 0.192 px/ms) could have traveled since detection, and add that to the
+    # base search radius. No cap — the radius grows naturally with the delay.
+    # 0ms → 120px, 500ms → 216px, 1s → 312px, 2s → 504px.
     peak_radius = radius
     if not moving and lost_count == 0:
         created_tick = int(track.get("createdTick", 0))
         now_tick = int(track.get("nowTick", 0))
-        age_ms = max(0, now_tick - created_tick)
-        age_factor = 1.0 + (age_ms / 500.0)
-        peak_radius = int(detector.local_track_search_radius_px * min(age_factor, 3.0))
+        delay_ms = max(0, now_tick - created_tick)
+        max_speed_px_per_ms = (3 * 64) / 1000.0  # ~0.192 px/ms
+        extra_px = int(delay_ms * max_speed_px_per_ms)
+        peak_radius = int(detector.local_track_search_radius_px) + extra_px
     peak = _find_local_peak(
         detector, frame_bgr, descriptor, cx, cy, scale,
         search_radius_px=peak_radius,
