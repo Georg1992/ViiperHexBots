@@ -3,11 +3,15 @@
 Used by tests to lock the pipeline contract.
 
 Ownership:
-- **Discovery** creates tracks for new mobs, publishes soft position priors
-  on match (``discovery_obs_*``). It never overwrites authoritative ``x``/``y``.
-  Tracks unmatched for 2 consecutive scans are removed as dead/out-of-range.
-- **Tracking** follows tracks every frame, reports hits/misses. Tracking also
-  re-scores missed tracks via the silhouette gate to confirm or remove.
+- **Discovery** scans the hunt ROI for living mobs each cycle, creates tracks
+  for new finds, publishes soft position priors (``discovery_obs_*``) on match,
+  and removes tracks that are out-of-range or missed for 2 consecutive scans.
+  It never overwrites authoritative ``x``/``y``.
+- **Tracking** follows every alive track every frame via pure heatmap local
+  follow (no silhouette gate). On found=True it updates position, velocity,
+  and clears discovery priors. On stationary timeout (mob hasn't moved >3px
+  for ``STATIONARY_DEATH_TIMEOUT_MS``) it flags the track as a corpse.
+  On miss it coasts along velocity and wakes discovery for confirmation.
 - **Attack** records attack_count / last_attack_tick only; it reads position
   snapshots for clicks but must not mutate tracking fields or remove tracks.
 """

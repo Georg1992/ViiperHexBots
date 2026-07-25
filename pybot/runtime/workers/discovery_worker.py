@@ -1,20 +1,25 @@
-"""Discovery loop — own thread, finds new mobs and signals track evidence.
+"""Discovery loop — own thread, detects living mobs and reconciles tracks.
 
 Schedule: every ``discovery_interval_ms`` (default 1s), and immediately when
-``discovery_wake`` is set after a teleport settle delay. While
-``discovery_suspend`` is set (claim → teleport key → delay), or while
-storage UI is open (``should_run_discovery`` false), this worker does
-not scan — only waits for the post-delay wake / storage end.
+``discovery_wake`` is set after a teleport settle delay or when tracking
+wakes it on a local miss. While ``discovery_suspend`` is set (claim →
+teleport key → delay), or while storage UI is open (``should_run_discovery``
+false), this worker does not scan — only waits for the post-delay wake /
+storage end.
 
 One discovery pass (same frame):
-1. Living heatmap → silhouette scan for new / matched mobs (living refs only).
-2. Reconcile: create / match / mark absent. Sample exact pixel palette for
-   newly created tracks from the capture frame.
+1. Silhouette scan for living mobs (living refs only).
+2. Reconcile: create / match / mark absent.
 
-Tracking owns authoritative position and all track removal (joint-absence,
-out-of-range). Discovery never overwrites authoritative x/y;
-it only creates, soft-priors, absence marks, and refreshes priors when
-tracking wakes it on a local miss.
+Removal factors run in ``HuntTracks.reconcile_detections()``:
+- Factor 1: Tracks outside the hunt ROI → removed immediately.
+- Factor 2: Tracks missed for 2+ consecutive discovery scans → removed.
+- First miss: discovery_absent flag set (track stays alive for one more
+  scan cycle).
+
+Discovery never overwrites authoritative x/y; it only creates tracks,
+publishes soft position priors (``discovery_obs_*``) on match, marks
+absent tracks, and refreshes priors when tracking wakes it on a miss.
 
 Teleport clear requires zero living scan candidates, not merely zero alive
 tracks after ghost matching. Capture-time position snapshots keep dedup and

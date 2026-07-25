@@ -356,9 +356,9 @@ class HuntTracks:
     ) -> list[int]:
         """Refresh coordinates from LocalTracker results.
 
-        Evaluates tracking-level death factors (palette decay, stationary
-        timeout) and removes dead tracks. Returns track IDs that were not
-        found (missed by tracker).
+        Evaluates tracking-level death factor (stationary timeout) and
+        removes dead tracks. Returns track IDs that were not found (missed
+        by tracker).
 
         Add new removal factors as separate ``_evaluate_*`` methods and
         call them in the death-ids collection block below.
@@ -418,7 +418,7 @@ class HuntTracks:
             return missed_ids
 
     def _evaluate_stationary_death(self, track: MobTrack, result, tick: int) -> bool:
-        """Factor 2 (tracking): Stationary death timeout — mob hasn't moved
+        """Factor 1 (tracking): Stationary death timeout — mob hasn't moved
         more than 3 px for ``STATIONARY_DEATH_TIMEOUT_MS``, so it's a corpse.
 
         Side-effect: updates ``track.stationary_since_tick``.
