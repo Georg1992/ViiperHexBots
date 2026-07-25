@@ -46,8 +46,14 @@ def track_local(
     offset_x: int = 0,
     offset_y: int = 0,
     search_radius_px: int | None = None,
+    suppress_positions: list[tuple[int, int]] | None = None,
 ) -> LocalTrackResult:
-    """Follow one known track near its last / predicted center."""
+    """Follow one known track near its last / predicted center.
+
+    ``suppress_positions``: ROI-relative (x, y) of other tracks whose heat
+    signature should be suppressed in the peak search. Prevents track A from
+    locking onto mob B when two mobs are close together.
+    """
     track_id = int(track["trackId"])
     cx = int(track["x"])
     cy = int(track["y"])
@@ -122,6 +128,7 @@ def track_local(
     peak = _find_local_peak(
         detector, frame_bgr, descriptor, cx, cy, scale,
         search_radius_px=peak_radius,
+        suppress_positions=suppress_positions,
     )
     if peak is not None:
         _peak_x, _peak_y, _heat_score, peak_sim, peak_bbox = peak
@@ -176,6 +183,7 @@ def _find_local_peak(
     scale: float,
     *,
     search_radius_px: int,
+    suppress_positions: list[tuple[int, int]] | None = None,
 ) -> tuple[int, int, float] | None:
     frame_h, frame_w = frame_bgr.shape[:2]
     margin_x = int(round(descriptor.avg_width * scale * 0.6))
@@ -194,6 +202,21 @@ def _find_local_peak(
     )
     if local_final.size == 0:
         return None
+
+    # Suppress heat near other tracks so each track grabs its own mob.
+    if suppress_positions:
+        suppress_radius = int(detector.config["trackDedupRadiusPx"]) // 2
+        for sx, sy in suppress_positions:
+            lsx = sx - x0
+            lsy = sy - y0
+            if 0 <= lsx < local_final.shape[1] and 0 <= lsy < local_final.shape[0]:
+                cv2.circle(
+                    local_final,
+                    (int(lsx), int(lsy)),
+                    suppress_radius,
+                    0.0,
+                    thickness=-1,
+                )
 
     anchor_x = cx - x0
     anchor_y = cy - y0

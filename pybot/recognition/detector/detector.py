@@ -1283,12 +1283,13 @@ class MobDetector:
     # ------------------------------------------------------------------
 
     def track_local(self, frame_bgr, mob_name, track, *, offset_x=0, offset_y=0,
-                    search_radius_px=None):
+                    search_radius_px=None, suppress_positions=None):
         from pybot.recognition.detector.tracking.local_tracker import track_local as run_track_local
         return run_track_local(
             self, frame_bgr, mob_name, track,
             offset_x=offset_x, offset_y=offset_y,
             search_radius_px=search_radius_px,
+            suppress_positions=suppress_positions,
         )
 
     # ------------------------------------------------------------------

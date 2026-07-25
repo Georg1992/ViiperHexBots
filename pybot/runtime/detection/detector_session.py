@@ -219,10 +219,17 @@ class DetectorSession:
                 found_count=0,
                 coord_updates=0,
             )
+        # Collect all track positions (ROI-relative) so each track's peak search
+        # can suppress heat near other tracks — prevents track swapping when mobs
+        # are close together.
+        all_roi_positions: list[tuple[int, int]] = [
+            (snapshot.x - roi.x, snapshot.y - roi.y)
+            for snapshot in track_snapshots
+        ]
         start = time.perf_counter()
         results: list[LocalTrackResult] = []
         with self._lock:
-            for snapshot in track_snapshots:
+            for i, snapshot in enumerate(track_snapshots):
                 track = {
                     "trackId": snapshot.track_id,
                     "x": snapshot.x - roi.x,
@@ -244,6 +251,10 @@ class DetectorSession:
                     track["discoveryObsX"] = snapshot.discovery_obs_x - roi.x
                     track["discoveryObsY"] = snapshot.discovery_obs_y - roi.y
                     track["discoveryObsTick"] = snapshot.discovery_obs_tick
+                # Other tracks' positions for heatmap suppression
+                other_positions = [
+                    pos for j, pos in enumerate(all_roi_positions) if j != i
+                ]
                 results.append(
                     self._detector.track_local(
                         frame,
@@ -251,6 +262,7 @@ class DetectorSession:
                         track,
                         offset_x=roi.x,
                         offset_y=roi.y,
+                        suppress_positions=other_positions if other_positions else None,
                     )
                 )
         duration_ms = int((time.perf_counter() - start) * 1000)
