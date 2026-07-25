@@ -100,10 +100,12 @@ def track_local(
         )
 
     # Center miss → search local heatmap peaks.
-    # _find_local_peak returns (x, y, heat, sim, bbox) from the winning
-    # score_at — no redundant re-score needed.
+    # Use the LAST known position (cx, cy) as the search center, not the
+    # predicted position (search_x, search_y). When velocity prediction is
+    # wrong (e.g. direction change), the mob is closest to where it was
+    # last seen, not where we predicted it to be.
     peak = _find_local_peak(
-        detector, frame_bgr, descriptor, search_x, search_y, scale,
+        detector, frame_bgr, descriptor, cx, cy, scale,
         search_radius_px=radius,
     )
     if peak is not None:

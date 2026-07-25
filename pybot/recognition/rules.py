@@ -294,8 +294,11 @@ def apply_track_observation(
     if found:
         dx = float(x - track.x)
         dy = float(y - track.y)
-        track.vel_x = (0.65 * track.vel_x) + (0.35 * dx)
-        track.vel_y = (0.65 * track.vel_y) + (0.35 * dy)
+        # Responsive velocity EMA: 50/50 weight so direction changes correct
+        # within 1 frame. 0.65/0.35 was too slow for fast mobs and sudden
+        # turns — the tracked position lagged behind actual movement.
+        track.vel_x = (0.5 * track.vel_x) + (0.5 * dx)
+        track.vel_y = (0.5 * track.vel_y) + (0.5 * dy)
         track.x = x
         track.y = y
         track.updated_tick = now_tick
