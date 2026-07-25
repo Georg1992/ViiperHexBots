@@ -97,6 +97,11 @@ class MobTrack:
     # the track is removed immediately — palette decay = death.
     peak_match_count: int = 0
 
+    # Tick when the mob first registered as stationary at its current position
+    # (within 3px). When this exceeds STATIONARY_DEATH_TIMEOUT_MS and the mob
+    # hasn't moved, the track is removed as a corpse. 0 = not stationary.
+    stationary_since_tick: int = 0
+
     @classmethod
     def from_discovery(
         cls,

@@ -23,6 +23,7 @@ from pybot.recognition.rules import (
 
 from pybot.runtime.track_reconciler import TrackReconciler
 from pybot.runtime.capture.window_roi import HuntRoi
+from pybot.runtime.constants import STATIONARY_DEATH_TIMEOUT_MS
 from pybot.recognition.detector.detector import load_detector_config
 
 
@@ -383,6 +384,21 @@ class HuntTracks:
                     # Update peak match count
                     if match_count > track.peak_match_count:
                         track.peak_match_count = match_count
+
+                    # Stationary death timeout: if the mob hasn't moved more
+                    # than 3px for STATIONARY_DEATH_TIMEOUT_MS, it's a corpse.
+                    STATIONARY_PX = 3
+                    if not track.moving:
+                        dx = abs(result.x - track.x)
+                        dy = abs(result.y - track.y)
+                        if dx <= STATIONARY_PX and dy <= STATIONARY_PX:
+                            if track.stationary_since_tick == 0:
+                                track.stationary_since_tick = tick
+                            elif tick - track.stationary_since_tick >= STATIONARY_DEATH_TIMEOUT_MS:
+                                death_ids.append(result.track_id)
+                                continue
+                        else:
+                            track.stationary_since_tick = 0
 
                     move_px, stop_px = movement_thresholds(self._detector_config())
                     apply_movement_observation(
