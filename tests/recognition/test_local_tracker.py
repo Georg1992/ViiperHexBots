@@ -27,24 +27,6 @@ def playfield_roi(frame):
     ]
 
 
-def _sample_fixture_palette(
-    frame: np.ndarray, cx: int, cy: int, size: int = 20,
-) -> list[tuple[int, int, int]]:
-    """Sample unique BGR pixel values from a tight area — matches production."""
-    h, w = frame.shape[:2]
-    half = size // 2
-    x0 = max(0, cx - half)
-    y0 = max(0, cy - half)
-    x1 = min(w, x0 + size)
-    y1 = min(h, y0 + size)
-    if x1 <= x0 or y1 <= y0:
-        return []
-    patch = frame[y0:y1, x0:x1]
-    pixels = patch.reshape(-1, 3)
-    unique = np.unique(pixels, axis=0)
-    return [tuple(int(v) for v in color) for color in unique]
-
-
 class LocalTrackerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -68,15 +50,12 @@ class LocalTrackerTests(unittest.TestCase):
         return living[0]
 
     def _build_track_dict(self, anchor, track_id=1, **overrides) -> dict:
-        """Build a track dict with a sampled palette from the fixture frame."""
+        """Build a track dict from a discovery anchor."""
         track = {
             "trackId": track_id,
             "x": anchor.center_x,
             "y": anchor.center_y,
             "scale": anchor.candidate_scale,
-            "trackPaletteBgr": _sample_fixture_palette(
-                self.roi, anchor.center_x, anchor.center_y,
-            ),
         }
         track.update(overrides)
         return track
@@ -145,22 +124,12 @@ class LocalTrackerTests(unittest.TestCase):
                 track_local(detector, self.roi, "horn", track)
             return time.perf_counter() - start
 
-        palette_cache: dict[int, list] = {}
-        def _palette(candidate, size=16):
-            cid = id(candidate)
-            if cid not in palette_cache:
-                palette_cache[cid] = _sample_fixture_palette(
-                    self.roi, candidate.center_x, candidate.center_y, size=size,
-                )
-            return palette_cache[cid]
-
         one = [
             {
                 "trackId": 1,
                 "x": living[0].center_x,
                 "y": living[0].center_y,
                 "scale": living[0].candidate_scale,
-                "trackPaletteBgr": _palette(living[0]),
             }
         ]
         three = [
@@ -169,7 +138,6 @@ class LocalTrackerTests(unittest.TestCase):
                 "x": candidate.center_x,
                 "y": candidate.center_y,
                 "scale": candidate.candidate_scale,
-                "trackPaletteBgr": _palette(candidate),
             }
             for index, candidate in enumerate(living[:3])
         ]
@@ -179,7 +147,6 @@ class LocalTrackerTests(unittest.TestCase):
                 "x": candidate.center_x,
                 "y": candidate.center_y,
                 "scale": candidate.candidate_scale,
-                "trackPaletteBgr": _palette(candidate),
             }
             for index, candidate in enumerate(living[:6])
         ]

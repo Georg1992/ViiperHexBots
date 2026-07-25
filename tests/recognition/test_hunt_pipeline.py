@@ -26,23 +26,6 @@ def playfield_roi(frame):
     ]
 
 
-def _sample_fixture_palette(
-    frame: np.ndarray, cx: int, cy: int, size: int = 20,
-) -> list[tuple[int, int, int]]:
-    h, w = frame.shape[:2]
-    half = size // 2
-    x0 = max(0, cx - half)
-    y0 = max(0, cy - half)
-    x1 = min(w, x0 + size)
-    y1 = min(h, y0 + size)
-    if x1 <= x0 or y1 <= y0:
-        return []
-    patch = frame[y0:y1, x0:x1]
-    pixels = patch.reshape(-1, 3)
-    unique = np.unique(pixels, axis=0)
-    return [tuple(int(v) for v in color) for color in unique]
-
-
 class HuntPipelineIntegrationTests(unittest.TestCase):
     """Discovery + local tracking + track rules."""
 
@@ -96,13 +79,11 @@ class HuntPipelineIntegrationTests(unittest.TestCase):
             now_tick=t_create,
             discovery_scale=anchor.candidate_scale,
         )
-        palette = _sample_fixture_palette(self.roi, track.x, track.y)
         track_req = {
             "trackId": 1,
             "x": track.x,
             "y": track.y,
             "scale": track.discovery_scale,
-            "trackPaletteBgr": palette,
         }
         result = track_local(detector, self.roi, "horn", track_req)
         self.assertTrue(result.found)
@@ -124,13 +105,11 @@ class HuntPipelineIntegrationTests(unittest.TestCase):
             now_tick=now,
             discovery_scale=anchor.candidate_scale,
         )
-        palette = _sample_fixture_palette(self.roi, track.x, track.y)
         track_req = {
             "trackId": 1,
             "x": track.x,
             "y": track.y,
             "scale": anchor.candidate_scale,
-            "trackPaletteBgr": palette,
         }
 
         for tick in range(5):

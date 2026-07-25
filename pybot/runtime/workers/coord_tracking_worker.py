@@ -81,7 +81,6 @@ class CoordTrackingWorker:
                 discovery_obs_x=track.discovery_obs_x,
                 discovery_obs_y=track.discovery_obs_y,
                 discovery_obs_tick=track.discovery_obs_tick,
-                track_palette_bgr=tuple(track.track_palette_bgr),
             )
             for track in alive_tracks
         ]

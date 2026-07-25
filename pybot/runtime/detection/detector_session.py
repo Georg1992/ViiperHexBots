@@ -58,8 +58,7 @@ class StateTrackSnapshot:
     discovery_obs_x: int = 0
     discovery_obs_y: int = 0
     discovery_obs_tick: int = 0
-    # Exact BGR palette sampled at track creation; empty = use descriptor.
-    track_palette_bgr: tuple[tuple[int, int, int], ...] = ()
+
 
 
 @dataclass(frozen=True)
@@ -245,8 +244,6 @@ class DetectorSession:
                     track["discoveryObsX"] = snapshot.discovery_obs_x - roi.x
                     track["discoveryObsY"] = snapshot.discovery_obs_y - roi.y
                     track["discoveryObsTick"] = snapshot.discovery_obs_tick
-                if snapshot.track_palette_bgr:
-                    track["trackPaletteBgr"] = list(snapshot.track_palette_bgr)
                 results.append(
                     self._detector.track_local(
                         frame,

@@ -44,21 +44,12 @@ class DetectorSessionTests(unittest.TestCase):
     def test_track_locals_returns_results(self) -> None:
         scan = self.detector.discover_frame(self.roi_frame, self.roi)
         anchor = next(d for d in scan.detections if d.living)
-        # Sample palette from the fixture frame at the anchor position
-        import numpy as np
-        h, w = self.roi_frame.shape[:2]
-        cx, cy = anchor.x, anchor.y
-        x0, y0 = max(0, cx - 10), max(0, cy - 10)
-        x1, y1 = min(w, x0 + 20), min(h, y0 + 20)
-        patch = self.roi_frame[y0:y1, x0:x1]
-        palette = tuple(tuple(int(v) for v in c) for c in np.unique(patch.reshape(-1, 3), axis=0))
         snapshots = [
             StateTrackSnapshot(
                 track_id=1,
                 x=anchor.x,
                 y=anchor.y,
                 scale=anchor.candidate_scale,
-                track_palette_bgr=palette,
             )
         ]
         batch = self.detector.track_locals_frame(self.roi_frame, self.roi, snapshots)

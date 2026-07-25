@@ -148,19 +148,6 @@ class HuntTracks:
                     return track
             return None
 
-    def set_track_palette(
-        self,
-        track_id: int,
-        palette: list[tuple[int, int, int]],
-    ) -> bool:
-        """Store exact BGR palette for a track (sampled from frame at creation)."""
-        with self._lock:
-            track = self._get_track_by_id_locked(track_id)
-            if track is None:
-                return False
-            track.track_palette_bgr = list(palette)
-            return True
-
     def snapshot_for_track(self, track_id: int, now_tick: int | None = None) -> MobTrackSnapshot | None:
         with self._lock:
             track = self._get_track_by_id_locked(track_id)

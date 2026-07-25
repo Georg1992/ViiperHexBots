@@ -14,7 +14,7 @@ Ownership:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 # Same-object dedup radius for discovery vs existing tracks. Clustering of raw
@@ -86,11 +86,6 @@ class MobTrack:
     discovery_obs_x: int = 0
     discovery_obs_y: int = 0
     discovery_obs_tick: int = 0
-
-    # Exact BGR palette sampled from the frame when this track was first created.
-    # Used by the local tracker for exact-match pixel following — no distance
-    # threshold, no descriptor palette. Empty list until first discovery sample.
-    track_palette_bgr: list[tuple[int, int, int]] = field(default_factory=list)
 
     # Peak exact-palette match count observed by tracking so far.
     # When match_count drops far below peak AND the mob is stationary,
