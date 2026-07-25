@@ -104,9 +104,17 @@ def track_local(
     # predicted position (search_x, search_y). When velocity prediction is
     # wrong (e.g. direction change), the mob is closest to where it was
     # last seen, not where we predicted it to be.
+    #
+    # New track widening: a track just created by discovery might have had
+    # its mob move significantly between the discovery frame capture and
+    # this first tracking tick. Use the wider moving-search radius so the
+    # peak search doesn't miss and trigger a duplicate discovery wake.
+    peak_radius = radius
+    if not moving and lost_count == 0:
+        peak_radius = int(detector.local_track_moving_search_radius_px)
     peak = _find_local_peak(
         detector, frame_bgr, descriptor, cx, cy, scale,
-        search_radius_px=radius,
+        search_radius_px=peak_radius,
     )
     if peak is not None:
         _peak_x, _peak_y, _heat_score, peak_sim, peak_bbox = peak

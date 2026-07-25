@@ -227,12 +227,16 @@ class HuntTracks:
         area_epoch: int | None = None,
         hunt_roi: HuntRoi | None = None,
     ) -> ReconcileSummary:
-        """Discovery step: create new tracks; remove out-of-range; mark absent.
+        """Discovery step: create new tracks; evaluate removal factors.
 
-        Tracks whose capture-time position falls outside the hunt ROI are
-        removed immediately. In-range unmatched tracks are marked
-        ``discovery_absent`` so tracking can drop them after a sustained
-        local miss (``trackJointAbsentConfirmMs``).
+        After reconciling detections against known tracks, evaluates all
+        removal factors on unmatched tracks:
+        1. Outside hunt ROI → removed immediately.
+        2. Two missed discovery scans → removed.
+        3. First miss → marked discovery_absent (stays alive).
+
+        Add new removal factors as separate ``_evaluate_*`` methods and
+        call them here in the ``remove_ids`` collection block.
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
@@ -272,62 +276,111 @@ class HuntTracks:
             )
             unmatched_ids = set(summary.removed_ids or [])
 
-            # Split unmatched tracks:
-            # - Outside hunt ROI → removed immediately
-            # - Inside ROI, miss_count >= 2 (2nd miss) → removed immediately
-            # - Inside ROI, miss_count = 0 (1st miss) → mark discovery_absent
-            out_of_range_ids: list[int] = []
-            two_miss_ids: list[int] = []
-            first_miss_ids: list[int] = []
-            if hunt_roi is not None:
-                for track_id in unmatched_ids:
-                    tx, ty = self._capture_position(
-                        track_id, track_positions,
-                    )
-                    if tx is None:
-                        continue
-                    in_roi = (
-                        hunt_roi.x <= tx < hunt_roi.x + hunt_roi.w
-                        and hunt_roi.y <= ty < hunt_roi.y + hunt_roi.h
-                    )
-                    if not in_roi:
-                        out_of_range_ids.append(track_id)
-                        continue
-                    track = self._get_track_by_id_locked(track_id)
-                    if track is None:
-                        continue
-                    track.discovery_miss_count += 1
-                    if track.discovery_miss_count >= 2:
-                        two_miss_ids.append(track_id)
-                    else:
-                        first_miss_ids.append(track_id)
-            else:
-                for track_id in unmatched_ids:
-                    track = self._get_track_by_id_locked(track_id)
-                    if track is None:
-                        continue
-                    track.discovery_miss_count += 1
-                    if track.discovery_miss_count >= 2:
-                        two_miss_ids.append(track_id)
-                    else:
-                        first_miss_ids.append(track_id)
+            # ── Collect removal reasons ──────────────────────────────────
+            # Each factor is a self-contained evaluation. Add new factors
+            # by calling a new _evaluate_* method here.
+            remove_ids: set[int] = set()
 
-            remove_ids = set(out_of_range_ids + two_miss_ids)
+            # Factor 1: Tracks that left the hunt ROI
+            remove_ids.update(
+                self._evaluate_out_of_range_removal(
+                    unmatched_ids, hunt_roi, track_positions,
+                )
+            )
+
+            # Factor 2: Tracks missed by discovery 2+ scans in a row
+            # (also increments miss_count and returns first-miss tracks)
+            miss_remove, first_miss_ids = self._evaluate_discovery_miss_removal(
+                unmatched_ids, hunt_roi, track_positions,
+            )
+            remove_ids.update(miss_remove)
+
+            # Execute removal
             if remove_ids:
                 self._remove_tracks_locked(remove_ids)
 
+            # Mark first-miss tracks as discovery_absent (not removed)
             for track_id in first_miss_ids:
                 track = self._get_track_by_id_locked(track_id)
                 if track is None:
                     continue
                 clear_discovery_observation(track)
 
-            summary.removed_ids = list(out_of_range_ids + two_miss_ids)
+            summary.removed_ids = sorted(remove_ids)
             summary.removed_count = len(remove_ids)
             summary.tracks_after = len(self._tracks)
             summary.alive_after = sum(1 for t in self._tracks if is_alive(t))
             self._last_reconcile_summary = summary
             return summary
+
+    # ── Removal-factor evaluators ────────────────────────────────────────
+    # Each method evaluates ONE removal factor and returns a set of track
+    # IDs to remove (or (set, list) tuple). Add new factors as new methods.
+
+    def _evaluate_out_of_range_removal(
+        self,
+        unmatched_ids: set[int],
+        hunt_roi: HuntRoi | None,
+        track_positions: list[tuple[int, int, int]] | list[tuple[int, int, int, float]],
+    ) -> set[int]:
+        """Factor 1: Remove tracks whose capture-time position is outside the hunt ROI."""
+        if hunt_roi is None:
+            return set()
+        out: set[int] = set()
+        for track_id in unmatched_ids:
+            tx, ty = self._capture_position(track_id, track_positions)
+            if tx is None:
+                continue
+            if not (
+                hunt_roi.x <= tx < hunt_roi.x + hunt_roi.w
+                and hunt_roi.y <= ty < hunt_roi.y + hunt_roi.h
+            ):
+                out.add(track_id)
+        return out
+
+    def _evaluate_discovery_miss_removal(
+        self,
+        unmatched_ids: set[int],
+        hunt_roi: HuntRoi | None,
+        track_positions: list[tuple[int, int, int]] | list[tuple[int, int, int, float]],
+    ) -> tuple[set[int], list[int]]:
+        """Factor 2: Remove tracks missed by 2+ consecutive discovery scans.
+
+        Side-effect: increments ``discovery_miss_count`` for in-range tracks.
+
+        Returns ``(remove_ids, first_miss_ids)`` where:
+        - ``remove_ids``: tracks with miss_count >= 2 (to be removed).
+        - ``first_miss_ids``: tracks on their first miss (to be marked absent).
+        """
+        remove_ids: set[int] = set()
+        first_miss_ids: list[int] = []
+
+        # Determine which unmatched tracks are still in-range (skip already
+        # removed by out-of-range factor).
+        in_range_unmatched: set[int] = set()
+        for track_id in unmatched_ids:
+            if hunt_roi is not None:
+                tx, ty = self._capture_position(track_id, track_positions)
+                if tx is None:
+                    continue
+                if not (
+                    hunt_roi.x <= tx < hunt_roi.x + hunt_roi.w
+                    and hunt_roi.y <= ty < hunt_roi.y + hunt_roi.h
+                ):
+                    continue  # already handled by out-of-range factor
+            in_range_unmatched.add(track_id)
+
+        for track_id in in_range_unmatched:
+            track = self._get_track_by_id_locked(track_id)
+            if track is None:
+                continue
+            track.discovery_miss_count += 1
+            if track.discovery_miss_count >= 2:
+                remove_ids.add(track_id)
+            else:
+                first_miss_ids.append(track_id)
+
+        return remove_ids, first_miss_ids
 
     def apply_tracking(
         self,
@@ -338,11 +391,12 @@ class HuntTracks:
     ) -> list[int]:
         """Refresh coordinates from LocalTracker results.
 
-        Detects palette decay (exact-match count dropping far below peak on
-        a stationary mob) and removes the track immediately — the corpse
-        is no longer showing the mob's colors.
+        Evaluates tracking-level death factors (palette decay, stationary
+        timeout) and removes dead tracks. Returns track IDs that were not
+        found (missed by tracker).
 
-        Returns track IDs that were not found (missed).
+        Add new removal factors as separate ``_evaluate_*`` methods and
+        call them in the death-ids collection block below.
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
         missed_ids: list[int] = []
@@ -356,36 +410,19 @@ class HuntTracks:
                     continue
 
                 if result.found:
-                    # Palette decay check: if match count is far below the
-                    # peak AND the mob isn't moving → corpse, remove now.
-                    match_count = result.match_count
-                    if (
-                        match_count > 0
-                        and not track.moving
-                        and track.peak_match_count > 5
-                        and match_count < max(5, track.peak_match_count * 0.2)
-                    ):
+                    # Factor 1: Palette decay death — tracked colors vanished
+                    if self._evaluate_palette_death(track, result):
                         death_ids.append(result.track_id)
                         continue
 
-                    # Update peak match count
-                    if match_count > track.peak_match_count:
-                        track.peak_match_count = match_count
+                    # Update peak match count (used by palette decay above)
+                    if result.match_count > track.peak_match_count:
+                        track.peak_match_count = result.match_count
 
-                    # Stationary death timeout: if the mob hasn't moved more
-                    # than 3px for STATIONARY_DEATH_TIMEOUT_MS, it's a corpse.
-                    STATIONARY_PX = 3
-                    if not track.moving:
-                        dx = abs(result.x - track.x)
-                        dy = abs(result.y - track.y)
-                        if dx <= STATIONARY_PX and dy <= STATIONARY_PX:
-                            if track.stationary_since_tick == 0:
-                                track.stationary_since_tick = tick
-                            elif tick - track.stationary_since_tick >= STATIONARY_DEATH_TIMEOUT_MS:
-                                death_ids.append(result.track_id)
-                                continue
-                        else:
-                            track.stationary_since_tick = 0
+                    # Factor 2: Stationary death timeout — hasn't moved for too long
+                    if self._evaluate_stationary_death(track, result, tick):
+                        death_ids.append(result.track_id)
+                        continue
 
                     move_px, stop_px = movement_thresholds(self._detector_config())
                     apply_movement_observation(
@@ -418,11 +455,42 @@ class HuntTracks:
                 track.moving = False
                 missed_ids.append(result.track_id)
 
-            # Remove tracks killed by palette decay
+            # Execute all tracking-level removals
             if death_ids:
                 self._remove_tracks_locked(set(death_ids))
 
             return missed_ids
+
+    def _evaluate_palette_death(self, track: MobTrack, result) -> bool:
+        """Factor 1 (tracking): Palette decay — exact-match count dropped far
+        below the peak on a stationary mob, meaning the corpse is no longer
+        showing the mob's colors."""
+        match_count = result.match_count
+        return bool(
+            match_count > 0
+            and not track.moving
+            and track.peak_match_count > 5
+            and match_count < max(5, track.peak_match_count * 0.2)
+        )
+
+    def _evaluate_stationary_death(self, track: MobTrack, result, tick: int) -> bool:
+        """Factor 2 (tracking): Stationary death timeout — mob hasn't moved
+        more than 3 px for ``STATIONARY_DEATH_TIMEOUT_MS``, so it's a corpse.
+
+        Side-effect: updates ``track.stationary_since_tick``.
+        """
+        STATIONARY_PX = 3
+        if track.moving:
+            return False
+        dx = abs(result.x - track.x)
+        dy = abs(result.y - track.y)
+        if dx > STATIONARY_PX or dy > STATIONARY_PX:
+            track.stationary_since_tick = 0
+            return False
+        if track.stationary_since_tick == 0:
+            track.stationary_since_tick = tick
+            return False
+        return (tick - track.stationary_since_tick) >= STATIONARY_DEATH_TIMEOUT_MS
 
     @property
     def last_reconcile_summary(self) -> ReconcileSummary | None:
