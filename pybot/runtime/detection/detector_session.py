@@ -55,9 +55,6 @@ class StateTrackSnapshot:
     attack_count: int = 0
     created_tick: int = 0
     now_tick: int = 0
-    discovery_obs_x: int = 0
-    discovery_obs_y: int = 0
-    discovery_obs_tick: int = 0
 
 
 
@@ -124,15 +121,12 @@ class DetectorSession:
         self,
         frame: np.ndarray | None,
         roi: HuntRoi,
-        *,
-        known_tracks: list[tuple[int, int, int, float]] | None = None,
     ) -> DiscoveryScanResult:
-        """Discovery scan: living silhouette gate only. Death is death-worker-owned.
+        """Discovery scan: living silhouette gate only.
 
-        ``known_tracks`` are ``(track_id, screen_x, screen_y, scale)`` at capture
-        time. Empty on the first scan (living-only). Later scans find heatmap
-        peaks near known-track coords, skip pre-gates, and score against living
-        silhouettes so an existing track is matched rather than created anew.
+        All blobs go through every gate. Dedup against existing tracks is
+        handled by TrackReconciler after detection — discovery just produces
+        raw detections.
         """
         if frame is None or frame.size == 0:
             return DiscoveryScanResult(
@@ -144,16 +138,11 @@ class DetectorSession:
                 duration_ms=0,
                 elapsed_s=0.0,
             )
-        frame_known: list[tuple[int, int, int, float]] = [
-            (int(track_id), int(screen_x) - roi.x, int(screen_y) - roi.y, float(scale))
-            for track_id, screen_x, screen_y, scale in (known_tracks or ())
-        ]
         start = time.perf_counter()
         with self._lock:
             result = self._detector.detect(
                 frame,
                 self._mob_name,
-                known_tracks=frame_known or None,
             )
         elapsed_s = time.perf_counter() - start
         duration_ms = int(elapsed_s * 1000)
@@ -247,10 +236,6 @@ class DetectorSession:
                 track["attackCount"] = snapshot.attack_count
                 track["createdTick"] = snapshot.created_tick
                 track["nowTick"] = snapshot.now_tick
-                if snapshot.discovery_obs_tick > 0:
-                    track["discoveryObsX"] = snapshot.discovery_obs_x - roi.x
-                    track["discoveryObsY"] = snapshot.discovery_obs_y - roi.y
-                    track["discoveryObsTick"] = snapshot.discovery_obs_tick
                 # Other tracks' positions for heatmap suppression
                 other_positions = [
                     pos for j, pos in enumerate(all_roi_positions) if j != i

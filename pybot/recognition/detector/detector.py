@@ -267,13 +267,12 @@ class MobDetector:
         self,
         frame_bgr: np.ndarray,
         mob_name: str,
-        *,
-        known_tracks: list[tuple[int, int, int, float]] | None = None,
     ) -> DetectionResult:
         """Heatmap discovery with silhouette check.
 
-        Order: heatmap → blobs → (new peaks: geometry + color structure) →
-        silhouette. Known-track blobs skip geometry/color.
+        Order: heatmap → blobs → geometry → color structure → silhouette.
+        All blobs go through every gate — dedup against existing tracks is
+        handled by TrackReconciler after detection.
         """
         start = time.perf_counter()
         descriptor = self.ensure_descriptor(mob_name)
@@ -306,9 +305,6 @@ class MobDetector:
         blobs = self.heatmap_detector.top_centers(sprite_heatmap, descriptor)
         blobs_end = time.perf_counter()
 
-        dedup_radius = int(self.config["trackDedupRadiusPx"])
-        known = list(known_tracks or ())
-        blob_to_known = self._mark_known_blobs(blobs, known, dedup_radius)
         heatmap_peak = float(sprite_heatmap.max()) if sprite_heatmap.size else 0.0
         peak_rel = float(self.config["peakRelativeThreshold"])
         small_rel_heat = _SMALL_HEAT_RELATIVE_PEAK_MULT * peak_rel
@@ -320,13 +316,22 @@ class MobDetector:
         for blob_index, (cx, cy, heat_score, comp_bbox) in enumerate(blobs):
             bx, by, bw, bh = comp_bbox
             bbox = (bx, by, bw, bh)
-            known_hit = blob_to_known.get(blob_index)
+            # All blobs must clear geometry + color structure pre-gates.
+            # Dedup against existing tracks is handled post-detection by
+            # TrackReconciler.match_and_absent().
+            if not self._passes_discovery_geometry_gate(comp_bbox, descriptor):
+                silhouette_checks.append(SilhouetteCheck(
+                    center_x=cx,
+                    center_y=cy,
+                    heat_score=heat_score,
+                    passed=False,
+                    similarity=0.0,
+                ))
+                continue
 
-            # New peaks must clear geometry + color structure. Known tracks were
-            # already silhouette-confirmed when created — skip those pre-gates so
-            # fading corpses can still reach silhouette scoring.
-            if known_hit is None:
-                if not self._passes_discovery_geometry_gate(comp_bbox, descriptor):
+            # Tiny heat CCs: require relative heat vs frame peak (config-derived).
+            if self._is_small_heat_cc(comp_bbox, descriptor):
+                if heatmap_peak <= 0.0 or (float(heat_score) / heatmap_peak) < small_rel_heat:
                     silhouette_checks.append(SilhouetteCheck(
                         center_x=cx,
                         center_y=cy,
@@ -336,29 +341,17 @@ class MobDetector:
                     ))
                     continue
 
-                # Tiny heat CCs: require relative heat vs frame peak (config-derived).
-                if self._is_small_heat_cc(comp_bbox, descriptor):
-                    if heatmap_peak <= 0.0 or (float(heat_score) / heatmap_peak) < small_rel_heat:
-                        silhouette_checks.append(SilhouetteCheck(
-                            center_x=cx,
-                            center_y=cy,
-                            heat_score=heat_score,
-                            passed=False,
-                            similarity=0.0,
-                        ))
-                        continue
-
-                if not self._passes_color_structure_gate(
-                    frame_bgr, descriptor, comp_bbox,
-                ):
-                    silhouette_checks.append(SilhouetteCheck(
-                        center_x=cx,
-                        center_y=cy,
-                        heat_score=heat_score,
-                        passed=False,
-                        similarity=0.0,
-                    ))
-                    continue
+            if not self._passes_color_structure_gate(
+                frame_bgr, descriptor, comp_bbox,
+            ):
+                silhouette_checks.append(SilhouetteCheck(
+                    center_x=cx,
+                    center_y=cy,
+                    heat_score=heat_score,
+                    passed=False,
+                    similarity=0.0,
+                ))
+                continue
 
 
             (
@@ -377,9 +370,8 @@ class MobDetector:
                 bbox,
                 comp_bbox=comp_bbox,
             )
-            # New peaks: confirm body mass on the final extract crop (sprite-scale).
-            # Known tracks skip — fading corpses can lose body fill before opacity death.
-            if passed and known_hit is None:
+            # All passed blobs must confirm body mass on the final extract crop.
+            if passed:
                 if not self._passes_extract_body_gate(
                     frame_bgr, descriptor, extract_bbox,
                 ):
@@ -462,40 +454,6 @@ class MobDetector:
             sprite_heatmap=sprite_heatmap,
             silhouette_checks=silhouette_checks,
         )
-
-    @staticmethod
-    def _mark_known_blobs(
-        blobs: list[tuple[int, int, float, tuple[int, int, int, int]]],
-        known_tracks: list[tuple[int, int, int, float]],
-        dedup_radius: int,
-    ) -> dict[int, tuple[int, int, int, float]]:
-        """Map blob index → nearest known track within dedup radius (1:1)."""
-        if not blobs or not known_tracks:
-            return {}
-        radius_sq = dedup_radius * dedup_radius
-        claimed_tracks: set[int] = set()
-        marked: dict[int, tuple[int, int, int, float]] = {}
-        # Nearest pairs first so two peaks don't steal the same track poorly.
-        pairs: list[tuple[int, int, int]] = []
-        for blob_index, (cx, cy, _heat, _bbox) in enumerate(blobs):
-            for track_id, kx, ky, _scale in known_tracks:
-                dist = (int(cx) - int(kx)) ** 2 + (int(cy) - int(ky)) ** 2
-                if dist <= radius_sq:
-                    pairs.append((dist, blob_index, int(track_id)))
-        pairs.sort(key=lambda item: item[0])
-        track_by_id = {
-            int(track_id): (int(track_id), int(kx), int(ky), float(scale))
-            for track_id, kx, ky, scale in known_tracks
-        }
-        for _dist, blob_index, track_id in pairs:
-            if blob_index in marked or track_id in claimed_tracks:
-                continue
-            known = track_by_id.get(track_id)
-            if known is None:
-                continue
-            marked[blob_index] = known
-            claimed_tracks.add(track_id)
-        return marked
 
     # ------------------------------------------------------------------
     #  Geometry pre-gate + silhouette gate

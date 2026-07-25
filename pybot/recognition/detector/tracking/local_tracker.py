@@ -55,9 +55,6 @@ def track_local(
     moving = bool(track.get("moving", False))
     vel_x = float(track.get("velX", 0.0))
     vel_y = float(track.get("velY", 0.0))
-    discovery_obs_tick = int(track.get("discoveryObsTick", 0))
-    discovery_obs_x = int(track.get("discoveryObsX", 0))
-    discovery_obs_y = int(track.get("discoveryObsY", 0))
     lost_count = int(track.get("lostCount", 0))
 
     if search_radius_px is not None:
@@ -71,15 +68,6 @@ def track_local(
     predicted_x = int(round(cx + vel_x)) if moving else cx
     predicted_y = int(round(cy + vel_y)) if moving else cy
     search_x, search_y = predicted_x, predicted_y
-
-    # Use discovery soft prior when local follow is drifted or missing
-    if discovery_obs_tick > 0:
-        dedup_radius = int(detector.config["trackDedupRadiusPx"])
-        drift_sq = (cx - discovery_obs_x) ** 2 + (cy - discovery_obs_y) ** 2
-        half_dedup_sq = (dedup_radius // 2) ** 2
-        if lost_count > 0 or drift_sq > half_dedup_sq:
-            search_x = discovery_obs_x
-            search_y = discovery_obs_y
 
     descriptor = detector.ensure_descriptor(mob_name)
     screen_cx = cx + offset_x

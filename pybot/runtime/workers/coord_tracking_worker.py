@@ -1,8 +1,14 @@
-"""Coordinate tracking loop — own thread, follows positions only.
+"""Coordinate tracking loop — own thread, follows positions and creates tracks.
 
-Runs as fast as capture + local follow allow. Each tick captures a frame and
-follows every alive track with the LocalTracker (skip_opacity=True), writing
-fresh coordinates into the shared HuntTracks store.
+Runs as fast as capture + local follow allow. Each tick:
+1. Ingests discovery candidates, runs local-follow on the *current fresh frame*
+   to get exact coordinates, and creates tracks at those coordinates.
+2. Follows every alive track with the LocalTracker, writing fresh coordinates
+   into the shared HuntTracks store.
+
+Tracking owns track creation and all position writes. Discovery only
+publishes candidate positions; tracking resolves them on a current frame
+so tracks are created at the EXACT mob position, not 0.5s ago.
 
 Tracking is pure follow — no silhouette checks. On local miss, wakes
 discovery so it can confirm the mob via its full detection pipeline.
@@ -19,7 +25,7 @@ from pybot.runtime.workers.worker_contexts import CoordTrackingWorkerContext
 
 
 class CoordTrackingWorker:
-    """Single-threaded fast loop that follows known tracks (coords only)."""
+    """Single-threaded fast loop that follows known tracks and creates new ones."""
 
     def __init__(self, ctx: CoordTrackingWorkerContext) -> None:
         self._ctx = ctx
@@ -53,7 +59,13 @@ class CoordTrackingWorker:
 
         now_ms = monotonic_ms()
         area_epoch, alive_tracks = ctx.tracks.tracking_frame_snapshot(now_ms)
-        if not alive_tracks:
+
+        # Check for new discovery candidates — tracking creates these tracks
+        # on the current fresh frame at exact coordinates.
+        candidates = ctx.tracks.get_and_clear_new_candidates()
+
+        # Skip if nothing to do
+        if not alive_tracks and not candidates:
             self._update_overlay(now_ms)
             return
 
@@ -62,6 +74,20 @@ class CoordTrackingWorker:
             if now_ms - self._last_empty_frame_log_ms >= LOG_REPEAT_INTERVAL_MS:
                 self._last_empty_frame_log_ms = now_ms
                 ctx.logger.behavior("[COORD] capture returned empty frame")
+            return
+
+        # ── Step 1: Create tracks from discovery candidates ──────────────
+        if candidates:
+            new_count = self._process_discovery_candidates(
+                candidates, frame, roi, now_ms, area_epoch,
+            )
+            if new_count > 0:
+                # Refresh alive tracks snapshot after creating new tracks
+                _, alive_tracks = ctx.tracks.tracking_frame_snapshot(now_ms)
+
+        # ── Step 2: Follow existing tracks ───────────────────────────────
+        if not alive_tracks:
+            self._update_overlay(now_ms)
             return
 
         snapshots = [
@@ -80,9 +106,6 @@ class CoordTrackingWorker:
                 attack_count=track.attack_count,
                 created_tick=track.created_tick,
                 now_tick=now_ms,
-                discovery_obs_x=track.discovery_obs_x,
-                discovery_obs_y=track.discovery_obs_y,
-                discovery_obs_tick=track.discovery_obs_tick,
             )
             for track in alive_tracks
         ]
@@ -115,7 +138,6 @@ class CoordTrackingWorker:
                     f"miss_reason={miss_reason}"
                 )
 
-
         missed_ids = ctx.tracks.apply_tracking(
             results,
             now_tick=now_ms,
@@ -127,6 +149,82 @@ class CoordTrackingWorker:
             ctx.discovery_wake.set()
 
         self._update_overlay(now_ms)
+
+    def _process_discovery_candidates(
+        self,
+        candidates,
+        frame,
+        roi,
+        now_ms: int,
+        area_epoch: int,
+    ) -> int:
+        """Run local-follow on fresh frame for each candidate; create tracks.
+
+        Returns the number of tracks created.
+        """
+        ctx = self._ctx
+        mob_name = ctx.config.mob_name
+
+        # Get existing track positions for dedup — don't create a track
+        # for a mob that already has one.
+        existing_positions = ctx.tracks.positions_snapshot(now_ms)
+        config = ctx.tracker.detector_config()
+        dedup_radius = int(config["trackDedupRadiusPx"])
+        dedup_sq = dedup_radius * dedup_radius
+
+        created = 0
+        for candidate in candidates:
+            cx, cy = candidate.x, candidate.y
+
+            # Dedup: skip if this candidate matches an existing track
+            duplicate = False
+            for px, py in existing_positions:
+                if (cx - px) ** 2 + (cy - py) ** 2 <= dedup_sq:
+                    duplicate = True
+                    break
+            if duplicate:
+                continue
+
+            # Build a temporary snapshot for track_local on the fresh frame.
+            # Uses track_id=0 as a sentinel — track_locals_frame treats this
+            # like any other track for the local-follow search; only the
+            # result's x/y are used for track creation.
+            snap = StateTrackSnapshot(
+                track_id=0,
+                x=cx,
+                y=cy,
+                scale=candidate.candidate_scale if candidate.candidate_scale > 0 else 1.0,
+                now_tick=now_ms,
+            )
+            batch = ctx.tracker.track_locals_frame(frame, roi, [snap])
+            if not batch.ok or not batch.results:
+                continue
+
+            result = batch.results[0]
+            if not result.found:
+                continue
+
+            # Guard against teleport: if area epoch advanced, discard
+            if ctx.tracks.area_epoch != area_epoch:
+                break
+
+            # Create track at the exact position from the fresh frame
+            ctx.tracks.create_track(
+                mob_name,
+                result.x,
+                result.y,
+                candidate.confidence,
+                candidate.candidate_scale,
+                now_tick=now_ms,
+            )
+            existing_positions.append((result.x, result.y))
+            created += 1
+
+        if created > 0:
+            ctx.logger.behavior(
+                f"[COORD] created {created} track(s) from discovery candidates"
+            )
+        return created
 
     def _update_overlay(self, now_ms: int) -> None:
         ctx = self._ctx

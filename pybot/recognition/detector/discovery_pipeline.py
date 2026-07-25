@@ -179,10 +179,9 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             ),
         ),
     ),
-    PipelineStage(
-        title="Geometry pre-gate",
+    PipelineStage(        title="Geometry pre-gate",
         items=(
-            "new peaks only (known-track blobs skip)",
+            "all peaks clear pre-gates (dedup is post-detection)",
             "heat area in [sil_frac/5, 2.0] vs descriptor sprite area",
             "heat aspect vs per-mob descriptor.min_aspect_ratio / max_aspect_ratio",
             "small heat CC: peak-relative heat >= 1.5 * peakRelativeThreshold",
@@ -201,21 +200,20 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             SourceCheck(
                 _detect,
                 (
-                    "known_hit is None",
                     "_passes_discovery_geometry_gate",
                     "_is_small_heat_cc",
                     "peakRelativeThreshold",
                     "_SMALL_HEAT_RELATIVE_PEAK_MULT",
                 ),
             ),
+
+
         ),
-
-
     ),
     PipelineStage(
         title="Color structure pre-gate",
         items=(
-            "new peaks only (known-track blobs skip)",
+            "all peaks clear pre-gates (dedup is post-detection)",
             "heat-CC crop required palette groups present count",
             "second-largest required-group share among matched pixels",
             "required-group match coverage of crop pixels",
@@ -242,7 +240,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             ),
             SourceCheck(
                 _detect,
-                ("known_hit is None", "_passes_color_structure_gate"),
+                ("_passes_color_structure_gate",),
             ),
         ),
     ),

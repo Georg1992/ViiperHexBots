@@ -12,16 +12,14 @@ from pybot.recognition.rules import (
     MobTrack,
     ReconcileSummary,
     apply_attack_event,
-    apply_discovery_reanchor,
+    apply_discovery_match,
     apply_movement_observation,
     apply_track_observation,
-    clear_discovery_observation,
-    has_discovery_observation,
     is_alive,
     movement_thresholds,
 )
 
-from pybot.runtime.track_reconciler import TrackReconciler
+from pybot.runtime.track_reconciler import DiscoveryReconcileResult, TrackReconciler
 from pybot.runtime.capture.window_roi import HuntRoi
 from pybot.runtime.constants import STATIONARY_DEATH_TIMEOUT_MS
 from pybot.recognition.detector.detector import load_detector_config
@@ -66,12 +64,14 @@ class HuntTracks:
         self._next_id = 1
         self._area_epoch = 0
         self._last_reconcile_summary: ReconcileSummary | None = None
+        self._discovery_candidates: list[DiscoveryDetection] = []
 
     def reset(self) -> None:
         with self._lock:
             self._tracks = []
             self._next_id = 1
             self._last_reconcile_summary = None
+            self._discovery_candidates = []
 
     def area_reset(self) -> None:
         with self._lock:
@@ -95,6 +95,7 @@ class HuntTracks:
         self._tracks = []
         self._next_id = 1
         self._last_reconcile_summary = None
+        self._discovery_candidates = []
 
     @property
     def area_epoch(self) -> int:
@@ -122,6 +123,7 @@ class HuntTracks:
                 self._tracks = []
                 self._next_id = 1
                 self._last_reconcile_summary = None
+                self._discovery_candidates = []
         return AreaClearStatus(
             clear=alive == 0,
             reason="" if alive == 0 else "alive_tracks",
@@ -172,7 +174,7 @@ class HuntTracks:
 
     def discovery_frame_snapshot(
         self, now_tick: int | None = None
-    ) -> tuple[int, list[tuple[int, int]], list[tuple[int, int, int, float]]]:
+    ) -> tuple[int, list[tuple[int, int]], list[tuple[int, int, int]]]:
         """Atomic sample for one discovery capture: epoch + dedup + alive positions.
 
         Alive entries are ``(track_id, x, y, scale)`` at capture time.
@@ -180,12 +182,7 @@ class HuntTracks:
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
             alive = [
-                (
-                    t.id,
-                    t.x,
-                    t.y,
-                    t.discovery_scale if t.discovery_scale > 0 else 1.0,
-                )
+                (t.id, t.x, t.y)
                 for t in self._tracks
                 if is_alive(t)
             ]
@@ -203,20 +200,32 @@ class HuntTracks:
             alive = [copy.deepcopy(t) for t in self._tracks if is_alive(t)]
             return self._area_epoch, alive
 
-    def reconcile_detections(
+    # ── Discovery candidates pipeline ────────────────────────────────────
+
+    def get_and_clear_new_candidates(self) -> list[DiscoveryDetection]:
+        """Return and clear the new-mob candidate list for tracking to ingest."""
+        with self._lock:
+            candidates = self._discovery_candidates
+            self._discovery_candidates = []
+            return candidates
+
+    def process_discovery_scan(
         self,
         detections: list[DiscoveryDetection],
         *,
         mob_name: str = "",
         now_tick: int | None = None,
         existing_positions: list[tuple[int, int]] | None = None,
-        existing_track_positions: list[tuple[int, int, int]] | list[tuple[int, int, int, float]] | None = None,
+        existing_track_positions: list[tuple[int, int, int]] | None = None,
         area_epoch: int | None = None,
         hunt_roi: HuntRoi | None = None,
     ) -> ReconcileSummary:
-        """Discovery step: create new tracks; evaluate removal factors.
+        """Discovery step: match detections, mark absence, evaluate removal factors.
 
-        After reconciling detections against known tracks, evaluates all
+        Does NOT create tracks — publishing new candidates so tracking can
+        create them on a fresh frame with exact coordinates.
+
+        After matching detections against known tracks, evaluates all
         removal factors on unmatched tracks:
         1. Outside hunt ROI → removed immediately.
         2. Two missed discovery scans → removed.
@@ -251,17 +260,23 @@ class HuntTracks:
                 if existing_track_positions is not None
                 else [(t.id, t.x, t.y) for t in self._tracks if is_alive(t)]
             )
-            summary = TrackReconciler.reconcile(
-                self._tracks,
+            result: DiscoveryReconcileResult = TrackReconciler.match_and_absent(
                 detections,
                 positions,
-                mob_name=mob_name,
-                now_tick=tick,
-                create_track_fn=self._create_track_locked,
+                track_positions,
                 detector_config=self._detector_config_ref,
-                existing_track_positions=track_positions,
             )
-            unmatched_ids = set(summary.removed_ids or [])
+
+            # Reset discovery_miss_count for matched tracks
+            for tid in result.matched_ids:
+                track = self._get_track_by_id_locked(tid)
+                if track is not None:
+                    apply_discovery_match(track, now_tick=tick)
+
+            # Publish new candidates for tracking to create on fresh frame
+            self._discovery_candidates = list(result.new_candidates)
+
+            unmatched_ids = set(result.removed_ids)
 
             # ── Collect removal reasons ──────────────────────────────────
             # Each factor is a self-contained evaluation. Add new factors
@@ -287,17 +302,21 @@ class HuntTracks:
             if remove_ids:
                 self._remove_tracks_locked(remove_ids)
 
-            # Mark first-miss tracks as discovery_absent (not removed)
-            for track_id in first_miss_ids:
-                track = self._get_track_by_id_locked(track_id)
-                if track is None:
-                    continue
-                clear_discovery_observation(track)
+            # Mark first-miss tracks — they stay alive for one more scan
+            # (discovery_miss_count was already incremented in the evaluator).
 
-            summary.removed_ids = sorted(remove_ids)
-            summary.removed_count = len(remove_ids)
-            summary.tracks_after = len(self._tracks)
-            summary.alive_after = sum(1 for t in self._tracks if is_alive(t))
+            alive_after = sum(1 for t in self._tracks if is_alive(t))
+            summary = ReconcileSummary(
+                tracks_before=alive_after + len(remove_ids),
+                tracks_after=alive_after,
+                alive_before=alive_after + len(remove_ids),
+                alive_after=alive_after,
+                created_ids=[],
+                removed_ids=sorted(remove_ids),
+                matched_count=result.matched_count,
+                added_count=len(result.new_candidates),
+                removed_count=len(remove_ids),
+            )
             self._last_reconcile_summary = summary
             return summary
 
@@ -309,7 +328,7 @@ class HuntTracks:
         self,
         unmatched_ids: set[int],
         hunt_roi: HuntRoi | None,
-        track_positions: list[tuple[int, int, int]] | list[tuple[int, int, int, float]],
+        track_positions: list[tuple[int, int, int]],
     ) -> set[int]:
         """Factor 1: Remove tracks whose capture-time position is outside the hunt ROI."""
         if hunt_roi is None:
@@ -366,6 +385,9 @@ class HuntTracks:
         removes dead tracks. Returns track IDs that were not found (missed
         by tracker).
 
+        Tracking owns all position writes — discovery only publishes
+        candidates; tracking creates tracks on fresh frames.
+
         Add new removal factors as separate ``_evaluate_*`` methods and
         call them in the death-ids collection block below.
         """
@@ -403,9 +425,8 @@ class HuntTracks:
                         now_tick=tick,
                     )
                     continue
-                if has_discovery_observation(track):
-                    if apply_discovery_reanchor(track, now_tick=tick):
-                        continue
+
+                # Tracking miss — coast on velocity, advance lost count.
                 apply_track_observation(
                     track,
                     found=False,
@@ -500,7 +521,7 @@ class HuntTracks:
     @staticmethod
     def _capture_position(
         track_id: int,
-        track_positions: list[tuple[int, int, int]] | list[tuple[int, int, int, float]],
+        track_positions: list[tuple[int, int, int]],
     ) -> tuple[int | None, int | None]:
         """Get capture-time (x, y) for a track from the snapshot positions."""
         for entry in track_positions:

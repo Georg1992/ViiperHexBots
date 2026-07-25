@@ -21,7 +21,7 @@ from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.logging import HuntLogger
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.validation_log import HuntValidationLogger
-from pybot.runtime.detection.detector_session import DetectorSession
+from pybot.runtime.detection.detector_session import DetectorSession, StateTrackSnapshot
 
 FIXTURE = default_horn_fixture()
 
@@ -83,7 +83,7 @@ class ShadowPipelineTests(unittest.TestCase):
         cls.roi_frame = playfield_roi(frame)
         cls.roi = HuntRoi(x=0, y=0, w=cls.roi_frame.shape[1], h=cls.roi_frame.shape[0])
 
-    def test_discovery_creates_tracks_on_fixture(self) -> None:
+    def test_discovery_publishes_candidates_tracking_creates_tracks(self) -> None:
         config = make_config()
         logger = HuntLogger(session_id="test_shadow_pipeline")
         tracks = HuntTracks()
@@ -115,15 +115,37 @@ class ShadowPipelineTests(unittest.TestCase):
             for d in scan.detections
         ]
 
-        summary = tracks.reconcile_detections(
+        now = int(1_000_000)
+        summary = tracks.process_discovery_scan(
             detections,
             mob_name="horn",
-            now_tick=int(1_000_000),
+            now_tick=now,
         )
 
-        self.assertGreater(tracks.get_track_count(), 0)
         self.assertGreater(summary.added_count, 0)
+        # No tracks created yet — tracking owns that
+        self.assertEqual(tracks.get_track_count(), 0)
 
+        # Tracking ingests candidates and creates tracks on fresh frame
+        candidates = tracks.get_and_clear_new_candidates()
+        self.assertGreater(len(candidates), 0)
+
+        for candidate in candidates:
+            snap = StateTrackSnapshot(
+                track_id=0,
+                x=candidate.x,
+                y=candidate.y,
+                scale=candidate.candidate_scale if candidate.candidate_scale > 0 else 1.0,
+            )
+            batch = detector.track_locals_frame(self.roi_frame, self.roi, [snap])
+            if batch.ok and batch.results and batch.results[0].found:
+                r = batch.results[0]
+                tracks.create_track(
+                    "horn", r.x, r.y, candidate.confidence, candidate.candidate_scale,
+                    now_tick=now,
+                )
+
+        self.assertGreater(tracks.get_track_count(), 0)
         track = tracks.get_track_by_id(1)
         assert track is not None
         self.assertGreater(track.updated_tick, 0)

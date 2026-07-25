@@ -1,4 +1,4 @@
-"""Discovery loop — own thread, detects living mobs and reconciles tracks.
+"""Discovery loop — own thread, detects living mobs and publishes candidates.
 
 Schedule: every ``discovery_interval_ms`` (default 1s), and immediately when
 ``discovery_wake`` is set after a teleport settle delay or when tracking
@@ -9,17 +9,18 @@ storage end.
 
 One discovery pass (same frame):
 1. Silhouette scan for living mobs (living refs only).
-2. Reconcile: create / match / mark absent.
+2. Match detections to existing tracks; publish new-mob candidates for
+   tracking (which creates tracks on its next fresh frame at exact coords).
 
-Removal factors run in ``HuntTracks.reconcile_detections()``:
+Removal factors run in ``HuntTracks.process_discovery_scan()``:
 - Factor 1: Tracks outside the hunt ROI → removed immediately.
 - Factor 2: Tracks missed for 2+ consecutive discovery scans → removed.
 - First miss: discovery_absent flag set (track stays alive for one more
   scan cycle).
 
-Discovery never overwrites authoritative x/y; it only creates tracks,
-publishes soft position priors (``discovery_obs_*``) on match, marks
-absent tracks, and refreshes priors when tracking wakes it on a miss.
+Discovery never creates tracks directly — tracking owns track creation and
+all position writes. Discovery only matches detections (resetting
+miss_count) and publishes new-candidate positions for tracking to ingest.
 
 Teleport clear requires zero living scan candidates, not merely zero alive
 tracks after ghost matching. Capture-time position snapshots keep dedup and
@@ -119,11 +120,9 @@ class DiscoveryWorker:
                 ctx.logger.behavior("[DISCOVERY] capture returned empty frame")
             return
 
-        # Living-only for new peaks; known tracks get alive+dead silhouette checks.
         scan = ctx.detector.discover_frame(
             frame,
             roi,
-            known_tracks=existing_track_positions,
         )
         if not scan.ok:
             self._hunt_mode.note_discovery_scan_failed(scan.fail_reason)
@@ -147,7 +146,10 @@ class DiscoveryWorker:
 
         # area_epoch gates create/remove under the tracks lock so a teleport
         # between detect and reconcile cannot spawn or clear into the new area.
-        summary = ctx.tracks.reconcile_detections(
+        # process_discovery_scan matches detections, marks absence, handles
+        # removal factors, and publishes new candidates for tracking to create
+        # on its next fresh frame at exact coordinates.
+        summary = ctx.tracks.process_discovery_scan(
             detections,
             mob_name=ctx.config.mob_name,
             now_tick=now_ms,

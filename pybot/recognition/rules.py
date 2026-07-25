@@ -3,15 +3,18 @@
 Used by tests to lock the pipeline contract.
 
 Ownership:
-- **Discovery** scans the hunt ROI for living mobs each cycle, creates tracks
-  for new finds, publishes soft position priors (``discovery_obs_*``) on match,
-  and removes tracks that are out-of-range or missed for 2 consecutive scans.
-  It never overwrites authoritative ``x``/``y``.
-- **Tracking** follows every alive track every frame via pure heatmap local
-  follow (no silhouette gate). On found=True it updates position, velocity,
-  and clears discovery priors. On stationary timeout (mob hasn't moved >3px
-  for ``STATIONARY_DEATH_TIMEOUT_MS``) it flags the track as a corpse.
-  On miss it coasts along velocity and wakes discovery for confirmation.
+- **Discovery** scans the hunt ROI for living mobs each cycle, publishes
+  new-mob candidates, matches detections to existing tracks (resetting
+  discovery_miss_count), and removes tracks that are out-of-range or missed
+  for 2 consecutive scans.  Discovery never creates tracks directly.
+- **Tracking** owns track creation and position.  On each tick it ingests
+  discovery candidates, runs a local-follow search on the *current fresh
+  frame* to get exact coordinates, creates tracks at those coordinates,
+  then follows every alive track via pure heatmap local follow (no
+  silhouette gate).  On found=True it updates position, velocity, and
+  clears discovery priors.  On stationary timeout it flags the track as a
+  corpse.  On miss it coasts along velocity and wakes discovery for
+  confirmation.
 - **Attack** records attack_count / last_attack_tick only; it reads position
   snapshots for clicks but must not mutate tracking fields or remove tracks.
 """
@@ -82,12 +85,6 @@ class MobTrack:
     # At >= 2 the track is removed immediately — it failed discovery gates
     # twice in a row, meaning it's dead or gone.
     discovery_miss_count: int = 0
-
-    # Soft position prior from the latest discovery match (0 tick = none).
-    # Tracking searches/snaps from these coords; authoritative x/y stay tracking-owned.
-    discovery_obs_x: int = 0
-    discovery_obs_y: int = 0
-    discovery_obs_tick: int = 0
 
     # Tick when the mob first registered as stationary at its current position
     # (within 3px). When this exceeds STATIONARY_DEATH_TIMEOUT_MS and the mob
@@ -207,69 +204,18 @@ def detection_matches_existing(
     return False
 
 
-def has_discovery_observation(track: MobTrack) -> bool:
-    """True when discovery published a soft position prior not yet cleared."""
-    return track.discovery_obs_tick > 0
-
-
-def apply_discovery_observation(
+def apply_discovery_match(
     track: MobTrack,
     *,
-    x: int,
-    y: int,
     now_tick: int,
 ) -> None:
-    """Discovery match prior — sets soft prior and, when tracking has lost
-    the track, directly restores authoritative position so the next discovery
-    frame snapshot sees fresh coords (no stale-position dedup failure)."""
-    track.discovery_obs_x = x
-    track.discovery_obs_y = y
-    track.discovery_obs_tick = now_tick
+    """Record that discovery saw this track in its latest scan.
+
+    Resets the discovery-miss streak so the track is not removed by the
+    2-miss absence rule.  Does NOT write position — tracking owns that.
+    """
     track.last_discovery_tick = now_tick
     track.discovery_miss_count = 0
-    if track.lost_count > 0:
-        track.x = x
-        track.y = y
-        track.updated_tick = now_tick
-        track.lost_count = 0
-        track.moving = False
-        track.vel_x = 0.0
-        track.vel_y = 0.0
-        # Clear soft prior — we already snapped x/y, so tracking's next tick
-        # starts from the fresh position without a redundant reanchor attempt.
-        track.discovery_obs_x = 0
-        track.discovery_obs_y = 0
-        track.discovery_obs_tick = 0
-
-
-def clear_discovery_observation(track: MobTrack) -> None:
-    track.discovery_obs_x = 0
-    track.discovery_obs_y = 0
-    track.discovery_obs_tick = 0
-
-
-def apply_discovery_reanchor(
-    track: MobTrack,
-    *,
-    now_tick: int,
-) -> bool:
-    """Tracking writer path: snap x/y to discovery prior when drifted from it.
-
-    Returns True when a snap was applied. When already at the prior, returns
-    False so the caller can advance normal miss/lost accounting. Keeps
-    ``discovery_obs_*`` until a real local hit confirms the mob.
-    """
-    if track.x == track.discovery_obs_x and track.y == track.discovery_obs_y:
-        return False
-    track.x = track.discovery_obs_x
-    track.y = track.discovery_obs_y
-    track.updated_tick = now_tick
-    track.lost_count = 0
-    track.moving = False
-    track.vel_x = 0.0
-    track.vel_y = 0.0
-    track.discovery_miss_count = 0
-    return True
 
 
 def apply_track_observation(
@@ -295,11 +241,10 @@ def apply_track_observation(
         track.updated_tick = now_tick
         track.last_found_tick = now_tick
         track.lost_count = 0
-        clear_discovery_observation(track)
         # NOTE: discovery_miss_count is NOT reset here — only discovery
-        # (apply_discovery_observation / apply_discovery_reanchor) determines
-        # liveness. The tracker is a pure follower; if it reports found=True
-        # on background noise it should NOT block discovery's 2-miss removal.
+        # (apply_discovery_match) determines liveness. The tracker is a pure
+        # follower; if it reports found=True on background noise it should
+        # NOT block discovery's 2-miss removal.
         if confidence > 0:
             track.confidence = confidence
         return

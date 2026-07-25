@@ -110,7 +110,8 @@ class TrackingIntegrationTests(unittest.TestCase):
         cls.roi_frame = playfield_roi(frame)
         cls.roi = HuntRoi(x=0, y=0, w=cls.roi_frame.shape[1], h=cls.roi_frame.shape[0])
 
-    def test_discovery_creates_tracks(self) -> None:
+    def test_discovery_publishes_candidates_then_tracking_creates_tracks(self) -> None:
+        """Discovery publishes candidates; tracking creates tracks on fresh frame."""
         config = make_config()
         detector = FixtureDetector(self.roi_frame)
         ctx = make_context(config, roi=self.roi, detector=detector)
@@ -120,19 +121,42 @@ class TrackingIntegrationTests(unittest.TestCase):
         self.assertTrue(scan.ok)
         self.assertGreater(scan.accepted_count, 0)
 
-        # Reconcile into tracks
-        from pybot.recognition.rules import DiscoveryDetection
-
         detections = [
             DiscoveryDetection(x=d.x, y=d.y, confidence=d.confidence, candidate_scale=d.candidate_scale, living=True)
             for d in scan.detections
         ]
-        summary = ctx.tracks.reconcile_detections(
+
+        # Process discovery scan — matches/publishes candidates, does NOT create tracks
+        summary = ctx.tracks.process_discovery_scan(
             detections,
             mob_name="horn",
             now_tick=monotonic_ms(),
         )
         self.assertGreater(summary.added_count, 0)
+        # No tracks yet — tracking creates them
+        self.assertEqual(ctx.tracks.get_track_count(), 0)
+
+        # Tracking ingests candidates and creates tracks
+        from pybot.runtime.detection.detector_session import StateTrackSnapshot
+
+        candidates = ctx.tracks.get_and_clear_new_candidates()
+        self.assertGreater(len(candidates), 0)
+
+        for candidate in candidates:
+            snap = StateTrackSnapshot(
+                track_id=0,
+                x=candidate.x,
+                y=candidate.y,
+                scale=candidate.candidate_scale if candidate.candidate_scale > 0 else 1.0,
+            )
+            batch = detector.track_locals_frame(self.roi_frame, self.roi, [snap])
+            if batch.ok and batch.results and batch.results[0].found:
+                r = batch.results[0]
+                ctx.tracks.create_track(
+                    "horn", r.x, r.y, candidate.confidence, candidate.candidate_scale,
+                    now_tick=monotonic_ms(),
+                )
+
         self.assertGreater(ctx.tracks.get_track_count(), 0)
 
     def test_shadow_attack_on_discovered_track(self) -> None:
@@ -142,15 +166,20 @@ class TrackingIntegrationTests(unittest.TestCase):
         hunt_mode = create_hunt_mode(ctx, ShadowInputBackend())
         attack = AttackLoop(ctx, hunt_mode, ShadowInputBackend())
 
-        # Discover from frame
-        from pybot.recognition.rules import DiscoveryDetection
-
+        # Create a track directly (simulating tracking post-candidate-ingest)
         scan = detector.discover(self.roi)
         detections = [
             DiscoveryDetection(x=d.x, y=d.y, confidence=d.confidence, candidate_scale=d.candidate_scale, living=True)
             for d in scan.detections
         ]
-        ctx.tracks.reconcile_detections(detections, mob_name="horn", now_tick=monotonic_ms())
+        # Process discovery to get candidates, then create tracks
+        ctx.tracks.process_discovery_scan(detections, mob_name="horn", now_tick=monotonic_ms())
+        candidates = ctx.tracks.get_and_clear_new_candidates()
+        for candidate in candidates:
+            ctx.tracks.create_track(
+                "horn", candidate.x, candidate.y, candidate.confidence,
+                candidate.candidate_scale, now_tick=monotonic_ms(),
+            )
 
         now = monotonic_ms()
         target_id = ctx.policy.select_target(ctx.tracks.tracks_for_policy(now), now)
@@ -170,20 +199,25 @@ class TrackingIntegrationTests(unittest.TestCase):
             self.assertEqual(track_after.state, "alive")
             self.assertEqual(track_after.attack_count, 1)
 
-    def test_rediscovery_dedups_without_duplicates_or_moving(self) -> None:
+    def test_rediscovery_matches_without_duplicates_or_position_change(self) -> None:
+        """Rediscovery matches existing tracks; tracking still owns position."""
         config = make_config()
         detector = FixtureDetector(self.roi_frame)
         ctx = make_context(config, roi=self.roi, detector=detector)
 
-        from pybot.recognition.rules import DiscoveryDetection
-
-        # Discover
+        # Create tracks directly
         scan = detector.discover(self.roi)
         detections = [
             DiscoveryDetection(x=d.x, y=d.y, confidence=d.confidence, candidate_scale=d.candidate_scale, living=True)
             for d in scan.detections
         ]
-        ctx.tracks.reconcile_detections(detections, mob_name="horn", now_tick=monotonic_ms())
+        ctx.tracks.process_discovery_scan(detections, mob_name="horn", now_tick=monotonic_ms())
+        candidates = ctx.tracks.get_and_clear_new_candidates()
+        for candidate in candidates:
+            ctx.tracks.create_track(
+                "horn", candidate.x, candidate.y, candidate.confidence,
+                candidate.candidate_scale, now_tick=monotonic_ms(),
+            )
 
         track = ctx.tracks.get_track_by_id(1)
         assert track is not None
@@ -191,23 +225,21 @@ class TrackingIntegrationTests(unittest.TestCase):
         count_before = ctx.tracks.get_track_count()
 
         # Re-discover the same mobs slightly shifted (within one object radius):
-        # must NOT spawn duplicates and must NOT move authoritative x/y
-        # (tracking owns position). Soft discovery prior is updated.
+        # must NOT spawn candidates and must NOT move authoritative x/y
+        # (tracking owns position).
         detections2 = [
             DiscoveryDetection(x=d.x + 5, y=d.y + 5, confidence=d.confidence, candidate_scale=d.candidate_scale, living=True)
             for d in scan.detections
         ]
-        summary = ctx.tracks.reconcile_detections(
+        summary = ctx.tracks.process_discovery_scan(
             detections2, mob_name="horn", now_tick=monotonic_ms() + 1000
         )
 
-        self.assertEqual(summary.added_count, 0)
+        self.assertEqual(summary.added_count, 0)  # no new candidates
         self.assertEqual(ctx.tracks.get_track_count(), count_before)
-        self.assertEqual(track.x, old_x)
+        self.assertEqual(track.x, old_x)  # position unchanged
         self.assertEqual(track.y, old_y)
-        self.assertEqual(track.discovery_obs_x, old_x + 5)
-        self.assertEqual(track.discovery_obs_y, old_y + 5)
-        self.assertGreater(track.discovery_obs_tick, 0)
+        self.assertEqual(track.discovery_miss_count, 0)  # miss count reset
 
     def test_tracking_keeps_track_coords_fresh(self) -> None:
         config = make_config()
@@ -221,7 +253,13 @@ class TrackingIntegrationTests(unittest.TestCase):
             DiscoveryDetection(x=d.x, y=d.y, confidence=d.confidence, candidate_scale=d.candidate_scale, living=True)
             for d in scan.detections
         ]
-        ctx.tracks.reconcile_detections(detections, mob_name="horn", now_tick=monotonic_ms())
+        ctx.tracks.process_discovery_scan(detections, mob_name="horn", now_tick=monotonic_ms())
+        candidates = ctx.tracks.get_and_clear_new_candidates()
+        for candidate in candidates:
+            ctx.tracks.create_track(
+                "horn", candidate.x, candidate.y, candidate.confidence,
+                candidate.candidate_scale, now_tick=monotonic_ms(),
+            )
 
         snapshots = [
             StateTrackSnapshot(

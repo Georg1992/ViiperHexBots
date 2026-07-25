@@ -1,88 +1,83 @@
-"""Discovery reconciliation — create new tracks; list absences for tracking.
+"""Discovery reconciliation — matches detections to existing tracks; lists
+new-mob candidates for tracking to create.
 
-Discovery finds NEW mobs and publishes soft position priors on match.
-Authoritative position updates and all track removal belong to tracking;
-this service never overwrites existing track ``x``/``y`` and never deletes.
+Discovery finds NEW mobs and publishes candidate positions.  Tracking owns
+all track creation — it ingests candidates on the next fresh frame, runs a
+local-follow search to get exact coordinates, and creates the track there.
 
 Dedup uses ``existing_positions`` — known-object (x, y) at frame-capture time
-(alive tracks plus recent removal sites). Absence uses
+(alive tracks plus recent removal sites).  Absence uses
 ``existing_track_positions`` — (track_id, x, y) for alive tracks at that same
-instant. A detection within one object radius of a known position (or of a
-track just created earlier in this same scan) is skipped; only genuinely new
-detections create a track. Alive tracks with no matching detection are listed
-in ``removed_ids``; the caller marks them ``discovery_absent`` (notification).
-
+instant.  A detection within one object radius of a known position is matched
+(not a new candidate).  Alive tracks with no matching detection are listed
+in ``removed_ids``; the caller increments their ``discovery_miss_count``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from dataclasses import dataclass
 
 from pybot.recognition.rules import (
     DiscoveryDetection,
-    MobTrack,
-    ReconcileSummary,
-    apply_discovery_observation,
     cluster_living_detections,
     detection_matches_existing,
-    is_alive,
 )
 from pybot.recognition.detector.detector import load_detector_config
 
 
+@dataclass
+class DiscoveryReconcileResult:
+    """Output of discovery reconciliation.
+
+    new_candidates: detections that did not match any existing track —
+        tracking should create tracks for these on the next fresh frame.
+    matched_ids: track IDs that were matched by a detection.
+    removed_ids: track IDs that had no matching detection (absent).
+    matched_count: number of detections that matched an existing track.
+    """
+    new_candidates: list[DiscoveryDetection]
+    matched_ids: list[int]
+    removed_ids: list[int]
+    matched_count: int
+
+
 class TrackReconciler:
-    """Stateless service that adds new-mob tracks and lists absent track ids."""
+    """Stateless service that matches detections to tracks and lists absences."""
 
     @staticmethod
-    def reconcile(
-        tracks: list[MobTrack],
+    def match_and_absent(
         detections: list[DiscoveryDetection],
         existing_positions: list[tuple[int, int]],
+        existing_track_positions: list[tuple[int, int, int]],
         *,
-        mob_name: str,
-        now_tick: int,
-        create_track_fn: Callable[..., MobTrack],
         detector_config: dict | None = None,
-        existing_track_positions: list[tuple[int, int, int]] | None = None,
-    ) -> ReconcileSummary:
-        """Create tracks for new detections; list tracks missing from this scan.
+    ) -> DiscoveryReconcileResult:
+        """Match detections to existing tracks; return new-candidate detections.
+
+        Does NOT create tracks — that is tracking's job on a fresh frame.
+        Does NOT mutate any track fields — the caller applies match/absence.
 
         Args:
-            tracks: Current track list (appended to in-place via create_track_fn).
             detections: Raw discovery detections.
             existing_positions: (x, y) of known objects at frame-capture time.
-            mob_name: Mob name for new tracks.
-            now_tick: Current monotonic tick.
-            create_track_fn: Callable with signature
-                ``(mob_name, x, y, confidence, candidate_scale, tick) -> MobTrack``
-                that creates and appends a new track to the list.
             existing_track_positions: (track_id, x, y) for alive tracks at
-                frame-capture time. When omitted, derived from ``tracks``.
+                frame-capture time — required, always provided by caller.
+            detector_config: Optional detector config dict (loaded from disk
+                when omitted).
 
         Returns:
-            ReconcileSummary with created/matched/absent statistics.
+            DiscoveryReconcileResult with new_candidates, matched_ids, removed_ids.
         """
-        tracks_before = len(tracks)
-        alive_before = sum(1 for t in tracks if is_alive(t))
-
-        track_positions = (
-            list(existing_track_positions)
-            if existing_track_positions is not None
-            else [(t.id, t.x, t.y) for t in tracks if is_alive(t)]
-        )
-        tracks_by_id = {t.id: t for t in tracks if is_alive(t)}
-        unmatched_ids = {entry[0] for entry in track_positions}
+        unmatched_ids = {entry[0] for entry in existing_track_positions}
 
         # Working set of "known" positions: seeded with frame-time known
-        # objects, extended with each track created in this scan so two
-        # detections of one new mob don't both spawn a track.
-        known_positions: list[tuple[int, int]] = [
-            (int(x), int(y))
-            for x, y in existing_positions
-        ]
+        # objects, extended with each candidate already published in this
+        # scan so two detections of one new mob don't both become candidates.
+        known_positions: list[tuple[int, int]] = list(existing_positions)
 
+        matched_ids: list[int] = []
         matched_count = 0
-        created_ids: list[int] = []
+        new_candidates: list[DiscoveryDetection] = []
 
         config = detector_config or load_detector_config()
         cluster_radius = int(config["discoveryClusterRadiusPx"])
@@ -97,21 +92,14 @@ class TrackReconciler:
             matched_tid = TrackReconciler._match_track_id(
                 detection.x,
                 detection.y,
-                track_positions,
+                existing_track_positions,
                 unmatched_ids,
                 radius_sq=radius_sq,
             )
             if matched_tid is not None:
                 unmatched_ids.discard(matched_tid)
+                matched_ids.append(matched_tid)
                 matched_count += 1
-                matched_track = tracks_by_id.get(matched_tid)
-                if matched_track is not None:
-                    apply_discovery_observation(
-                        matched_track,
-                        x=detection.x,
-                        y=detection.y,
-                        now_tick=now_tick,
-                    )
                 continue
 
             if detection_matches_existing(
@@ -123,28 +111,15 @@ class TrackReconciler:
                 matched_count += 1
                 continue
 
-            new_track = create_track_fn(
-                mob_name,
-                detection.x,
-                detection.y,
-                detection.confidence,
-                detection.candidate_scale,
-                now_tick,
-            )
-            created_ids.append(new_track.id)
+            new_candidates.append(detection)
             known_positions.append((detection.x, detection.y))
 
         removed_ids = sorted(unmatched_ids)
-        return ReconcileSummary(
-            tracks_before=tracks_before,
-            tracks_after=len(tracks),
-            alive_before=alive_before,
-            alive_after=sum(1 for t in tracks if is_alive(t)),
-            created_ids=created_ids,
+        return DiscoveryReconcileResult(
+            new_candidates=new_candidates,
+            matched_ids=matched_ids,
             removed_ids=removed_ids,
             matched_count=matched_count,
-            added_count=len(created_ids),
-            removed_count=len(removed_ids),
         )
 
     @staticmethod
