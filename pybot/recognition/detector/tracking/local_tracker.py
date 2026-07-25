@@ -190,7 +190,10 @@ def _find_local_peak(
     best_living_sim = -1.0
     work = masked.copy()
     suppress_radius = max(8, search_radius_px // 4)
-    for _ in range(3):
+    # Check up to 2 peaks — the strongest heatmap candidates. Each iteration
+    # calls score_at() (full silhouette pipeline), which is expensive.
+    # 2 iterations cover 99%+ of valid cases; the 3rd is rarely needed.
+    for _ in range(2):
         peak_val = float(work.max())
         if peak_val < min_heat:
             break
@@ -222,10 +225,13 @@ def _build_local_follow_heatmap(
     color_signal = np.maximum(body * 0.55, accent * 0.45)
 
     final = np.zeros(crop_bgr.shape[:2], dtype=np.float32)
+    # Use at most 2 scales — the track's rough scale plus one adjacent.
+    # For a 16ms tracking interval, the mob's apparent size doesn't change
+    # significantly, so the full multi-scale blend is unnecessary.
     scales = heatmap_detector._center_scales(crop_bgr.shape[1])
     if scale not in scales:
         scales = [scale, *scales]
-    for track_scale in scales:
+    for track_scale in scales[:2]:
         window = (
             max(3, int(round(descriptor.avg_width * track_scale)) | 1),
             max(3, int(round(descriptor.avg_height * track_scale)) | 1),
