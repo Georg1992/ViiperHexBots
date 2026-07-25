@@ -177,7 +177,7 @@ class HuntTracks:
     ) -> tuple[int, list[tuple[int, int]], list[tuple[int, int, int]]]:
         """Atomic sample for one discovery capture: epoch + dedup + alive positions.
 
-        Alive entries are ``(track_id, x, y, scale)`` at capture time.
+        Alive entries are ``(track_id, x, y)`` at capture time.
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
