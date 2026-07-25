@@ -105,13 +105,18 @@ def track_local(
     # wrong (e.g. direction change), the mob is closest to where it was
     # last seen, not where we predicted it to be.
     #
-    # New track widening: a track just created by discovery might have had
-    # its mob move significantly between the discovery frame capture and
-    # this first tracking tick. Use the wider moving-search radius so the
-    # peak search doesn't miss and trigger a duplicate discovery wake.
+    # Age-scaled search radius: the older the detection (time between
+    # track creation and this tracking tick), the further the mob may have
+    # moved. Scale the search radius by the age so stale detections from
+    # slow processing (e.g. 1x-scale mobs like Creamy) still find the mob.
+    # 0ms delay → 1x, 500ms delay → 2x, capped at 3x.
     peak_radius = radius
     if not moving and lost_count == 0:
-        peak_radius = int(detector.local_track_moving_search_radius_px)
+        created_tick = int(track.get("createdTick", 0))
+        now_tick = int(track.get("nowTick", 0))
+        age_ms = max(0, now_tick - created_tick)
+        age_factor = 1.0 + (age_ms / 500.0)
+        peak_radius = int(detector.local_track_search_radius_px * min(age_factor, 3.0))
     peak = _find_local_peak(
         detector, frame_bgr, descriptor, cx, cy, scale,
         search_radius_px=peak_radius,
