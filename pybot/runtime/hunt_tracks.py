@@ -559,47 +559,6 @@ class HuntTracks:
                 return int(entry[1]), int(entry[2])
         return None, None
 
-    def apply_initial_follow(
-        self,
-        track_id: int,
-        *,
-        x: int,
-        y: int,
-        confidence: float,
-        now_tick: int | None = None,
-    ) -> bool:
-        """Initialize a newly created track's position from a fresh local follow.
-
-        Called by the discovery thread after creating a new track — captures a
-        fresh frame, runs ``track_local()``, and applies the found position
-        immediately. This is a standard initialization step: the detection
-        position is already stale by the time the track is created (detection
-        processing latency), so an immediate follow re-anchors the track at the
-        mob's current location before the tracking loop's next tick.
-        """
-        tick = now_tick if now_tick is not None else monotonic_ms()
-        with self._lock:
-            track = self._get_track_by_id_locked(track_id)
-            if track is None:
-                return False
-            move_px, stop_px = movement_thresholds(self._detector_config())
-            apply_movement_observation(
-                track,
-                x=x,
-                y=y,
-                move_threshold_px=move_px,
-                stop_threshold_px=stop_px,
-            )
-            apply_track_observation(
-                track,
-                found=True,
-                x=x,
-                y=y,
-                confidence=confidence,
-                now_tick=tick,
-            )
-            return True
-
     def _detector_config(self) -> dict:
         return self._detector_config_ref if self._detector_config_ref is not None else load_detector_config()
 

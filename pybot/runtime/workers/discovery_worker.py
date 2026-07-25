@@ -30,7 +30,6 @@ from pybot.recognition.rules import DiscoveryDetection
 from pybot.runtime.constants import LOG_REPEAT_INTERVAL_MS, WORKER_POLL_INTERVAL_S
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.detection.discovery_filter import filter_scan_candidates
-from pybot.runtime.detection.detector_session import StateTrackSnapshot
 from pybot.runtime.workers.worker_contexts import DiscoveryWorkerContext
 
 
@@ -153,14 +152,6 @@ class DiscoveryWorker:
             hunt_roi=roi,
         )
 
-        # Initial follow: newly created tracks get an immediate track_local()
-        # pass on a fresh frame. The detection position is stale by the time
-        # the track is created (detection processing latency), so this fast
-        # follow anchors the track at the mob's current position before
-        # tracking's next tick.
-        if summary.added_count > 0:
-            self._initial_follow_new_tracks(roi, summary.created_ids, now_ms)
-
         if ctx.tracks.area_epoch != area_epoch or ctx.discovery_suspend.is_set():
             return
 
@@ -195,64 +186,3 @@ class DiscoveryWorker:
             area_epoch=area_epoch,
         )
 
-    def _initial_follow_new_tracks(
-        self,
-        roi,
-        created_ids: list[int],
-        now_ms: int,
-    ) -> None:
-        """Initialize newly created tracks with a fresh local follow.
-
-        Standard initialization step in the discovery→tracking handoff: after
-        discovery creates a track, the detection-frame position is already
-        stale (detection processing takes time). This captures a fresh frame
-        and runs one ``track_local()`` per new track to anchor at the mob's
-        current position before the tracking loop can process its next tick.
-
-        Overhead: one frame capture + one local tracking pass per new track.
-        Negligible — new tracks are rare (mob enters screen or spawns).
-        """
-        ctx = self._ctx
-        snapshots: list[StateTrackSnapshot] = []
-        for tid in (created_ids or ()):
-            track = ctx.tracks.get_track_by_id(tid)
-            if track is None:
-                continue
-            # If tracking has already processed this track since creation
-            # (racing tick), skip — position is already fresh.
-            if track.updated_tick > now_ms:
-                continue
-            snapshots.append(
-                StateTrackSnapshot(
-                    track_id=tid,
-                    x=track.x,
-                    y=track.y,
-                    scale=track.discovery_scale if track.discovery_scale > 0 else 1.0,
-                    moving=track.moving,
-                    vel_x=track.vel_x,
-                    vel_y=track.vel_y,
-                    lost_count=track.lost_count,
-                    created_tick=track.created_tick,
-                    now_tick=now_ms,
-                    discovery_obs_x=track.discovery_obs_x,
-                    discovery_obs_y=track.discovery_obs_y,
-                    discovery_obs_tick=track.discovery_obs_tick,
-                )
-            )
-        if not snapshots:
-            return
-        fresh_frame = ctx.capture.capture_roi(roi)
-        if fresh_frame is None or fresh_frame.size == 0:
-            return
-        batch = ctx.tracker.track_locals_frame(fresh_frame, roi, snapshots)
-        if not batch.ok:
-            return
-        for result in batch.results:
-            if result.found:
-                ctx.tracks.apply_initial_follow(
-                    result.track_id,
-                    x=result.x,
-                    y=result.y,
-                    confidence=result.confidence,
-                    now_tick=now_ms,
-                )
