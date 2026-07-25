@@ -200,10 +200,10 @@ def _find_local_peak(
     best_living_sim = -1.0
     work = masked.copy()
     suppress_radius = max(8, search_radius_px // 4)
-    # Check up to 2 peaks — the strongest heatmap candidates. Each iteration
-    # calls score_at() (full silhouette pipeline), which is expensive.
-    # 2 iterations cover 99%+ of valid cases; the 3rd is rarely needed.
-    for _ in range(2):
+    # Check the single strongest heatmap peak. The center fast path handles
+    # the normal case; only the top heatmap candidate is worth the expensive
+    # score_at() silhouette gate call. A 2nd iteration would rarely differ.
+    for _ in range(1):
         peak_val = float(work.max())
         if peak_val < min_heat:
             break
