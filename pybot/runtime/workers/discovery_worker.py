@@ -30,7 +30,9 @@ from pybot.recognition.rules import DiscoveryDetection
 from pybot.runtime.constants import LOG_REPEAT_INTERVAL_MS, WORKER_POLL_INTERVAL_S
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.detection.discovery_filter import filter_scan_candidates
+from pybot.runtime.detection.detector_session import StateTrackSnapshot
 from pybot.runtime.workers.worker_contexts import DiscoveryWorkerContext
+
 
 class DiscoveryWorker:
     """Scans for living mobs, creates/matches tracks, marks absent for tracking."""
@@ -150,6 +152,14 @@ class DiscoveryWorker:
             area_epoch=area_epoch,
             hunt_roi=roi,
         )
+
+        # Quick-fix: newly created tracks get an immediate track_local() pass
+        # using a freshly captured frame. This eliminates the delay between
+        # detection finishing and tracking's first tick, so fast-moving mobs
+        # like Creamy don't lag their first tracking position.
+        if summary.added_count > 0:
+            self._apply_quick_fix(roi, summary.created_ids, now_ms)
+
         if ctx.tracks.area_epoch != area_epoch or ctx.discovery_suspend.is_set():
             return
 
@@ -183,3 +193,62 @@ class DiscoveryWorker:
             added_count=summary.added_count,
             area_epoch=area_epoch,
         )
+
+    def _apply_quick_fix(
+        self,
+        roi,
+        created_ids: list[int],
+        now_ms: int,
+    ) -> None:
+        """Run one-shot track_local() on newly created tracks using a fresh frame.
+
+        Captures a new frame (not the stale detection frame) so the follow-up
+        ``track_local()`` finds the mob at its current position, not where it
+        was when discovery processed the detection frame. Overhead is one frame
+        capture + one local tracking pass per new track — negligible since new
+        tracks are created rarely (mob enters screen or spawns).
+        """
+        ctx = self._ctx
+        snapshots: list[StateTrackSnapshot] = []
+        for tid in (created_ids or ()):
+            track = ctx.tracks.get_track_by_id(tid)
+            if track is None:
+                continue
+            # If tracking has already processed this track since creation
+            # (racing tick), skip — position is already fresh.
+            if track.updated_tick > now_ms:
+                continue
+            snapshots.append(
+                StateTrackSnapshot(
+                    track_id=tid,
+                    x=track.x,
+                    y=track.y,
+                    scale=track.discovery_scale if track.discovery_scale > 0 else 1.0,
+                    moving=track.moving,
+                    vel_x=track.vel_x,
+                    vel_y=track.vel_y,
+                    lost_count=track.lost_count,
+                    created_tick=track.created_tick,
+                    now_tick=now_ms,
+                    discovery_obs_x=track.discovery_obs_x,
+                    discovery_obs_y=track.discovery_obs_y,
+                    discovery_obs_tick=track.discovery_obs_tick,
+                )
+            )
+        if not snapshots:
+            return
+        fresh_frame = ctx.capture.capture_roi(roi)
+        if fresh_frame is None or fresh_frame.size == 0:
+            return
+        batch = ctx.tracker.track_locals_frame(fresh_frame, roi, snapshots)
+        if not batch.ok:
+            return
+        for result in batch.results:
+            if result.found:
+                ctx.tracks.apply_quick_fix_result(
+                    result.track_id,
+                    x=result.x,
+                    y=result.y,
+                    confidence=result.confidence,
+                    now_tick=now_ms,
+                )

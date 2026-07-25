@@ -559,6 +559,45 @@ class HuntTracks:
                 return int(entry[1]), int(entry[2])
         return None, None
 
+    def apply_quick_fix_result(
+        self,
+        track_id: int,
+        *,
+        x: int,
+        y: int,
+        confidence: float,
+        now_tick: int | None = None,
+    ) -> bool:
+        """Fast position update from a quick-fix pass — no death checks.
+
+        Called by the discovery thread after creating a new track, running
+        a fresh ``track_local()`` pass, and needing to snap the position
+        immediately. Applies movement observation and track observation
+        but skips all death-factor evaluation.
+        """
+        tick = now_tick if now_tick is not None else monotonic_ms()
+        with self._lock:
+            track = self._get_track_by_id_locked(track_id)
+            if track is None:
+                return False
+            move_px, stop_px = movement_thresholds(self._detector_config())
+            apply_movement_observation(
+                track,
+                x=x,
+                y=y,
+                move_threshold_px=move_px,
+                stop_threshold_px=stop_px,
+            )
+            apply_track_observation(
+                track,
+                found=True,
+                x=x,
+                y=y,
+                confidence=confidence,
+                now_tick=tick,
+            )
+            return True
+
     def _detector_config(self) -> dict:
         return self._detector_config_ref if self._detector_config_ref is not None else load_detector_config()
 

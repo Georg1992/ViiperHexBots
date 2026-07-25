@@ -83,6 +83,7 @@ class DiscoveryWorkerContext(
     HasConfig,
     CanCapture,
     CanDetect,
+    CanTrackLocal,
     CanTrack,
     CanValidate,
     CanWakeDiscovery,
