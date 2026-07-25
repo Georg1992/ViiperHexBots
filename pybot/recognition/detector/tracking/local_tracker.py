@@ -21,10 +21,6 @@ from pybot.recognition.detector.scoring.heatmap_detector import palette_heatmap,
 if TYPE_CHECKING:
     from pybot.recognition.detector.detector import MobDetector
 
-# The fastest mob travels ~3 game cells per second at 64px per cell.
-_FASTEST_MOB_PX_PER_MS = (3 * 64) / 1000.0  # ~0.192 px/ms
-
-
 @dataclass(frozen=True)
 class LocalTrackResult:
     track_id: int
@@ -106,24 +102,9 @@ def track_local(
     # predicted position (search_x, search_y). When velocity prediction is
     # wrong (e.g. direction change), the mob is closest to where it was
     # last seen, not where we predicted it to be.
-    #
-    # Age-scaled search radius: the older the detection (time between
-    # track creation and this tracking tick), the further the mob may have
-    # moved. Calculate how many pixels the fastest mob (~3 cells/s at 64px/cell
-    # = 0.192 px/ms) could have traveled since detection, and add that to the
-    # base search radius. No cap — the radius grows naturally with the delay.
-    # 0ms → 120px, 500ms → 216px, 1s → 312px, 2s → 504px.
-    peak_radius = radius
-    if not moving and lost_count == 0:
-        created_tick = int(track.get("createdTick", 0))
-        now_tick = int(track.get("nowTick", 0))
-        delay_ms = max(0, now_tick - created_tick)
-        max_speed_px_per_ms = _FASTEST_MOB_PX_PER_MS
-        extra_px = int(delay_ms * max_speed_px_per_ms)
-        peak_radius = int(detector.local_track_search_radius_px) + extra_px
     peak = _find_local_peak(
         detector, frame_bgr, descriptor, cx, cy, scale,
-        search_radius_px=peak_radius,
+        search_radius_px=radius,
         suppress_positions=suppress_positions,
         lost_count=lost_count,
     )

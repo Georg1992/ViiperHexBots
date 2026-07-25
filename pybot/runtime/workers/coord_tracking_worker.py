@@ -24,6 +24,8 @@ class CoordTrackingWorker:
     def __init__(self, ctx: CoordTrackingWorkerContext) -> None:
         self._ctx = ctx
         self._last_empty_frame_log_ms = 0
+        # Track IDs whose first-tick data has been logged (one shot per track).
+        self._logged_first_tick: set[int] = set()
 
     def run(self) -> None:
         ctx = self._ctx
@@ -87,6 +89,32 @@ class CoordTrackingWorker:
 
         batch = ctx.tracker.track_locals_frame(frame, roi, snapshots)
         results = batch.results
+
+        # Data collection: log first tracking tick for newly created tracks
+        # to measure actual delay and movement before tracking gets its first
+        # chance to follow. Each track is logged at most once.
+        for track in alive_tracks:
+            if track.id in self._logged_first_tick:
+                continue
+            age_ms = now_ms - track.created_tick
+            if age_ms <= 0:
+                continue
+            self._logged_first_tick.add(track.id)
+            age_sec = age_ms / 1000.0
+            result = next((r for r in results if r.track_id == track.id), None)
+            if result is not None:
+                dx = result.x - track.x
+                dy = result.y - track.y
+                dist = int((dx * dx + dy * dy) ** 0.5)
+                miss_reason = getattr(result, "miss_reason", "")
+                ctx.logger.behavior(
+                    f"[TRACK] first_tick track={track.id} "
+                    f"age={age_sec:.2f}s snap=({track.x},{track.y}) "
+                    f"found={result.found} at=({result.x},{result.y}) "
+                    f"shift={dist}px "
+                    f"miss_reason={miss_reason}"
+                )
+
 
         missed_ids = ctx.tracks.apply_tracking(
             results,
