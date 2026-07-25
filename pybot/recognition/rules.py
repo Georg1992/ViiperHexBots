@@ -243,12 +243,27 @@ def apply_discovery_observation(
     y: int,
     now_tick: int,
 ) -> None:
-    """Discovery match prior — does not overwrite authoritative track x/y."""
+    """Discovery match prior — sets soft prior and, when tracking has lost
+    the track, directly restores authoritative position so the next discovery
+    frame snapshot sees fresh coords (no stale-position dedup failure)."""
     track.discovery_obs_x = x
     track.discovery_obs_y = y
     track.discovery_obs_tick = now_tick
     track.last_discovery_tick = now_tick
     track.discovery_miss_count = 0
+    if track.lost_count > 0:
+        track.x = x
+        track.y = y
+        track.updated_tick = now_tick
+        track.lost_count = 0
+        track.moving = False
+        track.vel_x = 0.0
+        track.vel_y = 0.0
+        # Clear soft prior — we already snapped x/y, so tracking's next tick
+        # starts from the fresh position without a redundant reanchor attempt.
+        track.discovery_obs_x = 0
+        track.discovery_obs_y = 0
+        track.discovery_obs_tick = 0
 
 
 def clear_discovery_observation(track: MobTrack) -> None:
