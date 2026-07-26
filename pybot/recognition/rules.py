@@ -12,11 +12,12 @@ Ownership:
   frame* to get exact coordinates, creates tracks at those coordinates,
   then follows every alive track via pure heatmap local follow (no
   silhouette gate).  On found=True it updates position, velocity, and
-  clears discovery priors.  On stationary timeout it flags the track as a
-  corpse.  On miss it coasts along velocity and wakes discovery for
-  confirmation.
+  opacity baseline / decay.  Sustained opacity drop while stationary
+  removes the track (in-place death fade).  On miss it coasts along
+  velocity and wakes discovery for confirmation.
 - **Attack** records attack_count / last_attack_tick only; it reads position
   snapshots for clicks but must not mutate tracking fields or remove tracks.
+  Idle-attack SP checks are a separate death / unreachable path.
 """
 
 from __future__ import annotations
@@ -78,7 +79,7 @@ class MobTrack:
     area_epoch: int = 0
     opacity_baseline: float = 0.0
     opacity_baseline_samples: int = 0
-    # Monotonic tick when a meaningful opacity fade began; 0 = not fading.
+    # Consecutive stationary frames below the opacity decay ratio; 0 = not fading.
     opacity_decay_streak: int = 0
     moving: bool = False
     vel_x: float = 0.0
@@ -299,4 +300,74 @@ def apply_movement_observation(
         move_threshold_px=move_threshold_px,
         stop_threshold_px=stop_threshold_px,
     )
+
+
+def apply_opacity_observation(
+    track: MobTrack,
+    *,
+    opacity_score: float,
+    config: dict,
+) -> bool:
+    """Update opacity baseline / decay streak; return True when death is confirmed.
+
+    Call after ``apply_movement_observation`` so ``track.moving`` gates the
+    fade clock for this frame. Measurement comes from the local tracker
+    (``opacity_score``); this mutates only MobTrack opacity fields.
+    """
+    baseline, samples, streak, dead = evaluate_opacity_death(
+        opacity_score=opacity_score,
+        baseline=track.opacity_baseline,
+        baseline_samples=track.opacity_baseline_samples,
+        decay_streak=track.opacity_decay_streak,
+        config=config,
+        moving=track.moving,
+    )
+    track.opacity_baseline = baseline
+    track.opacity_baseline_samples = samples
+    track.opacity_decay_streak = streak
+    return dead
+
+
+def evaluate_opacity_death(
+    *,
+    opacity_score: float,
+    baseline: float,
+    baseline_samples: int,
+    decay_streak: int,
+    config: dict,
+    moving: bool,
+) -> tuple[float, int, int, bool]:
+    """Update opacity baseline state and return whether death is confirmed.
+
+    The first ``deathOpacityBaselineSamples`` found frames establish the
+    living baseline (running max). Once calibrated above
+    ``deathOpacityMinBaseline``, a score below ``baseline * deathOpacityDecayRatio``
+    for ``deathOpacityConfirmTicks`` consecutive stationary frames confirms
+    death. Motion holds the streak (blur is not fade); recovery clears it.
+    """
+    min_samples = int(config["deathOpacityBaselineSamples"])
+    min_baseline = float(config["deathOpacityMinBaseline"])
+    decay_ratio = float(config["deathOpacityDecayRatio"])
+    confirm_ticks = int(config["deathOpacityConfirmTicks"])
+
+    if baseline_samples < min_samples:
+        baseline = max(baseline, opacity_score)
+        baseline_samples += 1
+        return baseline, baseline_samples, 0, False
+
+    if baseline < min_baseline:
+        baseline = max(baseline, opacity_score)
+        return baseline, baseline_samples, decay_streak, False
+
+    dropped = opacity_score < (baseline * decay_ratio)
+    if dropped and moving:
+        # Walk / attack blur can look like a drop — hold the fade streak.
+        return baseline, baseline_samples, decay_streak, False
+    if dropped:
+        decay_streak += 1
+        if decay_streak >= confirm_ticks:
+            return baseline, baseline_samples, 0, True
+        return baseline, baseline_samples, decay_streak, False
+
+    return baseline, baseline_samples, 0, False
 

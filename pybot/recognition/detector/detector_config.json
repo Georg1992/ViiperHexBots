@@ -25,5 +25,9 @@
   "trackDedupRadiusPx": 90,
   "debugOutputDir": "pybot/recognition/debug/detector",
   "movementMoveThresholdPx": 12,
-  "movementStopThresholdPx": 6
+  "movementStopThresholdPx": 6,
+  "deathOpacityBaselineSamples": 4,
+  "deathOpacityMinBaseline": 0.20,
+  "deathOpacityDecayRatio": 0.80,
+  "deathOpacityConfirmTicks": 3
 }

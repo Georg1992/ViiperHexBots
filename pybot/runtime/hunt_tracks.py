@@ -14,6 +14,7 @@ from pybot.recognition.rules import (
     apply_attack_event,
     apply_discovery_match,
     apply_movement_observation,
+    apply_opacity_observation,
     apply_track_observation,
     is_alive,
     movement_thresholds,
@@ -377,10 +378,12 @@ class HuntTracks:
         *,
         now_tick: int | None = None,
         area_epoch: int | None = None,
-    ) -> list[int]:
+    ) -> tuple[list[int], list[int]]:
         """Refresh coordinates from LocalTracker results.
 
-        Returns track IDs that were not found (missed by tracker).
+        Returns ``(missed_ids, opacity_dead_ids)``.
+        - *missed_ids*: tracks not found by the local tracker.
+        - *opacity_dead_ids*: tracks removed by opacity-decay death detection.
 
         Tracking owns all position writes — discovery only publishes
         candidates; tracking creates tracks on fresh frames.
@@ -389,14 +392,16 @@ class HuntTracks:
         missed_ids: list[int] = []
         with self._lock:
             if area_epoch is not None and area_epoch != self._area_epoch:
-                return []
+                return [], []
+            opacity_dead: set[int] = set()
+            config = self._detector_config()
             for result in results:
                 track = self._get_track_by_id_locked(result.track_id)
                 if track is None:
                     continue
 
                 if result.found:
-                    move_px, stop_px = movement_thresholds(self._detector_config())
+                    move_px, stop_px = movement_thresholds(config)
                     apply_movement_observation(
                         track,
                         x=result.x,
@@ -404,6 +409,14 @@ class HuntTracks:
                         move_threshold_px=move_px,
                         stop_threshold_px=stop_px,
                     )
+                    if apply_opacity_observation(
+                        track,
+                        opacity_score=result.opacity_score,
+                        config=config,
+                    ):
+                        opacity_dead.add(result.track_id)
+                        continue
+
                     apply_track_observation(
                         track,
                         found=True,
@@ -426,7 +439,10 @@ class HuntTracks:
                 track.moving = False
                 missed_ids.append(result.track_id)
 
-            return missed_ids
+            if opacity_dead:
+                self._remove_tracks_locked(opacity_dead)
+
+            return missed_ids, sorted(opacity_dead)
 
     _IDLE_DEAD_THRESHOLD = 2
     _IDLE_UNREACHABLE_THRESHOLD = 5

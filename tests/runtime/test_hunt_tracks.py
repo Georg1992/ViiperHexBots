@@ -12,12 +12,33 @@ from pybot.runtime.hunt_policy import HuntPolicy
 from pybot.runtime.hunt_tracks import HuntTracks
 
 
-def _hit(track_id: int, x: int, y: int, confidence: float = 0.8) -> SimpleNamespace:
-    return SimpleNamespace(track_id=track_id, found=True, x=x, y=y, confidence=confidence)
+def _hit(
+    track_id: int,
+    x: int,
+    y: int,
+    confidence: float = 0.8,
+    *,
+    opacity_score: float = 0.55,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        track_id=track_id,
+        found=True,
+        x=x,
+        y=y,
+        confidence=confidence,
+        opacity_score=opacity_score,
+    )
 
 
 def _miss(track_id: int) -> SimpleNamespace:
-    return SimpleNamespace(track_id=track_id, found=False, x=0, y=0, confidence=0.0)
+    return SimpleNamespace(
+        track_id=track_id,
+        found=False,
+        x=0,
+        y=0,
+        confidence=0.0,
+        opacity_score=0.0,
+    )
 
 
 def det(x: int, y: int, confidence: float = 0.71, scale: float = 0.9) -> DiscoveryDetection:
@@ -259,7 +280,7 @@ class HuntTracksRulesTests(unittest.TestCase):
 
     def test_tracking_miss_keeps_track(self) -> None:
         track_id = self._create(874, 578)
-        missed_ids = self.tracks.apply_tracking(
+        missed_ids, _opacity_dead = self.tracks.apply_tracking(
             [_miss(track_id)],
             now_tick=self.now + 5_000,
         )
@@ -293,7 +314,7 @@ class HuntTracksRulesTests(unittest.TestCase):
             "horn", 900, 600, 0.7, 0.9, now_tick=self.now + 1
         ).id
         self.assertEqual(new_id, track_id)  # ids reuse after reset
-        missed_ids = self.tracks.apply_tracking(
+        missed_ids, _opacity_dead = self.tracks.apply_tracking(
             [_miss(track_id)],
             now_tick=self.now + 2,
             area_epoch=epoch,
@@ -394,6 +415,58 @@ class HuntTracksRulesTests(unittest.TestCase):
 
         # Second call returns empty (already cleared)
         self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 0)
+
+    def test_opacity_decay_removes_stationary_track(self) -> None:
+        track_id = self._create(874, 578)
+        # Calibrate living baseline (same pixel → stationary).
+        for i in range(4):
+            missed, dead = self.tracks.apply_tracking(
+                [_hit(track_id, 874, 578, opacity_score=0.60)],
+                now_tick=self.now + (i + 1) * 16,
+            )
+            self.assertEqual(missed, [])
+            self.assertEqual(dead, [])
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertEqual(track.opacity_baseline_samples, 4)
+        self.assertGreaterEqual(track.opacity_baseline, 0.60)
+
+        # Two decay frames — not yet confirmed.
+        for i in range(2):
+            missed, dead = self.tracks.apply_tracking(
+                [_hit(track_id, 874, 578, opacity_score=0.20)],
+                now_tick=self.now + 100 + (i + 1) * 16,
+            )
+            self.assertEqual(missed, [])
+            self.assertEqual(dead, [])
+            self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
+
+        # Third consecutive decay frame confirms death.
+        missed, dead = self.tracks.apply_tracking(
+            [_hit(track_id, 874, 578, opacity_score=0.18)],
+            now_tick=self.now + 200,
+        )
+        self.assertEqual(missed, [])
+        self.assertEqual(dead, [track_id])
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
+
+    def test_opacity_decay_ignored_while_moving(self) -> None:
+        track_id = self._create(874, 578)
+        for i in range(4):
+            self.tracks.apply_tracking(
+                [_hit(track_id, 874, 578, opacity_score=0.60)],
+                now_tick=self.now + (i + 1) * 16,
+            )
+        # Large displacement → moving; low opacity must not remove.
+        for i in range(5):
+            x = 874 + (i + 1) * 20
+            missed, dead = self.tracks.apply_tracking(
+                [_hit(track_id, x, 578, opacity_score=0.10)],
+                now_tick=self.now + 100 + (i + 1) * 16,
+            )
+            self.assertEqual(missed, [])
+            self.assertEqual(dead, [])
+        self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
 
 
 if __name__ == "__main__":

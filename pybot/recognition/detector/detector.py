@@ -55,9 +55,13 @@ REQUIRED_CONFIG_KEYS = {
     "discoveryClusterRadiusPx",
     "trackDedupRadiusPx",
     "debugOutputDir",
-    # track-removal keys (movement)
+    # track-removal keys (movement + opacity death)
     "movementMoveThresholdPx",
     "movementStopThresholdPx",
+    "deathOpacityBaselineSamples",
+    "deathOpacityMinBaseline",
+    "deathOpacityDecayRatio",
+    "deathOpacityConfirmTicks",
 }
 
 # Geometry pre-gate: heat-CC area must sit in [min_area_ratio, max_area_ratio]

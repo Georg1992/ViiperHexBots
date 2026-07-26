@@ -138,11 +138,16 @@ class CoordTrackingWorker:
                     f"miss_reason={miss_reason}"
                 )
 
-        missed_ids = ctx.tracks.apply_tracking(
+        missed_ids, opacity_dead_ids = ctx.tracks.apply_tracking(
             results,
             now_tick=now_ms,
             area_epoch=area_epoch,
         )
+
+        if opacity_dead_ids:
+            ctx.logger.behavior(
+                f"[TRACK] opacity_death ids={opacity_dead_ids}"
+            )
 
         # Local miss → wake discovery so it can confirm removal.
         if missed_ids and not ctx.discovery_suspend.is_set():

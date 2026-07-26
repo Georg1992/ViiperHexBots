@@ -3,8 +3,9 @@
 Heatmap-based tracking: scores at the predicted center first, falls back
 to a heatmap peak search when center misses. Uses the descriptor's sprite
 and body palettes with a distance threshold — no exact-match, no sampled
-track palette. Tracking is pure follow; discovery handles all liveness
-decisions (2-miss removal, stationary timeout, palette decay).
+track palette. Tracking is pure follow for position; discovery handles
+2-miss removal. Tracking also measures opacity on successful hits so the
+store can confirm in-place death fade.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import numpy as np
 
 from pybot.recognition.detector.descriptors.descriptor import MobDescriptor
 from pybot.recognition.detector.scoring.heatmap_detector import palette_heatmap, sprite_palette_heatmap
+from pybot.recognition.detector.tracking.opacity_probe import measure_opacity_score
 
 if TYPE_CHECKING:
     from pybot.recognition.detector.detector import MobDetector
@@ -29,6 +31,7 @@ class LocalTrackResult:
     y: int
     confidence: float
     miss_reason: str
+    opacity_score: float = 0.0
 
 
 def track_local(
@@ -81,8 +84,14 @@ def track_local(
 
     if center_hit:
         return _finalize_track_hit(
-            track_id=track_id, bbox=center_bbox, similarity=sim,
-            offset_x=offset_x, offset_y=offset_y,
+            detector=detector,
+            frame_bgr=frame_bgr,
+            descriptor=descriptor,
+            track_id=track_id,
+            bbox=center_bbox,
+            similarity=sim,
+            offset_x=offset_x,
+            offset_y=offset_y,
         )
 
     # Center miss → search local heatmap peaks.
@@ -99,8 +108,14 @@ def track_local(
     if peak is not None:
         _peak_x, _peak_y, _heat_score, peak_sim, peak_bbox = peak
         return _finalize_track_hit(
-            track_id=track_id, bbox=peak_bbox, similarity=peak_sim,
-            offset_x=offset_x, offset_y=offset_y,
+            detector=detector,
+            frame_bgr=frame_bgr,
+            descriptor=descriptor,
+            track_id=track_id,
+            bbox=peak_bbox,
+            similarity=peak_sim,
+            offset_x=offset_x,
+            offset_y=offset_y,
         )
 
     return _miss_result(
@@ -122,6 +137,9 @@ def _miss_result(
 
 def _finalize_track_hit(
     *,
+    detector: MobDetector,
+    frame_bgr: np.ndarray,
+    descriptor: MobDescriptor,
     track_id: int,
     bbox: tuple[int, int, int, int],
     similarity: float,
@@ -131,9 +149,18 @@ def _finalize_track_hit(
     x = bx + bw // 2 + offset_x
     y = by + bh // 2 + offset_y
 
+    opacity_score = measure_opacity_score(
+        frame_bgr,
+        descriptor,
+        bbox,
+        float(descriptor.max_sprite_palette_distance),
+        float(detector.config["minSpritePaletteMatch"]),
+    )
+
     return LocalTrackResult(
         track_id=track_id, found=True, x=x, y=y,
         confidence=similarity, miss_reason="",
+        opacity_score=opacity_score,
     )
 
 

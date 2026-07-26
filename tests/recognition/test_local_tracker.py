@@ -68,6 +68,7 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertIsInstance(result, LocalTrackResult)
         self.assertTrue(result.found)
         self.assertGreater(result.confidence, 0.0)
+        self.assertGreater(result.opacity_score, 0.0)
         self.assertEqual(result.miss_reason, "")
         dist = abs(result.x - anchor.center_x) + abs(result.y - anchor.center_y)
         self.assertLess(dist, 40)
