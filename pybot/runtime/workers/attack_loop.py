@@ -100,20 +100,25 @@ class AttackLoop:
         # the mob is already dead.
         current_sp = self._read_sp()
         if current_sp > 0:
-            removed, idle_count = ctx.tracks.evaluate_idle_attack(
+            action, idle_count = ctx.tracks.evaluate_idle_attack(
                 target_id, current_sp, click_x, click_y,
                 self._char_x, self._char_y,
             )
-            if removed:
+            if action == "dead":
                 ctx.logger.behavior(
                     f"[ATTACK] idle-death id={target_id} @{click_x},{click_y} "
                     f"sp={current_sp} — {idle_count} idle attacks, track removed"
                 )
                 return
+            if action == "unreachable":
+                ctx.logger.behavior(
+                    f"[ATTACK] idle-unreachable id={target_id} @{click_x},{click_y} "
+                    f"sp={current_sp} — {idle_count} idle attacks, track marked unreachable"
+                )
+                return
             if idle_count > 0:
                 ctx.logger.behavior(
-                    f"[ATTACK] idle id={target_id} count={idle_count}/3 "
-                    f"sp={current_sp}"
+                    f"[ATTACK] idle id={target_id} count={idle_count} sp={current_sp}"
                 )
 
         try:

@@ -30,7 +30,7 @@ from typing import Literal
 HUNT_OBJECT_RADIUS = 90
 HUNT_DISCOVERY_CLUSTER_RADIUS = 48
 
-TrackState = Literal["alive"]
+TrackState = Literal["alive", "unreachable"]
 
 
 @dataclass
@@ -65,6 +65,7 @@ class MobTrack:
     attack_count_baseline: int = 0
     idle_attack_count: int = 0
     last_attack_sp: int = 0  # SP value stored before the previous attack, for idle detection
+    was_accessible: bool = False  # True once SP consumption proves the mob is hittable
     state: TrackState = "alive"
     mob_name: str = ""
     created_tick: int = 0

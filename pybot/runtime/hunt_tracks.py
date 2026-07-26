@@ -117,10 +117,9 @@ class HuntTracks:
     def get_area_clear_candidate(self, now_tick: int | None = None) -> AreaClearStatus:
         with self._lock:
             alive = sum(1 for track in self._tracks if is_alive(track))
-            if alive == 0:
-                # No tracks left — reset ID counter to prevent unbounded
+            if len(self._tracks) == 0:
+                # No tracks at all — reset ID counter to prevent unbounded
                 # growth across many create/remove cycles.
-                self._tracks = []
                 self._next_id = 1
                 self._last_reconcile_summary = None
                 self._discovery_candidates = []
@@ -175,18 +174,21 @@ class HuntTracks:
     def discovery_frame_snapshot(
         self, now_tick: int | None = None
     ) -> tuple[int, list[tuple[int, int]], list[tuple[int, int, int]]]:
-        """Atomic sample for one discovery capture: epoch + dedup + positions."""
+        """Atomic sample for one discovery capture: epoch + dedup + positions.
+
+        Dedup positions include unreachable tracks so discovery does not
+        re-create tracks for corpses whose sprites still match the detector.
+        Track positions (3-tuples) are alive-only — unreachable IDs must
+        not participate in discovery absence matching.
+        """
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
-            visible = [
-                (t.id, t.x, t.y)
-                for t in self._tracks
-                if is_alive(t)
-            ]
+            alive = [t for t in self._tracks if is_alive(t)]
+            unreachable = [t for t in self._tracks if t.state == "unreachable"]
             return (
                 self._area_epoch,
-                [(t.x, t.y) for t in self._tracks if is_alive(t)],
-                visible,
+                [(t.x, t.y) for t in alive] + [(t.x, t.y) for t in unreachable],
+                [(t.id, t.x, t.y) for t in alive],
             )
 
     def tracking_frame_snapshot(
@@ -250,7 +252,10 @@ class HuntTracks:
             positions = (
                 existing_positions
                 if existing_positions is not None
-                else [(t.x, t.y) for t in self._tracks if is_alive(t)]
+                else [
+                    (t.x, t.y) for t in self._tracks
+                    if is_alive(t) or t.state == "unreachable"
+                ]
             )
             track_positions = (
                 existing_track_positions
@@ -423,7 +428,8 @@ class HuntTracks:
 
             return missed_ids
 
-    _IDLE_ATTACK_DEATH_THRESHOLD = 3
+    _IDLE_DEAD_THRESHOLD = 2
+    _IDLE_UNREACHABLE_THRESHOLD = 5
     _MELEE_RADIUS_PX = 150
 
     def evaluate_idle_attack(
@@ -434,40 +440,38 @@ class HuntTracks:
         mob_y: int,
         char_x: int,
         char_y: int,
-    ) -> tuple[bool, int]:
-        """Check idle-attack death conditions and increment the counter.
+    ) -> tuple[str, int]:
+        """Check idle-attack death / unreachable conditions.
 
         Called before each attack. Compares *current_sp* against the SP
-        stored from the previous attack cycle. If SP is unchanged AND the
-        mob is stationary AND distant from the character, the previous
-        attack was an "idle attack" (game rejected it — mob is dead).
+        stored from the previous attack cycle.
+
+        Two independent paths:
+
+        **Dead** — mob was hittable (SP consumed at least once), then
+        stopped moving and the next 2 attacks were idle → track is removed.
+
+        **Unreachable** — 5 consecutive idle attacks on any track → marked
+        unreachable (red dot, blocks rediscovery).  This catches both
+        never-hittable mobs and accessible mobs that moved behind walls.
+
+        The melee-range guard (150 px) prevents false positives when the
+        character is sitting on the mob and auto-attacks are hitting.
 
         Does NOT store SP — call ``store_attack_sp`` after a successful
         attack to record the pre-attack SP for the next cycle.
 
-        Returns ``(removed, idle_count)`` where *removed* is True when the
-        track was removed (>= 3 consecutive idle attacks), and *idle_count*
-        is the current counter value (for intermediate logging).
-
-        Resets the counter when:
-        - The mob is moving (not stationary).
-        - SP changed from the previous attack (real, SP-consuming attack).
-        - The mob is in melee range of the character (auto-attack edge cases).
+        Returns ``(action, idle_count)`` where *action* is one of
+        ``"none"``, ``"dead"``, or ``"unreachable"``.
         """
         with self._lock:
             track = self._get_track_by_id_locked(track_id)
             if track is None:
-                return False, 0
-
-            # Moving mob is alive — reset counter and baseline SP
-            if track.moving:
-                track.idle_attack_count = 0
-                track.last_attack_sp = 0
-                return False, 0
+                return "none", 0
 
             # First attack or no previous SP to compare — skip evaluation
             if track.last_attack_sp <= 0:
-                return False, 0
+                return "none", 0
 
             # SP unchanged → previous attack was rejected by the game
             was_idle = current_sp == track.last_attack_sp
@@ -476,19 +480,28 @@ class HuntTracks:
                 # Mob must NOT be at melee range ("sitting on character")
                 dx = mob_x - char_x
                 dy = mob_y - char_y
-                if (dx * dx + dy * dy) > (self._MELEE_RADIUS_PX * self._MELEE_RADIUS_PX):
-                    track.idle_attack_count += 1
-                    if track.idle_attack_count >= self._IDLE_ATTACK_DEATH_THRESHOLD:
-                        self._remove_tracks_locked({track_id})
-                        return True, track.idle_attack_count
-                    return False, track.idle_attack_count
-                # Within melee range → mob is still fighting, reset counter
-                track.idle_attack_count = 0
-            else:
-                # SP changed → real attack consumed SP → reset counter
-                track.idle_attack_count = 0
+                if (dx * dx + dy * dy) <= (self._MELEE_RADIUS_PX * self._MELEE_RADIUS_PX):
+                    track.idle_attack_count = 0
+                    return "none", 0
 
-            return False, track.idle_attack_count
+                track.idle_attack_count += 1
+
+                # Path 1: was accessible + stationary + 2 idle → dead
+                if track.was_accessible and not track.moving and track.idle_attack_count >= self._IDLE_DEAD_THRESHOLD:
+                    self._remove_tracks_locked({track_id})
+                    return "dead", track.idle_attack_count
+
+                # Path 2: 5 idle attacks (any accessibility) → unreachable
+                if track.idle_attack_count >= self._IDLE_UNREACHABLE_THRESHOLD:
+                    track.state = "unreachable"
+                    return "unreachable", track.idle_attack_count
+
+                return "none", track.idle_attack_count
+
+            # SP changed → real attack consumed SP → mob is hittable
+            track.was_accessible = True
+            track.idle_attack_count = 0
+            return "none", 0
 
     def store_attack_sp(self, track_id: int, sp: int) -> None:
         """Record the pre-attack SP for comparison on the next cycle."""
@@ -539,6 +552,7 @@ class HuntTracks:
         track.attack_count_baseline = 0
         track.idle_attack_count = 0
         track.last_attack_sp = 0
+        track.was_accessible = False
         self._next_id += 1
         self._tracks.append(track)
         return track
@@ -583,10 +597,11 @@ class HuntTracks:
             candidate_scale=track.candidate_scale,
         )
 
-    def overlay_track_state(self, now_tick: int | None = None) -> tuple[int, list[MobTrackSnapshot]]:
+    def overlay_track_state(self, now_tick: int | None = None) -> tuple[int, list[MobTrackSnapshot], list[MobTrackSnapshot]]:
         with self._lock:
             alive = [self._to_snapshot(track) for track in self._tracks if is_alive(track)]
-            return len(self._tracks), alive
+            unreachable = [self._to_snapshot(track) for track in self._tracks if track.state == "unreachable"]
+            return len(self._tracks), alive, unreachable
 
     def tracks_for_policy(self, now_tick: int | None = None) -> list[MobTrack]:
         with self._lock:
