@@ -64,7 +64,6 @@ class MobTrack:
     attack_count: int = 0
     attack_count_baseline: int = 0
     idle_attack_count: int = 0
-    last_attack_sp: int = 0  # SP value stored before the previous attack, for idle detection
     was_accessible: bool = False  # True once SP consumption proves the mob is hittable
     state: TrackState = "alive"
     mob_name: str = ""

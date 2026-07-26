@@ -26,7 +26,6 @@ class AttackLoop:
         self._ctx = ctx
         self._hunt_mode = hunt_mode
         self._input = input_backend
-        self._last_attack_ms = 0
         self._poller = poller or GameMemoryPoller()
         self._memory = memory or MemoryAddresses()
         self._char_x = char_x
@@ -43,12 +42,6 @@ class AttackLoop:
 
                 tick = monotonic_ms()
                 policy_tracks = self._ctx.tracks.tracks_for_policy(tick)
-        
-
-                # Respect skill delay after each attack
-                if self._is_on_cooldown(tick):
-                    self._ctx.stop_event.wait(0.025)
-                    continue
 
                 target_id = self._ctx.policy.select_target(policy_tracks, tick)
                 if target_id:
@@ -64,12 +57,6 @@ class AttackLoop:
                     f"[ATTACK] CRASH:\n{traceback.format_exc()}"
                 )
                 break
-
-    def _is_on_cooldown(self, now_tick: int) -> bool:
-        if not self._last_attack_ms:
-            return False
-        elapsed = now_tick - self._last_attack_ms
-        return elapsed < self._ctx.config.skill_delay_ms
 
     def _read_sp(self) -> int:
         """Read current SP from game memory. Returns 0 if unavailable."""
@@ -94,33 +81,11 @@ class AttackLoop:
         click_x, click_y = snap.x, snap.y
 
         # ── Idle-attack death detection ────────────────────────────────
-        # Read SP before the attack and check whether the PREVIOUS attack
-        # consumed SP. If SP didn't change AND the mob is stationary AND
-        # distant from the character, the previous attack was rejected —
-        # the mob is already dead.
-        current_sp = self._read_sp()
-        if current_sp > 0:
-            action, idle_count = ctx.tracks.evaluate_idle_attack(
-                target_id, current_sp, click_x, click_y,
-                self._char_x, self._char_y,
-            )
-            if action == "dead":
-                ctx.logger.behavior(
-                    f"[ATTACK] idle-death id={target_id} @{click_x},{click_y} "
-                    f"sp={current_sp} — {idle_count} idle attacks, track removed"
-                )
-                return
-            if action == "unreachable":
-                ctx.logger.behavior(
-                    f"[ATTACK] idle-unreachable id={target_id} @{click_x},{click_y} "
-                    f"sp={current_sp} — {idle_count} idle attacks, track marked unreachable"
-                )
-                return
-            if idle_count > 0:
-                ctx.logger.behavior(
-                    f"[ATTACK] idle id={target_id} count={idle_count} sp={current_sp}"
-                )
-
+        # Read SP before the attack, then again after the skill delay
+        # so the game has processed SP consumption.  Measuring the delta
+        # per-attack keeps each track's counter independent — other tracks'
+        # SP consumption between attacks cannot contaminate the comparison.
+        pre_sp = self._read_sp()
         try:
             self._input.move_mouse(click_x, click_y)
             self._input.skill_click(ctx.config.skill_scan_code)
@@ -130,13 +95,39 @@ class AttackLoop:
             )
             return
 
+        # Wait for the skill delay so the game updates SP post-consumption
+        self._ctx.stop_event.wait(ctx.config.skill_delay_ms / 1000.0)
+        post_sp = self._read_sp()
+
+        was_idle = (pre_sp > 0 and post_sp > 0 and pre_sp == post_sp)
+        action, idle_count = ctx.tracks.evaluate_idle_attack(
+            target_id,
+            was_idle=was_idle,
+            mob_x=click_x,
+            mob_y=click_y,
+            char_x=self._char_x,
+            char_y=self._char_y,
+        )
+        if action == "dead":
+            ctx.logger.behavior(
+                f"[ATTACK] idle-death id={target_id} @{click_x},{click_y} "
+                f"sp={post_sp} — {idle_count} idle attacks, track removed"
+            )
+            return
+        if action == "unreachable":
+            ctx.logger.behavior(
+                f"[ATTACK] idle-unreachable id={target_id} @{click_x},{click_y} "
+                f"sp={post_sp} — {idle_count} idle attacks, track marked unreachable"
+            )
+            return
+        if idle_count > 0:
+            ctx.logger.behavior(
+                f"[ATTACK] idle id={target_id} count={idle_count} "
+                f"pre_sp={pre_sp} post_sp={post_sp}"
+            )
+
         ctx.tracks.apply_attack_event(target_id, now_tick=now_tick)
-        # Store pre-attack SP only after a successful click, so failed
-        # clicks don't leak stale SP into the next cycle's comparison.
-        if current_sp > 0:
-            ctx.tracks.store_attack_sp(target_id, current_sp)
         ctx.policy.note_attack_target(target_id)
-        self._last_attack_ms = now_tick
         ctx.overlay.increment_attacks()
         ctx.logger.behavior(
             f"[ATTACK] id={target_id} @{click_x},{click_y} "

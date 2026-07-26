@@ -435,7 +435,8 @@ class HuntTracks:
     def evaluate_idle_attack(
         self,
         track_id: int,
-        current_sp: int,
+        *,
+        was_idle: bool,
         mob_x: int,
         mob_y: int,
         char_x: int,
@@ -443,8 +444,9 @@ class HuntTracks:
     ) -> tuple[str, int]:
         """Check idle-attack death / unreachable conditions.
 
-        Called before each attack. Compares *current_sp* against the SP
-        stored from the previous attack cycle.
+        Called after each attack. *was_idle* is True when SP did not change
+        during this specific attack (pre-attack SP == post-attack SP),
+        measured per-attack so other tracks' SP consumption cannot interfere.
 
         Two independent paths:
 
@@ -458,9 +460,6 @@ class HuntTracks:
         The melee-range guard (150 px) prevents false positives when the
         character is sitting on the mob and auto-attacks are hitting.
 
-        Does NOT store SP — call ``store_attack_sp`` after a successful
-        attack to record the pre-attack SP for the next cycle.
-
         Returns ``(action, idle_count)`` where *action* is one of
         ``"none"``, ``"dead"``, or ``"unreachable"``.
         """
@@ -468,13 +467,6 @@ class HuntTracks:
             track = self._get_track_by_id_locked(track_id)
             if track is None:
                 return "none", 0
-
-            # First attack or no previous SP to compare — skip evaluation
-            if track.last_attack_sp <= 0:
-                return "none", 0
-
-            # SP unchanged → previous attack was rejected by the game
-            was_idle = current_sp == track.last_attack_sp
 
             if was_idle:
                 # Mob must NOT be at melee range ("sitting on character")
@@ -498,17 +490,10 @@ class HuntTracks:
 
                 return "none", track.idle_attack_count
 
-            # SP changed → real attack consumed SP → mob is hittable
+            # SP consumed → real attack → mob is hittable
             track.was_accessible = True
             track.idle_attack_count = 0
             return "none", 0
-
-    def store_attack_sp(self, track_id: int, sp: int) -> None:
-        """Record the pre-attack SP for comparison on the next cycle."""
-        with self._lock:
-            track = self._get_track_by_id_locked(track_id)
-            if track is not None:
-                track.last_attack_sp = sp
 
     @property
     def last_reconcile_summary(self) -> ReconcileSummary | None:
@@ -551,7 +536,6 @@ class HuntTracks:
         track.attack_count = 0
         track.attack_count_baseline = 0
         track.idle_attack_count = 0
-        track.last_attack_sp = 0
         track.was_accessible = False
         self._next_id += 1
         self._tracks.append(track)
