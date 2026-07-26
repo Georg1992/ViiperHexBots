@@ -17,10 +17,6 @@ SIT_SP_POLL_INTERVAL_S = 0.25
 SIT_IDLE_BEFORE_SIT_S = 1.0
 # After stand keypress, delay before hunt/timers resume.
 SIT_STAND_RESUME_DELAY_S = 0.5
-# If a track hasn't moved its position by more than 3px for this many ms,
-# it's almost certainly a corpse — remove immediately.
-# RO mobs always move within this window (idle animation, patrol, aggro).
-STATIONARY_DEATH_TIMEOUT_MS = 6000
 # Wait for sit animation before measuring the sitting sprite box.
 SIT_POSE_SETTLE_S = 0.4
 # SP ticks roughly every 2–3s while sitting; no increase for this long → stall.

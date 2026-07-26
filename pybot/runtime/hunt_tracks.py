@@ -21,7 +21,7 @@ from pybot.recognition.rules import (
 
 from pybot.runtime.track_reconciler import DiscoveryReconcileResult, TrackReconciler
 from pybot.runtime.capture.window_roi import HuntRoi
-from pybot.runtime.constants import STATIONARY_DEATH_TIMEOUT_MS
+
 from pybot.recognition.detector.detector import load_detector_config
 
 
@@ -175,13 +175,10 @@ class HuntTracks:
     def discovery_frame_snapshot(
         self, now_tick: int | None = None
     ) -> tuple[int, list[tuple[int, int]], list[tuple[int, int, int]]]:
-        """Atomic sample for one discovery capture: epoch + dedup + alive positions.
-
-        Alive entries are ``(track_id, x, y)`` at capture time.
-        """
+        """Atomic sample for one discovery capture: epoch + dedup + positions."""
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
-            alive = [
+            visible = [
                 (t.id, t.x, t.y)
                 for t in self._tracks
                 if is_alive(t)
@@ -189,7 +186,7 @@ class HuntTracks:
             return (
                 self._area_epoch,
                 [(t.x, t.y) for t in self._tracks if is_alive(t)],
-                alive,
+                visible,
             )
 
     def tracking_frame_snapshot(
@@ -293,7 +290,7 @@ class HuntTracks:
             # Only the remaining in-range tracks are evaluated — out-of-range
             # tracks were already handled by Factor 1.
             remaining_ids = unmatched_ids - out_of_range
-            miss_remove, first_miss_ids = self._evaluate_discovery_miss_removal(
+            miss_remove, _first_miss = self._evaluate_discovery_miss_removal(
                 remaining_ids,
             )
             remove_ids.update(miss_remove)
@@ -301,9 +298,6 @@ class HuntTracks:
             # Execute removal
             if remove_ids:
                 self._remove_tracks_locked(remove_ids)
-
-            # Mark first-miss tracks — they stay alive for one more scan
-            # (discovery_miss_count was already incremented in the evaluator).
 
             alive_after = sum(1 for t in self._tracks if is_alive(t))
             summary = ReconcileSummary(
@@ -381,19 +375,13 @@ class HuntTracks:
     ) -> list[int]:
         """Refresh coordinates from LocalTracker results.
 
-        Evaluates tracking-level death factor (stationary timeout) and
-        removes dead tracks. Returns track IDs that were not found (missed
-        by tracker).
+        Returns track IDs that were not found (missed by tracker).
 
         Tracking owns all position writes — discovery only publishes
         candidates; tracking creates tracks on fresh frames.
-
-        Add new removal factors as separate ``_evaluate_*`` methods and
-        call them in the death-ids collection block below.
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
         missed_ids: list[int] = []
-        death_ids: list[int] = []
         with self._lock:
             if area_epoch is not None and area_epoch != self._area_epoch:
                 return []
@@ -403,11 +391,6 @@ class HuntTracks:
                     continue
 
                 if result.found:
-                    # Factor 1: Stationary death timeout — hasn't moved for too long
-                    if self._evaluate_stationary_death(track, result, tick):
-                        death_ids.append(result.track_id)
-                        continue
-
                     move_px, stop_px = movement_thresholds(self._detector_config())
                     apply_movement_observation(
                         track,
@@ -438,30 +421,81 @@ class HuntTracks:
                 track.moving = False
                 missed_ids.append(result.track_id)
 
-            # Execute all tracking-level removals
-            if death_ids:
-                self._remove_tracks_locked(set(death_ids))
-
             return missed_ids
 
-    def _evaluate_stationary_death(self, track: MobTrack, result, tick: int) -> bool:
-        """Factor 1 (tracking): Stationary death timeout — mob hasn't moved
-        more than 3 px for ``STATIONARY_DEATH_TIMEOUT_MS``, so it's a corpse.
+    _IDLE_ATTACK_DEATH_THRESHOLD = 3
+    _MELEE_RADIUS_PX = 150
 
-        Side-effect: updates ``track.stationary_since_tick``.
+    def evaluate_idle_attack(
+        self,
+        track_id: int,
+        current_sp: int,
+        mob_x: int,
+        mob_y: int,
+        char_x: int,
+        char_y: int,
+    ) -> tuple[bool, int]:
+        """Check idle-attack death conditions and increment the counter.
+
+        Called before each attack. Compares *current_sp* against the SP
+        stored from the previous attack cycle. If SP is unchanged AND the
+        mob is stationary AND distant from the character, the previous
+        attack was an "idle attack" (game rejected it — mob is dead).
+
+        Does NOT store SP — call ``store_attack_sp`` after a successful
+        attack to record the pre-attack SP for the next cycle.
+
+        Returns ``(removed, idle_count)`` where *removed* is True when the
+        track was removed (>= 3 consecutive idle attacks), and *idle_count*
+        is the current counter value (for intermediate logging).
+
+        Resets the counter when:
+        - The mob is moving (not stationary).
+        - SP changed from the previous attack (real, SP-consuming attack).
+        - The mob is in melee range of the character (auto-attack edge cases).
         """
-        STATIONARY_PX = 3
-        if track.moving:
-            return False
-        dx = abs(result.x - track.x)
-        dy = abs(result.y - track.y)
-        if dx > STATIONARY_PX or dy > STATIONARY_PX:
-            track.stationary_since_tick = 0
-            return False
-        if track.stationary_since_tick == 0:
-            track.stationary_since_tick = tick
-            return False
-        return (tick - track.stationary_since_tick) >= STATIONARY_DEATH_TIMEOUT_MS
+        with self._lock:
+            track = self._get_track_by_id_locked(track_id)
+            if track is None:
+                return False, 0
+
+            # Moving mob is alive — reset counter and baseline SP
+            if track.moving:
+                track.idle_attack_count = 0
+                track.last_attack_sp = 0
+                return False, 0
+
+            # First attack or no previous SP to compare — skip evaluation
+            if track.last_attack_sp <= 0:
+                return False, 0
+
+            # SP unchanged → previous attack was rejected by the game
+            was_idle = current_sp == track.last_attack_sp
+
+            if was_idle:
+                # Mob must NOT be at melee range ("sitting on character")
+                dx = mob_x - char_x
+                dy = mob_y - char_y
+                if (dx * dx + dy * dy) > (self._MELEE_RADIUS_PX * self._MELEE_RADIUS_PX):
+                    track.idle_attack_count += 1
+                    if track.idle_attack_count >= self._IDLE_ATTACK_DEATH_THRESHOLD:
+                        self._remove_tracks_locked({track_id})
+                        return True, track.idle_attack_count
+                    return False, track.idle_attack_count
+                # Within melee range → mob is still fighting, reset counter
+                track.idle_attack_count = 0
+            else:
+                # SP changed → real attack consumed SP → reset counter
+                track.idle_attack_count = 0
+
+            return False, track.idle_attack_count
+
+    def store_attack_sp(self, track_id: int, sp: int) -> None:
+        """Record the pre-attack SP for comparison on the next cycle."""
+        with self._lock:
+            track = self._get_track_by_id_locked(track_id)
+            if track is not None:
+                track.last_attack_sp = sp
 
     @property
     def last_reconcile_summary(self) -> ReconcileSummary | None:
@@ -503,6 +537,8 @@ class HuntTracks:
         )
         track.attack_count = 0
         track.attack_count_baseline = 0
+        track.idle_attack_count = 0
+        track.last_attack_sp = 0
         self._next_id += 1
         self._tracks.append(track)
         return track

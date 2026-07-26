@@ -63,6 +63,8 @@ class MobTrack:
     confidence: float = 0.0
     attack_count: int = 0
     attack_count_baseline: int = 0
+    idle_attack_count: int = 0
+    last_attack_sp: int = 0  # SP value stored before the previous attack, for idle detection
     state: TrackState = "alive"
     mob_name: str = ""
     created_tick: int = 0
@@ -85,11 +87,6 @@ class MobTrack:
     # At >= 2 the track is removed immediately — it failed discovery gates
     # twice in a row, meaning it's dead or gone.
     discovery_miss_count: int = 0
-
-    # Tick when the mob first registered as stationary at its current position
-    # (within 3px). When this exceeds STATIONARY_DEATH_TIMEOUT_MS and the mob
-    # hasn't moved, the track is removed as a corpse. 0 = not stationary.
-    stationary_since_tick: int = 0
 
     @classmethod
     def from_discovery(

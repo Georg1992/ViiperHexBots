@@ -28,6 +28,7 @@ from pybot.recognition.detector.detector import load_detector_config
 from pybot.runtime.detection.detector_session import DetectorSession
 from pybot.runtime.workers.attack_loop import AttackLoop
 from pybot.runtime.workers.coord_tracking_worker import CoordTrackingWorker
+from pybot.game_state import GameMemoryPoller
 
 from pybot.runtime.workers.discovery_worker import DiscoveryWorker
 from pybot.runtime.workers.skill_timer_worker import SkillTimerWorker
@@ -160,7 +161,14 @@ def create_runtime_deps(
     profile = load_client_profile(ctx.config.client_profile)
     memory = MemoryAddresses() if profile is None else profile.memory
     discovery = DiscoveryWorker(ctx, hunt_mode)
-    attack = AttackLoop(ctx, hunt_mode, input_backend)
+    roi = ctx.capture.get_hunt_roi()
+    char_x = roi.x + roi.w // 2 if roi else 0
+    char_y = roi.y + roi.h // 2 if roi else 0
+    attack = AttackLoop(
+        ctx, hunt_mode, input_backend,
+        poller=GameMemoryPoller(), memory=memory,
+        char_x=char_x, char_y=char_y,
+    )
     workers: list[tuple[str, Callable[[], None]]] = [
         ("coord", tracking.run),
         ("discovery", discovery.run),

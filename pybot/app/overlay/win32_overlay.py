@@ -281,10 +281,8 @@ def _paint_overlay_content(hdc: int, cw: int, ch: int, content: dict) -> None:
     # ── Draw track position dots (over the game area) ──────────
     if track_positions and client_w > 0 and brush_living:
         for tx, ty in track_positions:
-            # Convert game-client-absolute coords to overlay-relative
             dx = tx - client_left
             dy = ty - client_top
-            # Skip if inside the right-side panel
             if dx >= cw - PANEL_W:
                 continue
             old_b = gdi32.SelectObject(hdc, brush_living)
