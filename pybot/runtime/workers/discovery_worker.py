@@ -140,6 +140,7 @@ class DiscoveryWorker:
                 confidence=item.confidence,
                 candidate_scale=item.candidate_scale,
                 living=True,
+                bbox=item.bbox,
             )
             for item in filtered
         ]

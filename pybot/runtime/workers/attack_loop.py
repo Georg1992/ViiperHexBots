@@ -112,6 +112,7 @@ class AttackLoop:
             mob_y=click_y,
             char_x=self._char_x,
             char_y=self._char_y,
+            now_tick=now_tick,
         )
         if action == "dead":
             ctx.logger.behavior(

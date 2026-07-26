@@ -1,10 +1,12 @@
 """Sit when SP is low; pause hunting (and timers) until SP recovers.
 
 Before sitting: teleport until a discovery scan sees no living mobs, idle 1s,
-measure standing/sitting center pose, then sit. While regenerating: interrupt
-on danger — HP dropping (vision; already standing from the hit), or SP
-stall/drop with nearby foreign sprites (stand key if still seated) — then
-teleport to a quiet area and sit again.
+measure standing pose, sit and confirm the shorter sitting pose (retry on
+failure), then regenerate. While regenerating: interrupt on danger — HP
+dropping (vision; already standing from the hit), or SP stall/drop with
+nearby foreign sprites (stand key with pose confirm if still seated) — then
+teleport to a quiet area and sit again. On SP recover: stand and confirm
+standing pose before resume (retry on failure).
 
 Each sit teleport clears tracking (same as hunt-mode teleport) so workers
 resume against the new screen only.
@@ -26,6 +28,8 @@ from pybot.runtime.clear_area import HuntModeAreaReset, teleport_until_quiet
 from pybot.runtime.constants import (
     SIT_HP_POLL_S,
     SIT_LOW_SP_RATIO,
+    SIT_POSE_MAX_ATTEMPTS,
+    SIT_POSE_MIN_HEIGHT_DROP,
     SIT_POSE_SETTLE_S,
     SIT_RESUME_SP_RATIO,
     SIT_SP_POLL_INTERVAL_S,
@@ -156,7 +160,7 @@ class SitOnLowSpWorker:
                     return
                 leave_screen = True
                 ctx.logger.behavior(
-                    "[SIT] danger while regenerating — "
+                    f"[SIT] {outcome} while regenerating — "
                     "force teleport, then find another sit spot"
                 )
         finally:
@@ -169,26 +173,26 @@ class SitOnLowSpWorker:
         Returns:
             ``"recovered"`` — stood after SP ≥ resume threshold.
             ``"danger"`` — HP drop or SP stall with nearby objects.
+            ``"pose_failed"`` — could not confirm sit/stand pose after retries.
             ``"stopped"`` — stop/pause ended the session (stood if needed).
         """
         ctx = self._ctx
         sit_scan = ctx.config.sit_on_low_sp_scan_code
-        stand_pose = self._measure_pose()
-        self._input.teleport_key(sit_scan)
-        sat_down = True
 
-        if not ctx.wait_unless_stopped(SIT_POSE_SETTLE_S):
-            self._input.teleport_key(sit_scan)
-            return "stopped"
+        stand_pose = self._measure_stand_pose()
+        if stand_pose is None:
+            ctx.logger.behavior("[SIT] cannot measure stand pose — abort sit")
+            return "pose_failed"
 
-        sit_pose = self._measure_pose()
-        if stand_pose is not None and sit_pose is not None:
-            ctx.logger.behavior(
-                f"[SIT] pose stand_h={stand_pose.body_height} "
-                f"sit_h={sit_pose.body_height}"
-            )
-        else:
-            ctx.logger.behavior("[SIT] could not calibrate center pose")
+        sit_pose = self._ensure_sitting(sit_scan, stand_pose)
+        if sit_pose is None:
+            ctx.logger.behavior("[SIT] failed to confirm sit pose — abort sit")
+            return "pose_failed"
+
+        ctx.logger.behavior(
+            f"[SIT] pose confirmed stand_h={stand_pose.body_height} "
+            f"sit_h={sit_pose.body_height}"
+        )
 
         sp_state = self._sp_snapshot()
         last_sp = sp_state[0] if sp_state is not None else None
@@ -202,10 +206,13 @@ class SitOnLowSpWorker:
                 sp, ratio = sp_state
                 if ratio >= SIT_RESUME_SP_RATIO:
                     ctx.logger.behavior(
-                        f"[SIT] SP recovered ratio={ratio:.1%} — standing, "
-                        f"wait {SIT_STAND_RESUME_DELAY_S * 1000:.0f}ms then resume"
+                        f"[SIT] SP recovered ratio={ratio:.1%} — standing"
                     )
-                    self._input.teleport_key(sit_scan)
+                    if not self._ensure_standing(sit_scan, sit_pose, stand_pose):
+                        ctx.logger.behavior(
+                            "[SIT] failed to confirm stand pose after recover"
+                        )
+                        return "pose_failed"
                     ctx.wait_unless_stopped(SIT_STAND_RESUME_DELAY_S)
                     return "recovered"
 
@@ -275,28 +282,79 @@ class SitOnLowSpWorker:
 
             ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
 
-        if sat_down:
-            self._input.teleport_key(sit_scan)
-            ctx.logger.behavior("[SIT] stopped while sitting — stood up")
+        self._ensure_standing(sit_scan, sit_pose, stand_pose)
+        ctx.logger.behavior("[SIT] stopped while sitting — stood up")
         return "stopped"
+
+    def _measure_stand_pose(self) -> CharacterPose | None:
+        """Read standing pose before the sit key; retry while unreadable."""
+        for attempt in range(1, SIT_POSE_MAX_ATTEMPTS + 1):
+            pose = self._measure_pose()
+            if pose is not None:
+                return pose
+            self._ctx.logger.behavior(
+                f"[SIT] stand pose unreadable attempt={attempt}/"
+                f"{SIT_POSE_MAX_ATTEMPTS}"
+            )
+            if not self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S):
+                return None
+        return None
+
+    def _ensure_sitting(
+        self,
+        sit_scan: int,
+        stand_pose: CharacterPose,
+    ) -> CharacterPose | None:
+        """Press sit until center pose is shorter than stand by the min drop."""
+        for attempt in range(1, SIT_POSE_MAX_ATTEMPTS + 1):
+            self._input.teleport_key(sit_scan)
+            if not self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S):
+                return None
+            current = self._measure_pose()
+            if current is None:
+                self._ctx.logger.behavior(
+                    f"[SIT] sit pose unreadable attempt={attempt}/"
+                    f"{SIT_POSE_MAX_ATTEMPTS}"
+                )
+                continue
+            drop = stand_pose.body_height - current.body_height
+            if drop >= SIT_POSE_MIN_HEIGHT_DROP:
+                return current
+            self._ctx.logger.behavior(
+                f"[SIT] sit not confirmed attempt={attempt}/"
+                f"{SIT_POSE_MAX_ATTEMPTS} stand_h={stand_pose.body_height} "
+                f"current_h={current.body_height} drop={drop} "
+                f"need>={SIT_POSE_MIN_HEIGHT_DROP} — retry"
+            )
+        return None
 
     def _ensure_standing(
         self,
         sit_scan: int,
-        sit_pose: CharacterPose | None,
-        stand_pose: CharacterPose | None,
-    ) -> None:
-        """Stand before teleport if the center sprite still looks seated."""
-        if sit_pose is None or stand_pose is None:
-            self._input.teleport_key(sit_scan)
-            self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S)
-            return
-        current = self._measure_pose()
-        if current is None:
-            self._input.teleport_key(sit_scan)
-            self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S)
-            return
+        sit_pose: CharacterPose,
+        stand_pose: CharacterPose,
+    ) -> bool:
+        """Press stand until center pose is no longer seated. Returns success."""
         mid = (sit_pose.body_height + stand_pose.body_height) / 2.0
-        if current.body_height < mid:
+        for attempt in range(1, SIT_POSE_MAX_ATTEMPTS + 1):
+            current = self._measure_pose()
+            if current is not None and current.body_height >= mid:
+                return True
             self._input.teleport_key(sit_scan)
-            self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S)
+            if not self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S):
+                return False
+            current = self._measure_pose()
+            if current is None:
+                self._ctx.logger.behavior(
+                    f"[SIT] stand pose unreadable attempt={attempt}/"
+                    f"{SIT_POSE_MAX_ATTEMPTS}"
+                )
+                continue
+            if current.body_height >= mid:
+                return True
+            self._ctx.logger.behavior(
+                f"[SIT] stand not confirmed attempt={attempt}/"
+                f"{SIT_POSE_MAX_ATTEMPTS} current_h={current.body_height} "
+                f"mid={mid:.0f} — retry"
+            )
+        return False

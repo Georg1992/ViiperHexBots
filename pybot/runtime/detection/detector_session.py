@@ -23,6 +23,7 @@ class RawDetection:
     confidence: float
     candidate_scale: float
     living: bool
+    bbox: tuple[int, int, int, int] = (0, 0, 0, 0)
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,12 @@ class DetectorSession:
                 confidence=candidate.final_score,
                 candidate_scale=candidate.candidate_scale,
                 living=candidate.accepted,
+                bbox=(
+                    candidate.bbox[0] + roi.x,
+                    candidate.bbox[1] + roi.y,
+                    candidate.bbox[2],
+                    candidate.bbox[3],
+                ),
             )
             for candidate in result.accepted
         ]

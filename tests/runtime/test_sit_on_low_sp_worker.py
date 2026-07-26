@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import threading
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from pybot.game_state import MemorySnapshot
 from pybot.config.clients import MemoryAddresses
+from pybot.recognition.danger import DangerReport
+from pybot.recognition.ui.character_pose import CharacterPose
 from pybot.runtime.constants import SIT_LOW_SP_RATIO, SIT_RESUME_SP_RATIO
 from pybot.runtime.detection.detector_session import DiscoveryScanResult, RawDetection
 from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.workers.sit_on_low_sp_worker import SitOnLowSpWorker
+
+_STAND = CharacterPose(body_height=99, fg_count=2500)
+_SIT = CharacterPose(body_height=60, fg_count=2200)
 
 
 class _FakePoller:
@@ -62,11 +67,58 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.capture.is_valid.return_value = True
         self.ctx.capture.get_hunt_roi.return_value = MagicMock(x=0, y=0, w=100, h=100)
         self.ctx.capture.capture_roi.return_value = MagicMock(size=1)
-        # No client frame → pose calibration skipped; attack path stays off.
-        self.ctx.capture.capture_client.return_value = None
+        self.ctx.capture.capture_client.return_value = object()
         self.input = MagicMock(spec=ShadowInputBackend)
         self.memory = MemoryAddresses(current_sp=1, max_sp=2)
         self.hunt_mode = MagicMock()
+
+    def _empty_scans(self, n: int = 5) -> list[DiscoveryScanResult]:
+        empty = DiscoveryScanResult(
+            ok=True,
+            fail_reason="",
+            raw_count=0,
+            accepted_count=0,
+            detections=[],
+            duration_ms=1,
+            elapsed_s=0.001,
+        )
+        return [empty] * n
+
+    def _living_then_clear(self) -> list[DiscoveryScanResult]:
+        living = RawDetection(
+            x=10, y=10, confidence=0.9, candidate_scale=1.0, living=True,
+            bbox=(0, 0, 20, 20),
+        )
+        empty = DiscoveryScanResult(
+            ok=True,
+            fail_reason="",
+            raw_count=0,
+            accepted_count=0,
+            detections=[],
+            duration_ms=1,
+            elapsed_s=0.001,
+        )
+        living_scan = DiscoveryScanResult(
+            ok=True,
+            fail_reason="",
+            raw_count=1,
+            accepted_count=1,
+            detections=[living],
+            duration_ms=1,
+            elapsed_s=0.001,
+        )
+        return [living_scan, empty, empty, empty, empty]
+
+    def _pose_side_effect(self, poses: list[CharacterPose]):
+        it = iter(poses)
+
+        def _next() -> CharacterPose:
+            try:
+                return next(it)
+            except StopIteration:
+                return poses[-1]
+
+        return _next
 
     def test_sitting_blocks_should_run_workers(self) -> None:
         self.assertTrue(self.ctx.should_run_workers())
@@ -83,36 +135,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
                 SIT_RESUME_SP_RATIO,
             ]
         )
-        # First scan sees a mob, second is clear.
-        living = RawDetection(
-            x=10, y=10, confidence=0.9, candidate_scale=1.0, living=True
-        )
-        # Clear: mob → empty; post-idle recheck: empty; extra empties for safety.
-        empty = DiscoveryScanResult(
-            ok=True,
-            fail_reason="",
-            raw_count=0,
-            accepted_count=0,
-            detections=[],
-            duration_ms=1,
-            elapsed_s=0.001,
-        )
-        living_scan = DiscoveryScanResult(
-            ok=True,
-            fail_reason="",
-            raw_count=1,
-            accepted_count=1,
-            detections=[living],
-            duration_ms=1,
-            elapsed_s=0.001,
-        )
-        self.ctx.detector.discover_frame.side_effect = [
-            living_scan,
-            empty,
-            empty,
-            empty,
-            empty,
-        ]
+        self.ctx.detector.discover_frame.side_effect = self._living_then_clear()
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
@@ -121,26 +144,26 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             poller=poller,
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
+        # stand calibrate, sit confirm, stand check (still sit), stand after press
+        poses = [_STAND, _SIT, _SIT, _STAND]
 
         def stop_after_recover() -> None:
-            # teleport (16) + sit (82) + stand (82) = 3 presses; teleport may be first.
             while self.input.teleport_key.call_count < 3 and not self.ctx.is_stopped():
                 self.ctx.stop_event.wait(0.01)
             self.ctx.stop_event.set()
 
         threading.Thread(target=stop_after_recover, daemon=True).start()
-        worker.run()
+        with patch.object(worker, "_measure_pose", side_effect=self._pose_side_effect(poses)):
+            worker.run()
 
         self.assertGreaterEqual(self.input.teleport_key.call_count, 3)
-        # First press clears area with teleport key; sit/stand use sit key.
         self.assertEqual(self.input.teleport_key.call_args_list[0].args[0], 16)
         sit_presses = [
             c.args[0] for c in self.input.teleport_key.call_args_list if c.args[0] == 82
         ]
-        self.assertEqual(len(sit_presses), 2)
+        self.assertGreaterEqual(len(sit_presses), 2)
         self.assertFalse(self.ctx.sitting_event.is_set())
         self.assertTrue(self.ctx.discovery_wake.is_set())
-        # Sit teleports must clear tracking like hunt-mode teleports.
         self.assertGreaterEqual(self.ctx.tracks.area_reset.call_count, 1)
         self.assertGreaterEqual(self.hunt_mode.on_area_reset.call_count, 1)
 
@@ -150,35 +173,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
 
     def test_sit_teleport_clears_overlay_tracks(self) -> None:
         poller = _FakePoller([SIT_LOW_SP_RATIO - 0.01, SIT_RESUME_SP_RATIO])
-        living = RawDetection(
-            x=10, y=10, confidence=0.9, candidate_scale=1.0, living=True
-        )
-        # Clear: mob → empty; post-idle recheck: empty; extra empties for safety.
-        empty = DiscoveryScanResult(
-            ok=True,
-            fail_reason="",
-            raw_count=0,
-            accepted_count=0,
-            detections=[],
-            duration_ms=1,
-            elapsed_s=0.001,
-        )
-        living_scan = DiscoveryScanResult(
-            ok=True,
-            fail_reason="",
-            raw_count=1,
-            accepted_count=1,
-            detections=[living],
-            duration_ms=1,
-            elapsed_s=0.001,
-        )
-        self.ctx.detector.discover_frame.side_effect = [
-            living_scan,
-            empty,
-            empty,
-            empty,
-            empty,
-        ]
+        self.ctx.detector.discover_frame.side_effect = self._living_then_clear()
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
@@ -187,6 +182,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             poller=poller,
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
+        poses = [_STAND, _SIT, _SIT, _STAND]
 
         def stop_after_recover() -> None:
             while self.input.teleport_key.call_count < 3 and not self.ctx.is_stopped():
@@ -194,18 +190,15 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             self.ctx.stop_event.set()
 
         threading.Thread(target=stop_after_recover, daemon=True).start()
-        worker.run()
+        with patch.object(worker, "_measure_pose", side_effect=self._pose_side_effect(poses)):
+            worker.run()
 
         self.ctx.overlay.set_track_positions.assert_called_with([])
         self.ctx.overlay.set_track_stats.assert_any_call(track_count=0, alive_count=0)
 
     def test_sit_session_returns_danger_on_sp_drop_and_near_objects(self) -> None:
-        from unittest.mock import patch
-
-        from pybot.recognition.danger import DangerReport
-        from pybot.recognition.ui.character_pose import CharacterPose
-
-        poller = _FakePoller([0.40, 0.40, 0.30])
+        # SP drop marks stall immediately; keep mid ratios so we never resume.
+        poller = _FakePoller([0.40, 0.30] + [0.30] * 30)
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
@@ -214,35 +207,34 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             poller=poller,
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-        stand = CharacterPose(body_height=99, fg_count=2500)
-        sit = CharacterPose(body_height=60, fg_count=2200)
-        poses = iter([stand, sit, stand])
+        # stand, sit confirm, then standing checks during ensure_standing
+        poses = [_STAND, _SIT, _STAND]
 
-        with patch.object(worker, "_measure_pose", side_effect=lambda: next(poses, sit)):
-            with patch.object(worker, "_capture_client", return_value=object()):
-                with patch.object(worker, "_read_hp", return_value=1000):
-                    with patch.object(
-                        worker,
-                        "_assess_danger",
-                        return_value=DangerReport(
-                            in_danger=True,
-                            reasons=("near_objects:1",),
-                            near_object_count=1,
-                        ),
-                    ):
-                        outcome = worker._sit_session()
+        with patch(
+            "pybot.runtime.workers.sit_on_low_sp_worker.SIT_HP_POLL_S",
+            0.0,
+        ):
+            with patch.object(worker, "_measure_pose", side_effect=self._pose_side_effect(poses)):
+                with patch.object(worker, "_capture_client", return_value=object()):
+                    with patch.object(worker, "_read_hp", return_value=1000):
+                        with patch.object(
+                            worker,
+                            "_assess_danger",
+                            return_value=DangerReport(
+                                in_danger=True,
+                                reasons=("near_objects:1",),
+                                near_object_count=1,
+                            ),
+                        ):
+                            outcome = worker._sit_session()
 
         self.assertEqual(outcome, "danger")
         self.assertGreaterEqual(self.input.teleport_key.call_count, 1)
 
     def test_sit_session_returns_danger_on_hp_drop(self) -> None:
-        from unittest.mock import patch
-
-        from pybot.recognition.danger import DangerReport
-        from pybot.recognition.ui.character_pose import CharacterPose
-
         # Steady SP mid-regen; danger comes from HP drop only.
-        poller = _FakePoller([0.40, 0.40, 0.40, 0.40])
+        # Enough mid ratios so FakePoller never falls through to 98% resume.
+        poller = _FakePoller([0.40] * 20)
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
@@ -251,9 +243,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             poller=poller,
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-        stand = CharacterPose(body_height=99, fg_count=2500)
-        sit = CharacterPose(body_height=60, fg_count=2200)
-        poses = iter([stand, sit, stand])
+        poses = [_STAND, _SIT]
         hp_values = iter([1000, 900])
 
         def fake_assess(frame, *, hp=None, previous_hp=None):
@@ -275,11 +265,11 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             0.0,
         ):
             with patch.object(
-                worker, "_measure_pose", side_effect=lambda: next(poses, sit)
+                worker, "_measure_pose", side_effect=self._pose_side_effect(poses)
             ):
                 with patch.object(worker, "_capture_client", return_value=object()):
                     with patch.object(
-                        worker, "_read_hp", side_effect=lambda _f: next(hp_values)
+                        worker, "_read_hp", side_effect=lambda _f: next(hp_values, 900)
                     ):
                         with patch.object(
                             worker, "_assess_danger", side_effect=fake_assess
@@ -287,6 +277,54 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
                             outcome = worker._sit_session()
 
         self.assertEqual(outcome, "danger")
+
+    def test_ensure_sitting_retries_until_pose_drops(self) -> None:
+        worker = SitOnLowSpWorker(
+            self.ctx,
+            self.input,
+            self.memory,
+            hunt_mode=self.hunt_mode,
+            poller=_FakePoller([]),
+        )
+        self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
+        # First press still looks standing; second press sits.
+        poses = [_STAND, _SIT]
+        with patch.object(worker, "_measure_pose", side_effect=self._pose_side_effect(poses)):
+            sit_pose = worker._ensure_sitting(82, _STAND)
+        self.assertIsNotNone(sit_pose)
+        assert sit_pose is not None
+        self.assertEqual(sit_pose.body_height, _SIT.body_height)
+        self.assertEqual(self.input.teleport_key.call_count, 2)
+
+    def test_ensure_standing_retries_until_pose_rises(self) -> None:
+        worker = SitOnLowSpWorker(
+            self.ctx,
+            self.input,
+            self.memory,
+            hunt_mode=self.hunt_mode,
+            poller=_FakePoller([]),
+        )
+        self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
+        # Pre-check sit → press → still sit → loop → pre-check sit → press → stand.
+        poses = [_SIT, _SIT, _SIT, _STAND]
+        with patch.object(worker, "_measure_pose", side_effect=self._pose_side_effect(poses)):
+            ok = worker._ensure_standing(82, _SIT, _STAND)
+        self.assertTrue(ok)
+        self.assertEqual(self.input.teleport_key.call_count, 2)
+
+    def test_ensure_sitting_fails_after_max_attempts(self) -> None:
+        worker = SitOnLowSpWorker(
+            self.ctx,
+            self.input,
+            self.memory,
+            hunt_mode=self.hunt_mode,
+            poller=_FakePoller([]),
+        )
+        self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
+        with patch.object(worker, "_measure_pose", return_value=_STAND):
+            sit_pose = worker._ensure_sitting(82, _STAND)
+        self.assertIsNone(sit_pose)
+        self.assertEqual(self.input.teleport_key.call_count, 5)
 
 
 if __name__ == "__main__":

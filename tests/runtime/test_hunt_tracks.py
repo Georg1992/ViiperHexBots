@@ -41,13 +41,23 @@ def _miss(track_id: int) -> SimpleNamespace:
     )
 
 
-def det(x: int, y: int, confidence: float = 0.71, scale: float = 0.9) -> DiscoveryDetection:
+def det(
+    x: int,
+    y: int,
+    confidence: float = 0.71,
+    scale: float = 0.9,
+    *,
+    bbox: tuple[int, int, int, int] | None = None,
+) -> DiscoveryDetection:
+    if bbox is None:
+        bbox = (x - 20, y - 20, 40, 40)
     return DiscoveryDetection(
         x=x,
         y=y,
         confidence=confidence,
         candidate_scale=scale,
         living=True,
+        bbox=bbox,
     )
 
 
@@ -554,6 +564,9 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.tracks.evaluate_idle_attack(
             track_id, was_idle=False, mob_x=500, mob_y=500, char_x=0, char_y=0,
         )
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.discovery_stationary = True
         action, count = self.tracks.evaluate_idle_attack(
             track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
         )
@@ -566,14 +579,97 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(count, 2)
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
-    def test_accessible_moving_reaches_unreachable_at_five(self) -> None:
+    def test_idle_death_blocks_rediscovery_at_death_site(self) -> None:
+        track_id = self._create(500, 500)
+        self.tracks.evaluate_idle_attack(
+            track_id, was_idle=False, mob_x=500, mob_y=500, char_x=0, char_y=0,
+            now_tick=self.now,
+        )
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.discovery_stationary = True
+        self.tracks.evaluate_idle_attack(
+            track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+            now_tick=self.now + 10,
+        )
+        self.tracks.evaluate_idle_attack(
+            track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+            now_tick=self.now + 20,
+        )
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
+
+        # Corpse heat at the same spot must not become a new candidate.
+        summary = self.tracks.process_discovery_scan(
+            [det(505, 502)],
+            mob_name="horn",
+            now_tick=self.now + 50,
+        )
+        self.assertEqual(summary.added_count, 0)
+        self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 0)
+        self.assertEqual(self.tracks.get_alive_count(), 0)
+
+    def test_opacity_death_blocks_rediscovery_at_death_site(self) -> None:
+        track_id = self._create(500, 500)
+        for i in range(4):
+            self.tracks.apply_tracking(
+                [_hit(track_id, 500, 500, opacity_score=0.60)],
+                now_tick=self.now + (i + 1) * 16,
+            )
+        for i in range(2):
+            self.tracks.apply_tracking(
+                [_hit(track_id, 500, 500, opacity_score=0.20)],
+                now_tick=self.now + 100 + (i + 1) * 16,
+            )
+        missed, dead = self.tracks.apply_tracking(
+            [_hit(track_id, 500, 500, opacity_score=0.18)],
+            now_tick=self.now + 200,
+        )
+        self.assertEqual(dead, [track_id])
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
+
+        summary = self.tracks.process_discovery_scan(
+            [det(500, 500)],
+            mob_name="horn",
+            now_tick=self.now + 250,
+        )
+        self.assertEqual(summary.added_count, 0)
+        self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 0)
+
+    def test_death_site_expires_after_cooldown(self) -> None:
+        track_id = self._create(500, 500)
+        self.tracks.evaluate_idle_attack(
+            track_id, was_idle=False, mob_x=500, mob_y=500, char_x=0, char_y=0,
+            now_tick=self.now,
+        )
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.discovery_stationary = True
+        self.tracks.evaluate_idle_attack(
+            track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+            now_tick=self.now + 10,
+        )
+        self.tracks.evaluate_idle_attack(
+            track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+            now_tick=self.now + 20,
+        )
+        cooldown = int(self.config["deathRediscoveryCooldownMs"])
+        # Past cooldown — corpse site no longer blocks a new candidate.
+        summary = self.tracks.process_discovery_scan(
+            [det(500, 500)],
+            mob_name="horn",
+            now_tick=self.now + 20 + cooldown + 100,
+        )
+        self.assertEqual(summary.added_count, 1)
+        self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 1)
+
+    def test_accessible_without_blob_stationary_reaches_unreachable_at_five(self) -> None:
         track_id = self._create(500, 500)
         self.tracks.evaluate_idle_attack(
             track_id, was_idle=False, mob_x=500, mob_y=500, char_x=0, char_y=0,
         )
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
-        track.moving = True
+        track.discovery_stationary = False
         for i in range(4):
             action, count = self.tracks.evaluate_idle_attack(
                 track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
@@ -588,6 +684,40 @@ class HuntTracksRulesTests(unittest.TestCase):
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
         self.assertEqual(track.state, "unreachable")
+
+    def test_discovery_blob_stability_sets_stationary(self) -> None:
+        track_id = self._create(500, 500)
+        bbox = (480, 480, 40, 40)
+        # First match: seed blob, not yet stationary.
+        self.tracks.process_discovery_scan(
+            [det(500, 500, bbox=bbox)],
+            mob_name="horn",
+            now_tick=self.now + 50,
+        )
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertTrue(track.discovery_blob_seen)
+        self.assertFalse(track.discovery_stationary)
+
+        # Stable blob → stationary.
+        self.tracks.process_discovery_scan(
+            [det(501, 500, bbox=(481, 480, 40, 40))],
+            mob_name="horn",
+            now_tick=self.now + 100,
+        )
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertTrue(track.discovery_stationary)
+
+        # Moved blob → not stationary.
+        self.tracks.process_discovery_scan(
+            [det(560, 500, bbox=(540, 480, 40, 40))],
+            mob_name="horn",
+            now_tick=self.now + 150,
+        )
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertFalse(track.discovery_stationary)
 
 
 if __name__ == "__main__":

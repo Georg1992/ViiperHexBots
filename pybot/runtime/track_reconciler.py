@@ -31,11 +31,13 @@ class DiscoveryReconcileResult:
 
     new_candidates: detections that did not match any existing track —
         tracking should create tracks for these on the next fresh frame.
+    matched: (track_id, detection) pairs for radius-matched alive tracks.
     matched_ids: track IDs that were matched by a detection.
     removed_ids: track IDs that had no matching detection (absent).
     matched_count: number of detections that matched an existing track.
     """
     new_candidates: list[DiscoveryDetection]
+    matched: list[tuple[int, DiscoveryDetection]]
     matched_ids: list[int]
     removed_ids: list[int]
     matched_count: int
@@ -66,7 +68,7 @@ class TrackReconciler:
                 when omitted).
 
         Returns:
-            DiscoveryReconcileResult with new_candidates, matched_ids, removed_ids.
+            DiscoveryReconcileResult with new_candidates, matched, removed_ids.
         """
         unmatched_ids = {entry[0] for entry in existing_track_positions}
 
@@ -75,7 +77,7 @@ class TrackReconciler:
         # scan so two detections of one new mob don't both become candidates.
         known_positions: list[tuple[int, int]] = list(existing_positions)
 
-        matched_ids: list[int] = []
+        matched: list[tuple[int, DiscoveryDetection]] = []
         matched_count = 0
         new_candidates: list[DiscoveryDetection] = []
 
@@ -98,7 +100,7 @@ class TrackReconciler:
             )
             if matched_tid is not None:
                 unmatched_ids.discard(matched_tid)
-                matched_ids.append(matched_tid)
+                matched.append((matched_tid, detection))
                 matched_count += 1
                 continue
 
@@ -115,8 +117,10 @@ class TrackReconciler:
             known_positions.append((detection.x, detection.y))
 
         removed_ids = sorted(unmatched_ids)
+        matched_ids = [tid for tid, _det in matched]
         return DiscoveryReconcileResult(
             new_candidates=new_candidates,
+            matched=matched,
             matched_ids=matched_ids,
             removed_ids=removed_ids,
             matched_count=matched_count,
