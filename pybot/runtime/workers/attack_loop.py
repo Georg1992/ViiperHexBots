@@ -99,7 +99,12 @@ class AttackLoop:
         self._ctx.stop_event.wait(ctx.config.skill_delay_ms / 1000.0)
         post_sp = self._read_sp()
 
-        was_idle = (pre_sp > 0 and post_sp > 0 and pre_sp == post_sp)
+        # Idle requires two valid SP samples. Unreadable SP must not be
+        # treated as a hit (that would reset the idle streak / fake accessibility).
+        if not self._sp_reading_available or pre_sp <= 0 or post_sp <= 0:
+            was_idle: bool | None = None
+        else:
+            was_idle = pre_sp == post_sp
         action, idle_count = ctx.tracks.evaluate_idle_attack(
             target_id,
             was_idle=was_idle,

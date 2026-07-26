@@ -452,7 +452,7 @@ class HuntTracks:
         self,
         track_id: int,
         *,
-        was_idle: bool,
+        was_idle: bool | None,
         mob_x: int,
         mob_y: int,
         char_x: int,
@@ -460,9 +460,11 @@ class HuntTracks:
     ) -> tuple[str, int]:
         """Check idle-attack death / unreachable conditions.
 
-        Called after each attack. *was_idle* is True when SP did not change
-        during this specific attack (pre-attack SP == post-attack SP),
-        measured per-attack so other tracks' SP consumption cannot interfere.
+        Called after each attack. *was_idle*:
+        - ``True`` — SP did not change (pre == post, both readable)
+        - ``False`` — SP dropped (skill consumed)
+        - ``None`` — SP unread / unknown; idle and accessibility state
+          are left untouched (must not fake a hit or an idle)
 
         Two independent paths:
 
@@ -483,6 +485,13 @@ class HuntTracks:
             track = self._get_track_by_id_locked(track_id)
             if track is None:
                 return "none", 0
+
+            if track.state == "unreachable":
+                return "unreachable", track.idle_attack_count
+
+            # SP unknown — do not invent idle or accessibility.
+            if was_idle is None:
+                return "none", track.idle_attack_count
 
             if was_idle:
                 # Mob must NOT be at melee range ("sitting on character")

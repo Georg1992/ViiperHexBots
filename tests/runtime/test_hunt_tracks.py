@@ -468,6 +468,127 @@ class HuntTracksRulesTests(unittest.TestCase):
             self.assertEqual(dead, [])
         self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
 
+    def test_five_idle_attacks_mark_unreachable(self) -> None:
+        track_id = self._create(500, 500)
+        # Far from character — not melee-guarded.
+        for i in range(4):
+            action, count = self.tracks.evaluate_idle_attack(
+                track_id,
+                was_idle=True,
+                mob_x=500,
+                mob_y=500,
+                char_x=0,
+                char_y=0,
+            )
+            self.assertEqual(action, "none")
+            self.assertEqual(count, i + 1)
+            track = self.tracks.get_track_by_id(track_id)
+            assert track is not None
+            self.assertEqual(track.state, "alive")
+
+        action, count = self.tracks.evaluate_idle_attack(
+            track_id,
+            was_idle=True,
+            mob_x=500,
+            mob_y=500,
+            char_x=0,
+            char_y=0,
+        )
+        self.assertEqual(action, "unreachable")
+        self.assertEqual(count, 5)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertEqual(track.state, "unreachable")
+        # Unreachable tracks are not attack targets.
+        policy = self.tracks.tracks_for_policy(self.now)
+        self.assertEqual([t.id for t in policy], [])
+
+    def test_idle_streak_resets_on_sp_spend(self) -> None:
+        track_id = self._create(500, 500)
+        for _ in range(3):
+            self.tracks.evaluate_idle_attack(
+                track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+            )
+        action, count = self.tracks.evaluate_idle_attack(
+            track_id, was_idle=False, mob_x=500, mob_y=500, char_x=0, char_y=0,
+        )
+        self.assertEqual(action, "none")
+        self.assertEqual(count, 0)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertTrue(track.was_accessible)
+        self.assertEqual(track.idle_attack_count, 0)
+
+    def test_unknown_sp_does_not_reset_idle_or_fake_access(self) -> None:
+        track_id = self._create(500, 500)
+        self.tracks.evaluate_idle_attack(
+            track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+        )
+        action, count = self.tracks.evaluate_idle_attack(
+            track_id, was_idle=None, mob_x=500, mob_y=500, char_x=0, char_y=0,
+        )
+        self.assertEqual(action, "none")
+        self.assertEqual(count, 1)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertFalse(track.was_accessible)
+        self.assertEqual(track.idle_attack_count, 1)
+
+    def test_melee_range_idle_resets_streak(self) -> None:
+        track_id = self._create(100, 100)
+        for _ in range(3):
+            self.tracks.evaluate_idle_attack(
+                track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+            )
+        action, count = self.tracks.evaluate_idle_attack(
+            track_id, was_idle=True, mob_x=100, mob_y=100, char_x=100, char_y=100,
+        )
+        self.assertEqual(action, "none")
+        self.assertEqual(count, 0)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertEqual(track.idle_attack_count, 0)
+
+    def test_accessible_stationary_dies_at_two_idle(self) -> None:
+        track_id = self._create(500, 500)
+        self.tracks.evaluate_idle_attack(
+            track_id, was_idle=False, mob_x=500, mob_y=500, char_x=0, char_y=0,
+        )
+        action, count = self.tracks.evaluate_idle_attack(
+            track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+        )
+        self.assertEqual(action, "none")
+        self.assertEqual(count, 1)
+        action, count = self.tracks.evaluate_idle_attack(
+            track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+        )
+        self.assertEqual(action, "dead")
+        self.assertEqual(count, 2)
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
+
+    def test_accessible_moving_reaches_unreachable_at_five(self) -> None:
+        track_id = self._create(500, 500)
+        self.tracks.evaluate_idle_attack(
+            track_id, was_idle=False, mob_x=500, mob_y=500, char_x=0, char_y=0,
+        )
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.moving = True
+        for i in range(4):
+            action, count = self.tracks.evaluate_idle_attack(
+                track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+            )
+            self.assertEqual(action, "none")
+            self.assertEqual(count, i + 1)
+        action, count = self.tracks.evaluate_idle_attack(
+            track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+        )
+        self.assertEqual(action, "unreachable")
+        self.assertEqual(count, 5)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertEqual(track.state, "unreachable")
+
 
 if __name__ == "__main__":
     unittest.main()
