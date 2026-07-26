@@ -23,6 +23,9 @@ from pybot.runtime.constants import CELL_SIZE_PX, DEFAULT_SEARCH_RANGE_CELLS
 # LRESULT was removed from wintypes in Python 3.14
 if not hasattr(wintypes, "LRESULT"):
     wintypes.LRESULT = ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_long
+# HCURSOR is missing from wintypes on Python 3.11 (same underlying type as HICON).
+if not hasattr(wintypes, "HCURSOR"):
+    wintypes.HCURSOR = wintypes.HICON
 
 user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32

@@ -14,7 +14,8 @@ if (-not (Test-Path $viiperOut)) {
 }
 
 Write-Host "Installing Python package (editable)..." -ForegroundColor Cyan
-python -m pip install -e ".[dev]" -q
+# --user avoids needing write access to C:\Python*\Scripts (common without admin).
+python -m pip install -e ".[dev]" --user -q
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host ""
