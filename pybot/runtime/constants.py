@@ -15,7 +15,7 @@ LOG_REPEAT_INTERVAL_MS = 5000
 ATTACK_IDLE_SPIN_S = WORKER_POLL_INTERVAL_S / 2.0
 # Idle SP confirmation: post observation must be this fresh at sample time,
 # otherwise an early mid-wait republish of pre-cost SP can look like idle.
-SP_IDLE_MAX_OBSERVATION_AGE_MS = 250
+SP_IDLE_MAX_OBSERVATION_AGE_MS = 1000
 # Discovery scans without a match before track removal.
 DISCOVERY_MISS_REMOVE_COUNT = 2
 # Idle-attack death / unreachable policy.
