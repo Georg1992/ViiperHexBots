@@ -168,6 +168,7 @@ class DiscoveryWorker:
             or summary.removed_count > 0
             or self._scan_count <= 3
             or self._scan_count % 20 == 0
+            or summary.death_sites_active > 0
         )
         if verbose:
             ctx.validation.log_discovery_scan(
@@ -181,7 +182,33 @@ class DiscoveryWorker:
                 f"raw={scan.raw_count} filtered={len(filtered)} "
                 f"added={summary.added_count} removed={summary.removed_count} "
                 f"matched={summary.matched_count} "
+                f"death_sites={summary.death_sites_active} "
                 f"tracks={ctx.tracks.get_track_count()}"
+            )
+
+        if summary.removed_out_of_range_ids:
+            ctx.logger.behavior(
+                f"[DEATH] path=discovery-out-of-range "
+                f"ids={summary.removed_out_of_range_ids}"
+            )
+        if summary.removed_discovery_miss_ids:
+            ctx.logger.behavior(
+                f"[DEATH] path=discovery-miss-2 "
+                f"ids={summary.removed_discovery_miss_ids}"
+            )
+        # Detections seen but nothing new created while death sites are active —
+        # likely corpse heat matched a death site (or unreachable).
+        if (
+            len(filtered) > 0
+            and summary.added_count == 0
+            and summary.alive_after == 0
+            and summary.death_sites_active > 0
+        ):
+            ctx.logger.behavior(
+                f"[DEATH] path=death-site-block "
+                f"detections={len(filtered)} matched={summary.matched_count} "
+                f"death_sites={summary.death_sites_active} "
+                f"— no new track (corpse heat held by death site)"
             )
 
         # Teleport clear requires the scan itself to see no living candidates.

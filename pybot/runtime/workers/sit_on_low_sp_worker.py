@@ -11,16 +11,15 @@ standing pose before resume (retry on failure).
 Each sit teleport clears tracking (same as hunt-mode teleport) so workers
 resume against the new screen only.
 
-SP comes from ``GameMemoryPoller`` → ``MemorySnapshot`` (memory addresses or
-Basic Info vision). HP for danger is always vision (status panel).
+SP comes from shared ``PlayerVitals`` (UI publishes memory or Basic Info OCR).
+HP for danger is always vision (status panel).
 """
 
 from __future__ import annotations
 
 import time
 
-from pybot.config.clients import MemoryAddresses
-from pybot.game_state import GameMemoryPoller
+from pybot.game_state import PlayerVitals
 from pybot.recognition.danger import DangerReport, assess_danger
 from pybot.recognition.ui.character_pose import CharacterPose, measure_center_pose
 from pybot.recognition.ui.status_panel import read_status_panel
@@ -47,16 +46,14 @@ class SitOnLowSpWorker:
         self,
         ctx: SitOnLowSpWorkerContext,
         input_backend: InputBackend,
-        memory: MemoryAddresses,
         hunt_mode: HuntModeAreaReset,
         *,
-        poller: GameMemoryPoller | None = None,
+        vitals: PlayerVitals | None = None,
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
-        self._memory = memory
         self._hunt_mode = hunt_mode
-        self._poller = poller or GameMemoryPoller()
+        self._vitals = vitals or PlayerVitals()
         self._last_fail_log = ""
 
     def run(self) -> None:
@@ -87,15 +84,15 @@ class SitOnLowSpWorker:
     def _sp_snapshot(self) -> tuple[int, float] | None:
         """Return ``(sp, ratio)`` or None when SP is unavailable."""
         ctx = self._ctx
-        snap = self._poller.read(ctx.config.hwnd, self._memory)
-        if not snap.ok or snap.sp is None or snap.sp_max is None or snap.sp_max <= 0:
-            reason = snap.error or "sp_unavailable"
+        sp, sp_max = self._vitals.sp_pair()
+        if sp is None or sp_max is None or sp_max <= 0:
+            reason = "sp_unavailable"
             if reason != self._last_fail_log:
                 self._last_fail_log = reason
                 ctx.logger.behavior(f"[SIT] SP read failed: {reason}")
             return None
         self._last_fail_log = ""
-        return snap.sp, snap.sp / snap.sp_max
+        return sp, sp / sp_max
 
     def _sp_ratio(self) -> float | None:
         snap = self._sp_snapshot()

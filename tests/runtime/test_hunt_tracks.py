@@ -457,7 +457,7 @@ class HuntTracksRulesTests(unittest.TestCase):
             now_tick=self.now + 200,
         )
         self.assertEqual(missed, [])
-        self.assertEqual(dead, [track_id])
+        self.assertEqual([e.track_id for e in dead], [track_id])
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
     def test_opacity_decay_ignored_while_moving(self) -> None:
@@ -624,7 +624,7 @@ class HuntTracksRulesTests(unittest.TestCase):
             [_hit(track_id, 500, 500, opacity_score=0.18)],
             now_tick=self.now + 200,
         )
-        self.assertEqual(dead, [track_id])
+        self.assertEqual([e.track_id for e in dead], [track_id])
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
         summary = self.tracks.process_discovery_scan(

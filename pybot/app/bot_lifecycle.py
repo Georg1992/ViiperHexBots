@@ -17,6 +17,7 @@ from tkinter import messagebox
 from pybot.app.bot_controller import BotController, DEFAULT_STOP_JOIN_TIMEOUT_S
 from pybot.app.config_store import AppConfig
 from pybot.app.overlay import Win32HuntOverlay
+from pybot.game_state import PlayerVitals
 from pybot.mobs.catalog import MobEntry, mob_folder_by_index
 from pybot.app.session_log import AppSessionLog
 from pybot.app.viiper_manager import ViiperManager
@@ -48,6 +49,7 @@ class BotLifecycleManager:
         viiper: ViiperManager,
         *,
         hunt_overlay: Win32HuntOverlay | None = None,
+        vitals: PlayerVitals | None = None,
         on_state_change: Callable[[BotState], None] | None = None,
         on_log: Callable[[str], None] | None = None,
         on_input_ready: Callable[[], None] | None = None,
@@ -59,6 +61,7 @@ class BotLifecycleManager:
         self._session = session
         self._viiper = viiper
         self._hunt_overlay = hunt_overlay or Win32HuntOverlay()
+        self._vitals = vitals or PlayerVitals()
         self._on_state_change = on_state_change
         self._on_log = on_log or (lambda _: None)
         self._on_input_ready_call = on_input_ready
@@ -203,6 +206,7 @@ class BotLifecycleManager:
                     session_id=session_id,
                     on_log=self._on_log,
                     overlay=runtime_overlay,
+                    vitals=self._vitals,
                 )
                 if not self._is_current_start(generation):
                     return

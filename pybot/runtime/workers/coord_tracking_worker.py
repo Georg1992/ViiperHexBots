@@ -138,15 +138,24 @@ class CoordTrackingWorker:
                     f"miss_reason={miss_reason}"
                 )
 
-        missed_ids, opacity_dead_ids = ctx.tracks.apply_tracking(
+        missed_ids, opacity_deaths = ctx.tracks.apply_tracking(
             results,
             now_tick=now_ms,
             area_epoch=area_epoch,
         )
 
-        if opacity_dead_ids:
+        for event in opacity_deaths:
+            ratio = (
+                event.opacity_score / event.baseline
+                if event.baseline > 0
+                else 0.0
+            )
             ctx.logger.behavior(
-                f"[TRACK] opacity_death ids={opacity_dead_ids}"
+                f"[DEATH] path=opacity id={event.track_id} "
+                f"@{event.x},{event.y} "
+                f"score={event.opacity_score:.3f} baseline={event.baseline:.3f} "
+                f"ratio={ratio:.2f} streak={event.streak} "
+                f"— track removed, death-site recorded"
             )
 
         # Local miss → wake discovery so it can confirm removal.

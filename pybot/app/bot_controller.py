@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 from pybot.app.config_store import AppConfig
 from pybot.config.runtime import load_runtime_config
+from pybot.game_state import PlayerVitals
 from pybot.paths import SESSIONS_DIR
 from pybot.runtime.hunt_runtime import create_runtime_deps, HuntRuntime
 from pybot.runtime.overlay_ports import HuntOverlay, NullOverlay
@@ -22,11 +23,13 @@ class BotController:
         session_id: str,
         on_log: Callable[[str], None] | None = None,
         overlay: HuntOverlay | None = None,
+        vitals: PlayerVitals | None = None,
     ) -> None:
         self._app_config = app_config
         self._session_id = session_id
         self._on_log = on_log
         self._overlay = overlay or NullOverlay()
+        self._vitals = vitals or PlayerVitals()
         self._runtime: HuntRuntime | None = None
         self._thread: threading.Thread | None = None
 
@@ -52,6 +55,7 @@ class BotController:
             session_id=self._session_id,
             behavior_callback=self._on_log,
             overlay=self._overlay,
+            vitals=self._vitals,
         )
         self._runtime = HuntRuntime(deps)
         self._thread = threading.Thread(

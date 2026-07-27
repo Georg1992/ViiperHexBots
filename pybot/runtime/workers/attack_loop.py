@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from pybot.config.clients import MemoryAddresses
-from pybot.game_state import GameMemoryPoller
+from pybot.game_state import PlayerVitals
 from pybot.runtime.hunt_mode import HuntModeController
-from pybot.runtime.hunt_tracks import monotonic_ms
+from pybot.runtime.hunt_tracks import HuntTracks, monotonic_ms
 from pybot.runtime.input.input_backend import InputBackend
-from pybot.runtime.constants import WORKER_POLL_INTERVAL_S
+from pybot.runtime.constants import LOG_REPEAT_INTERVAL_MS, WORKER_POLL_INTERVAL_S
 from pybot.runtime.workers.worker_contexts import AttackLoopContext
 
 
@@ -18,19 +17,17 @@ class AttackLoop:
         hunt_mode: HuntModeController,
         input_backend: InputBackend,
         *,
-        poller: GameMemoryPoller | None = None,
-        memory: MemoryAddresses | None = None,
+        vitals: PlayerVitals | None = None,
         char_x: int = 0,
         char_y: int = 0,
     ) -> None:
         self._ctx = ctx
         self._hunt_mode = hunt_mode
         self._input = input_backend
-        self._poller = poller or GameMemoryPoller()
-        self._memory = memory or MemoryAddresses()
+        self._vitals = vitals or PlayerVitals()
         self._char_x = char_x
         self._char_y = char_y
-        self._sp_reading_available = self._memory.current_sp > 0 and self._memory.max_sp > 0
+        self._last_sp_unknown_log_ms = 0
 
     def run(self) -> None:
         self._ctx.logger.behavior("[ATTACK] loop started")
@@ -58,17 +55,9 @@ class AttackLoop:
                 )
                 break
 
-    def _read_sp(self) -> int:
-        """Read current SP from game memory. Returns 0 if unavailable."""
-        if not self._sp_reading_available:
-            return 0
-        try:
-            snap = self._poller.read(self._ctx.config.hwnd, self._memory)
-            if snap.ok and snap.sp is not None:
-                return snap.sp
-        except Exception:
-            pass
-        return 0
+    def _read_sp(self) -> int | None:
+        """Current SP from shared ``PlayerVitals`` (UI memory/OCR publish)."""
+        return self._vitals.sp
 
     def _attack_one(self, target_id: int, now_tick: int) -> None:
         ctx = self._ctx
@@ -101,10 +90,24 @@ class AttackLoop:
 
         # Idle requires two valid SP samples. Unreadable SP must not be
         # treated as a hit (that would reset the idle streak / fake accessibility).
-        if not self._sp_reading_available or pre_sp <= 0 or post_sp <= 0:
+        if pre_sp is None or post_sp is None:
             was_idle: bool | None = None
+            # Throttle: SP unread freezes idle death; spam would drown other [DEATH] lines.
+            if now_tick - self._last_sp_unknown_log_ms >= LOG_REPEAT_INTERVAL_MS:
+                self._last_sp_unknown_log_ms = now_tick
+                ctx.logger.behavior(
+                    f"[DEATH] path=idle-sp-unknown id={target_id} "
+                    f"pre_sp={pre_sp} post_sp={post_sp} — idle/death counters frozen"
+                )
         else:
             was_idle = pre_sp == post_sp
+
+        pre_track = ctx.tracks.get_track_by_id(target_id)
+        accessible = bool(pre_track.was_accessible) if pre_track else False
+        blob_stationary = bool(pre_track.discovery_stationary) if pre_track else False
+        moving = bool(pre_track.moving) if pre_track else False
+        idle_before = int(pre_track.idle_attack_count) if pre_track else 0
+
         action, idle_count = ctx.tracks.evaluate_idle_attack(
             target_id,
             was_idle=was_idle,
@@ -116,20 +119,33 @@ class AttackLoop:
         )
         if action == "dead":
             ctx.logger.behavior(
-                f"[ATTACK] idle-death id={target_id} @{click_x},{click_y} "
-                f"sp={post_sp} — {idle_count} idle attacks, track removed"
+                f"[DEATH] path=idle-dead id={target_id} @{click_x},{click_y} "
+                f"idle={idle_count} accessible={accessible} "
+                f"blob_stationary={blob_stationary} moving={moving} "
+                f"pre_sp={pre_sp} post_sp={post_sp} — track removed, death-site recorded"
             )
             return
         if action == "unreachable":
             ctx.logger.behavior(
-                f"[ATTACK] idle-unreachable id={target_id} @{click_x},{click_y} "
-                f"sp={post_sp} — {idle_count} idle attacks, track marked unreachable"
+                f"[DEATH] path=idle-unreachable id={target_id} @{click_x},{click_y} "
+                f"idle={idle_count} accessible={accessible} "
+                f"blob_stationary={blob_stationary} moving={moving} "
+                f"pre_sp={pre_sp} post_sp={post_sp} — marked unreachable"
             )
             return
-        if idle_count > 0:
+        if was_idle is True and idle_count > 0:
             ctx.logger.behavior(
-                f"[ATTACK] idle id={target_id} count={idle_count} "
+                f"[DEATH] path=idle-progress id={target_id} "
+                f"idle={idle_count}/{HuntTracks._IDLE_UNREACHABLE_THRESHOLD} "
+                f"(dead_at={HuntTracks._IDLE_DEAD_THRESHOLD} if accessible+stationary) "
+                f"accessible={accessible} blob_stationary={blob_stationary} "
+                f"moving={moving} idle_before={idle_before} "
                 f"pre_sp={pre_sp} post_sp={post_sp}"
+            )
+        elif was_idle is False and not accessible:
+            ctx.logger.behavior(
+                f"[DEATH] path=idle-first-hit id={target_id} "
+                f"pre_sp={pre_sp} post_sp={post_sp} — SP spent, now accessible"
             )
 
         ctx.tracks.apply_attack_event(target_id, now_tick=now_tick)

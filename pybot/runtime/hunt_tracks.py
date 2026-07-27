@@ -32,6 +32,18 @@ def monotonic_ms() -> int:
 
 
 @dataclass(frozen=True)
+class OpacityDeathEvent:
+    """One track removed by opacity-decay death detection."""
+
+    track_id: int
+    x: int
+    y: int
+    baseline: float
+    opacity_score: float
+    streak: int
+
+
+@dataclass(frozen=True)
 class MobTrackSnapshot:
     id: int
     x: int
@@ -253,6 +265,7 @@ class HuntTracks:
                     matched_count=0,
                     added_count=0,
                     removed_count=0,
+                    death_sites_active=len(self._death_sites),
                 )
                 self._last_reconcile_summary = empty
                 return empty
@@ -314,6 +327,7 @@ class HuntTracks:
             if remove_ids:
                 self._remove_tracks_locked(remove_ids)
 
+            self._prune_death_sites_locked(tick)
             alive_after = sum(1 for t in self._tracks if is_alive(t))
             summary = ReconcileSummary(
                 tracks_before=alive_after + len(remove_ids),
@@ -322,9 +336,12 @@ class HuntTracks:
                 alive_after=alive_after,
                 created_ids=[],
                 removed_ids=sorted(remove_ids),
+                removed_out_of_range_ids=sorted(out_of_range),
+                removed_discovery_miss_ids=sorted(miss_remove),
                 matched_count=result.matched_count,
                 added_count=len(result.new_candidates),
                 removed_count=len(remove_ids),
+                death_sites_active=len(self._death_sites),
             )
             self._last_reconcile_summary = summary
             return summary
@@ -388,12 +405,12 @@ class HuntTracks:
         *,
         now_tick: int | None = None,
         area_epoch: int | None = None,
-    ) -> tuple[list[int], list[int]]:
+    ) -> tuple[list[int], list[OpacityDeathEvent]]:
         """Refresh coordinates from LocalTracker results.
 
-        Returns ``(missed_ids, opacity_dead_ids)``.
+        Returns ``(missed_ids, opacity_deaths)``.
         - *missed_ids*: tracks not found by the local tracker.
-        - *opacity_dead_ids*: tracks removed by opacity-decay death detection.
+        - *opacity_deaths*: tracks removed by opacity-decay death detection.
 
         Tracking owns all position writes — discovery only publishes
         candidates; tracking creates tracks on fresh frames.
@@ -403,7 +420,7 @@ class HuntTracks:
         with self._lock:
             if area_epoch is not None and area_epoch != self._area_epoch:
                 return [], []
-            opacity_dead: set[int] = set()
+            opacity_deaths: list[OpacityDeathEvent] = []
             config = self._detector_config()
             for result in results:
                 track = self._get_track_by_id_locked(result.track_id)
@@ -419,12 +436,23 @@ class HuntTracks:
                         move_threshold_px=move_px,
                         stop_threshold_px=stop_px,
                     )
+                    baseline = track.opacity_baseline
+                    streak = track.opacity_decay_streak
                     if apply_opacity_observation(
                         track,
                         opacity_score=result.opacity_score,
                         config=config,
                     ):
-                        opacity_dead.add(result.track_id)
+                        opacity_deaths.append(
+                            OpacityDeathEvent(
+                                track_id=result.track_id,
+                                x=track.x,
+                                y=track.y,
+                                baseline=baseline,
+                                opacity_score=float(result.opacity_score),
+                                streak=streak + 1,
+                            )
+                        )
                         continue
 
                     apply_track_observation(
@@ -449,10 +477,13 @@ class HuntTracks:
                 track.moving = False
                 missed_ids.append(result.track_id)
 
-            if opacity_dead:
-                self._remove_dead_tracks_locked(opacity_dead, tick)
+            if opacity_deaths:
+                self._remove_dead_tracks_locked(
+                    {event.track_id for event in opacity_deaths},
+                    tick,
+                )
 
-            return missed_ids, sorted(opacity_dead)
+            return missed_ids, opacity_deaths
 
     _IDLE_DEAD_THRESHOLD = 2
     _IDLE_UNREACHABLE_THRESHOLD = 5

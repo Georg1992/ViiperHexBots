@@ -55,9 +55,12 @@ class ReconcileSummary:
     alive_after: int = 0
     created_ids: list[int] | None = None
     removed_ids: list[int] | None = None
+    removed_out_of_range_ids: list[int] | None = None
+    removed_discovery_miss_ids: list[int] | None = None
     matched_count: int = 0
     added_count: int = 0
     removed_count: int = 0
+    death_sites_active: int = 0
 
 
 @dataclass

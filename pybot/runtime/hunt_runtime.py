@@ -28,7 +28,7 @@ from pybot.recognition.detector.detector import load_detector_config
 from pybot.runtime.detection.detector_session import DetectorSession
 from pybot.runtime.workers.attack_loop import AttackLoop
 from pybot.runtime.workers.coord_tracking_worker import CoordTrackingWorker
-from pybot.game_state import GameMemoryPoller
+from pybot.game_state import PlayerVitals
 
 from pybot.runtime.workers.discovery_worker import DiscoveryWorker
 from pybot.runtime.workers.skill_timer_worker import SkillTimerWorker
@@ -104,6 +104,7 @@ def create_runtime_deps(
     *,
     behavior_callback: Callable[[str], None] | None = None,
     overlay: HuntOverlay | None = None,
+    vitals: PlayerVitals | None = None,
 ) -> RuntimeDependencies:
     """Construct all hunt runtime dependencies.
     Builds every component the runtime needs (tracks, capture, detector,
@@ -113,6 +114,7 @@ def create_runtime_deps(
         config: A HuntRuntimeConfig instance.
         session_id: Optional session identifier (auto-generated if omitted).
         behavior_callback: Optional callback for behavior log messages.
+        vitals: Shared final SP store published by the UI poll (memory/OCR).
     """
     sid = session_id or time.strftime("%Y%m%d_%H%M%S")
     logger = HuntLogger(
@@ -164,9 +166,10 @@ def create_runtime_deps(
     roi = ctx.capture.get_hunt_roi()
     char_x = roi.x + roi.w // 2 if roi else 0
     char_y = roi.y + roi.h // 2 if roi else 0
+    player_vitals = vitals or PlayerVitals()
     attack = AttackLoop(
         ctx, hunt_mode, input_backend,
-        poller=GameMemoryPoller(), memory=memory,
+        vitals=player_vitals,
         char_x=char_x, char_y=char_y,
     )
     workers: list[tuple[str, Callable[[], None]]] = [
@@ -190,15 +193,15 @@ def create_runtime_deps(
         profile = load_client_profile(ctx.config.client_profile)
         memory = MemoryAddresses() if profile is None else profile.memory
         has_sp_memory = memory.current_sp > 0 and memory.max_sp > 0
-        # Server profiles need SP memory addresses. Generic uses empty addresses
-        # so GameMemoryPoller fills the same MemorySnapshot fields via vision.
+        # Server profiles need SP memory addresses so the UI can publish SP.
+        # Generic publishes SP from Basic Info OCR into the same PlayerVitals.
         if not has_sp_memory and memory_reading_enabled(ctx.config.client_profile):
             raise ValueError(
                 "Sit On Low Sp requires a client profile with currentSpAddress "
                 f"and maxSpAddress (profile={ctx.config.client_profile!r})."
             )
         sit_worker = SitOnLowSpWorker(
-            ctx, input_backend, memory, hunt_mode=hunt_mode
+            ctx, input_backend, hunt_mode=hunt_mode, vitals=player_vitals
         )
         workers.append(("sit_sp", sit_worker.run))
     # Storage deposit + GetFlyWings only when Open Storage keychain is assigned.

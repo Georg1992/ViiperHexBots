@@ -19,7 +19,7 @@ from pybot.app.config_store import AppConfig, list_client_profiles
 from pybot.app.hotkey_manager import HotkeyManager
 from pybot.app.log_pipe import LogPipe
 from pybot.app.overlay import StatusPanelOverlay, Win32HuntOverlay
-from pybot.game_state import GameMemoryPoller, MemorySnapshot
+from pybot.game_state import GameMemoryPoller, MemorySnapshot, PlayerVitals
 from pybot.app.session_log import AppSessionLog
 from pybot.app.startup_splash import preload_mob_descriptors
 from pybot.app.viiper_manager import ViiperManager
@@ -78,6 +78,7 @@ class MainWindow:
         self.session = AppSessionLog()
         self._hunt_overlay = Win32HuntOverlay()
         self._status_panel_overlay = StatusPanelOverlay()
+        self.vitals = PlayerVitals()
 
         # ── Managers (created before UI so callbacks are ready) ─────
         self.log_pipe = LogPipe(self.root)
@@ -92,6 +93,7 @@ class MainWindow:
             session=self.session,
             viiper=self.viiper,
             hunt_overlay=self._hunt_overlay,
+            vitals=self.vitals,
             on_state_change=self._on_bot_state_changed,
             on_log=self.log_pipe.log,
             on_input_ready=self._enable_after_viiper,
@@ -1044,6 +1046,8 @@ class MainWindow:
         self.memory_name.configure(text=placeholder)
         self.memory_sp.configure(text=placeholder)
         self.memory_weight.configure(text=placeholder)
+        if not self._panel_owns_sp_weight():
+            self.vitals.clear_sp()
 
     def _clear_vision_stats(self, placeholder: str = "—") -> None:
         """Clear vision-backed labels (HP always; SP/Weight when panel owns them)."""
@@ -1051,18 +1055,21 @@ class MainWindow:
         if self._panel_owns_sp_weight():
             self.memory_sp.configure(text=placeholder)
             self.memory_weight.configure(text=placeholder)
+            self.vitals.clear_sp()
 
     def _apply_memory_snapshot(self, snap: MemorySnapshot) -> None:
         if not snap.ok:
             self.memory_name.configure(text="—")
             self.memory_sp.configure(text="—")
             self.memory_weight.configure(text="—")
+            self.vitals.clear_sp()
             return
         self.memory_name.configure(text=snap.char_name or "—")
         self.memory_sp.configure(text=self._format_pair(snap.sp, snap.sp_max))
         self.memory_weight.configure(
             text=self._format_pair(snap.weight, snap.weight_max)
         )
+        self.vitals.publish_sp(snap.sp, snap.sp_max)
         # HP is vision-only — never overwrite from memory polls.
 
     def _apply_status_panel_stats(self, values: StatusPanelValues) -> None:
@@ -1084,12 +1091,14 @@ class MainWindow:
             self.memory_name.configure(text="—")
             self.memory_sp.configure(text="—")
             self.memory_weight.configure(text="—")
+            self.vitals.clear_sp()
             return
         hwnd = self.config.window_id
         if not hwnd or not window_exists(hwnd):
             self.memory_name.configure(text="—")
             self.memory_sp.configure(text="—")
             self.memory_weight.configure(text="—")
+            self.vitals.clear_sp()
             return
         snap = self._memory_poller.read(hwnd, profile.memory)
         self._apply_memory_snapshot(snap)
@@ -1166,6 +1175,9 @@ class MainWindow:
         )
         # HP is vision-only — always mirror into the bot UI from panel OCR.
         self.memory_hp.configure(text=self._format_pair(values.hp, values.hp_max))
+        # Publish final SP every successful OCR tick when vision owns SP/Weight.
+        if self._panel_owns_sp_weight():
+            self.vitals.publish_sp(values.sp, values.sp_max)
         if previous is not None and self._status_panel_numbers(
             previous
         ) == self._status_panel_numbers(values):

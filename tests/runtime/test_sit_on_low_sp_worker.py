@@ -6,8 +6,7 @@ import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
-from pybot.game_state import MemorySnapshot
-from pybot.config.clients import MemoryAddresses
+from pybot.game_state import PlayerVitals
 from pybot.recognition.danger import DangerReport
 from pybot.recognition.ui.character_pose import CharacterPose
 from pybot.runtime.constants import SIT_LOW_SP_RATIO, SIT_RESUME_SP_RATIO
@@ -20,20 +19,22 @@ _STAND = CharacterPose(body_height=99, fg_count=2500)
 _SIT = CharacterPose(body_height=60, fg_count=2200)
 
 
-class _FakePoller:
+class _ScriptedVitals(PlayerVitals):
+    """Pops scripted SP ratios on each ``sp_pair`` read."""
+
     def __init__(self, ratios: list[float | None]) -> None:
+        super().__init__()
         self._ratios = list(ratios)
         self.calls = 0
 
-    def read(self, hwnd: int, addresses: MemoryAddresses) -> MemorySnapshot:
-        del hwnd, addresses
+    def sp_pair(self) -> tuple[int | None, int | None]:
         self.calls += 1
         if not self._ratios:
-            return MemorySnapshot(sp=98, sp_max=100, ok=True)
+            return 98, 100
         ratio = self._ratios.pop(0)
         if ratio is None:
-            return MemorySnapshot(ok=False, error="no_sp")
-        return MemorySnapshot(sp=int(ratio * 100), sp_max=100, ok=True)
+            return None, None
+        return int(ratio * 100), 100
 
 
 class SitOnLowSpWorkerTests(unittest.TestCase):
@@ -69,7 +70,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.capture.capture_roi.return_value = MagicMock(size=1)
         self.ctx.capture.capture_client.return_value = object()
         self.input = MagicMock(spec=ShadowInputBackend)
-        self.memory = MemoryAddresses(current_sp=1, max_sp=2)
         self.hunt_mode = MagicMock()
 
     def _empty_scans(self, n: int = 5) -> list[DiscoveryScanResult]:
@@ -128,7 +128,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertTrue(self.ctx.should_run_workers())
 
     def test_recover_teleports_until_clear_then_sits(self) -> None:
-        poller = _FakePoller(
+        vitals = _ScriptedVitals(
             [
                 SIT_LOW_SP_RATIO - 0.01,
                 0.50,
@@ -139,9 +139,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
-            self.memory,
             hunt_mode=self.hunt_mode,
-            poller=poller,
+            vitals=vitals,
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
         # stand calibrate, sit confirm, stand check (still sit), stand after press
@@ -172,14 +171,13 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertAlmostEqual(SIT_RESUME_SP_RATIO, 0.98)
 
     def test_sit_teleport_clears_overlay_tracks(self) -> None:
-        poller = _FakePoller([SIT_LOW_SP_RATIO - 0.01, SIT_RESUME_SP_RATIO])
+        vitals = _ScriptedVitals([SIT_LOW_SP_RATIO - 0.01, SIT_RESUME_SP_RATIO])
         self.ctx.detector.discover_frame.side_effect = self._living_then_clear()
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
-            self.memory,
             hunt_mode=self.hunt_mode,
-            poller=poller,
+            vitals=vitals,
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
         poses = [_STAND, _SIT, _SIT, _STAND]
@@ -198,13 +196,12 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
 
     def test_sit_session_returns_danger_on_sp_drop_and_near_objects(self) -> None:
         # SP drop marks stall immediately; keep mid ratios so we never resume.
-        poller = _FakePoller([0.40, 0.30] + [0.30] * 30)
+        vitals = _ScriptedVitals([0.40, 0.30] + [0.30] * 30)
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
-            self.memory,
             hunt_mode=self.hunt_mode,
-            poller=poller,
+            vitals=vitals,
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
         # stand, sit confirm, then standing checks during ensure_standing
@@ -233,14 +230,13 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
 
     def test_sit_session_returns_danger_on_hp_drop(self) -> None:
         # Steady SP mid-regen; danger comes from HP drop only.
-        # Enough mid ratios so FakePoller never falls through to 98% resume.
-        poller = _FakePoller([0.40] * 20)
+        # Enough mid ratios so scripted vitals never fall through to 98% resume.
+        vitals = _ScriptedVitals([0.40] * 20)
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
-            self.memory,
             hunt_mode=self.hunt_mode,
-            poller=poller,
+            vitals=vitals,
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
         poses = [_STAND, _SIT]
@@ -282,9 +278,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
-            self.memory,
             hunt_mode=self.hunt_mode,
-            poller=_FakePoller([]),
+            vitals=_ScriptedVitals([]),
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
         # First press still looks standing; second press sits.
@@ -300,9 +295,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
-            self.memory,
             hunt_mode=self.hunt_mode,
-            poller=_FakePoller([]),
+            vitals=_ScriptedVitals([]),
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
         # Pre-check sit → press → still sit → loop → pre-check sit → press → stand.
@@ -316,9 +310,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
-            self.memory,
             hunt_mode=self.hunt_mode,
-            poller=_FakePoller([]),
+            vitals=_ScriptedVitals([]),
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
         with patch.object(worker, "_measure_pose", return_value=_STAND):
