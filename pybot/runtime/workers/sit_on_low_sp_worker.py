@@ -170,26 +170,13 @@ class SitOnLowSpWorker:
         Returns:
             ``"recovered"`` — stood after SP ≥ resume threshold.
             ``"danger"`` — HP drop or SP stall with nearby objects.
-            ``"pose_failed"`` — could not confirm sit/stand pose after retries.
             ``"stopped"`` — stop/pause ended the session (stood if needed).
         """
         ctx = self._ctx
         sit_scan = ctx.config.sit_on_low_sp_scan_code
 
-        stand_pose = self._measure_stand_pose()
-        if stand_pose is None:
-            ctx.logger.behavior("[SIT] cannot measure stand pose — abort sit")
-            return "pose_failed"
-
-        sit_pose = self._ensure_sitting(sit_scan, stand_pose)
-        if sit_pose is None:
-            ctx.logger.behavior("[SIT] failed to confirm sit pose — abort sit")
-            return "pose_failed"
-
-        ctx.logger.behavior(
-            f"[SIT] pose confirmed stand_h={stand_pose.body_height} "
-            f"sit_h={sit_pose.body_height}"
-        )
+        self._ensure_sitting(sit_scan)
+        ctx.logger.behavior("[SIT] Pressed sit button, waiting for regen")
 
         sp_state = self._sp_snapshot()
         last_sp = sp_state[0] if sp_state is not None else None
@@ -205,12 +192,8 @@ class SitOnLowSpWorker:
                     ctx.logger.behavior(
                         f"[SIT] SP recovered ratio={ratio:.1%} — standing"
                     )
-                    if not self._ensure_standing(sit_scan, sit_pose, stand_pose, force_press=True):
-                        ctx.logger.behavior(
-                            "[SIT] failed to confirm stand pose after recover, but SP is full so continuing"
-                        )
-                    else:
-                        ctx.wait_unless_stopped(SIT_STAND_RESUME_DELAY_S)
+                    self._ensure_standing(sit_scan)
+                    ctx.wait_unless_stopped(SIT_STAND_RESUME_DELAY_S)
                     return "recovered"
 
                 now = time.monotonic()
@@ -242,9 +225,7 @@ class SitOnLowSpWorker:
                                 f"reasons={','.join(danger.reasons)} "
                                 "(hp dropped, ensuring standing)"
                             )
-                            self._ensure_standing(
-                                sit_scan, sit_pose, stand_pose
-                            )
+                            self._ensure_standing(sit_scan)
                             return "danger"
                         if (
                             sp_stalled
@@ -254,9 +235,7 @@ class SitOnLowSpWorker:
                                 f"[SIT] danger while sitting sp={sp} "
                                 f"reasons={','.join(danger.reasons)}"
                             )
-                            self._ensure_standing(
-                                sit_scan, sit_pose, stand_pose
-                            )
+                            self._ensure_standing(sit_scan)
                             return "danger"
                         if hp is not None:
                             last_hp = hp
@@ -272,96 +251,28 @@ class SitOnLowSpWorker:
                                 f"[SIT] danger while sitting sp={sp} "
                                 f"reasons={','.join(danger.reasons)}"
                             )
-                            self._ensure_standing(
-                                sit_scan, sit_pose, stand_pose
-                            )
+                            self._ensure_standing(sit_scan)
                             return "danger"
                     last_progress = now
 
             ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
 
-        self._ensure_standing(sit_scan, sit_pose, stand_pose, force_press=True)
+        self._ensure_standing(sit_scan)
         ctx.logger.behavior("[SIT] stopped while sitting — stood up")
         return "stopped"
-
-    def _measure_stand_pose(self) -> CharacterPose | None:
-        """Read standing pose before the sit key; retry while unreadable."""
-        for attempt in range(1, SIT_POSE_MAX_ATTEMPTS + 1):
-            pose = self._measure_pose()
-            if pose is not None:
-                return pose
-            self._ctx.logger.behavior(
-                f"[SIT] stand pose unreadable attempt={attempt}/"
-                f"{SIT_POSE_MAX_ATTEMPTS}"
-            )
-            if not self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S):
-                return None
-        return None
 
     def _ensure_sitting(
         self,
         sit_scan: int,
-        stand_pose: CharacterPose,
-    ) -> CharacterPose | None:
-        """Press sit until center pose is shorter than stand by the min drop."""
-        for attempt in range(1, SIT_POSE_MAX_ATTEMPTS + 1):
-            self._input.teleport_key(sit_scan)
-            if not self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S):
-                return None
-            current = self._measure_pose()
-            if current is None:
-                self._ctx.logger.behavior(
-                    f"[SIT] sit pose unreadable attempt={attempt}/"
-                    f"{SIT_POSE_MAX_ATTEMPTS}"
-                )
-                continue
-            drop = stand_pose.body_height - current.body_height
-            if drop >= SIT_POSE_MIN_HEIGHT_DROP:
-                return current
-            
-            # If height increased significantly, we were already sitting and just stood up!
-            # Press sit again to actually sit down, and update stand_pose to this new standing height.
-            if drop <= -SIT_POSE_MIN_HEIGHT_DROP:
-                self._ctx.logger.behavior(
-                    f"[SIT] pose inverted! Height increased by {-drop}px. "
-                    "We were already sitting. Updating stand pose and retrying."
-                )
-                stand_pose = current
-                continue
-
-            self._ctx.logger.behavior(
-                f"[SIT] sit not confirmed attempt={attempt}/"
-                f"{SIT_POSE_MAX_ATTEMPTS} stand_h={stand_pose.body_height} "
-                f"current_h={current.body_height} drop={drop} "
-                f"need>={SIT_POSE_MIN_HEIGHT_DROP} — retry"
-            )
-        return None
+    ) -> None:
+        """Press sit once."""
+        self._input.teleport_key(sit_scan)
+        self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S)
 
     def _ensure_standing(
         self,
         sit_scan: int,
-        sit_pose: CharacterPose,
-        stand_pose: CharacterPose,
-    ) -> bool:
-        """Press stand until center pose is no longer seated. Returns success."""
-        mid = (sit_pose.body_height + stand_pose.body_height) / 2.0
-        
-        for attempt in range(1, SIT_POSE_MAX_ATTEMPTS + 1):
-            self._input.teleport_key(sit_scan)
-            if not self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S):
-                return False
-            current = self._measure_pose()
-            if current is None:
-                self._ctx.logger.behavior(
-                    f"[SIT] stand pose unreadable attempt={attempt}/"
-                    f"{SIT_POSE_MAX_ATTEMPTS}"
-                )
-                continue
-            if current.body_height >= mid:
-                return True
-            self._ctx.logger.behavior(
-                f"[SIT] stand not confirmed attempt={attempt}/"
-                f"{SIT_POSE_MAX_ATTEMPTS} current_h={current.body_height} "
-                f"mid={mid:.0f} — retry"
-            )
-        return False
+    ) -> None:
+        """Press stand once."""
+        self._input.teleport_key(sit_scan)
+        self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S)
