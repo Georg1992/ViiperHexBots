@@ -145,7 +145,7 @@ def hunt_runtime_config_from_settings(
             mob_name=mob_name,
         ),
         hunt_mode=hunt_mode or settings.hunt_mode,
-        skill_delay_ms=settings.skill_delay,
+        skill_delay_ms=max(200, settings.skill_delay),
         skill_button=settings.skill_button,
         skill_scan_code=key_name_to_scan_code(settings.skill_button),
         teleport_button=settings.teleport_button,

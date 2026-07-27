@@ -94,17 +94,7 @@ class AttackLoop:
 
         # Sole inter-skill wait — game applies SP cost; UI may refresh vitals.
         self._ctx.stop_event.wait(ctx.config.skill_delay_ms / 1000.0)
-        
-        # Wait up to 400ms extra for a fresh SP observation if skill delay was too short
-        # to allow the async UI/Memory poller to publish a new value.
-        wait_deadline = time.monotonic() + 0.4
         post_sp, post_obs_ms, post_chg_ms = self._vitals.sp_sample()
-        while post_obs_ms <= pre_obs_ms and time.monotonic() < wait_deadline:
-            if self._ctx.is_stopped():
-                break
-            self._ctx.stop_event.wait(0.02)
-            post_sp, post_obs_ms, post_chg_ms = self._vitals.sp_sample()
-            
         sample_now = monotonic_ms()
 
         # Hit: SP dropped after a fresh observation.
