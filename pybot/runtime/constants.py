@@ -34,7 +34,7 @@ SIT_POSE_SETTLE_S = 0.4
 SIT_POSE_MAX_ATTEMPTS = 5
 # Sitting must shrink body height by at least this many px vs stand pose
 # (matches character-pose fixture gap; see test_character_pose).
-SIT_POSE_MIN_HEIGHT_DROP = 20
+SIT_POSE_MIN_HEIGHT_DROP = 8
 # SP ticks roughly every 4s while sitting; no increase for this long → stall.
 SIT_SP_STALL_S = 15.0
 # How often to OCR HP while sitting (vision-only; Gepard-sensitive).
