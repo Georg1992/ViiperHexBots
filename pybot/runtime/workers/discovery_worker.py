@@ -12,10 +12,11 @@ One discovery pass (same frame):
 2. Match detections to existing tracks; publish new-mob candidates for
    tracking (which creates tracks on its next fresh frame at exact coords).
 
-Removal factors run in ``HuntTracks.process_discovery_scan()``:
+        Removal factors run in ``HuntTracks.process_discovery_scan()``:
 - Factor 1: Tracks outside the hunt ROI → removed immediately (bookkeeping).
-- Factor 2: Tracks missed for 2+ consecutive discovery scans → removed
-  (bookkeeping — not confirmed death; no death site).
+- Factor 2: Tracks missed for 2+ consecutive discovery scans → removed.
+  If the track was already opacity-fading, a death site is recorded so
+  corpse heat cannot be rediscovered; otherwise bookkeeping only.
 - First miss: ``discovery_miss_count`` increments; track stays alive for one
   more scan cycle.
 

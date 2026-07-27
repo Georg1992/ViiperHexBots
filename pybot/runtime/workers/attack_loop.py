@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from pybot.game_state import PlayerVitals
+from pybot.runtime.constants import (
+    LOG_REPEAT_INTERVAL_MS,
+    SP_IDLE_MAX_OBSERVATION_AGE_MS,
+    WORKER_POLL_INTERVAL_S,
+)
 from pybot.runtime.hunt_mode import HuntModeController
 from pybot.runtime.hunt_tracks import HuntTracks, monotonic_ms
 from pybot.runtime.input.input_backend import InputBackend
-from pybot.runtime.constants import LOG_REPEAT_INTERVAL_MS, WORKER_POLL_INTERVAL_S
 from pybot.runtime.workers.worker_contexts import AttackLoopContext
 
 
@@ -55,6 +59,13 @@ class AttackLoop:
                 )
                 break
 
+    def _character_pos(self) -> tuple[int, int]:
+        """Screen position used for the melee-range idle guard."""
+        pos = self._ctx.character_screen_pos()
+        if pos is None:
+            return self._char_x, self._char_y
+        return int(pos[0]), int(pos[1])
+
     def _attack_one(self, target_id: int, now_tick: int) -> None:
         ctx = self._ctx
 
@@ -64,10 +75,11 @@ class AttackLoop:
             return
 
         click_x, click_y = snap.x, snap.y
+        char_x, char_y = self._character_pos()
 
         # Idle death: cheap cache samples around the configured skill delay.
         # Pacing is exactly skill_delay_ms (plus click) — no OCR / capture here.
-        pre_sp, pre_updated_ms = self._vitals.sp_sample()
+        pre_sp, pre_obs_ms, pre_chg_ms = self._vitals.sp_sample()
         try:
             self._input.move_mouse(click_x, click_y)
             self._input.skill_click(ctx.config.skill_scan_code)
@@ -79,44 +91,64 @@ class AttackLoop:
 
         # Sole inter-skill wait — game applies SP cost; UI may refresh vitals.
         self._ctx.stop_event.wait(ctx.config.skill_delay_ms / 1000.0)
-        post_sp, post_updated_ms = self._vitals.sp_sample()
+        post_sp, post_obs_ms, post_chg_ms = self._vitals.sp_sample()
+        sample_now = monotonic_ms()
 
-        # Need two readable samples and a vitals publish during the delay.
-        # Stale cache (no UI refresh) must not fake idle or a hit.
-        if (
-            pre_sp is None
-            or post_sp is None
-            or post_updated_ms <= pre_updated_ms
-        ):
-            was_idle: bool | None = None
+        # Hit: SP dropped after a fresh observation.
+        # Idle: same SP, fresh observation, no value change since pre, and the
+        # observation is recent (rejects early mid-wait republish of pre-cost SP).
+        # Otherwise unknown — freeze idle/death counters.
+        was_idle: bool | None
+        if pre_sp is None or post_sp is None or post_obs_ms <= pre_obs_ms:
+            was_idle = None
             if now_tick - self._last_sp_unknown_log_ms >= LOG_REPEAT_INTERVAL_MS:
                 self._last_sp_unknown_log_ms = now_tick
-                stale = (
-                    pre_sp is not None
-                    and post_sp is not None
-                    and post_updated_ms <= pre_updated_ms
+                reason = (
+                    "sp-unread"
+                    if pre_sp is None or post_sp is None
+                    else "vitals-stale"
                 )
-                reason = "vitals-stale" if stale else "sp-unread"
                 ctx.logger.behavior(
                     f"[IDLE] path=sp-unknown id={target_id} reason={reason} "
                     f"pre_sp={pre_sp} post_sp={post_sp} — idle/death counters frozen"
                 )
+        elif post_sp < pre_sp:
+            was_idle = False
+        elif post_sp > pre_sp:
+            was_idle = None
+            if now_tick - self._last_sp_unknown_log_ms >= LOG_REPEAT_INTERVAL_MS:
+                self._last_sp_unknown_log_ms = now_tick
+                ctx.logger.behavior(
+                    f"[IDLE] path=sp-unknown id={target_id} reason=sp-increased "
+                    f"pre_sp={pre_sp} post_sp={post_sp} — idle/death counters frozen"
+                )
+        elif post_chg_ms > pre_chg_ms:
+            # Value changed away and back within the window — inconclusive.
+            was_idle = None
+        elif sample_now - post_obs_ms > SP_IDLE_MAX_OBSERVATION_AGE_MS:
+            was_idle = None
+            if now_tick - self._last_sp_unknown_log_ms >= LOG_REPEAT_INTERVAL_MS:
+                self._last_sp_unknown_log_ms = now_tick
+                ctx.logger.behavior(
+                    f"[IDLE] path=sp-unknown id={target_id} reason=obs-stale "
+                    f"age_ms={sample_now - post_obs_ms} "
+                    f"pre_sp={pre_sp} post_sp={post_sp} — idle/death counters frozen"
+                )
         else:
-            was_idle = pre_sp == post_sp
+            was_idle = True
 
-        pre_track = ctx.tracks.get_track_by_id(target_id)
-        accessible = bool(pre_track.was_accessible) if pre_track else False
-        blob_stationary = bool(pre_track.discovery_stationary) if pre_track else False
-        moving = bool(pre_track.moving) if pre_track else False
-        idle_before = int(pre_track.idle_attack_count) if pre_track else 0
+        accessible = snap.was_accessible
+        blob_stationary = snap.discovery_stationary
+        moving = snap.moving
+        idle_before = snap.idle_attack_count
 
         action, idle_count = ctx.tracks.evaluate_idle_attack(
             target_id,
             was_idle=was_idle,
             mob_x=click_x,
             mob_y=click_y,
-            char_x=self._char_x,
-            char_y=self._char_y,
+            char_x=char_x,
+            char_y=char_y,
             now_tick=now_tick,
         )
         if action == "dead":

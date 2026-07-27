@@ -20,6 +20,8 @@ class PlayerVitalsTests(unittest.TestCase):
         self.assertEqual(vitals.sp_max, 200)
         self.assertEqual(vitals.sp_pair(), (120, 200))
         self.assertGreater(vitals.updated_ms, 0)
+        self.assertEqual(vitals.updated_ms, vitals.observed_ms)
+        self.assertEqual(vitals.changed_ms, vitals.observed_ms)
 
         vitals.clear_sp()
         self.assertIsNone(vitals.sp)
@@ -29,7 +31,7 @@ class PlayerVitalsTests(unittest.TestCase):
         vitals = PlayerVitals()
         vitals.publish_sp(415, 500)
         loop = AttackLoop(
-            MagicMock(),
+            MagicMock(character_screen_pos=MagicMock(return_value=None)),
             MagicMock(),
             MagicMock(),
             vitals=vitals,
@@ -40,25 +42,33 @@ class PlayerVitalsTests(unittest.TestCase):
         vitals.clear_sp()
         self.assertIsNone(loop._vitals.sp)
 
-    def test_sp_sample_detects_stale_vs_fresh(self) -> None:
+    def test_sp_sample_detects_observe_vs_change(self) -> None:
         import time
 
         vitals = PlayerVitals()
         vitals.publish_sp(100, 200)
-        sp1, t1 = vitals.sp_sample()
+        sp1, obs1, chg1 = vitals.sp_sample()
         self.assertEqual(sp1, 100)
-        sp2, t2 = vitals.sp_sample()
-        self.assertEqual(t2, t1)
+        self.assertEqual(obs1, chg1)
+
+        sp2, obs2, chg2 = vitals.sp_sample()
+        self.assertEqual(obs2, obs1)
+        self.assertEqual(chg2, chg1)
+
         time.sleep(0.002)
-        vitals.publish_sp(100, 200)  # same value, new publish tick
-        sp3, t3 = vitals.sp_sample()
+        vitals.publish_sp(100, 200)  # same value — observe bumps, change does not
+        sp3, obs3, chg3 = vitals.sp_sample()
         self.assertEqual(sp3, 100)
-        self.assertGreater(t3, t1)
+        self.assertGreater(obs3, obs1)
+        self.assertEqual(chg3, chg1)
+
         time.sleep(0.002)
         vitals.publish_sp(88, 200)
-        sp4, t4 = vitals.sp_sample()
+        sp4, obs4, chg4 = vitals.sp_sample()
         self.assertEqual(sp4, 88)
-        self.assertGreater(t4, t3)
+        self.assertGreater(obs4, obs3)
+        self.assertGreater(chg4, chg1)
+        self.assertEqual(chg4, obs4)
 
 
 if __name__ == "__main__":

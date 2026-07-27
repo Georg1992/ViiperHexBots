@@ -91,6 +91,13 @@ class HuntRuntimeContext:
         """True when tracking may tick (workers running and not in storage UI)."""
         return self.should_run_workers() and not self.storage_event.is_set()
 
+    def character_screen_pos(self) -> tuple[int, int] | None:
+        """Hunt ROI center — character is always at the middle of the hunt view."""
+        roi = self.capture.get_hunt_roi()
+        if roi is None:
+            return None
+        return roi.x + roi.w // 2, roi.y + roi.h // 2
+
     def mark_running(self) -> None:
         """Workers may run; wake any thread blocked in ``wait_while_stopped_or_paused``."""
         self.pause_event.clear()

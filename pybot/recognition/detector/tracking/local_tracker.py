@@ -178,7 +178,7 @@ def _find_local_peak(
     *,
     search_radius_px: int,
     suppress_positions: list[tuple[int, int]] | None = None,
-) -> tuple[int, int, float] | None:
+) -> tuple[int, int, float, float, tuple[int, int, int, int]] | None:
     frame_h, frame_w = frame_bgr.shape[:2]
     margin_x = int(round(descriptor.avg_width * scale * 0.6))
     margin_y = int(round(descriptor.avg_height * scale * 0.6))

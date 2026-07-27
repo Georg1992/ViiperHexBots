@@ -55,6 +55,10 @@ class MobTrackSnapshot:
     updated_tick: int
     discovery_scale: float
     candidate_scale: float
+    idle_attack_count: int = 0
+    was_accessible: bool = False
+    discovery_stationary: bool = False
+    moving: bool = False
 
 
 @dataclass(frozen=True)
@@ -71,10 +75,10 @@ class HuntTracks:
         *,
         skill_delay_ms: int = 5000,
     ) -> None:
+        del skill_delay_ms  # attack pacing owns skill delay; keep ctor compat
         self._lock = threading.RLock()
         self._tracks: list[MobTrack] = []
         self._detector_config_ref = detector_config
-        self._skill_delay_ms = max(skill_delay_ms, 1)
         self._next_id = 1
         self._area_epoch = 0
         self._last_reconcile_summary: ReconcileSummary | None = None
@@ -224,6 +228,15 @@ class HuntTracks:
             self._discovery_candidates = []
             return candidates
 
+    def requeue_discovery_candidates(
+        self, candidates: list[DiscoveryDetection]
+    ) -> None:
+        """Put candidates back when tracking could not process them (e.g. empty frame)."""
+        if not candidates:
+            return
+        with self._lock:
+            self._merge_candidates_locked(candidates)
+
     def process_discovery_scan(
         self,
         detections: list[DiscoveryDetection],
@@ -241,13 +254,14 @@ class HuntTracks:
         create them on a fresh frame with exact coordinates.
 
         After matching detections against known tracks, evaluates all
-        removal factors on unmatched tracks (bookkeeping only — no death sites):
-        1. Outside hunt ROI → removed immediately.
-        2. Two missed discovery scans → removed.
+        removal factors on unmatched tracks:
+        1. Outside hunt ROI → removed immediately (no death site).
+        2. Two missed discovery scans → removed. If the track was already
+           opacity-fading, records a death site; otherwise bookkeeping only.
         3. First miss → ``discovery_miss_count`` += 1 (stays alive one more scan).
 
         Confirmed death (opacity / idle-dead) uses ``_remove_dead_tracks_locked``
-        elsewhere and records death sites; discovery removals do not.
+        elsewhere and records death sites.
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
@@ -307,8 +321,9 @@ class HuntTracks:
                     continue
                 kept_candidates.append(detection)
 
-            # Publish new candidates for tracking to create on fresh frame
-            self._discovery_candidates = kept_candidates
+            # Merge with any unconsumed candidates so a back-to-back discovery
+            # scan cannot drop detections tracking has not ingested yet.
+            self._merge_candidates_locked(kept_candidates)
 
             unmatched_ids = set(result.removed_ids)
 
@@ -332,9 +347,19 @@ class HuntTracks:
             )
             remove_ids.update(miss_remove)
 
-            # Execute removal
+            # Execute removal. Miss removals that were already fading get a
+            # death site so corpse heat cannot be rediscovered as a new track.
             if remove_ids:
-                self._remove_tracks_locked(remove_ids)
+                fading_ids = {
+                    tid
+                    for tid in remove_ids
+                    if self._track_opacity_fading_locked(tid)
+                }
+                plain_ids = remove_ids - fading_ids
+                if fading_ids:
+                    self._remove_dead_tracks_locked(fading_ids, tick)
+                if plain_ids:
+                    self._remove_tracks_locked(plain_ids)
 
             self._prune_death_sites_locked(tick)
             alive_after = sum(1 for t in self._tracks if is_alive(t))
@@ -391,8 +416,10 @@ class HuntTracks:
         Side-effect: increments ``discovery_miss_count``.
 
         Returns ``(remove_ids, first_miss_ids)`` where:
-        - ``remove_ids``: tracks with miss_count >= 2 (removed without death site).
+        - ``remove_ids``: tracks with miss_count >= 2.
         - ``first_miss_ids``: tracks on their first miss (still alive).
+
+        Caller records a death site when the removed track was opacity-fading.
         """
         remove_ids: set[int] = set()
         first_miss_ids: list[int] = []
@@ -452,11 +479,15 @@ class HuntTracks:
                         opacity_score=result.opacity_score,
                         config=config,
                     ):
+                        # Corpse is at the found coords this frame — record
+                        # death site there, not the previous track position.
+                        track.x = result.x
+                        track.y = result.y
                         opacity_deaths.append(
                             OpacityDeathEvent(
                                 track_id=result.track_id,
-                                x=track.x,
-                                y=track.y,
+                                x=result.x,
+                                y=result.y,
                                 baseline=baseline,
                                 opacity_score=float(result.opacity_score),
                                 streak=streak + 1,
@@ -589,10 +620,43 @@ class HuntTracks:
         candidate_scale: float = 0.0,
         *,
         now_tick: int | None = None,
-    ) -> MobTrack:
+        area_epoch: int | None = None,
+    ) -> MobTrack | None:
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
-            return self._create_track_locked(mob_name, x, y, confidence, candidate_scale, tick)
+            if area_epoch is not None and area_epoch != self._area_epoch:
+                return None
+            return self._create_track_locked(
+                mob_name, x, y, confidence, candidate_scale, tick
+            )
+
+    def _track_opacity_fading_locked(self, track_id: int) -> bool:
+        track = self._get_track_by_id_locked(track_id)
+        return track is not None and track.opacity_decay_streak > 0
+
+    def _merge_candidates_locked(
+        self, new_candidates: list[DiscoveryDetection]
+    ) -> None:
+        """Append *new_candidates* onto the pending queue, deduped by radius."""
+        if not new_candidates and not self._discovery_candidates:
+            return
+        config = self._detector_config()
+        dedup_radius = int(config["trackDedupRadiusPx"])
+        radius_sq = dedup_radius * dedup_radius
+        merged: list[DiscoveryDetection] = list(new_candidates)
+        known = [(c.x, c.y) for c in merged]
+        for prior in self._discovery_candidates:
+            duplicate = False
+            for kx, ky in known:
+                dx = prior.x - kx
+                dy = prior.y - ky
+                if (dx * dx + dy * dy) <= radius_sq:
+                    duplicate = True
+                    break
+            if not duplicate:
+                merged.append(prior)
+                known.append((prior.x, prior.y))
+        self._discovery_candidates = merged
 
     def _create_track_locked(
         self,
@@ -727,6 +791,10 @@ class HuntTracks:
             updated_tick=track.updated_tick,
             discovery_scale=track.discovery_scale,
             candidate_scale=track.candidate_scale,
+            idle_attack_count=track.idle_attack_count,
+            was_accessible=track.was_accessible,
+            discovery_stationary=track.discovery_stationary,
+            moving=track.moving,
         )
 
     def overlay_track_state(self, now_tick: int | None = None) -> tuple[int, list[MobTrackSnapshot], list[MobTrackSnapshot]]:

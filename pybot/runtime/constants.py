@@ -11,6 +11,9 @@ CELL_SIZE_PX = 64
 DEFAULT_SEARCH_RANGE_CELLS = 16
 WORKER_POLL_INTERVAL_S = 0.05
 LOG_REPEAT_INTERVAL_MS = 5000
+# Idle SP confirmation: post observation must be this fresh at sample time,
+# otherwise an early mid-wait republish of pre-cost SP can look like idle.
+SP_IDLE_MAX_OBSERVATION_AGE_MS = 250
 SIT_LOW_SP_RATIO = 0.05
 SIT_RESUME_SP_RATIO = 0.98
 SIT_SP_POLL_INTERVAL_S = 0.25
@@ -76,6 +79,7 @@ __all__ = [
     "DEFAULT_SEARCH_RANGE_CELLS",
     "WORKER_POLL_INTERVAL_S",
     "LOG_REPEAT_INTERVAL_MS",
+    "SP_IDLE_MAX_OBSERVATION_AGE_MS",
     "SIT_LOW_SP_RATIO",
     "SIT_RESUME_SP_RATIO",
     "SIT_SP_POLL_INTERVAL_S",

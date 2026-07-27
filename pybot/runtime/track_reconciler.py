@@ -5,12 +5,13 @@ Discovery finds NEW mobs and publishes candidate positions.  Tracking owns
 all track creation — it ingests candidates on the next fresh frame, runs a
 local-follow search to get exact coordinates, and creates the track there.
 
-Dedup uses ``existing_positions`` — known-object (x, y) at frame-capture time
-(alive tracks plus recent removal sites).  Absence uses
-``existing_track_positions`` — (track_id, x, y) for alive tracks at that same
-instant.  A detection within one object radius of a known position is matched
-(not a new candidate).  Alive tracks with no matching detection are listed
-in ``removed_ids``; the caller increments their ``discovery_miss_count``.
+Dedup uses ``existing_positions`` — alive-track (x, y) at frame-capture time.
+Death sites are absorbed separately by the caller (larger radius + cooldown).
+Absence uses ``existing_track_positions`` — (track_id, x, y) for alive tracks
+at that same instant.  A detection within one object radius of a known
+position is matched (not a new candidate).  Alive tracks with no matching
+detection are listed in ``removed_ids``; the caller increments their
+``discovery_miss_count``.
 """
 
 from __future__ import annotations

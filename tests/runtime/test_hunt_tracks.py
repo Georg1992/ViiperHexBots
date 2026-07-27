@@ -427,6 +427,71 @@ class HuntTracksRulesTests(unittest.TestCase):
         # Second call returns empty (already cleared)
         self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 0)
 
+    def test_discovery_merges_unconsumed_candidates(self) -> None:
+        """A second scan must not drop candidates tracking has not ingested."""
+        self.tracks.process_discovery_scan(
+            [det(100, 100)],
+            mob_name="horn",
+            now_tick=self.now,
+        )
+        self.tracks.process_discovery_scan(
+            [det(400, 400)],
+            mob_name="horn",
+            now_tick=self.now + 50,
+        )
+        candidates = self.tracks.get_and_clear_new_candidates()
+        self.assertEqual(len(candidates), 2)
+        positions = {(c.x, c.y) for c in candidates}
+        self.assertEqual(positions, {(100, 100), (400, 400)})
+
+    def test_requeue_discovery_candidates_restores_queue(self) -> None:
+        self.tracks.process_discovery_scan(
+            [det(100, 100)],
+            mob_name="horn",
+            now_tick=self.now,
+        )
+        taken = self.tracks.get_and_clear_new_candidates()
+        self.assertEqual(len(taken), 1)
+        self.tracks.requeue_discovery_candidates(taken)
+        restored = self.tracks.get_and_clear_new_candidates()
+        self.assertEqual(len(restored), 1)
+        self.assertEqual((restored[0].x, restored[0].y), (100, 100))
+
+    def test_create_track_rejects_stale_area_epoch(self) -> None:
+        epoch = self.tracks.area_epoch
+        self.tracks.area_reset()
+        track = self.tracks.create_track(
+            "horn", 100, 100, 0.7, 0.9,
+            now_tick=self.now,
+            area_epoch=epoch,
+        )
+        self.assertIsNone(track)
+        self.assertEqual(self.tracks.get_track_count(), 0)
+
+    def test_discovery_miss_while_fading_records_death_site(self) -> None:
+        track_id = self._create(500, 500)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.opacity_decay_streak = 1
+        from pybot.runtime.capture.window_roi import HuntRoi
+
+        roi = HuntRoi(x=0, y=0, w=2000, h=2000)
+        self.tracks.process_discovery_scan(
+            [], mob_name="horn", now_tick=self.now + 50, hunt_roi=roi,
+        )
+        self.tracks.process_discovery_scan(
+            [], mob_name="horn", now_tick=self.now + 100, hunt_roi=roi,
+        )
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
+        summary = self.tracks.process_discovery_scan(
+            [det(500, 500)],
+            mob_name="horn",
+            now_tick=self.now + 150,
+            hunt_roi=roi,
+        )
+        self.assertEqual(summary.added_count, 0)
+        self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 0)
+
     def test_opacity_decay_removes_stationary_track(self) -> None:
         track_id = self._create(874, 578)
         # Calibrate living baseline (same pixel → stationary).

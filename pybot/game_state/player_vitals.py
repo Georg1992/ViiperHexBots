@@ -17,13 +17,19 @@ class PlayerVitals:
         self._lock = threading.Lock()
         self._sp: int | None = None
         self._sp_max: int | None = None
-        self._updated_ms: int = 0
+        # Last UI observation (bumped on every publish, including same values).
+        self._observed_ms: int = 0
+        # Last time SP or SP max actually changed.
+        self._changed_ms: int = 0
 
     def publish_sp(self, sp: int | None, sp_max: int | None) -> None:
         with self._lock:
-            self._sp = sp
-            self._sp_max = sp_max
-            self._updated_ms = int(time.monotonic() * 1000)
+            now = int(time.monotonic() * 1000)
+            self._observed_ms = now
+            if sp != self._sp or sp_max != self._sp_max:
+                self._sp = sp
+                self._sp_max = sp_max
+                self._changed_ms = now
 
     def clear_sp(self) -> None:
         self.publish_sp(None, None)
@@ -40,15 +46,26 @@ class PlayerVitals:
 
     @property
     def updated_ms(self) -> int:
+        """Last observation time (compat alias for ``observed_ms``)."""
         with self._lock:
-            return self._updated_ms
+            return self._observed_ms
+
+    @property
+    def observed_ms(self) -> int:
+        with self._lock:
+            return self._observed_ms
+
+    @property
+    def changed_ms(self) -> int:
+        with self._lock:
+            return self._changed_ms
 
     def sp_pair(self) -> tuple[int | None, int | None]:
         """Atomic ``(sp, sp_max)`` for ratio checks."""
         with self._lock:
             return self._sp, self._sp_max
 
-    def sp_sample(self) -> tuple[int | None, int]:
-        """Atomic ``(sp, updated_ms)`` for pre/post idle comparisons."""
+    def sp_sample(self) -> tuple[int | None, int, int]:
+        """Atomic ``(sp, observed_ms, changed_ms)`` for pre/post idle comparisons."""
         with self._lock:
-            return self._sp, self._updated_ms
+            return self._sp, self._observed_ms, self._changed_ms

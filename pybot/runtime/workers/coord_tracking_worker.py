@@ -10,8 +10,9 @@ Tracking owns track creation and all position writes. Discovery only
 publishes candidate positions; tracking resolves them on a current frame
 so tracks are created at the EXACT mob position, not 0.5s ago.
 
-Tracking is pure follow — no silhouette checks. On local miss, wakes
-discovery so it can confirm the mob via its full detection pipeline.
+On local miss, wakes discovery so it can confirm the mob via its full
+detection pipeline. Local follow still uses ``score_at`` (silhouette gate)
+to accept a hit; heatmap peaks only propose candidates.
 """
 
 from __future__ import annotations
@@ -71,6 +72,8 @@ class CoordTrackingWorker:
 
         frame = ctx.capture.capture_roi(roi)
         if frame is None or frame.size == 0:
+            if candidates:
+                ctx.tracks.requeue_discovery_candidates(candidates)
             if now_ms - self._last_empty_frame_log_ms >= LOG_REPEAT_INTERVAL_MS:
                 self._last_empty_frame_log_ms = now_ms
                 ctx.logger.behavior("[COORD] capture returned empty frame")
@@ -226,19 +229,19 @@ class CoordTrackingWorker:
             if not result.found:
                 continue
 
-            # Guard against teleport: if area epoch advanced, discard
-            if ctx.tracks.area_epoch != area_epoch:
-                break
-
-            # Create track at the exact position from the fresh frame
-            ctx.tracks.create_track(
+            # Create under the lock with epoch gate — rejects if teleport won.
+            track = ctx.tracks.create_track(
                 mob_name,
                 result.x,
                 result.y,
                 candidate.confidence,
                 candidate.candidate_scale,
                 now_tick=now_ms,
+                area_epoch=area_epoch,
             )
+            if track is None:
+                break
+
             existing_positions.append((result.x, result.y))
             created += 1
 

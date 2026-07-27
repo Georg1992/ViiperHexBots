@@ -10,13 +10,14 @@ Ownership:
 - **Tracking** owns track creation and position.  On each tick it ingests
   discovery candidates, runs a local-follow search on the *current fresh
   frame* to get exact coordinates, creates tracks at those coordinates,
-  then follows every alive track via pure heatmap local follow (no
-  silhouette gate).  On found=True it updates position, velocity, and
-  opacity baseline / decay.  Sustained opacity drop while stationary
-  removes the track (in-place death fade).  Discovery matches also update
-  ``discovery_stationary`` from consecutive discovery blob centers
-  (coordinates unchanged within the stop threshold).
-  On miss it coasts along velocity and wakes discovery for confirmation.
+  then follows every alive track via heatmap local follow.  Peak search
+  proposes centers; ``score_at`` (silhouette gate) accepts a hit.  On
+  found=True it updates position, velocity, and opacity baseline / decay.
+  Sustained opacity drop while stationary removes the track (in-place
+  death fade).  Discovery matches also update ``discovery_stationary``
+  from consecutive discovery blob centers (coordinates unchanged within
+  the stop threshold).  On miss it coasts along velocity and wakes
+  discovery for confirmation.
 - **Attack** supplies skill clicks and idle SP samples (``was_idle``).
   Confirmed idle-dead / unreachable decisions live in
   ``HuntTracks.evaluate_idle_attack`` (death uses discovery blob stationary,
@@ -233,6 +234,10 @@ def apply_discovery_match(
     """
     track.last_discovery_tick = now_tick
     track.discovery_miss_count = 0
+    if detection.candidate_scale > 0:
+        # Keep local-follow scale current as the mob's apparent size changes.
+        track.discovery_scale = detection.candidate_scale
+        track.candidate_scale = detection.candidate_scale
 
     bx, by, bw, bh = detection.bbox
     if bw <= 0 or bh <= 0:
