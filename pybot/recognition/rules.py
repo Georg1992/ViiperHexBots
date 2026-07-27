@@ -14,12 +14,13 @@ Ownership:
   silhouette gate).  On found=True it updates position, velocity, and
   opacity baseline / decay.  Sustained opacity drop while stationary
   removes the track (in-place death fade).  Discovery matches also update
-  ``discovery_stationary`` from heat-blob stability (center + bbox IoU).
+  ``discovery_stationary`` from consecutive discovery blob centers
+  (coordinates unchanged within the stop threshold).
   On miss it coasts along velocity and wakes discovery for confirmation.
-- **Attack** records attack_count / last_attack_tick only; it reads position
-  snapshots for clicks but must not mutate tracking fields or remove tracks.
-  Idle-attack SP checks are a separate death / unreachable path
-  (death uses discovery blob stationary, not tracking displacement).
+- **Attack** supplies skill clicks and idle SP samples (``was_idle``).
+  Confirmed idle-dead / unreachable decisions live in
+  ``HuntTracks.evaluate_idle_attack`` (death uses discovery blob stationary,
+  not tracking displacement). Attack must not write track positions.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from typing import Literal
 HUNT_OBJECT_RADIUS = 90
 HUNT_DISCOVERY_CLUSTER_RADIUS = 48
 
-TrackState = Literal["alive", "unreachable"]
+TrackState = Literal["alive"]
 
 
 @dataclass
@@ -87,7 +88,7 @@ class MobTrack:
     last_discovery_y: int = 0
     last_discovery_bbox: tuple[int, int, int, int] = (0, 0, 0, 0)
     discovery_blob_seen: bool = False
-    discovery_stationary: bool = False  # True when consecutive discovery blobs match
+    discovery_stationary: bool = False  # True when consecutive discovery centers match
     lost_count: int = 0
     area_epoch: int = 0
     opacity_baseline: float = 0.0
@@ -140,7 +141,6 @@ def apply_attack_event(track: MobTrack, now_tick: int) -> None:
     """Record one attack directed at this mob track (attack-owned fields only)."""
     track.attack_count += 1
     track.last_attack_tick = now_tick
-    track.lost_count = 0
 
 
 def select_target_id(
@@ -228,8 +228,8 @@ def apply_discovery_match(
     Resets the discovery-miss streak so the track is not removed by the
     2-miss absence rule.  Does NOT write track position — tracking owns that.
 
-    Updates ``discovery_stationary`` from heat-blob stability (center shift
-    + bbox IoU vs the previous matched discovery blob).
+    Sets ``discovery_stationary`` when the discovery blob center did not
+    move (within ``movementStopThresholdPx``) vs the previous match.
     """
     track.last_discovery_tick = now_tick
     track.discovery_miss_count = 0
@@ -248,38 +248,12 @@ def apply_discovery_match(
         return
 
     stop_px = int(config["movementStopThresholdPx"])
-    min_iou = float(config["discoveryBlobMinIoU"])
     dx = detection.x - track.last_discovery_x
     dy = detection.y - track.last_discovery_y
-    center_stable = (dx * dx + dy * dy) <= (stop_px * stop_px)
-    iou = bbox_iou(track.last_discovery_bbox, detection.bbox)
-    track.discovery_stationary = center_stable and iou >= min_iou
+    track.discovery_stationary = (dx * dx + dy * dy) <= (stop_px * stop_px)
     track.last_discovery_x = detection.x
     track.last_discovery_y = detection.y
     track.last_discovery_bbox = detection.bbox
-
-
-def bbox_iou(
-    a: tuple[int, int, int, int],
-    b: tuple[int, int, int, int],
-) -> float:
-    """IoU of two ``(x, y, w, h)`` boxes; 0 when either has non-positive area."""
-    ax, ay, aw, ah = a
-    bx, by, bw, bh = b
-    if aw <= 0 or ah <= 0 or bw <= 0 or bh <= 0:
-        return 0.0
-    ax2, ay2 = ax + aw, ay + ah
-    bx2, by2 = bx + bw, by + bh
-    ix0, iy0 = max(ax, bx), max(ay, by)
-    ix1, iy1 = min(ax2, bx2), min(ay2, by2)
-    iw, ih = ix1 - ix0, iy1 - iy0
-    if iw <= 0 or ih <= 0:
-        return 0.0
-    inter = float(iw * ih)
-    union = float(aw * ah + bw * bh) - inter
-    if union <= 0.0:
-        return 0.0
-    return inter / union
 
 
 def clear_discovery_blob_observation(track: MobTrack) -> None:

@@ -131,11 +131,13 @@ class ShadowPipelineTests(unittest.TestCase):
         self.assertGreater(len(candidates), 0)
 
         for candidate in candidates:
+            if candidate.candidate_scale <= 0:
+                continue
             snap = StateTrackSnapshot(
                 track_id=0,
                 x=candidate.x,
                 y=candidate.y,
-                scale=candidate.candidate_scale if candidate.candidate_scale > 0 else 1.0,
+                scale=candidate.candidate_scale,
             )
             batch = detector.track_locals_frame(self.roi_frame, self.roi, [snap])
             if batch.ok and batch.results and batch.results[0].found:

@@ -16,8 +16,8 @@ class OpacityDeathProbeTests(unittest.TestCase):
         return {
             "deathOpacityBaselineSamples": 4,
             "deathOpacityMinBaseline": 0.20,
-            "deathOpacityDecayRatio": 0.80,
-            "deathOpacityConfirmTicks": 3,
+            "deathOpacityDecayRatio": 0.85,
+            "deathOpacityConfirmTicks": 2,
         }
 
     def test_detector_config_has_required_opacity_keys(self) -> None:
@@ -75,7 +75,7 @@ class OpacityDeathProbeTests(unittest.TestCase):
         self.assertFalse(dead)
         self.assertEqual(streak, 0)
 
-        for score in (0.18, 0.17, 0.16):
+        for score in (0.18, 0.17):
             baseline, samples, streak, dead = evaluate_opacity_death(
                 opacity_score=score,
                 baseline=baseline,
@@ -106,8 +106,9 @@ class OpacityDeathProbeTests(unittest.TestCase):
         baseline = 0.60
         samples = 4
         streak = 0
+        # Above baseline * 0.85 (=0.51) — not a decay.
         baseline, samples, streak, dead = evaluate_opacity_death(
-            opacity_score=0.50,
+            opacity_score=0.52,
             baseline=baseline,
             baseline_samples=samples,
             decay_streak=streak,
@@ -141,9 +142,12 @@ class OpacityDeathProbeTests(unittest.TestCase):
         self.assertEqual(track.opacity_baseline_samples, 4)
         self.assertGreaterEqual(track.opacity_baseline, 0.57)
 
-        for score in (0.20, 0.18, 0.16):
-            dead = apply_opacity_observation(track, opacity_score=score, config=config)
-        self.assertTrue(dead)
+        self.assertFalse(
+            apply_opacity_observation(track, opacity_score=0.20, config=config)
+        )
+        self.assertTrue(
+            apply_opacity_observation(track, opacity_score=0.18, config=config)
+        )
         self.assertEqual(track.opacity_decay_streak, 0)
 
     def test_measure_opacity_empty_bbox_is_zero(self) -> None:

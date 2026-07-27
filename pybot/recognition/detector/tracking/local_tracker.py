@@ -1,11 +1,10 @@
 """Local coordinate follower for already-discovered tracks.
 
-Heatmap-based tracking: scores at the predicted center first, falls back
-to a heatmap peak search when center misses. Uses the descriptor's sprite
-and body palettes with a distance threshold — no exact-match, no sampled
-track palette. Tracking is pure follow for position; discovery handles
-2-miss removal. Tracking also measures opacity on successful hits so the
-store can confirm in-place death fade.
+Heatmap-based tracking: scores at the predicted center first; on miss,
+searches nearby heatmap peaks (same silhouette gate). Uses the descriptor's
+sprite and body palettes with a distance threshold. Tracking is pure follow
+for position; discovery handles 2-miss removal. Tracking also measures
+opacity on successful hits so the store can confirm in-place death fade.
 """
 
 from __future__ import annotations
@@ -54,7 +53,14 @@ def track_local(
     track_id = int(track["trackId"])
     cx = int(track["x"])
     cy = int(track["y"])
-    scale = float(track.get("scale", 1.0))
+    scale = float(track.get("scale", 0.0))
+    if scale <= 0.0:
+        return _miss_result(
+            track_id=track_id,
+            x=cx + offset_x,
+            y=cy + offset_y,
+            reason="invalid_scale",
+        )
     moving = bool(track.get("moving", False))
     vel_x = float(track.get("velX", 0.0))
     vel_y = float(track.get("velY", 0.0))
@@ -103,7 +109,6 @@ def track_local(
         detector, frame_bgr, descriptor, cx, cy, scale,
         search_radius_px=radius,
         suppress_positions=suppress_positions,
-        lost_count=lost_count,
     )
     if peak is not None:
         _peak_x, _peak_y, _heat_score, peak_sim, peak_bbox = peak
@@ -173,7 +178,6 @@ def _find_local_peak(
     *,
     search_radius_px: int,
     suppress_positions: list[tuple[int, int]] | None = None,
-    lost_count: int = 0,
 ) -> tuple[int, int, float] | None:
     frame_h, frame_w = frame_bgr.shape[:2]
     margin_x = int(round(descriptor.avg_width * scale * 0.6))
@@ -194,11 +198,7 @@ def _find_local_peak(
         return None
 
     # Suppress heat near other tracks so each track grabs its own mob.
-    # Active tracks (lost_count == 0): suppress aggressively — search radius / 2
-    # prevents locking onto a neighbor mob.
-    # Lost tracks (lost_count > 0): no suppression — locking onto ANY mob is
-    # better than remaining lost (discovery will sort out identity later).
-    if suppress_positions and lost_count == 0:
+    if suppress_positions:
         suppress_radius = max(8, search_radius_px // 2)
         for sx, sy in suppress_positions:
             lsx = sx - x0

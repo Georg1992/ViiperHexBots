@@ -26,10 +26,10 @@
   "debugOutputDir": "pybot/recognition/debug/detector",
   "movementMoveThresholdPx": 12,
   "movementStopThresholdPx": 6,
-  "discoveryBlobMinIoU": 0.70,
   "deathOpacityBaselineSamples": 4,
   "deathOpacityMinBaseline": 0.20,
-  "deathOpacityDecayRatio": 0.80,
-  "deathOpacityConfirmTicks": 3,
-  "deathRediscoveryCooldownMs": 4000
+  "deathOpacityDecayRatio": 0.85,
+  "deathOpacityConfirmTicks": 2,
+  "deathRediscoveryCooldownMs": 8000,
+  "deathSiteRadiusPx": 160
 }

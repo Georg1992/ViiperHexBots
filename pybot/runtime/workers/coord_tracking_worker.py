@@ -95,7 +95,7 @@ class CoordTrackingWorker:
                 track_id=track.id,
                 x=track.x,
                 y=track.y,
-                scale=track.discovery_scale if track.discovery_scale > 0 else 1.0,
+                scale=track.discovery_scale,
                 opacity_baseline=track.opacity_baseline,
                 opacity_baseline_samples=track.opacity_baseline_samples,
                 opacity_decay_streak=track.opacity_decay_streak,
@@ -108,7 +108,11 @@ class CoordTrackingWorker:
                 now_tick=now_ms,
             )
             for track in alive_tracks
+            if track.discovery_scale > 0
         ]
+        if not snapshots:
+            self._update_overlay(now_ms)
+            return
 
         batch = ctx.tracker.track_locals_frame(frame, roi, snapshots)
         results = batch.results
@@ -199,6 +203,10 @@ class CoordTrackingWorker:
             if duplicate:
                 continue
 
+            # Fail closed: discovery must supply a positive scale.
+            if candidate.candidate_scale <= 0:
+                continue
+
             # Build a temporary snapshot for track_local on the fresh frame.
             # Uses track_id=0 as a sentinel — track_locals_frame treats this
             # like any other track for the local-follow search; only the
@@ -207,7 +215,7 @@ class CoordTrackingWorker:
                 track_id=0,
                 x=cx,
                 y=cy,
-                scale=candidate.candidate_scale if candidate.candidate_scale > 0 else 1.0,
+                scale=candidate.candidate_scale,
                 now_tick=now_ms,
             )
             batch = ctx.tracker.track_locals_frame(frame, roi, [snap])

@@ -13,10 +13,11 @@ One discovery pass (same frame):
    tracking (which creates tracks on its next fresh frame at exact coords).
 
 Removal factors run in ``HuntTracks.process_discovery_scan()``:
-- Factor 1: Tracks outside the hunt ROI → removed immediately.
-- Factor 2: Tracks missed for 2+ consecutive discovery scans → removed.
-- First miss: discovery_absent flag set (track stays alive for one more
-  scan cycle).
+- Factor 1: Tracks outside the hunt ROI → removed immediately (bookkeeping).
+- Factor 2: Tracks missed for 2+ consecutive discovery scans → removed
+  (bookkeeping — not confirmed death; no death site).
+- First miss: ``discovery_miss_count`` increments; track stays alive for one
+  more scan cycle.
 
 Discovery never creates tracks directly — tracking owns track creation and
 all position writes. Discovery only matches detections (resetting
@@ -188,16 +189,16 @@ class DiscoveryWorker:
 
         if summary.removed_out_of_range_ids:
             ctx.logger.behavior(
-                f"[DEATH] path=discovery-out-of-range "
+                f"[DISCOVERY] path=out-of-range "
                 f"ids={summary.removed_out_of_range_ids}"
             )
         if summary.removed_discovery_miss_ids:
             ctx.logger.behavior(
-                f"[DEATH] path=discovery-miss-2 "
+                f"[DISCOVERY] path=miss-2 "
                 f"ids={summary.removed_discovery_miss_ids}"
             )
         # Detections seen but nothing new created while death sites are active —
-        # likely corpse heat matched a death site (or unreachable).
+        # likely corpse heat matched a death site.
         if (
             len(filtered) > 0
             and summary.added_count == 0
@@ -211,12 +212,16 @@ class DiscoveryWorker:
                 f"— no new track (corpse heat held by death site)"
             )
 
-        # Teleport clear requires the scan itself to see no living candidates.
-        # Ghost-matched corpse heat (alive_after=0, matched>0) must still block
-        # clear — otherwise we teleport, wipe removed_sites, and recreate the
-        # corpse as a fresh track.
+        # Teleport clear = nothing attackable (no alive tracks, no new candidates).
+        # Corpse heat held only by death sites must not block teleport — sites are
+        # screen-local and wiped when we leave the area.
+        living_for_clear = (
+            0
+            if summary.alive_after == 0 and summary.added_count == 0
+            else max(len(filtered), summary.alive_after)
+        )
         self._hunt_mode.note_discovery_scan_completed(
-            living_count=len(filtered),
+            living_count=living_for_clear,
             added_count=summary.added_count,
             area_epoch=area_epoch,
         )

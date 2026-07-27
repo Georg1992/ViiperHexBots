@@ -195,18 +195,15 @@ class HuntTracks:
     ) -> tuple[int, list[tuple[int, int]], list[tuple[int, int, int]]]:
         """Atomic sample for one discovery capture: epoch + dedup + positions.
 
-        Dedup positions include unreachable tracks and recent death sites so
-        discovery does not re-create tracks for fading corpse heat.
-        Track positions (3-tuples) are alive-only — unreachable IDs must
-        not participate in discovery absence matching.
+        Dedup positions are alive tracks only. Death sites are absorbed later
+        with ``deathSiteRadiusPx`` (not mixed into track dedup).
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
             alive = [t for t in self._tracks if is_alive(t)]
-            unreachable = [t for t in self._tracks if t.state == "unreachable"]
             return (
                 self._area_epoch,
-                self._dedup_positions_locked(tick, alive=alive, unreachable=unreachable),
+                self._dedup_positions_locked(tick, alive=alive),
                 [(t.id, t.x, t.y) for t in alive],
             )
 
@@ -244,13 +241,13 @@ class HuntTracks:
         create them on a fresh frame with exact coordinates.
 
         After matching detections against known tracks, evaluates all
-        removal factors on unmatched tracks:
+        removal factors on unmatched tracks (bookkeeping only — no death sites):
         1. Outside hunt ROI → removed immediately.
         2. Two missed discovery scans → removed.
-        3. First miss → marked discovery_absent (stays alive).
+        3. First miss → ``discovery_miss_count`` += 1 (stays alive one more scan).
 
-        Add new removal factors as separate ``_evaluate_*`` methods and
-        call them here in the ``remove_ids`` collection block.
+        Confirmed death (opacity / idle-dead) uses ``_remove_dead_tracks_locked``
+        elsewhere and records death sites; discovery removals do not.
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
@@ -287,7 +284,7 @@ class HuntTracks:
             )
 
             config = self._detector_config()
-            # Reset discovery_miss_count + update blob-stationary for matches
+            # Reset discovery_miss_count + update discovery_stationary for matches
             for tid, detection in result.matched:
                 track = self._get_track_by_id_locked(tid)
                 if track is not None:
@@ -298,8 +295,20 @@ class HuntTracks:
                         config=config,
                     )
 
+            # Absorb corpse heat into death sites (larger radius than track
+            # dedup). Refresh site position + cooldown while heat remains.
+            kept_candidates: list = []
+            death_absorbed = 0
+            for detection in result.new_candidates:
+                if self._absorb_into_death_site_locked(
+                    detection.x, detection.y, tick
+                ):
+                    death_absorbed += 1
+                    continue
+                kept_candidates.append(detection)
+
             # Publish new candidates for tracking to create on fresh frame
-            self._discovery_candidates = list(result.new_candidates)
+            self._discovery_candidates = kept_candidates
 
             unmatched_ids = set(result.removed_ids)
 
@@ -338,8 +347,8 @@ class HuntTracks:
                 removed_ids=sorted(remove_ids),
                 removed_out_of_range_ids=sorted(out_of_range),
                 removed_discovery_miss_ids=sorted(miss_remove),
-                matched_count=result.matched_count,
-                added_count=len(result.new_candidates),
+                matched_count=result.matched_count + death_absorbed,
+                added_count=len(kept_candidates),
                 removed_count=len(remove_ids),
                 death_sites_active=len(self._death_sites),
             )
@@ -382,8 +391,8 @@ class HuntTracks:
         Side-effect: increments ``discovery_miss_count``.
 
         Returns ``(remove_ids, first_miss_ids)`` where:
-        - ``remove_ids``: tracks with miss_count >= 2 (to be removed).
-        - ``first_miss_ids``: tracks on their first miss (to be marked absent).
+        - ``remove_ids``: tracks with miss_count >= 2 (removed without death site).
+        - ``first_miss_ids``: tracks on their first miss (still alive).
         """
         remove_ids: set[int] = set()
         first_miss_ids: list[int] = []
@@ -512,11 +521,11 @@ class HuntTracks:
 
         **Dead** — mob was hittable (SP consumed at least once), discovery
         heat blob is stationary (unchanged across scans), and the next 2
-        attacks were idle → track is removed.
+        attacks were idle → track removed + death site.
 
-        **Unreachable** — 5 consecutive idle attacks on any track → marked
-        unreachable (red dot, blocks rediscovery).  This catches both
-        never-hittable mobs and accessible mobs that moved behind walls.
+        **Unreachable** — 5 consecutive idle attacks on any track → track
+        removed + death site (same removal as dead). Catches never-hittable
+        mobs and accessible mobs that moved behind walls.
 
         The melee-range guard (150 px) prevents false positives when the
         character is sitting on the mob and auto-attacks are hitting.
@@ -528,9 +537,6 @@ class HuntTracks:
             track = self._get_track_by_id_locked(track_id)
             if track is None:
                 return "none", 0
-
-            if track.state == "unreachable":
-                return "unreachable", track.idle_attack_count
 
             # SP unknown — do not invent idle or accessibility.
             if was_idle is None:
@@ -556,9 +562,10 @@ class HuntTracks:
                     self._remove_dead_tracks_locked({track_id}, tick)
                     return "dead", track.idle_attack_count
 
-                # Path 2: 5 idle attacks (any accessibility) → unreachable
+                # Path 2: 5 idle attacks (any accessibility) → remove + death site
                 if track.idle_attack_count >= self._IDLE_UNREACHABLE_THRESHOLD:
-                    track.state = "unreachable"
+                    tick = now_tick if now_tick is not None else monotonic_ms()
+                    self._remove_dead_tracks_locked({track_id}, tick)
                     return "unreachable", track.idle_attack_count
 
                 return "none", track.idle_attack_count
@@ -637,6 +644,9 @@ class HuntTracks:
     def _death_rediscovery_cooldown_ms(self) -> int:
         return int(self._detector_config()["deathRediscoveryCooldownMs"])
 
+    def _death_site_radius_px(self) -> int:
+        return int(self._detector_config()["deathSiteRadiusPx"])
+
     def _prune_death_sites_locked(self, now_tick: int) -> None:
         cooldown = self._death_rediscovery_cooldown_ms()
         self._death_sites = [
@@ -649,22 +659,46 @@ class HuntTracks:
         self._prune_death_sites_locked(removed_tick)
         self._death_sites.append((x, y, removed_tick))
 
+    def _absorb_into_death_site_locked(
+        self, x: int, y: int, now_tick: int
+    ) -> bool:
+        """If *(x, y)* is near a death site, refresh that site and return True.
+
+        Follows corpse-heat drift and extends the rediscovery cooldown while
+        the corpse remains visible.
+        """
+        self._prune_death_sites_locked(now_tick)
+        radius = self._death_site_radius_px()
+        radius_sq = radius * radius
+        best_i: int | None = None
+        best_d = 0
+        for i, (sx, sy, _removed) in enumerate(self._death_sites):
+            dx = x - sx
+            dy = y - sy
+            dist = dx * dx + dy * dy
+            if dist <= radius_sq and (best_i is None or dist < best_d):
+                best_i = i
+                best_d = dist
+        if best_i is None:
+            return False
+        self._death_sites[best_i] = (x, y, now_tick)
+        return True
+
     def _dedup_positions_locked(
         self,
         now_tick: int,
         *,
         alive: list[MobTrack] | None = None,
-        unreachable: list[MobTrack] | None = None,
     ) -> list[tuple[int, int]]:
-        """Positions discovery must treat as already known (tracks + death sites)."""
-        self._prune_death_sites_locked(now_tick)
+        """Alive-track positions discovery must treat as already known.
+
+        Death sites are absorbed separately via ``_absorb_into_death_site_locked``
+        (larger radius + cooldown refresh).
+        """
+        del now_tick
         if alive is None:
             alive = [t for t in self._tracks if is_alive(t)]
-        if unreachable is None:
-            unreachable = [t for t in self._tracks if t.state == "unreachable"]
-        positions = [(t.x, t.y) for t in alive] + [(t.x, t.y) for t in unreachable]
-        positions.extend((x, y) for x, y, _removed in self._death_sites)
-        return positions
+        return [(t.x, t.y) for t in alive]
 
     @staticmethod
     def _capture_position(
@@ -698,8 +732,8 @@ class HuntTracks:
     def overlay_track_state(self, now_tick: int | None = None) -> tuple[int, list[MobTrackSnapshot], list[MobTrackSnapshot]]:
         with self._lock:
             alive = [self._to_snapshot(track) for track in self._tracks if is_alive(track)]
-            unreachable = [self._to_snapshot(track) for track in self._tracks if track.state == "unreachable"]
-            return len(self._tracks), alive, unreachable
+            # Second list kept for overlay API compat; idle-unreachable now removes.
+            return len(self._tracks), alive, []
 
     def tracks_for_policy(self, now_tick: int | None = None) -> list[MobTrack]:
         with self._lock:

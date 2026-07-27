@@ -355,7 +355,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         assert track is not None
         self.assertEqual(track.lost_count, 1)
 
-    def test_attack_event_resets_lost_streak(self) -> None:
+    def test_attack_event_does_not_clear_lost_streak(self) -> None:
         track_id = self._create(874, 578)
         self.tracks.apply_tracking([_miss(track_id)], now_tick=self.now + 1)
         track = self.tracks.get_track_by_id(track_id)
@@ -364,7 +364,8 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.tracks.apply_attack_event(track_id, now_tick=self.now + 50)
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
-        self.assertEqual(track.lost_count, 0)
+        self.assertEqual(track.lost_count, 1)
+        self.assertEqual(track.attack_count, 1)
 
     def test_area_reset_clears_tracks(self) -> None:
         self._create(874, 578)
@@ -441,17 +442,16 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(track.opacity_baseline_samples, 4)
         self.assertGreaterEqual(track.opacity_baseline, 0.60)
 
-        # Two decay frames — not yet confirmed.
-        for i in range(2):
-            missed, dead = self.tracks.apply_tracking(
-                [_hit(track_id, 874, 578, opacity_score=0.20)],
-                now_tick=self.now + 100 + (i + 1) * 16,
-            )
-            self.assertEqual(missed, [])
-            self.assertEqual(dead, [])
-            self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
+        # One decay frame — not yet confirmed.
+        missed, dead = self.tracks.apply_tracking(
+            [_hit(track_id, 874, 578, opacity_score=0.20)],
+            now_tick=self.now + 100,
+        )
+        self.assertEqual(missed, [])
+        self.assertEqual(dead, [])
+        self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
 
-        # Third consecutive decay frame confirms death.
+        # Second consecutive decay frame confirms death.
         missed, dead = self.tracks.apply_tracking(
             [_hit(track_id, 874, 578, opacity_score=0.18)],
             now_tick=self.now + 200,
@@ -478,7 +478,7 @@ class HuntTracksRulesTests(unittest.TestCase):
             self.assertEqual(dead, [])
         self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
 
-    def test_five_idle_attacks_mark_unreachable(self) -> None:
+    def test_five_idle_attacks_remove_unreachable(self) -> None:
         track_id = self._create(500, 500)
         # Far from character — not melee-guarded.
         for i in range(4):
@@ -489,6 +489,7 @@ class HuntTracksRulesTests(unittest.TestCase):
                 mob_y=500,
                 char_x=0,
                 char_y=0,
+                now_tick=self.now + i,
             )
             self.assertEqual(action, "none")
             self.assertEqual(count, i + 1)
@@ -503,15 +504,19 @@ class HuntTracksRulesTests(unittest.TestCase):
             mob_y=500,
             char_x=0,
             char_y=0,
+            now_tick=self.now + 10,
         )
         self.assertEqual(action, "unreachable")
         self.assertEqual(count, 5)
-        track = self.tracks.get_track_by_id(track_id)
-        assert track is not None
-        self.assertEqual(track.state, "unreachable")
-        # Unreachable tracks are not attack targets.
-        policy = self.tracks.tracks_for_policy(self.now)
-        self.assertEqual([t.id for t in policy], [])
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
+        # Death site blocks rediscovery at the same coordinates.
+        summary = self.tracks.process_discovery_scan(
+            [det(500, 500)],
+            mob_name="horn",
+            now_tick=self.now + 20,
+        )
+        self.assertEqual(summary.added_count, 0)
+        self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 0)
 
     def test_idle_streak_resets_on_sp_spend(self) -> None:
         track_id = self._create(500, 500)
@@ -598,7 +603,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         )
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
-        # Corpse heat at the same spot must not become a new candidate.
+        # Corpse heat slightly offset from the death site must still be held.
         summary = self.tracks.process_discovery_scan(
             [det(505, 502)],
             mob_name="horn",
@@ -608,6 +613,15 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 0)
         self.assertEqual(self.tracks.get_alive_count(), 0)
 
+        # Drift within deathSiteRadiusPx (160) — still blocked, site follows.
+        summary = self.tracks.process_discovery_scan(
+            [det(500 + 120, 500)],
+            mob_name="horn",
+            now_tick=self.now + 100,
+        )
+        self.assertEqual(summary.added_count, 0)
+        self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 0)
+
     def test_opacity_death_blocks_rediscovery_at_death_site(self) -> None:
         track_id = self._create(500, 500)
         for i in range(4):
@@ -615,11 +629,11 @@ class HuntTracksRulesTests(unittest.TestCase):
                 [_hit(track_id, 500, 500, opacity_score=0.60)],
                 now_tick=self.now + (i + 1) * 16,
             )
-        for i in range(2):
-            self.tracks.apply_tracking(
-                [_hit(track_id, 500, 500, opacity_score=0.20)],
-                now_tick=self.now + 100 + (i + 1) * 16,
-            )
+        missed, dead = self.tracks.apply_tracking(
+            [_hit(track_id, 500, 500, opacity_score=0.20)],
+            now_tick=self.now + 100,
+        )
+        self.assertEqual(dead, [])
         missed, dead = self.tracks.apply_tracking(
             [_hit(track_id, 500, 500, opacity_score=0.18)],
             now_tick=self.now + 200,
@@ -662,7 +676,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(summary.added_count, 1)
         self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 1)
 
-    def test_accessible_without_blob_stationary_reaches_unreachable_at_five(self) -> None:
+    def test_accessible_without_blob_stationary_removes_at_five(self) -> None:
         track_id = self._create(500, 500)
         self.tracks.evaluate_idle_attack(
             track_id, was_idle=False, mob_x=500, mob_y=500, char_x=0, char_y=0,
@@ -678,13 +692,11 @@ class HuntTracksRulesTests(unittest.TestCase):
             self.assertEqual(count, i + 1)
         action, count = self.tracks.evaluate_idle_attack(
             track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+            now_tick=self.now + 50,
         )
         self.assertEqual(action, "unreachable")
         self.assertEqual(count, 5)
-        track = self.tracks.get_track_by_id(track_id)
-        assert track is not None
-        self.assertEqual(track.state, "unreachable")
-
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
     def test_discovery_blob_stability_sets_stationary(self) -> None:
         track_id = self._create(500, 500)
         bbox = (480, 480, 40, 40)
@@ -699,9 +711,9 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertTrue(track.discovery_blob_seen)
         self.assertFalse(track.discovery_stationary)
 
-        # Stable blob → stationary.
+        # Stable center coords → stationary (bbox shape ignored).
         self.tracks.process_discovery_scan(
-            [det(501, 500, bbox=(481, 480, 40, 40))],
+            [det(501, 500, bbox=(470, 470, 60, 60))],
             mob_name="horn",
             now_tick=self.now + 100,
         )
@@ -709,7 +721,17 @@ class HuntTracksRulesTests(unittest.TestCase):
         assert track is not None
         self.assertTrue(track.discovery_stationary)
 
-        # Moved blob → not stationary.
+        # Same center again → still stationary.
+        self.tracks.process_discovery_scan(
+            [det(501, 500, bbox=(480, 480, 40, 40))],
+            mob_name="horn",
+            now_tick=self.now + 120,
+        )
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertTrue(track.discovery_stationary)
+
+        # Moved center → not stationary.
         self.tracks.process_discovery_scan(
             [det(560, 500, bbox=(540, 480, 40, 40))],
             mob_name="horn",

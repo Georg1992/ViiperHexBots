@@ -55,10 +55,6 @@ class AttackLoop:
                 )
                 break
 
-    def _read_sp(self) -> int | None:
-        """Current SP from shared ``PlayerVitals`` (UI memory/OCR publish)."""
-        return self._vitals.sp
-
     def _attack_one(self, target_id: int, now_tick: int) -> None:
         ctx = self._ctx
 
@@ -69,12 +65,9 @@ class AttackLoop:
 
         click_x, click_y = snap.x, snap.y
 
-        # ── Idle-attack death detection ────────────────────────────────
-        # Read SP before the attack, then again after the skill delay
-        # so the game has processed SP consumption.  Measuring the delta
-        # per-attack keeps each track's counter independent — other tracks'
-        # SP consumption between attacks cannot contaminate the comparison.
-        pre_sp = self._read_sp()
+        # Idle death: cheap cache samples around the configured skill delay.
+        # Pacing is exactly skill_delay_ms (plus click) — no OCR / capture here.
+        pre_sp, pre_updated_ms = self._vitals.sp_sample()
         try:
             self._input.move_mouse(click_x, click_y)
             self._input.skill_click(ctx.config.skill_scan_code)
@@ -84,19 +77,28 @@ class AttackLoop:
             )
             return
 
-        # Wait for the skill delay so the game updates SP post-consumption
+        # Sole inter-skill wait — game applies SP cost; UI may refresh vitals.
         self._ctx.stop_event.wait(ctx.config.skill_delay_ms / 1000.0)
-        post_sp = self._read_sp()
+        post_sp, post_updated_ms = self._vitals.sp_sample()
 
-        # Idle requires two valid SP samples. Unreadable SP must not be
-        # treated as a hit (that would reset the idle streak / fake accessibility).
-        if pre_sp is None or post_sp is None:
+        # Need two readable samples and a vitals publish during the delay.
+        # Stale cache (no UI refresh) must not fake idle or a hit.
+        if (
+            pre_sp is None
+            or post_sp is None
+            or post_updated_ms <= pre_updated_ms
+        ):
             was_idle: bool | None = None
-            # Throttle: SP unread freezes idle death; spam would drown other [DEATH] lines.
             if now_tick - self._last_sp_unknown_log_ms >= LOG_REPEAT_INTERVAL_MS:
                 self._last_sp_unknown_log_ms = now_tick
+                stale = (
+                    pre_sp is not None
+                    and post_sp is not None
+                    and post_updated_ms <= pre_updated_ms
+                )
+                reason = "vitals-stale" if stale else "sp-unread"
                 ctx.logger.behavior(
-                    f"[DEATH] path=idle-sp-unknown id={target_id} "
+                    f"[IDLE] path=sp-unknown id={target_id} reason={reason} "
                     f"pre_sp={pre_sp} post_sp={post_sp} — idle/death counters frozen"
                 )
         else:
@@ -130,12 +132,12 @@ class AttackLoop:
                 f"[DEATH] path=idle-unreachable id={target_id} @{click_x},{click_y} "
                 f"idle={idle_count} accessible={accessible} "
                 f"blob_stationary={blob_stationary} moving={moving} "
-                f"pre_sp={pre_sp} post_sp={post_sp} — marked unreachable"
+                f"pre_sp={pre_sp} post_sp={post_sp} — track removed, death-site recorded"
             )
             return
         if was_idle is True and idle_count > 0:
             ctx.logger.behavior(
-                f"[DEATH] path=idle-progress id={target_id} "
+                f"[IDLE] path=progress id={target_id} "
                 f"idle={idle_count}/{HuntTracks._IDLE_UNREACHABLE_THRESHOLD} "
                 f"(dead_at={HuntTracks._IDLE_DEAD_THRESHOLD} if accessible+stationary) "
                 f"accessible={accessible} blob_stationary={blob_stationary} "
@@ -144,7 +146,7 @@ class AttackLoop:
             )
         elif was_idle is False and not accessible:
             ctx.logger.behavior(
-                f"[DEATH] path=idle-first-hit id={target_id} "
+                f"[IDLE] path=first-hit id={target_id} "
                 f"pre_sp={pre_sp} post_sp={post_sp} — SP spent, now accessible"
             )
 

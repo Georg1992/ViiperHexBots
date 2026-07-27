@@ -47,3 +47,8 @@ class PlayerVitals:
         """Atomic ``(sp, sp_max)`` for ratio checks."""
         with self._lock:
             return self._sp, self._sp_max
+
+    def sp_sample(self) -> tuple[int | None, int]:
+        """Atomic ``(sp, updated_ms)`` for pre/post idle comparisons."""
+        with self._lock:
+            return self._sp, self._updated_ms

@@ -58,12 +58,12 @@ REQUIRED_CONFIG_KEYS = {
     # track-removal keys (movement + discovery blob stationary + opacity death)
     "movementMoveThresholdPx",
     "movementStopThresholdPx",
-    "discoveryBlobMinIoU",
     "deathOpacityBaselineSamples",
     "deathOpacityMinBaseline",
     "deathOpacityDecayRatio",
     "deathOpacityConfirmTicks",
     "deathRediscoveryCooldownMs",
+    "deathSiteRadiusPx",
 }
 
 # Geometry pre-gate: heat-CC area must sit in [min_area_ratio, max_area_ratio]

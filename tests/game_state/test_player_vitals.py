@@ -34,11 +34,31 @@ class PlayerVitalsTests(unittest.TestCase):
             MagicMock(),
             vitals=vitals,
         )
-        self.assertEqual(loop._read_sp(), 415)
+        self.assertEqual(loop._vitals.sp, 415)
         vitals.publish_sp(403, 500)
-        self.assertEqual(loop._read_sp(), 403)
+        self.assertEqual(loop._vitals.sp, 403)
         vitals.clear_sp()
-        self.assertIsNone(loop._read_sp())
+        self.assertIsNone(loop._vitals.sp)
+
+    def test_sp_sample_detects_stale_vs_fresh(self) -> None:
+        import time
+
+        vitals = PlayerVitals()
+        vitals.publish_sp(100, 200)
+        sp1, t1 = vitals.sp_sample()
+        self.assertEqual(sp1, 100)
+        sp2, t2 = vitals.sp_sample()
+        self.assertEqual(t2, t1)
+        time.sleep(0.002)
+        vitals.publish_sp(100, 200)  # same value, new publish tick
+        sp3, t3 = vitals.sp_sample()
+        self.assertEqual(sp3, 100)
+        self.assertGreater(t3, t1)
+        time.sleep(0.002)
+        vitals.publish_sp(88, 200)
+        sp4, t4 = vitals.sp_sample()
+        self.assertEqual(sp4, 88)
+        self.assertGreater(t4, t3)
 
 
 if __name__ == "__main__":
