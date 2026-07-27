@@ -124,13 +124,6 @@ MOB_FIXTURE_SUITES: tuple[MobFixtureSuite, ...] = (
 )
 
 
-def suite_by_folder(folder: str) -> MobFixtureSuite | None:
-    for suite in MOB_FIXTURE_SUITES:
-        if suite.folder == folder:
-            return suite
-    return None
-
-
 def shipped_mob_spr_stems() -> tuple[str, ...]:
     """SPR stems for every mob under assets/mobs (one per folder)."""
     mobs_dir = PROJECT_ROOT / "assets" / "mobs"

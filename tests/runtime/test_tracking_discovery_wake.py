@@ -14,7 +14,7 @@ from pybot.runtime.workers.coord_tracking_worker import CoordTrackingWorker
 
 class TrackingDiscoveryWakeTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tracks = HuntTracks(load_detector_config(), skill_delay_ms=5000)
+        self.tracks = HuntTracks(load_detector_config())
         self.ctx = MagicMock()
         self.ctx.tracks = self.tracks
         self.ctx.discovery_suspend = threading.Event()

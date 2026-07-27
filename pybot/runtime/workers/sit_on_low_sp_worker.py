@@ -207,10 +207,10 @@ class SitOnLowSpWorker:
                     )
                     if not self._ensure_standing(sit_scan, sit_pose, stand_pose):
                         ctx.logger.behavior(
-                            "[SIT] failed to confirm stand pose after recover"
+                            "[SIT] failed to confirm stand pose after recover, but SP is full so continuing"
                         )
-                        return "pose_failed"
-                    ctx.wait_unless_stopped(SIT_STAND_RESUME_DELAY_S)
+                    else:
+                        ctx.wait_unless_stopped(SIT_STAND_RESUME_DELAY_S)
                     return "recovered"
 
                 now = time.monotonic()
@@ -222,8 +222,8 @@ class SitOnLowSpWorker:
                     last_sp = sp
                     last_progress = now
                 elif sp < last_sp:
-                    last_sp = sp
-                    sp_stalled = True
+                    if now - last_progress >= SIT_SP_STALL_S:
+                        sp_stalled = True
                 elif now - last_progress >= SIT_SP_STALL_S:
                     sp_stalled = True
 
@@ -237,12 +237,13 @@ class SitOnLowSpWorker:
                             frame, hp=hp, previous_hp=last_hp
                         )
                         if danger.hp_dropped:
-                            # Hit while sitting stands the character automatically —
-                            # do not toggle sit (would sit again).
                             ctx.logger.behavior(
                                 f"[SIT] danger while sitting sp={sp} "
                                 f"reasons={','.join(danger.reasons)} "
-                                "(already standing from hit)"
+                                "(hp dropped, ensuring standing)"
+                            )
+                            self._ensure_standing(
+                                sit_scan, sit_pose, stand_pose
                             )
                             return "danger"
                         if (
@@ -317,6 +318,17 @@ class SitOnLowSpWorker:
             drop = stand_pose.body_height - current.body_height
             if drop >= SIT_POSE_MIN_HEIGHT_DROP:
                 return current
+            
+            # If height increased significantly, we were already sitting and just stood up!
+            # Press sit again to actually sit down, and update stand_pose to this new standing height.
+            if drop <= -SIT_POSE_MIN_HEIGHT_DROP:
+                self._ctx.logger.behavior(
+                    f"[SIT] pose inverted! Height increased by {-drop}px. "
+                    "We were already sitting. Updating stand pose and retrying."
+                )
+                stand_pose = current
+                continue
+
             self._ctx.logger.behavior(
                 f"[SIT] sit not confirmed attempt={attempt}/"
                 f"{SIT_POSE_MAX_ATTEMPTS} stand_h={stand_pose.body_height} "

@@ -174,23 +174,6 @@ class DetectorSession:
             elapsed_s=elapsed_s,
         )
 
-    def track_locals(
-        self,
-        roi: HuntRoi,
-        track_snapshots: list[StateTrackSnapshot],
-    ) -> LocalTrackBatchResult:
-        frame = capture_region(roi.x, roi.y, roi.w, roi.h)
-        if frame is None:
-            return LocalTrackBatchResult(
-                ok=False,
-                fail_reason="capture_failed",
-                results=[],
-                duration_ms=0,
-                found_count=0,
-                coord_updates=0,
-            )
-        return self.track_locals_frame(frame, roi, track_snapshots)
-
     def track_locals_frame(
         self,
         frame: np.ndarray | None,

@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import time
 import unittest
-from pathlib import Path
 
 import cv2
-import numpy as np
 
 from pybot.paths import PROJECT_ROOT, RECOGNITION_DIR
 from pybot.recognition.cli import apply_scale_calibration

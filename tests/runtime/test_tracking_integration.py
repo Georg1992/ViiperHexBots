@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 from pybot.runtime.capture.window_roi import HuntRoi
-from pybot.paths import PROJECT_ROOT, RECOGNITION_FIXTURES_DIR
+from pybot.paths import PROJECT_ROOT
 from pybot.recognition.fixtures import default_horn_fixture
 from pybot.recognition.rules import DiscoveryDetection
 from pybot.runtime.config import HuntRuntimeConfig

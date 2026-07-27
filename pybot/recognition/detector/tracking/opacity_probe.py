@@ -18,6 +18,15 @@ from pybot.recognition.detector.scoring.heatmap_detector import (
     sprite_palette_heatmap,
 )
 
+# Top fraction of body-heat pixels for the body-top signal (not minSpritePaletteMatch).
+_OPACITY_BODY_TOP_FRACTION = 0.22
+_OPACITY_BODY_COVERAGE_THRESH = 0.25
+_OPACITY_CONTRAST_DENOM = 128.0
+_OPACITY_W_INFORMATIVE = 0.50
+_OPACITY_W_BODY_COVERAGE = 0.30
+_OPACITY_W_BODY_TOP = 0.12
+_OPACITY_W_CONTRAST = 0.08
+
 
 def _top_match_score(heatmap: np.ndarray, fraction: float) -> float:
     if heatmap.size == 0:
@@ -61,20 +70,24 @@ def measure_opacity_score(
         max_sprite_palette_distance,
     )
 
-    body = _top_match_score(body_heat, 0.22)
+    body = _top_match_score(body_heat, _OPACITY_BODY_TOP_FRACTION)
     sprite_pixels = sprite_palette_heat >= min_sprite_palette_match
     informative_fraction = float(sprite_pixels.mean()) if sprite_pixels.size else 0.0
-    body_coverage = float((body_heat >= 0.25).mean()) if body_heat.size else 0.0
+    body_coverage = (
+        float((body_heat >= _OPACITY_BODY_COVERAGE_THRESH).mean())
+        if body_heat.size
+        else 0.0
+    )
 
     gray = cv2.cvtColor(region_bgr, cv2.COLOR_BGR2GRAY)
-    contrast = float(np.std(gray)) / 128.0
+    contrast = float(np.std(gray)) / _OPACITY_CONTRAST_DENOM
 
     # Coverage of sprite/body colors drops first as the corpse fades; contrast
     # is a light tie-breaker so flat background windows score near zero.
     opacity = (
-        0.50 * informative_fraction
-        + 0.30 * body_coverage
-        + 0.12 * body
-        + 0.08 * min(contrast, 1.0)
+        _OPACITY_W_INFORMATIVE * informative_fraction
+        + _OPACITY_W_BODY_COVERAGE * body_coverage
+        + _OPACITY_W_BODY_TOP * body
+        + _OPACITY_W_CONTRAST * min(contrast, 1.0)
     )
     return float(np.clip(opacity, 0.0, 1.0))

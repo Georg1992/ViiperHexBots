@@ -61,7 +61,7 @@ class HuntPipelineIntegrationTests(unittest.TestCase):
             discovery_scale=anchor.candidate_scale,
         )
         self.assertEqual(track.state, "alive")
-        self.assertEqual(select_target_id([track], now), 1)
+        self.assertEqual(select_target_id([track]), 1)
 
     def test_local_tracking_keeps_track_attackable(self) -> None:
         detector = self._detector_at_discovery_scale()
@@ -88,7 +88,7 @@ class HuntPipelineIntegrationTests(unittest.TestCase):
         result = track_local(detector, self.roi, "horn", track_req)
         self.assertTrue(result.found)
         self.assertEqual(track.state, "alive")
-        self.assertEqual(select_target_id([track], t_create), 1)
+        self.assertEqual(select_target_id([track]), 1)
 
     def test_local_tracking_multi_tick_attackable(self) -> None:
         detector = self._detector_at_discovery_scale()
@@ -118,7 +118,7 @@ class HuntPipelineIntegrationTests(unittest.TestCase):
             self.assertTrue(result.found, f"tick={tick} local follow must keep mob visible")
             track_req["x"] = result.x
             track_req["y"] = result.y
-            self.assertEqual(select_target_id([track], at), 1)
+            self.assertEqual(select_target_id([track]), 1)
 
 
 if __name__ == "__main__":

@@ -219,9 +219,11 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             + [False] + [True] * 48
             + [False] + [True] * 48
         )
-        find_tpl.side_effect = (
-            lambda _f, name, **_kw: (10, 10) if name == "use" else None
-        )
+        find_tpl.side_effect = lambda _f, name, **_kw: {
+            "use": (10, 10),
+            "eqp": (30, 10),
+            "etc": (40, 10),
+        }.get(name)
 
         worker = self._worker(_FakePoller(90))
         worker.items_to_storage()

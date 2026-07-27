@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from pybot.runtime.input import viiper_backend as vb
 from pybot.runtime.input.viiper_backend import ViiperBackend

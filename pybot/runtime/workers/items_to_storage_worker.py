@@ -466,14 +466,6 @@ class ItemsToStorageWorker:
     def _open_storage(self) -> None:
         self._ensure_storage_open()
 
-    def _move_to_first_inventory_cell(self) -> None:
-        """Aim at Use-tab slot (0,0) bottom-left (icon stays uncovered)."""
-        panel, _frame = self._wait_for_inventory_panel()
-        ax, ay = panel.slot_aim(0, 0)
-        ox, oy = self._client_origin()
-        self._input.move_mouse(ox + ax, oy + ay)
-        time.sleep(0.2)
-
     def _cursor_off_screen(self) -> None:
         """Move cursor just outside the client so it cannot cover UI."""
         client = self._ctx.capture.get_client_rect_screen()
@@ -550,6 +542,7 @@ class ItemsToStorageWorker:
         self._deposit_tab_grid(
             tab_label="Use",
             skip_wings=True,
+            handle_ok=True,
         )
 
     def _deposit_tab_grid(
@@ -567,6 +560,7 @@ class ItemsToStorageWorker:
         inp = self._input
         ox, oy = self._client_origin()
         guard = STORAGE_INV_COLS * STORAGE_INV_ROWS
+        failed_slots = set()
         for _ in range(guard):
             self._abort_if_critical_hp()
 
@@ -574,6 +568,8 @@ class ItemsToStorageWorker:
                 frame = self._capture_client()
                 panel = require_inventory_panel(frame)
                 for col, row, cx, cy in panel.iter_slot_centers():
+                    if (col, row) in failed_slots:
+                        continue
                     if slot_looks_empty(frame, cx, cy):
                         continue
                     if skip_wings and slot_contains_template(frame, "wing", cx, cy):
@@ -590,9 +586,11 @@ class ItemsToStorageWorker:
                 log(f"[STORAGE] ItemsToStorage {tab_label} tab clear")
                 return
             col, row, ax, ay = target
+            failed_slots.add((col, row))
             log(
                 f"[STORAGE] ItemsToStorage deposit {tab_label} item "
-                f"col={col} row={row} low-left ({ax},{ay})"
+                f"col={col} row={row} low-left ({ax},{ay}) "
+                f"panel-validated"
             )
             self._input.move_mouse(ox + ax, oy + ay)
             time.sleep(STORAGE_WING_AIM_SETTLE_S)
@@ -603,16 +601,35 @@ class ItemsToStorageWorker:
                     sx, sy = _cursor_pos()
                     inp.move_mouse(sx + 40, sy)
             self._alt_rmb_deposit()
+            # Let the slot clear before the next scan.
+            time.sleep(STORAGE_UI_SETTLE_S)
         raise InventoryUiError(
             f"{tab_label}-tab deposit did not finish within grid size"
         )
 
     def _select_inventory_tab(self, name: str) -> None:
-        """Click an inventory tab (``use`` / ``eqp`` / ``etc``) and settle."""
+        """Click an inventory tab (``use`` / ``eqp`` / ``etc``) and settle.
+
+        Tab BMPs match the *unselected* look. When the tab is already active
+        (selected tint), the template misses — treat that as already selected.
+        """
         log = self._ctx.logger.behavior
+
+        def find() -> tuple[int, int] | None:
+            return find_template(self._capture_client(), name)
+
+        self._cursor_off_screen()
+        loc = find()
+        if loc is None:
+            self._cursor_off_screen()
+            loc = find()
+        if loc is None:
+            log(f"[STORAGE] {name} tab already active ({name}_img not visible)")
+            return
         log(f"[STORAGE] click {name} tab")
-        self._move_to_template(name)
-        time.sleep(0.1)
+        ox, oy = self._client_origin()
+        self._input.move_mouse(ox + loc[0], oy + loc[1])
+        time.sleep(0.2)
         self._input.left_click()
         self._cursor_off_screen()
         time.sleep(STORAGE_UI_SETTLE_S)
@@ -773,12 +790,6 @@ class ItemsToStorageWorker:
     def get_fly_wings(self) -> None:
         """AHK ``GetFlyWings`` — restock only, single open/close."""
         self.storage_session(dump=False, restock=True)
-
-    def _cursor_slot_empty(self) -> bool:
-        """True when the icon under the cursor looks like an empty Use/Eqp/Etc slot."""
-        frame = self._capture_client()
-        cx, cy = self._cursor_in_client()
-        return slot_looks_empty(frame, cx, cy)
 
     def _abandon_fly_wings(self, reason: str) -> None:
         """Close menus, disable GetFlyWings for this hunt."""

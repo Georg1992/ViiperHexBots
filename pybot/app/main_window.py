@@ -733,18 +733,6 @@ class MainWindow:
         self._schedule_status_panel_poll()
         self._settings_apply_enabled = True
 
-    def _labeled_entry(
-        self, parent, label: str, value: str, row: int
-    ) -> ttk.Entry:
-        cell = ttk.Frame(parent)
-        cell.grid(row=row, column=0, sticky="w", pady=2)
-        ttk.Label(cell, text=label).pack(side=tk.LEFT)
-        entry = ttk.Entry(cell, width=10)
-        entry.insert(0, value)
-        entry.pack(side=tk.LEFT, padx=(4, 0))
-        self._bind_setting_entry(entry)
-        return entry
-
     def _key_entry(
         self,
         parent,
@@ -1041,13 +1029,6 @@ class MainWindow:
         if current is None:
             return f"—/{maximum}"
         return f"{current}/{maximum}"
-
-    def _clear_memory_stats(self, placeholder: str = "—") -> None:
-        self.memory_name.configure(text=placeholder)
-        self.memory_sp.configure(text=placeholder)
-        self.memory_weight.configure(text=placeholder)
-        if not self._panel_owns_sp_weight():
-            self.vitals.clear_sp()
 
     def _clear_vision_stats(self, placeholder: str = "—") -> None:
         """Clear vision-backed labels (HP always; SP/Weight when panel owns them)."""
@@ -1395,10 +1376,6 @@ class MainWindow:
         """Stop the bot (delegates to lifecycle)."""
         self.lifecycle.stop()
         self.log_pipe.log("Bot stopped (VIIPER still running)")
-
-    def pause_bot(self) -> None:
-        """Pause the bot (delegates to lifecycle)."""
-        self.lifecycle.pause()
 
     def resume_bot(self) -> None:
         """Resume the bot and restore game window focus."""

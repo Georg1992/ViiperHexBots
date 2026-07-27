@@ -11,9 +11,17 @@ CELL_SIZE_PX = 64
 DEFAULT_SEARCH_RANGE_CELLS = 16
 WORKER_POLL_INTERVAL_S = 0.05
 LOG_REPEAT_INTERVAL_MS = 5000
+# Attack loop spin when no target or after one attack (half worker poll).
+ATTACK_IDLE_SPIN_S = WORKER_POLL_INTERVAL_S / 2.0
 # Idle SP confirmation: post observation must be this fresh at sample time,
 # otherwise an early mid-wait republish of pre-cost SP can look like idle.
 SP_IDLE_MAX_OBSERVATION_AGE_MS = 250
+# Discovery scans without a match before track removal.
+DISCOVERY_MISS_REMOVE_COUNT = 2
+# Idle-attack death / unreachable policy.
+IDLE_DEAD_ATTACK_COUNT = 2
+IDLE_UNREACHABLE_ATTACK_COUNT = 5
+MELEE_IDLE_GUARD_RADIUS_PX = 150
 SIT_LOW_SP_RATIO = 0.05
 SIT_RESUME_SP_RATIO = 0.98
 SIT_SP_POLL_INTERVAL_S = 0.25
@@ -27,8 +35,8 @@ SIT_POSE_MAX_ATTEMPTS = 5
 # Sitting must shrink body height by at least this many px vs stand pose
 # (matches character-pose fixture gap; see test_character_pose).
 SIT_POSE_MIN_HEIGHT_DROP = 20
-# SP ticks roughly every 2–3s while sitting; no increase for this long → stall.
-SIT_SP_STALL_S = 5.0
+# SP ticks roughly every 4s while sitting; no increase for this long → stall.
+SIT_SP_STALL_S = 15.0
 # How often to OCR HP while sitting (vision-only; Gepard-sensitive).
 SIT_HP_POLL_S = 1.0
 # Press HP Restore Key when vision HP/max is below this (item path).
@@ -50,10 +58,6 @@ STORAGE_ENTER_SCAN_CODE = 284
 ALT_MOUSE_CLICK_DELAY_S = 0.1
 # Settle after moving onto a Use-tab fly wing before Alt+RMB deposit.
 STORAGE_WING_AIM_SETTLE_S = 0.25
-# Offset from cell1 template top-left into the first inventory cell center.
-# Prefer InventoryPanel slot geometry; kept for AHK-era call sites.
-STORAGE_CELL1_OFFSET_X = 13
-STORAGE_CELL1_OFFSET_Y = 28
 # Use-tab grid from assets/UI/InventoryPanel.png (8×6, 32px pitch).
 STORAGE_INV_COLS = 8
 STORAGE_INV_ROWS = 6
@@ -79,7 +83,12 @@ __all__ = [
     "DEFAULT_SEARCH_RANGE_CELLS",
     "WORKER_POLL_INTERVAL_S",
     "LOG_REPEAT_INTERVAL_MS",
+    "ATTACK_IDLE_SPIN_S",
     "SP_IDLE_MAX_OBSERVATION_AGE_MS",
+    "DISCOVERY_MISS_REMOVE_COUNT",
+    "IDLE_DEAD_ATTACK_COUNT",
+    "IDLE_UNREACHABLE_ATTACK_COUNT",
+    "MELEE_IDLE_GUARD_RADIUS_PX",
     "SIT_LOW_SP_RATIO",
     "SIT_RESUME_SP_RATIO",
     "SIT_SP_POLL_INTERVAL_S",
@@ -100,8 +109,6 @@ __all__ = [
     "STORAGE_ENTER_SCAN_CODE",
     "ALT_MOUSE_CLICK_DELAY_S",
     "STORAGE_WING_AIM_SETTLE_S",
-    "STORAGE_CELL1_OFFSET_X",
-    "STORAGE_CELL1_OFFSET_Y",
     "STORAGE_INV_COLS",
     "STORAGE_INV_ROWS",
     "STORAGE_INV_OPEN_TIMEOUT_S",

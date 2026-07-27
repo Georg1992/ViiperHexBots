@@ -148,3 +148,21 @@ def test_menu_open_closed_on_screenshots() -> None:
     assert is_storage_open(open_frame) is True
     assert is_inventory_open(closed_frame) is False
     assert is_storage_open(closed_frame) is False
+
+
+def test_inventory_panel_not_confused_with_storage() -> None:
+    """Master Storage title chrome must not win over Inventory.
+
+    Live bug: header-only match locked onto storage at ~(1074,302) and
+    ItemsToStorage looped Alt+RMB on storage row 0 instead of inventory.
+    """
+    frame = cv2.imread(
+        str(PROJECT_ROOT / "tests" / "FlyWingINV.png"), cv2.IMREAD_COLOR
+    )
+    assert frame is not None
+    panel = require_inventory_panel(frame)
+    assert panel.x == 514 and panel.y == 368
+    # Storage false-positive region from header-only matching.
+    assert not (panel.x == 1074 and panel.y == 302)
+    wings = find_wings_in_use_grid(frame, panel)
+    assert any(c == 0 and r == 0 for c, r, _x, _y in wings)

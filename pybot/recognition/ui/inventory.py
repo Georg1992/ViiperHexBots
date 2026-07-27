@@ -173,32 +173,73 @@ def require_template(
     return loc
 
 
+def _panel_has_inventory_tabs(
+    frame_bgr: np.ndarray,
+    hit: InventoryPanelHit,
+    *,
+    max_sqdiff: float = TEMPLATE_MATCH_MAX_SQDIFF,
+) -> bool:
+    """True when Use/Eqp/Etc tabs sit on the inventory left strip.
+
+    Master Storage's title bar is a near-match for the inventory header crop;
+    requiring an inventory tab rejects that false positive.
+    """
+    h, w = frame_bgr.shape[:2]
+    x0 = max(0, hit.x)
+    y0 = max(0, hit.y)
+    x1 = min(w, hit.x + 28)
+    y1 = min(h, hit.y + hit.height)
+    if x1 <= x0 or y1 <= y0:
+        return False
+    strip = frame_bgr[y0:y1, x0:x1]
+    return any(
+        find_template(strip, tab, max_sqdiff=max_sqdiff) is not None
+        for tab in ("use", "eqp", "etc")
+    )
+
+
 def find_inventory_panel(
     frame_bgr: np.ndarray,
     *,
     max_sqdiff: float = PANEL_HEADER_MAX_SQDIFF,
 ) -> InventoryPanelHit | None:
-    """Locate the inventory window via its title-bar header crop."""
+    """Locate the inventory window via its title-bar header crop.
+
+    Walks best header matches until one also has inventory tabs, so Master
+    Storage (similar title chrome) is not mistaken for Inventory.
+    """
     if frame_bgr is None or frame_bgr.size == 0:
         return None
     header, off_x, off_y = _load_inventory_header()
     panel = _load_inventory_panel()
-    if (
-        frame_bgr.shape[0] < header.shape[0]
-        or frame_bgr.shape[1] < header.shape[1]
-    ):
+    ph, pw = int(panel.shape[0]), int(panel.shape[1])
+    hh, hw = int(header.shape[0]), int(header.shape[1])
+    if frame_bgr.shape[0] < hh or frame_bgr.shape[1] < hw:
         return None
     result = cv2.matchTemplate(frame_bgr, header, cv2.TM_SQDIFF_NORMED)
-    min_val, _max_val, min_loc, _max_loc = cv2.minMaxLoc(result)
-    if min_val > max_sqdiff:
-        return None
-    hx, hy = int(min_loc[0]), int(min_loc[1])
-    return InventoryPanelHit(
-        x=hx - off_x,
-        y=hy - off_y,
-        width=int(panel.shape[1]),
-        height=int(panel.shape[0]),
-    )
+    work = result.copy()
+    suppress_y = max(8, hh // 2)
+    suppress_x = max(8, hw // 2)
+    for _ in range(12):
+        min_val = float(work.min())
+        if min_val > max_sqdiff:
+            return None
+        min_y, min_x = np.unravel_index(int(work.argmin()), work.shape)
+        hx, hy = int(min_x), int(min_y)
+        hit = InventoryPanelHit(
+            x=hx - off_x,
+            y=hy - off_y,
+            width=pw,
+            height=ph,
+        )
+        if _panel_has_inventory_tabs(frame_bgr, hit):
+            return hit
+        y0 = max(0, hy - suppress_y)
+        y1 = min(work.shape[0], hy + suppress_y)
+        x0 = max(0, hx - suppress_x)
+        x1 = min(work.shape[1], hx + suppress_x)
+        work[y0:y1, x0:x1] = 1.0
+    return None
 
 
 def require_inventory_panel(

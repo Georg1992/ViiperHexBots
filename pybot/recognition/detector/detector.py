@@ -80,11 +80,11 @@ _BODY_STRONG_SMALL_HEAT_AREA_MIN_AREA_MULT = 2.0
 # peakRelativeThreshold (blob-formation floor). 1.5× is a mild lift above the
 # weakest admissible blob so gray-world fringe peaks (e.g. 0.28 of peak) drop
 # while multi-mob secondary TPs (~0.47+) remain.
-_SMALL_HEAT_RELATIVE_PEAK_MULT = 1.5
+_SMALL_HEAT_RELATIVE_PEAK_MULT = 1.8
 # Post-silhouette extract body floor as a fraction of descriptor.min_body_cluster_strong.
 # Extract is sprite-scale and tighter than the heat CC; 0.5× still rejects wrong-fill
 # shapes while leaving margin for patchy mobs (Creamy TP sits ~0.79× full floor).
-_EXTRACT_BODY_STRONG_FLOOR_FRAC = 0.5
+_EXTRACT_BODY_STRONG_FLOOR_FRAC = 0.75
 
 
 
@@ -98,7 +98,7 @@ _DOWNSCALE_MIN_WORK_RESOLUTION_PX = 24.0
 _EXTRACT_BLOAT_AREA_RATIO = 2.0
 _CONTENT_NOISE_SOFT_HARD_RATIO = 2.0
 # Full 16x16 hard fill = palette smear in a desc-sized window, not a sprite body.
-_SOLID_FILL_HARD_FRACTION = 0.95
+_SOLID_FILL_HARD_FRACTION = 0.85
 
 # Silhouette crop / morph / deform sizing.
 _MIN_DESCRIPTOR_PX = 8

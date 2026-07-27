@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import (
+    ATTACK_IDLE_SPIN_S,
+    IDLE_DEAD_ATTACK_COUNT,
+    IDLE_UNREACHABLE_ATTACK_COUNT,
     LOG_REPEAT_INTERVAL_MS,
     SP_IDLE_MAX_OBSERVATION_AGE_MS,
     WORKER_POLL_INTERVAL_S,
 )
 from pybot.runtime.hunt_mode import HuntModeController
-from pybot.runtime.hunt_tracks import HuntTracks, monotonic_ms
+from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.workers.worker_contexts import AttackLoopContext
 
@@ -47,11 +50,11 @@ class AttackLoop:
                 target_id = self._ctx.policy.select_target(policy_tracks, tick)
                 if target_id:
                     self._attack_one(target_id, tick)
-                    self._ctx.stop_event.wait(0.025)
+                    self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
                     continue
 
                 self._hunt_mode.on_no_attackable_targets()
-                self._ctx.stop_event.wait(0.025)
+                self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
             except Exception:
                 import traceback
                 self._ctx.logger.behavior(
@@ -170,8 +173,8 @@ class AttackLoop:
         if was_idle is True and idle_count > 0:
             ctx.logger.behavior(
                 f"[IDLE] path=progress id={target_id} "
-                f"idle={idle_count}/{HuntTracks._IDLE_UNREACHABLE_THRESHOLD} "
-                f"(dead_at={HuntTracks._IDLE_DEAD_THRESHOLD} if accessible+stationary) "
+                f"idle={idle_count}/{IDLE_UNREACHABLE_ATTACK_COUNT} "
+                f"(dead_at={IDLE_DEAD_ATTACK_COUNT} if accessible+stationary) "
                 f"accessible={accessible} blob_stationary={blob_stationary} "
                 f"moving={moving} idle_before={idle_before} "
                 f"pre_sp={pre_sp} post_sp={post_sp}"

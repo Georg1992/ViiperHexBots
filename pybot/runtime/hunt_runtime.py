@@ -124,7 +124,7 @@ def create_runtime_deps(
     if behavior_callback:
         logger.set_behavior_callback(behavior_callback)
     detector_config = load_detector_config()
-    tracks = HuntTracks(detector_config, skill_delay_ms=config.skill_delay_ms)
+    tracks = HuntTracks(detector_config)
     policy = HuntPolicy()
     capture = HuntWindowCapture(config)
     # Two independent detectors: discovery's full scan and tracking's local

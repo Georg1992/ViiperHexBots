@@ -10,8 +10,6 @@ from __future__ import annotations
 import queue
 import shutil
 import threading
-import time
-from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 

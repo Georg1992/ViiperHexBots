@@ -16,11 +16,24 @@ import cv2
 import numpy as np
 
 from pybot.recognition.detector.descriptors.descriptor import MobDescriptor
-from pybot.recognition.detector.scoring.heatmap_detector import palette_heatmap, sprite_palette_heatmap
+from pybot.recognition.detector.scoring.heatmap_detector import (
+    _COVERAGE_SIZE_FRAC,
+    palette_heatmap,
+    sprite_palette_heatmap,
+)
 from pybot.recognition.detector.tracking.opacity_probe import measure_opacity_score
 
 if TYPE_CHECKING:
     from pybot.recognition.detector.detector import MobDetector
+
+_LOCAL_SUPPRESS_RADIUS_FLOOR_PX = 8
+_LOCAL_CROSS_TRACK_SUPPRESS_DIV = 2
+_LOCAL_PEAK_SUPPRESS_DIV = 4
+_LOCAL_FOLLOW_MIN_HEAT_FRAC = 0.5
+_LOCAL_FOLLOW_BODY_W = 0.55
+_LOCAL_FOLLOW_ACCENT_W = 0.45
+_LOCAL_FOLLOW_SPRITE_W = 0.75
+_LOCAL_FOLLOW_COLOR_W = 0.55
 
 @dataclass(frozen=True)
 class LocalTrackResult:
@@ -180,8 +193,8 @@ def _find_local_peak(
     suppress_positions: list[tuple[int, int]] | None = None,
 ) -> tuple[int, int, float, float, tuple[int, int, int, int]] | None:
     frame_h, frame_w = frame_bgr.shape[:2]
-    margin_x = int(round(descriptor.avg_width * scale * 0.6))
-    margin_y = int(round(descriptor.avg_height * scale * 0.6))
+    margin_x = int(round(descriptor.avg_width * scale * _COVERAGE_SIZE_FRAC))
+    margin_y = int(round(descriptor.avg_height * scale * _COVERAGE_SIZE_FRAC))
     pad = search_radius_px + max(margin_x, margin_y)
     x0 = max(0, cx - pad)
     y0 = max(0, cy - pad)
@@ -199,7 +212,10 @@ def _find_local_peak(
 
     # Suppress heat near other tracks so each track grabs its own mob.
     if suppress_positions:
-        suppress_radius = max(8, search_radius_px // 2)
+        suppress_radius = max(
+            _LOCAL_SUPPRESS_RADIUS_FLOOR_PX,
+            search_radius_px // _LOCAL_CROSS_TRACK_SUPPRESS_DIV,
+        )
         for sx, sy in suppress_positions:
             lsx = sx - x0
             lsy = sy - y0
@@ -218,12 +234,15 @@ def _find_local_peak(
     dist_sq = (xx - anchor_x) ** 2 + (yy - anchor_y) ** 2
     mask = dist_sq <= (search_radius_px * search_radius_px)
     masked = np.where(mask, local_final, 0.0)
-    min_heat = detector.heatmap_detector.min_center_heat * 0.5
+    min_heat = detector.heatmap_detector.min_center_heat * _LOCAL_FOLLOW_MIN_HEAT_FRAC
 
     best_peak: tuple[int, int, float, float, tuple[int, int, int, int]] | None = None
     best_living_sim = -1.0
     work = masked.copy()
-    suppress_radius = max(8, search_radius_px // 4)
+    suppress_radius = max(
+        _LOCAL_SUPPRESS_RADIUS_FLOOR_PX,
+        search_radius_px // _LOCAL_PEAK_SUPPRESS_DIV,
+    )
     # Check the single strongest heatmap peak. The center fast path handles
     # the normal case; only the top heatmap candidate is worth the expensive
     # score_at() silhouette gate call. A 2nd iteration would rarely differ.
@@ -256,7 +275,10 @@ def _build_local_follow_heatmap(
     )
     body = palette_heatmap(crop_bgr, descriptor.body_palette)
     accent = palette_heatmap(crop_bgr, descriptor.accent_colors)
-    color_signal = np.maximum(body * 0.55, accent * 0.45)
+    color_signal = np.maximum(
+        body * _LOCAL_FOLLOW_BODY_W,
+        accent * _LOCAL_FOLLOW_ACCENT_W,
+    )
 
     final = np.zeros(crop_bgr.shape[:2], dtype=np.float32)
     # Use at most 2 scales — the track's rough scale plus one adjacent.
@@ -272,6 +294,9 @@ def _build_local_follow_heatmap(
         )
         sprite_heat = cv2.blur(sprite, window)
         color_heat = cv2.blur(color_signal, window)
-        combined = np.maximum(sprite_heat * 0.75, color_heat * 0.55).astype(np.float32)
+        combined = np.maximum(
+            sprite_heat * _LOCAL_FOLLOW_SPRITE_W,
+            color_heat * _LOCAL_FOLLOW_COLOR_W,
+        ).astype(np.float32)
         final = np.maximum(final, combined)
     return final

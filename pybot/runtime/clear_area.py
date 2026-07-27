@@ -57,9 +57,7 @@ def scan_living_count(ctx: _ClearAreaContext) -> int | None:
     scan = ctx.detector.discover_frame(frame, roi)
     if not scan.ok:
         return None
-    filtered = filter_scan_candidates(
-        scan.detections, roi, ctx.config.cell_size_px
-    )
+    filtered = filter_scan_candidates(scan.detections)
     return len(filtered)
 
 

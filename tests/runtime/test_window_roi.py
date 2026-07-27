@@ -9,7 +9,6 @@ import numpy as np
 from pybot.runtime.capture.window_roi import (
     crop_frame_to_hunt_search_roi,
     hunt_roi_from_client_rect,
-    hunt_roi_from_frame_shape,
     player_ignore_box,
     point_inside_ignore,
     search_box_size_px,

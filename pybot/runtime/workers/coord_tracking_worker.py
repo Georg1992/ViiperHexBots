@@ -253,7 +253,6 @@ class CoordTrackingWorker:
 
     def _update_overlay(self, now_ms: int) -> None:
         ctx = self._ctx
-        track_count, alive, unreachable = ctx.tracks.overlay_track_state(now_ms)
+        track_count, alive = ctx.tracks.overlay_track_state(now_ms)
         ctx.overlay.set_track_stats(track_count=track_count, alive_count=len(alive))
         ctx.overlay.set_track_positions([(t.x, t.y) for t in alive])
-        ctx.overlay.set_unreachable_positions([(t.x, t.y) for t in unreachable])

@@ -132,7 +132,7 @@ class DiscoveryWorker:
 
         self._scan_count += 1
 
-        filtered = filter_scan_candidates(scan.detections, roi, ctx.config.cell_size_px)
+        filtered = filter_scan_candidates(scan.detections)
         ctx.overlay.set_scan_living(len(filtered))
 
         detections = [

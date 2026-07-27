@@ -64,7 +64,7 @@ def det(
 class HuntTracksRulesTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = load_detector_config()
-        self.tracks = HuntTracks(self.config, skill_delay_ms=5000)
+        self.tracks = HuntTracks(self.config)
         self.policy = HuntPolicy()
         self.now = 1_000_000
 
