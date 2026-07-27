@@ -561,9 +561,8 @@ class ItemsToStorageWorker:
         handle_ok: bool = False,
     ) -> None:
         """Deposit items from the current inventory tab.
-        We only need to move the cursor to the 1st slot. Alt+right click moves the item
-        to storage and moves the next one to the 1st slot. So when the 1st slot is empty,
-        we are done with this tab and move to the next tab.
+        We check if the first slot is empty with the cursor off-screen. If it's not empty,
+        we move to the first slot, Alt+Right Click, then move the cursor off-screen for the next check.
         """
         log = self._ctx.logger.behavior
         inp = self._input
@@ -577,14 +576,13 @@ class ItemsToStorageWorker:
         first_cx, first_cy = panel_init.slot_center(first_col, first_row)
         first_ax, first_ay = panel_init.slot_aim(first_col, first_row)
 
-        log(f"[STORAGE] Move to first slot of {tab_label} tab ({first_ax},{first_ay})")
-        self._input.move_mouse(ox + first_ax, oy + first_ay)
-        time.sleep(STORAGE_WING_AIM_SETTLE_S)
-
         for pass_i in range(guard):
             self._abort_if_critical_hp()
 
+            # Always check slot status with cursor off-screen to prevent covering slot
+            self._cursor_off_screen()
             frame = self._capture_client()
+
             if slot_looks_empty(frame, first_cx, first_cy):
                 log(f"[STORAGE] ItemsToStorage {tab_label} tab first slot empty — done")
                 return
@@ -594,6 +592,11 @@ class ItemsToStorageWorker:
                 return
 
             log(f"[STORAGE] ItemsToStorage deposit {tab_label} item from first slot")
+            
+            # Move cursor to first slot to perform deposit
+            self._input.move_mouse(ox + first_ax, oy + first_ay)
+            time.sleep(STORAGE_WING_AIM_SETTLE_S)
+
             if handle_ok:
                 time.sleep(0.05)
                 if self._image_on_screen("ok"):
