@@ -29,7 +29,7 @@
   "deathOpacityBaselineSamples": 4,
   "deathOpacityMinBaseline": 0.20,
   "deathOpacityDecayRatio": 0.85,
-  "deathOpacityConfirmTicks": 2,
+  "deathOpacityConfirmTicks": 3,
   "deathRediscoveryCooldownMs": 8000,
   "deathSiteRadiusPx": 160
 }

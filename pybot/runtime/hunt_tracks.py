@@ -23,6 +23,12 @@ from pybot.recognition.rules import (
 
 from pybot.runtime.track_reconciler import DiscoveryReconcileResult, TrackReconciler
 from pybot.runtime.capture.window_roi import HuntRoi
+from pybot.runtime.constants import (
+    DISCOVERY_MISS_REMOVE_COUNT,
+    IDLE_DEAD_ATTACK_COUNT,
+    IDLE_UNREACHABLE_ATTACK_COUNT,
+    MELEE_IDLE_GUARD_RADIUS_PX,
+)
 
 from pybot.recognition.detector.detector import load_detector_config
 
@@ -69,19 +75,12 @@ class AreaClearStatus:
 
 
 class HuntTracks:
-    def __init__(
-        self,
-        detector_config: dict | None = None,
-        *,
-        skill_delay_ms: int = 5000,
-    ) -> None:
-        del skill_delay_ms  # attack pacing owns skill delay; keep ctor compat
+    def __init__(self, detector_config: dict | None = None) -> None:
         self._lock = threading.RLock()
         self._tracks: list[MobTrack] = []
         self._detector_config_ref = detector_config
         self._next_id = 1
         self._area_epoch = 0
-        self._last_reconcile_summary: ReconcileSummary | None = None
         self._discovery_candidates: list[DiscoveryDetection] = []
         # Recent death positions (x, y, removed_tick) — block rediscovery of
         # fading corpse heat until deathRediscoveryCooldownMs elapses.
@@ -91,7 +90,6 @@ class HuntTracks:
         with self._lock:
             self._tracks = []
             self._next_id = 1
-            self._last_reconcile_summary = None
             self._discovery_candidates = []
             self._death_sites = []
 
@@ -116,7 +114,6 @@ class HuntTracks:
         self._area_epoch += 1
         self._tracks = []
         self._next_id = 1
-        self._last_reconcile_summary = None
         self._discovery_candidates = []
         self._death_sites = []
 
@@ -144,7 +141,6 @@ class HuntTracks:
                 # No tracks at all — reset ID counter to prevent unbounded
                 # growth across many create/remove cycles.
                 self._next_id = 1
-                self._last_reconcile_summary = None
                 self._discovery_candidates = []
         return AreaClearStatus(
             clear=alive == 0,
@@ -166,10 +162,6 @@ class HuntTracks:
                 return None
             return self._to_snapshot(track)
 
-    def snapshot_tracks(self, now_tick: int | None = None) -> list[MobTrackSnapshot]:
-        with self._lock:
-            return [self._to_snapshot(track) for track in self._tracks]
-
     def snapshot_alive(self, now_tick: int | None = None) -> list[MobTrackSnapshot]:
         with self._lock:
             return [self._to_snapshot(track) for track in self._tracks if is_alive(track)]
@@ -186,13 +178,6 @@ class HuntTracks:
     def positions_snapshot(self, now_tick: int | None = None) -> list[tuple[int, int]]:
         with self._lock:
             return [(t.x, t.y) for t in self._tracks if is_alive(t)]
-
-    def alive_track_positions_snapshot(
-        self, now_tick: int | None = None
-    ) -> list[tuple[int, int, int]]:
-        """Alive (track_id, x, y) at one instant for discovery absence matching."""
-        with self._lock:
-            return [(t.id, t.x, t.y) for t in self._tracks if is_alive(t)]
 
     def discovery_frame_snapshot(
         self, now_tick: int | None = None
@@ -278,7 +263,6 @@ class HuntTracks:
                     removed_count=0,
                     death_sites_active=len(self._death_sites),
                 )
-                self._last_reconcile_summary = empty
                 return empty
             positions = (
                 existing_positions
@@ -377,7 +361,6 @@ class HuntTracks:
                 removed_count=len(remove_ids),
                 death_sites_active=len(self._death_sites),
             )
-            self._last_reconcile_summary = summary
             return summary
 
     # ── Removal-factor evaluators ────────────────────────────────────────
@@ -429,7 +412,7 @@ class HuntTracks:
                 continue
             track.discovery_miss_count += 1
             clear_discovery_blob_observation(track)
-            if track.discovery_miss_count >= 2:
+            if track.discovery_miss_count >= DISCOVERY_MISS_REMOVE_COUNT:
                 remove_ids.add(track_id)
             else:
                 first_miss_ids.append(track_id)
@@ -525,10 +508,6 @@ class HuntTracks:
 
             return missed_ids, opacity_deaths
 
-    _IDLE_DEAD_THRESHOLD = 2
-    _IDLE_UNREACHABLE_THRESHOLD = 5
-    _MELEE_RADIUS_PX = 150
-
     def evaluate_idle_attack(
         self,
         track_id: int,
@@ -574,10 +553,17 @@ class HuntTracks:
                 return "none", track.idle_attack_count
 
             if was_idle:
+                # Moving mobs are actively pathing/chasing — do not mark them unreachable.
+                if track.moving:
+                    track.idle_attack_count = 0
+                    return "none", 0
+
                 # Mob must NOT be at melee range ("sitting on character")
                 dx = mob_x - char_x
                 dy = mob_y - char_y
-                if (dx * dx + dy * dy) <= (self._MELEE_RADIUS_PX * self._MELEE_RADIUS_PX):
+                if (dx * dx + dy * dy) <= (
+                    MELEE_IDLE_GUARD_RADIUS_PX * MELEE_IDLE_GUARD_RADIUS_PX
+                ):
                     track.idle_attack_count = 0
                     return "none", 0
 
@@ -587,14 +573,14 @@ class HuntTracks:
                 if (
                     track.was_accessible
                     and track.discovery_stationary
-                    and track.idle_attack_count >= self._IDLE_DEAD_THRESHOLD
+                    and track.idle_attack_count >= IDLE_DEAD_ATTACK_COUNT
                 ):
                     tick = now_tick if now_tick is not None else monotonic_ms()
                     self._remove_dead_tracks_locked({track_id}, tick)
                     return "dead", track.idle_attack_count
 
                 # Path 2: 5 idle attacks (any accessibility) → remove + death site
-                if track.idle_attack_count >= self._IDLE_UNREACHABLE_THRESHOLD:
+                if track.idle_attack_count >= IDLE_UNREACHABLE_ATTACK_COUNT:
                     tick = now_tick if now_tick is not None else monotonic_ms()
                     self._remove_dead_tracks_locked({track_id}, tick)
                     return "unreachable", track.idle_attack_count
@@ -605,11 +591,6 @@ class HuntTracks:
             track.was_accessible = True
             track.idle_attack_count = 0
             return "none", 0
-
-    @property
-    def last_reconcile_summary(self) -> ReconcileSummary | None:
-        with self._lock:
-            return self._last_reconcile_summary
 
     def create_track(
         self,
@@ -678,7 +659,6 @@ class HuntTracks:
             area_epoch=self._area_epoch,
         )
         track.attack_count = 0
-        track.attack_count_baseline = 0
         track.idle_attack_count = 0
         track.was_accessible = False
         self._next_id += 1
@@ -797,11 +777,12 @@ class HuntTracks:
             moving=track.moving,
         )
 
-    def overlay_track_state(self, now_tick: int | None = None) -> tuple[int, list[MobTrackSnapshot], list[MobTrackSnapshot]]:
+    def overlay_track_state(
+        self, now_tick: int | None = None
+    ) -> tuple[int, list[MobTrackSnapshot]]:
         with self._lock:
             alive = [self._to_snapshot(track) for track in self._tracks if is_alive(track)]
-            # Second list kept for overlay API compat; idle-unreachable now removes.
-            return len(self._tracks), alive, []
+            return len(self._tracks), alive
 
     def tracks_for_policy(self, now_tick: int | None = None) -> list[MobTrack]:
         with self._lock:

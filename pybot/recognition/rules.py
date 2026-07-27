@@ -37,6 +37,10 @@ HUNT_DISCOVERY_CLUSTER_RADIUS = 48
 
 TrackState = Literal["alive"]
 
+# Velocity coast decay on tracking miss (moving vs stationary).
+VEL_COAST_DECAY_MOVING = 0.9
+VEL_COAST_DECAY_STATIONARY = 0.5
+
 
 @dataclass
 class DiscoveryDetection:
@@ -72,7 +76,6 @@ class MobTrack:
     y: int
     confidence: float = 0.0
     attack_count: int = 0
-    attack_count_baseline: int = 0
     idle_attack_count: int = 0
     was_accessible: bool = False  # True once SP consumption proves the mob is hittable
     state: TrackState = "alive"
@@ -146,10 +149,7 @@ def apply_attack_event(track: MobTrack, now_tick: int) -> None:
 
 def select_target_id(
     tracks: list[MobTrack],
-    now_tick: int,
     last_attack_target_id: int = 0,
-    *,
-    max_attacks: int | None = None,
 ) -> int:
     """Round-robin through alive tracks."""
     alive_ids = sorted(track.id for track in tracks if is_alive(track))
@@ -304,11 +304,11 @@ def apply_track_observation(
     if track.moving:
         track.x += int(round(track.vel_x))
         track.y += int(round(track.vel_y))
-        track.vel_x *= 0.9
-        track.vel_y *= 0.9
+        track.vel_x *= VEL_COAST_DECAY_MOVING
+        track.vel_y *= VEL_COAST_DECAY_MOVING
     else:
-        track.vel_x *= 0.5
-        track.vel_y *= 0.5
+        track.vel_x *= VEL_COAST_DECAY_STATIONARY
+        track.vel_y *= VEL_COAST_DECAY_STATIONARY
     track.lost_count += 1
     track.updated_tick = now_tick
 
@@ -344,8 +344,8 @@ def apply_movement_observation(
     move_threshold_px: int,
     stop_threshold_px: int,
 ) -> None:
-    dx = x - track.x
-    dy = y - track.y
+    dx = x - track.last_discovery_x
+    dy = y - track.last_discovery_y
     track.moving = evaluate_track_moving(
         was_moving=track.moving,
         displacement_sq=(dx * dx) + (dy * dy),
