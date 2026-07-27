@@ -205,7 +205,7 @@ class SitOnLowSpWorker:
                     ctx.logger.behavior(
                         f"[SIT] SP recovered ratio={ratio:.1%} — standing"
                     )
-                    if not self._ensure_standing(sit_scan, sit_pose, stand_pose):
+                    if not self._ensure_standing(sit_scan, sit_pose, stand_pose, force_press=True):
                         ctx.logger.behavior(
                             "[SIT] failed to confirm stand pose after recover, but SP is full so continuing"
                         )
@@ -280,7 +280,7 @@ class SitOnLowSpWorker:
 
             ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
 
-        self._ensure_standing(sit_scan, sit_pose, stand_pose)
+        self._ensure_standing(sit_scan, sit_pose, stand_pose, force_press=True)
         ctx.logger.behavior("[SIT] stopped while sitting — stood up")
         return "stopped"
 
@@ -342,9 +342,16 @@ class SitOnLowSpWorker:
         sit_scan: int,
         sit_pose: CharacterPose,
         stand_pose: CharacterPose,
+        *,
+        force_press: bool = False,
     ) -> bool:
         """Press stand until center pose is no longer seated. Returns success."""
         mid = (sit_pose.body_height + stand_pose.body_height) / 2.0
+        
+        if force_press:
+            self._input.teleport_key(sit_scan)
+            self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S)
+
         for attempt in range(1, SIT_POSE_MAX_ATTEMPTS + 1):
             current = self._measure_pose()
             if current is not None and current.body_height >= mid:

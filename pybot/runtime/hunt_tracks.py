@@ -553,7 +553,18 @@ class HuntTracks:
                 return "none", track.idle_attack_count
 
             if was_idle:
-                # Moving mobs are actively pathing/chasing — do not mark them unreachable.
+                if not track.was_accessible:
+                    # Path 2: 5 Idle attacks to mob that was not attacked with a good attack = UNREACHABLE
+                    # Moving state does not matter (prevents getting stuck on unreachable pathing mobs).
+                    track.idle_attack_count += 1
+                    if track.idle_attack_count >= IDLE_UNREACHABLE_ATTACK_COUNT:
+                        tick = now_tick if now_tick is not None else monotonic_ms()
+                        self._remove_dead_tracks_locked({track_id}, tick)
+                        return "unreachable", track.idle_attack_count
+                    return "none", track.idle_attack_count
+
+                # Path 1: Mob was already attacked at least once.
+                # Mob stopped moving after it -> 2 idle attacks landed = DEAD
                 if track.moving:
                     track.idle_attack_count = 0
                     return "none", 0
@@ -569,21 +580,13 @@ class HuntTracks:
 
                 track.idle_attack_count += 1
 
-                # Path 1: was accessible + discovery blob stationary + 2 idle → dead
                 if (
-                    track.was_accessible
-                    and track.discovery_stationary
+                    track.discovery_stationary
                     and track.idle_attack_count >= IDLE_DEAD_ATTACK_COUNT
                 ):
                     tick = now_tick if now_tick is not None else monotonic_ms()
                     self._remove_dead_tracks_locked({track_id}, tick)
                     return "dead", track.idle_attack_count
-
-                # Path 2: 5 idle attacks (any accessibility) → remove + death site
-                if track.idle_attack_count >= IDLE_UNREACHABLE_ATTACK_COUNT:
-                    tick = now_tick if now_tick is not None else monotonic_ms()
-                    self._remove_dead_tracks_locked({track_id}, tick)
-                    return "unreachable", track.idle_attack_count
 
                 return "none", track.idle_attack_count
 
