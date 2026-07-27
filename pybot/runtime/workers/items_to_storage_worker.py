@@ -331,10 +331,18 @@ class ItemsToStorageWorker:
         )
 
     def _click_storage_close(self) -> None:
-        """Click the storage window close control (no validation)."""
-        self._ctx.logger.behavior("[STORAGE] click storage close")
+        """Click the storage window close control (no validation).
+        To close the storage we need to double click (lmcx2).
+        """
+        self._ctx.logger.behavior("[STORAGE] double click storage close")
         self._move_to_template("close")
         time.sleep(0.2)
+        # First click
+        self._input.set_left_button(True)
+        time.sleep(0.05)
+        self._input.set_left_button(False)
+        time.sleep(0.05)
+        # Second click
         self._input.set_left_button(True)
         time.sleep(0.05)
         self._input.set_left_button(False)
@@ -552,59 +560,56 @@ class ItemsToStorageWorker:
         skip_wings: bool = False,
         handle_ok: bool = False,
     ) -> None:
-        """Deposit every non-empty slot on the current inventory tab.
-
-        Scans the full 8×6 grid each pass (Equip/Etc often leave slot 0 empty).
+        """Deposit items from the current inventory tab.
+        We only need to move the cursor to the 1st slot. Alt+right click moves the item
+        to storage and moves the next one to the 1st slot. So when the 1st slot is empty,
+        we are done with this tab and move to the next tab.
         """
         log = self._ctx.logger.behavior
         inp = self._input
         ox, oy = self._client_origin()
         guard = STORAGE_INV_COLS * STORAGE_INV_ROWS
-        failed_slots = set()
-        for _ in range(guard):
+        
+        # Determine the first slot's center and aim position
+        frame_init = self._capture_client()
+        panel_init = require_inventory_panel(frame_init)
+        first_col, first_row = 0, 0
+        first_cx, first_cy = panel_init.slot_center(first_col, first_row)
+        first_ax, first_ay = panel_init.slot_aim(first_col, first_row)
+
+        log(f"[STORAGE] Move to first slot of {tab_label} tab ({first_ax},{first_ay})")
+        self._input.move_mouse(ox + first_ax, oy + first_ay)
+        time.sleep(STORAGE_WING_AIM_SETTLE_S)
+
+        for pass_i in range(guard):
             self._abort_if_critical_hp()
 
-            def scan_target() -> tuple[int, int, int, int] | None:
-                frame = self._capture_client()
-                panel = require_inventory_panel(frame)
-                for col, row, cx, cy in panel.iter_slot_centers():
-                    if (col, row) in failed_slots:
-                        continue
-                    if slot_looks_empty(frame, cx, cy):
-                        continue
-                    if skip_wings and slot_contains_template(frame, "wing", cx, cy):
-                        log(
-                            f"[STORAGE] ItemsToStorage skip fly wing "
-                            f"col={col} row={row}"
-                        )
-                        continue
-                    return col, row, *panel.slot_aim(col, row)
-                return None
-
-            target = self._recognize(f"{tab_label}-tab item scan", scan_target)
-            if target is None:
-                log(f"[STORAGE] ItemsToStorage {tab_label} tab clear")
+            frame = self._capture_client()
+            if slot_looks_empty(frame, first_cx, first_cy):
+                log(f"[STORAGE] ItemsToStorage {tab_label} tab first slot empty — done")
                 return
-            col, row, ax, ay = target
-            failed_slots.add((col, row))
-            log(
-                f"[STORAGE] ItemsToStorage deposit {tab_label} item "
-                f"col={col} row={row} low-left ({ax},{ay}) "
-                f"panel-validated"
-            )
-            self._input.move_mouse(ox + ax, oy + ay)
-            time.sleep(STORAGE_WING_AIM_SETTLE_S)
+
+            if skip_wings and slot_contains_template(frame, "wing", first_cx, first_cy):
+                log(f"[STORAGE] ItemsToStorage first slot contains fly wing; skip tab")
+                return
+
+            log(f"[STORAGE] ItemsToStorage deposit {tab_label} item from first slot")
             if handle_ok:
                 time.sleep(0.05)
                 if self._image_on_screen("ok"):
                     inp.key_tap(STORAGE_ENTER_SCAN_CODE, press_s=0.05, after_s=0.0)
                     sx, sy = _cursor_pos()
                     inp.move_mouse(sx + 40, sy)
+                    # Restore cursor to first slot after clicking OK
+                    self._input.move_mouse(ox + first_ax, oy + first_ay)
+                    time.sleep(STORAGE_WING_AIM_SETTLE_S)
+
             self._alt_rmb_deposit()
-            # Let the slot clear before the next scan.
+            # Let the slot clear/next item move into the first slot before next loop
             time.sleep(STORAGE_UI_SETTLE_S)
+
         raise InventoryUiError(
-            f"{tab_label}-tab deposit did not finish within grid size"
+            f"{tab_label}-tab deposit did not finish within guard limit"
         )
 
     def _select_inventory_tab(self, name: str) -> None:

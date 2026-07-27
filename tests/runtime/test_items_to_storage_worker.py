@@ -214,10 +214,9 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             "wing": (60, 60),
         }[name]
         slot_empty.side_effect = (
-            # Use / Eqp / Etc: one occupied slot then a full clear scan each.
-            [False] + [True] * 48
-            + [False] + [True] * 48
-            + [False] + [True] * 48
+            # Use / Eqp / Etc: one occupied slot then empty slot.
+            # We loop over each tab.
+            [False, True, False, True, False, True]
         )
         find_tpl.side_effect = lambda _f, name, **_kw: {
             "use": (10, 10),
@@ -278,7 +277,7 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         require_tpl.return_value = (10, 10)
         # Use clear, Eqp clear, Etc: one item then clear (OK dialog on deposit).
         slot_empty.side_effect = (
-            [True] * 48 + [True] * 48 + [False] + [True] * 48
+            [True, True, False, True]
         )
 
         with patch(
@@ -334,18 +333,14 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         require_panel.return_value = _fake_panel()
         require_tpl.return_value = (10, 10)
         find_tpl.return_value = None
-        # Use scan1: wing at (0,0), potion at (1,0) → deposit potion.
-        # Use/Eqp/Etc clear scans afterward.
-        slot_empty.side_effect = (
-            [False, False] + [True] * 48 + [True] * 48 + [True] * 48
-        )
-        slot_wing.side_effect = [True, False]
+        # Use first slot is not empty, and has wing.
+        slot_empty.side_effect = [False, True, True]
+        slot_wing.side_effect = [True]
 
         worker = self._worker(_FakePoller(90))
         worker.items_to_storage()
 
-        self.assertEqual(self.input.calls.count(("alt_rmb",)), 1)
-        self.assertIn(("move", 178, 92), self.input.calls)
+        self.assertEqual(self.input.calls.count(("alt_rmb",)), 0)
         # Off-screen clear before Use-tab scans (client origin 100,50 → 98,48).
         self.assertIn(("move", 98, 48), self.input.calls)
 
@@ -643,9 +638,7 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         find_storage.return_value = (200, 100)
         slot_empty.side_effect = (
             # Use / Eqp / Etc dump grids, then restock path does not use slot_empty.
-            [False] + [True] * 48
-            + [False] + [True] * 48
-            + [False] + [True] * 48
+            [False, True, False, True, False, True]
         )
         self.config.fly_wings_amount = 150
 
