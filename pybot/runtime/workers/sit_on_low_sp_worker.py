@@ -342,20 +342,11 @@ class SitOnLowSpWorker:
         sit_scan: int,
         sit_pose: CharacterPose,
         stand_pose: CharacterPose,
-        *,
-        force_press: bool = False,
     ) -> bool:
         """Press stand until center pose is no longer seated. Returns success."""
         mid = (sit_pose.body_height + stand_pose.body_height) / 2.0
         
-        if force_press:
-            self._input.teleport_key(sit_scan)
-            self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S)
-
         for attempt in range(1, SIT_POSE_MAX_ATTEMPTS + 1):
-            current = self._measure_pose()
-            if current is not None and current.body_height >= mid:
-                return True
             self._input.teleport_key(sit_scan)
             if not self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S):
                 return False
