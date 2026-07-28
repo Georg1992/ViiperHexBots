@@ -545,24 +545,15 @@ class ItemsToStorageWorker:
             f"Use-tab wing deposit did not clear after {max_passes} passes"
         )
 
-    def _deposit_use_tab_skipping_wings(self) -> None:
-        """Deposit Use-tab non-wing items; skip fly wings."""
-        self._deposit_tab_grid(
-            tab_label="Use",
-            skip_wings=True,
-            handle_ok=True,
-        )
-
     def _deposit_tab_grid(
         self,
         *,
         tab_label: str,
-        skip_wings: bool = False,
         handle_ok: bool = False,
     ) -> None:
         """Deposit items from the current inventory tab.
-        We check if the first slot is empty with the cursor off-screen. If it's not empty,
-        we move to the first slot, Alt+Right Click, then move the cursor off-screen for the next check.
+        We move to the first slot once. If it is empty, we are done.
+        Otherwise, keep sending Alt+Right Click.
         """
         log = self._ctx.logger.behavior
         inp = self._input
@@ -576,26 +567,20 @@ class ItemsToStorageWorker:
         first_cx, first_cy = panel_init.slot_center(first_col, first_row)
         first_ax, first_ay = panel_init.slot_aim(first_col, first_row)
 
+        log(f"[STORAGE] Move to first slot of {tab_label} tab ({first_ax},{first_ay})")
+        self._input.move_mouse(ox + first_ax, oy + first_ay)
+        time.sleep(STORAGE_WING_AIM_SETTLE_S)
+
         for pass_i in range(guard):
             self._abort_if_critical_hp()
 
-            # Always check slot status with cursor off-screen to prevent covering slot
-            self._cursor_off_screen()
             frame = self._capture_client()
 
             if slot_looks_empty(frame, first_cx, first_cy):
                 log(f"[STORAGE] ItemsToStorage {tab_label} tab first slot empty — done")
                 return
 
-            if skip_wings and slot_contains_template(frame, "wing", first_cx, first_cy):
-                log(f"[STORAGE] ItemsToStorage first slot contains fly wing; skip tab")
-                return
-
             log(f"[STORAGE] ItemsToStorage deposit {tab_label} item from first slot")
-            
-            # Move cursor to first slot to perform deposit
-            self._input.move_mouse(ox + first_ax, oy + first_ay)
-            time.sleep(STORAGE_WING_AIM_SETTLE_S)
 
             if handle_ok:
                 time.sleep(0.05)
@@ -643,8 +628,8 @@ class ItemsToStorageWorker:
         time.sleep(STORAGE_UI_SETTLE_S)
 
     def _deposit_inventory_to_storage(self) -> None:
-        """Deposit Use (skip wings) / Eqp / Etc via full-grid scans."""
-        self._deposit_use_tab_skipping_wings()
+        """Deposit Use / Eqp / Etc via full-grid scans."""
+        self._deposit_tab_grid(tab_label="Use", handle_ok=True)
 
         time.sleep(STORAGE_UI_SETTLE_S)
         self._abort_if_critical_hp()

@@ -295,58 +295,6 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
     @patch("pybot.runtime.workers.items_to_storage_worker.time.sleep", return_value=None)
     @patch(
         "pybot.runtime.workers.items_to_storage_worker._cursor_pos",
-        return_value=(156, 82),
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._close_menus"
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_storage_open"
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_inventory_open",
-        return_value=_fake_panel(),
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._wait_for_inventory_panel",
-        return_value=(_fake_panel(), np.zeros((10, 10, 3), dtype=np.uint8)),
-    )
-    @patch("pybot.runtime.workers.items_to_storage_worker.require_inventory_panel")
-    @patch("pybot.runtime.workers.items_to_storage_worker.slot_looks_empty")
-    @patch("pybot.runtime.workers.items_to_storage_worker.require_template")
-    @patch("pybot.runtime.workers.items_to_storage_worker.slot_contains_template")
-    @patch("pybot.runtime.workers.items_to_storage_worker.find_template")
-    def test_items_to_storage_skips_use_tab_wings(
-        self,
-        find_tpl: MagicMock,
-        slot_wing: MagicMock,
-        require_tpl: MagicMock,
-        slot_empty: MagicMock,
-        require_panel: MagicMock,
-        _wait_panel: MagicMock,
-        _ensure_inv_open: MagicMock,
-        _ensure_stor_open: MagicMock,
-        _close_menus: MagicMock,
-        _cursor: MagicMock,
-        _sleep: MagicMock,
-    ) -> None:
-        require_panel.return_value = _fake_panel()
-        require_tpl.return_value = (10, 10)
-        find_tpl.return_value = None
-        # Use first slot is not empty, and has wing.
-        slot_empty.side_effect = [False, True, True]
-        slot_wing.side_effect = [True]
-
-        worker = self._worker(_FakePoller(90))
-        worker.items_to_storage()
-
-        self.assertEqual(self.input.calls.count(("alt_rmb",)), 0)
-        # Off-screen clear before Use-tab scans (client origin 100,50 → 98,48).
-        self.assertIn(("move", 98, 48), self.input.calls)
-
-    @patch("pybot.runtime.workers.items_to_storage_worker.time.sleep", return_value=None)
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker._cursor_pos",
         return_value=(150, 100),
     )
     @patch(
