@@ -497,10 +497,12 @@ class SpriteGrf:
         rel_table_offset = len(container)
         
         if self._orig_header_tail:
-            # Modify the existing header tail to update the table offset (bytes 14-17 relative to tail)
-            # The RO client uses this offset to find the table. If it's wrong, it won't open.
+            # Modify the existing header tail to update the table offset.
+            # In legacy GRFs (46-byte header), the tail is 30 bytes and offset is at 14:18.
+            # In standard GRFs (47-byte header), the tail is 31 bytes and offset is at 15:19.
             tail = bytearray(self._orig_header_tail)
-            tail[15:19] = struct.pack("<I", rel_table_offset)
+            off_start = 14 if len(tail) == 30 else 15
+            tail[off_start:off_start+4] = struct.pack("<I", rel_table_offset)
             header += bytes(tail)
         else:
             # New GRF

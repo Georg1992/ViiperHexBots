@@ -22,14 +22,27 @@ from pybot.mobs.sprite_grf import (
 def _assert_header_match_up_to_table_offset(
     orig: bytes, saved: bytes, header_size: int
 ) -> None:
-    """Assert all header bytes match, except the ``table_offset`` field (bytes 31-34).
+    """Assert all header bytes match, except the ``table_offset`` field.
 
     ``save()`` rewrites the table offset to reflect the new table position
-    in the output file (which differs because of anti-hint padding and
-    possible container changes), so we skip those 4 bytes.
+    in the output file.  The exact bytes that change depend on the header
+    format:
+
+    * Legacy (46-byte header): tail is 30 bytes, offset at tail[14:18] =
+      file bytes 30-33.
+    * Standard (47-byte header): tail is 31 bytes, offset at tail[15:19] =
+      file bytes 31-34.
     """
+    # Determine which file bytes the table_offset write touches.
+    # save() writes 4 bytes starting at tail[14] for legacy (tail=30)
+    # or tail[15] for standard (tail=31).  tail[n] = file byte [16 + n].
+    tail_len = header_size - 16  # 30 for legacy, 31 for standard
+    tail_off = 14 if tail_len == 30 else 15
+    off_start = 16 + tail_off  # convert tail index → file byte index
+    off_end = off_start + 3  # inclusive
+
     for i in range(header_size):
-        if 31 <= i <= 34:
+        if off_start <= i <= off_end:
             continue  # table_offset always changes
         assert orig[i] == saved[i], (
             f"Header byte {i} differs: orig=0x{orig[i]:02X} "
