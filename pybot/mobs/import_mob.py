@@ -96,9 +96,9 @@ def _pair_from_directory(folder: Path) -> tuple[Path, Path]:
 
 
 def mob_assets_exist(stem: str) -> bool:
-    """True when ``assets/mobs/{stem}/{stem}.spr`` already exists."""
+    """True when ``assets/mobs/{stem}/sprite/{stem}.spr`` already exists."""
     key = stem.lower()
-    spr = MOBS_DIR / key / f"{key}.spr"
+    spr = MOBS_DIR / key / "sprite" / f"{key}.spr"
     return spr.is_file()
 
 
@@ -108,13 +108,13 @@ def install_mob_assets(
     *,
     overwrite: bool = False,
 ) -> str:
-    """Copy SPR/ACT into ``assets/mobs/{stem}/`` and return the lowercase stem."""
+    """Copy SPR/ACT into ``assets/mobs/{stem}/sprite/`` and return the lowercase stem."""
     stem = spr.stem.lower()
     if act.stem.lower() != stem:
         raise MobImportError(
             f"SPR/ACT stems must match ({spr.name} vs {act.name})"
         )
-    dest_dir = MOBS_DIR / stem
+    dest_dir = MOBS_DIR / stem / "sprite"
     dest_spr = dest_dir / f"{stem}.spr"
     dest_act = dest_dir / f"{stem}.act"
     if dest_spr.is_file() and not overwrite:
@@ -130,11 +130,19 @@ def install_mob_assets(
 def build_mob_descriptor(stem: str) -> MobDescriptor:
     """Force-build the descriptor for an installed mob stem."""
     key = stem.lower()
-    descriptor = DescriptorBuilder(PROJECT_ROOT).build(key, force=True)
+    builder = DescriptorBuilder(PROJECT_ROOT)
+    descriptor = builder.build(key, force=True)
     path = descriptor_path(key)
     if not path.is_file():
         raise RuntimeError(f"descriptor missing after build: {path}")
     return descriptor
+
+
+def build_modified_sprite_descriptor(stem: str) -> MobDescriptor | None:
+    """Force-build the modified (big+red) sprite descriptor (best-effort)."""
+    key = stem.lower()
+    builder = DescriptorBuilder(PROJECT_ROOT)
+    return builder.build_modified_sprite(key, force=True)
 
 
 def import_mob_from_paths(
@@ -146,6 +154,13 @@ def import_mob_from_paths(
     spr, act = resolve_spr_act_paths(paths)
     stem = install_mob_assets(spr, act, overwrite=overwrite)
     build_mob_descriptor(stem)
+    try:
+        build_modified_sprite_descriptor(stem)
+    except Exception as exc:
+        # Best-effort: normal descriptor is already built.
+        print(
+            f"[IMPORT] modified-sprite descriptor skipped for '{stem}': {exc}"
+        )
     return MobEntry(
         asset_name=stem,
         display_name=mob_display_name(stem),

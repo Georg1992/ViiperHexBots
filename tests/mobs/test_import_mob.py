@@ -66,8 +66,8 @@ def test_install_mob_assets_copies_lowercase(tmp_path: Path) -> None:
     with patch("pybot.mobs.import_mob.MOBS_DIR", mobs):
         stem = install_mob_assets(spr, act, overwrite=False)
         assert stem == "horn"
-        assert (mobs / "horn" / "horn.spr").read_bytes() == b"spr-data"
-        assert (mobs / "horn" / "horn.act").read_bytes() == b"act-data"
+        assert (mobs / "horn" / "sprite" / "horn.spr").read_bytes() == b"spr-data"
+        assert (mobs / "horn" / "sprite" / "horn.act").read_bytes() == b"act-data"
         assert mob_assets_exist("horn") is True
 
 
@@ -110,5 +110,5 @@ def test_import_mob_from_paths_builds(tmp_path: Path) -> None:
 
     assert entry.descriptor_name == "horn"
     assert entry.asset_name == "horn"
-    assert (mobs / "horn" / "horn.spr").is_file()
+    assert (mobs / "horn" / "sprite" / "horn.spr").is_file()
     mock_builder.build.assert_called_once_with("horn", force=True)

@@ -71,6 +71,8 @@ class AppSettings:
     sit_on_low_sp: bool = False
     sit_on_low_sp_button: str = "insert"
 
+    use_sprite_grf: bool = False
+
     @property
     def warper_coords_set(self) -> bool:
         return bool(self.warper_x and self.warper_y)

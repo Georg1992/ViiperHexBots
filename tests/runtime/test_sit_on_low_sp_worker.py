@@ -204,14 +204,15 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             vitals=vitals,
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-        # stand, sit confirm, then standing checks during ensure_standing
-        poses = [_STAND, _SIT, _STAND]
 
         with patch(
             "pybot.runtime.workers.sit_on_low_sp_worker.SIT_HP_POLL_S",
             0.0,
         ):
-            with patch.object(worker, "_measure_pose", side_effect=self._pose_side_effect(poses)):
+            with patch(
+                "pybot.runtime.workers.sit_on_low_sp_worker.SIT_SP_STALL_S",
+                0.0,
+            ):
                 with patch.object(worker, "_capture_client", return_value=object()):
                     with patch.object(worker, "_read_hp", return_value=1000):
                         with patch.object(
@@ -274,7 +275,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
 
         self.assertEqual(outcome, "danger")
 
-    def test_ensure_sitting_retries_until_pose_drops(self) -> None:
+    def test_ensure_sitting_presses_once(self) -> None:
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
@@ -282,16 +283,11 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             vitals=_ScriptedVitals([]),
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-        # First press still looks standing; second press sits.
-        poses = [_STAND, _SIT]
-        with patch.object(worker, "_measure_pose", side_effect=self._pose_side_effect(poses)):
-            sit_pose = worker._ensure_sitting(82, _STAND)
-        self.assertIsNotNone(sit_pose)
-        assert sit_pose is not None
-        self.assertEqual(sit_pose.body_height, _SIT.body_height)
-        self.assertEqual(self.input.teleport_key.call_count, 2)
+        worker._ensure_sitting(82)
+        self.assertEqual(self.input.teleport_key.call_count, 1)
+        self.assertEqual(self.input.teleport_key.call_args.args[0], 82)
 
-    def test_ensure_standing_retries_until_pose_rises(self) -> None:
+    def test_ensure_standing_presses_once(self) -> None:
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
@@ -299,14 +295,11 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             vitals=_ScriptedVitals([]),
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-        # Pre-check sit → press → still sit → loop → pre-check sit → press → stand.
-        poses = [_SIT, _SIT, _SIT, _STAND]
-        with patch.object(worker, "_measure_pose", side_effect=self._pose_side_effect(poses)):
-            ok = worker._ensure_standing(82, _SIT, _STAND)
-        self.assertTrue(ok)
-        self.assertEqual(self.input.teleport_key.call_count, 2)
+        worker._ensure_standing(82)
+        self.assertEqual(self.input.teleport_key.call_count, 1)
+        self.assertEqual(self.input.teleport_key.call_args.args[0], 82)
 
-    def test_ensure_sitting_fails_after_max_attempts(self) -> None:
+    def test_ensure_sitting_presses_key(self) -> None:
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
@@ -314,10 +307,9 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             vitals=_ScriptedVitals([]),
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-        with patch.object(worker, "_measure_pose", return_value=_STAND):
-            sit_pose = worker._ensure_sitting(82, _STAND)
-        self.assertIsNone(sit_pose)
-        self.assertEqual(self.input.teleport_key.call_count, 5)
+        worker._ensure_sitting(82)
+        self.assertEqual(self.input.teleport_key.call_count, 1)
+        self.assertEqual(self.input.teleport_key.call_args.args[0], 82)
 
 
 if __name__ == "__main__":

@@ -60,6 +60,7 @@ class HuntRuntimeConfig:
     sit_on_low_sp: bool = False
     sit_on_low_sp_button: str = "insert"
     sit_on_low_sp_scan_code: int = 0
+    use_sprite_grf: bool = False
     client_profile: str = "Generic"
 
     def active_teleport_scan_code(self) -> int:
@@ -173,6 +174,7 @@ def hunt_runtime_config_from_settings(
         sit_on_low_sp=settings.sit_on_low_sp,
         sit_on_low_sp_button=settings.sit_on_low_sp_button,
         sit_on_low_sp_scan_code=key_name_to_scan_code(settings.sit_on_low_sp_button),
+        use_sprite_grf=settings.use_sprite_grf,
         client_profile=settings.client_profile,
     )
 

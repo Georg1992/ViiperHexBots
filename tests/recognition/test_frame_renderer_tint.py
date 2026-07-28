@@ -12,10 +12,14 @@ from pybot.recognition.frame_renderer import render_act_frame
 from pybot.recognition.spr_reader import SprReader
 
 
+@unittest.skipUnless(
+    (PROJECT_ROOT / "assets/mobs/Horn/sprite/horn.spr").is_file(),
+    "Horn SPR/ACT assets not available",
+)
 class FrameRendererTintTests(unittest.TestCase):
     def test_default_act_tint_preserves_sprite_channels(self) -> None:
-        spr = SprReader(PROJECT_ROOT / "assets/mobs/TharaFrog/thara_frog.spr").load()
-        act = ActReader(PROJECT_ROOT / "assets/mobs/TharaFrog/thara_frog.act").load()
+        spr = SprReader(PROJECT_ROOT / "assets/mobs/Horn/sprite/horn.spr").load()
+        act = ActReader(PROJECT_ROOT / "assets/mobs/Horn/sprite/horn.act").load()
         layer = act.actions[0].frames[0].layers[0]
         self.assertEqual(layer.color_tint, (255, 255, 255, 255))
 

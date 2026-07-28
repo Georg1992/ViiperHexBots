@@ -88,11 +88,12 @@ MOB_FIXTURE_SUITES: tuple[MobFixtureSuite, ...] = (
         mob_name="horn",
         pattern=re.compile(r"^(\d+)Horn(?:_Gray\d*)?\.png$", re.IGNORECASE),
     ),
-    MobFixtureSuite.from_manifest(
-        folder="TharaFrog",
-        mob_name="thara_frog",
-        pattern=re.compile(r"^(\d+)Tharas?(?:_Gray)?\.png$", re.IGNORECASE),
-    ),
+    # TharaFrog — no SPR/ACT assets yet; fixtures kept for future use.
+    # MobFixtureSuite.from_manifest(
+    #     folder="TharaFrog",
+    #     mob_name="thara_frog",
+    #     pattern=re.compile(r"^(\d+)Tharas?(?:_Gray)?\.png$", re.IGNORECASE),
+    # ),
     MobFixtureSuite.from_manifest(
         folder="Alligator",
         mob_name="alligator",
@@ -103,11 +104,12 @@ MOB_FIXTURE_SUITES: tuple[MobFixtureSuite, ...] = (
         mob_name="noxious",
         pattern=re.compile(r"^(\d+)Noxious(?:_Gray)?\.png$", re.IGNORECASE),
     ),
-    MobFixtureSuite.from_manifest(
-        folder="Creamy",
-        mob_name="creamy",
-        pattern=re.compile(r"^(\d+)Creamy(?:_Gray\d*)?\.png$", re.IGNORECASE),
-    ),
+    # Creamy — no SPR/ACT assets yet; fixtures kept for future use.
+    # MobFixtureSuite.from_manifest(
+    #     folder="Creamy",
+    #     mob_name="creamy",
+    #     pattern=re.compile(r"^(\d+)Creamy(?:_Gray\d*)?\.png$", re.IGNORECASE),
+    # ),
     MobFixtureSuite.from_manifest(
         folder="Wolf",
         mob_name="desert_wolf",
@@ -133,7 +135,10 @@ def shipped_mob_spr_stems() -> tuple[str, ...]:
     for folder in sorted(mobs_dir.iterdir()):
         if not folder.is_dir():
             continue
-        spr_files = sorted(folder.glob("*.spr"))
+        sprite_dir = folder / "sprite"
+        if not sprite_dir.is_dir():
+            continue
+        spr_files = sorted(sprite_dir.glob("*.spr"))
         if spr_files:
             stems.append(spr_files[0].stem.lower())
     return tuple(stems)

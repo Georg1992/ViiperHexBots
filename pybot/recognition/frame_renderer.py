@@ -66,7 +66,10 @@ def _apply_layer_transform(sprite: np.ndarray, layer: ActSpriteLayer) -> np.ndar
         src = cv2.resize(src, (width, height), interpolation=cv2.INTER_NEAREST)
 
     tint_r, tint_g, tint_b, tint_a = layer.color_tint
-    if (tint_r, tint_g, tint_b, tint_a) in {(255, 255, 255, 255), (255, 0, 0, 255)}:
+    # Identity (white) tint — no colour transform needed.
+    # NOTE: (255, 0, 0, 255) is NOT identity; it encodes a red tint via the
+    # BGRA → channel-swapped convention used below and must NOT be skipped.
+    if (tint_r, tint_g, tint_b, tint_a) == (255, 255, 255, 255):
         return src
     tinted = src.astype(np.float32)
     tinted[:, :, 0] *= tint_b / 255.0

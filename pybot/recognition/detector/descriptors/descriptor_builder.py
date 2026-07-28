@@ -141,16 +141,17 @@ class DescriptorBuilder:
     def asset_dir(self, mob_name: str) -> Path:
         mob_name_lower = mob_name.lower()
         base = self.project_root / "assets" / "mobs"
-        # Fast path: direct lowercase folder name (e.g. horn/horn.spr)
-        direct = base / mob_name_lower
+        # Look for SPR+ACT inside a sprite/ subfolder.
+        direct = base / mob_name_lower / "sprite"
         if (direct / f"{mob_name_lower}.spr").is_file():
             return direct
-        # Fallback: scan folders for one containing the matching SPR file
-        # This handles folder/file name mismatches (e.g. DesertWolf/desert_wolf.spr)
+        # Fallback: scan folders for one containing sprite/{name}.spr
+        # This handles folder/file name mismatches (e.g. DesertWolf/desert_wolf.spr).
         if base.is_dir():
             for folder in sorted(base.iterdir()):
-                if folder.is_dir() and (folder / f"{mob_name_lower}.spr").is_file():
-                    return folder
+                sprite_dir = folder / "sprite"
+                if sprite_dir.is_dir() and (sprite_dir / f"{mob_name_lower}.spr").is_file():
+                    return sprite_dir
         return direct  # will raise FileNotFoundError in build() with clear message
 
     def output_dir(self, mob_name: str) -> Path:
@@ -166,6 +167,52 @@ class DescriptorBuilder:
             force=force,
         )
 
+    def build_modified_sprite(
+        self, mob_name: str, force: bool = False
+    ) -> MobDescriptor | None:
+        """Build a modified (big+red) sprite descriptor for GRF-modified servers.
+
+        Runs ``make_mobs_big_red.py`` to transform the original ACT (1.5x scale,
+        recolored red, death actions transparent) and builds a separate
+        ``modified_sprite_descriptor.json`` from the result.
+
+        Returns None when the mob has no SPR/ACT assets (graceful skip).
+        """
+        from scripts.make_mobs_big_red import process_mob_folder as make_big_red
+
+        mob_name = mob_name.lower()
+        asset_dir = self.asset_dir(mob_name)
+        # Derive modified dir from the actual mob folder on disk (preserves
+        # case so DesertWolf/modified_sprite/ not desert_wolf/modified_sprite/).
+        mob_folder = asset_dir.parent  # e.g. DesertWolf/
+        modified_dir = mob_folder / "modified_sprite"
+        descriptor_path = self.output_dir(mob_name) / "modified_sprite_descriptor.json"
+
+        # Cache hit: descriptor already built and not forced.
+        if descriptor_path.exists() and not force:
+            return MobDescriptor.load(descriptor_path)
+
+        # Check that the original assets exist (skip mobs without SPR/ACT).
+        spr_path = asset_dir / f"{mob_name}.spr"
+        act_path = asset_dir / f"{mob_name}.act"
+        if not spr_path.is_file() or not act_path.is_file():
+            return None
+
+        # Generate modified (big+red) ACT + copy SPR.
+        modified_dir.mkdir(parents=True, exist_ok=True)
+        make_big_red(asset_dir, modified_dir, verbose=False)
+
+        # Build the descriptor from the modified assets, saving to the
+        # custom filename so it does not overwrite the normal descriptor.
+        return self._build_from_asset_dir(
+            mob_name,
+            modified_dir,
+            spr_stem=mob_name,
+            output_dir=self.output_dir(mob_name),
+            force=True,
+            descriptor_filename="modified_sprite_descriptor.json",
+        )
+
     def _build_from_asset_dir(
         self,
         mob_name: str,
@@ -174,9 +221,10 @@ class DescriptorBuilder:
         spr_stem: str,
         output_dir: Path,
         force: bool,
+        descriptor_filename: str = "descriptor.json",
     ) -> MobDescriptor:
         output_dir.mkdir(parents=True, exist_ok=True)
-        descriptor_path = output_dir / "descriptor.json"
+        descriptor_path = output_dir / descriptor_filename
         if descriptor_path.exists() and not force:
             return MobDescriptor.load(descriptor_path)
 

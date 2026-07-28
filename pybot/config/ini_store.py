@@ -147,6 +147,7 @@ def load_settings(path: Path | None = None) -> AppSettings:
             parser.get("Keybindings", "SitOnLowSpButton", fallback="insert").strip()
             or "insert"
         ),
+        use_sprite_grf=parser.getint("Settings", "UseSpriteGrf", fallback=0) == 1,
     )
 
 
@@ -184,8 +185,8 @@ def save_settings(settings: AppSettings) -> None:
     parser["Settings"]["DetectCaptcha"] = "1" if settings.detect_captcha else "0"
     parser["Settings"]["HuntLogOverlay"] = "1" if settings.hunt_log_overlay else "0"
     parser["Settings"]["HuntValidationLog"] = "1" if settings.hunt_validation_log else "0"
+    parser["Settings"]["UseSpriteGrf"] = "1" if settings.use_sprite_grf else "0"
     parser["Settings"].pop("DeathDetectionEnabled", None)
-    parser["Settings"].pop("UseSpriteGrf", None)
 
     _ensure_section(parser, "Warper")
     if settings.warper_coords_set:

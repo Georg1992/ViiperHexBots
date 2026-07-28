@@ -638,6 +638,26 @@ def main() -> None:
             f"({desc_file.relative_to(PROJECT_ROOT)} v{descriptor.version})"
         )
 
+        # Modified-sprite descriptor (big+red) for GRF-modified servers.
+        mod_desc_path = desc_file.parent / "modified_sprite_descriptor.json"
+        if mod_desc_path.is_file():
+            try:
+                mod_descriptor = MobDescriptor.load(mod_desc_path)
+                cv2.imwrite(
+                    str(mob_dir / "modified_sprite_descriptor.png"),
+                    render_descriptor_info(
+                        mod_descriptor, config, descriptor_file=mod_desc_path,
+                    ),
+                )
+                print(
+                    f"  {mob_name:15s} wrote modified_sprite_descriptor.png  "
+                    f"(v{mod_descriptor.version})"
+                )
+            except Exception as exc:
+                print(
+                    f"  {mob_name:15s} modified_sprite_descriptor skip — {exc}"
+                )
+
         for image in suite.images():
             frame = cv2.imread(str(image.path))
             if frame is None:

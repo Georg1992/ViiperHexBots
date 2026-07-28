@@ -10,7 +10,6 @@ import numpy as np
 from pybot.game_state import MemorySnapshot
 from pybot.config.clients import MemoryAddresses
 from pybot.recognition.ui.inventory import InventoryPanelHit, InventoryUiError
-from pybot.runtime.constants import STORAGE_ENTER_SCAN_CODE
 from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.workers.items_to_storage_worker import (
@@ -260,7 +259,7 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         "pybot.runtime.workers.items_to_storage_worker.slot_contains_template",
         return_value=False,
     )
-    def test_items_to_storage_ok_dialog_uses_enter_284(
+    def test_items_to_storage_no_ok_dialog_moves_cursor(
         self,
         _slot_wing: MagicMock,
         require_tpl: MagicMock,
@@ -275,22 +274,17 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
     ) -> None:
         require_panel.return_value = _fake_panel()
         require_tpl.return_value = (10, 10)
-        # Use clear, Eqp clear, Etc: one item then clear (OK dialog on deposit).
+        # Use clear, Eqp clear, Etc: one item then clear.
         slot_empty.side_effect = (
             [True, True, False, True]
         )
 
-        with patch(
-            "pybot.runtime.workers.items_to_storage_worker.find_template",
-            side_effect=lambda _f, name, **_k: (1, 1) if name == "ok" else None,
-        ):
-            worker = self._worker(_FakePoller(90))
-            worker.items_to_storage()
+        worker = self._worker(_FakePoller(90))
+        worker.items_to_storage()
 
-        self.assertIn(
-            ("key_tap", STORAGE_ENTER_SCAN_CODE, 0.05, 0.0),
-            self.input.calls,
-        )
+        # OK dialog handling was removed — key_tap must not be called.
+        kinds = [c[0] for c in self.input.calls]
+        self.assertNotIn("key_tap", kinds)
 
     @patch("pybot.runtime.workers.items_to_storage_worker.time.sleep", return_value=None)
     @patch(

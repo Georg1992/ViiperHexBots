@@ -217,9 +217,12 @@ class MobDetector:
         self,
         project_root: Path,
         config: Optional[dict] = None,
+        *,
+        use_sprite_grf: bool = False,
     ):
         self.project_root = project_root
         self.config = load_detector_config() if config is None else config
+        self.use_sprite_grf = use_sprite_grf
         self.heatmap_detector = HeatmapDetector(self.config)
         self._descriptor_cache: dict[str, MobDescriptor] = {}
         self.discovery_heatmap_downscale = int(self.config["discoveryHeatmapDownscale"])
@@ -241,12 +244,17 @@ class MobDetector:
 
     def descriptor_path(self, mob_name: str) -> Path:
         stem = mob_name.lower()
+        filename = (
+            "modified_sprite_descriptor.json"
+            if self.use_sprite_grf
+            else "descriptor.json"
+        )
         return (
             self.project_root
             / "assets"
             / "generated_descriptors"
             / stem
-            / "descriptor.json"
+            / filename
         )
 
     def ensure_descriptor(self, mob_name: str) -> MobDescriptor:

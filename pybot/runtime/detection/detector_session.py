@@ -78,11 +78,12 @@ class DetectorSession:
         project_root: Path | None = None,
         *,
         detector_config: dict | None = None,
+        use_sprite_grf: bool = False,
     ) -> None:
         root = project_root or PROJECT_ROOT
         config = detector_config if detector_config is not None else load_detector_config()
         self._mob_name = mob_name.lower()
-        self._detector = MobDetector(root, config)
+        self._detector = MobDetector(root, config, use_sprite_grf=use_sprite_grf)
         self._lock = threading.RLock()
 
     def is_busy(self) -> bool:

@@ -497,6 +497,16 @@ class MainWindow:
         self.search_label = ttk.Label(search_row, text=str(self.config.search_range))
         self.search_label.pack(side=tk.LEFT, padx=(6, 0))
 
+        self.use_sprite_grf_var = tk.BooleanVar(value=self.config.use_sprite_grf)
+        sprite_check = ttk.Checkbutton(
+            mode_col,
+            text="Use sprite.grf",
+            variable=self.use_sprite_grf_var,
+            command=self._apply_ui_settings,
+        )
+        sprite_check.grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self._settings_checkbuttons.append(sprite_check)
+
         # ── Keybindings (spans remaining middle-row width) ───────────
         keys_frame = ttk.LabelFrame(main, text="Keybindings", padding=8)
         keys_frame.grid(
@@ -1277,6 +1287,7 @@ class MainWindow:
         self.config.sp_button = self.sp_button.get().strip()
         self.config.sit_on_low_sp_button = self.sit_on_low_sp_button.get().strip()
         self.config.sit_on_low_sp = self.sit_on_low_sp_var.get()
+        self.config.use_sprite_grf = self.use_sprite_grf_var.get()
         raw = self.fly_wings_amount.get().strip()
         self.config.fly_wings_amount = int(raw) if raw else 0
 

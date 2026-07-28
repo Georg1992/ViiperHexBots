@@ -132,10 +132,12 @@ def create_runtime_deps(
     detector = DetectorSession(
         config.mob_name,
         detector_config=detector_config,
+        use_sprite_grf=config.use_sprite_grf,
     )
     tracker = DetectorSession(
         config.mob_name,
         detector_config=detector_config,
+        use_sprite_grf=config.use_sprite_grf,
     )
     validation = HuntValidationLogger(
         logger,

@@ -32,9 +32,12 @@ def _scan_asset_pairs() -> list[tuple[str, str]]:
     for mob_dir in sorted(MOBS_DIR.iterdir()):
         if not mob_dir.is_dir():
             continue
-        for spr_path in sorted(mob_dir.glob("*.spr")):
+        sprite_dir = mob_dir / "sprite"
+        if not sprite_dir.is_dir():
+            continue
+        for spr_path in sorted(sprite_dir.glob("*.spr")):
             spr_stem = spr_path.stem
-            act_path = mob_dir / f"{spr_stem}.act"
+            act_path = sprite_dir / f"{spr_stem}.act"
             if act_path.is_file():
                 pairs.append((mob_dir.name, spr_stem))
                 break
@@ -43,6 +46,10 @@ def _scan_asset_pairs() -> list[tuple[str, str]]:
 
 def descriptor_path(spr_stem: str) -> Path:
     return DESCRIPTORS_DIR / spr_stem.lower() / "descriptor.json"
+
+
+def modified_sprite_descriptor_path(spr_stem: str) -> Path:
+    return DESCRIPTORS_DIR / spr_stem.lower() / "modified_sprite_descriptor.json"
 
 
 def _descriptor_needs_rebuild(descriptor_path_file: Path) -> bool:
@@ -69,12 +76,51 @@ def _build_descriptor(asset_name: str, spr_stem: str, _logger) -> None:
         )
     else:
         _logger(f"[AUTO-BUILD] {asset_name}: SPR/ACT found, building descriptor ({spr_stem})...")
-    DescriptorBuilder(PROJECT_ROOT).build(spr_stem, force=True)
+    builder = DescriptorBuilder(PROJECT_ROOT)
+    builder.build(spr_stem, force=True)
     if _descriptor_needs_rebuild(descriptor_path_file):
         raise RuntimeError(
             f"descriptor still missing or below version {DESCRIPTOR_VERSION} after build"
         )
     _logger(f"[AUTO-BUILD] {asset_name}: descriptor ready (v{DESCRIPTOR_VERSION})")
+
+    # Build modified-sprite descriptor for GRF-modified servers.
+    _build_modified_descriptor(asset_name, spr_stem, builder, _logger)
+
+
+def _build_modified_descriptor(
+    asset_name: str, spr_stem: str, builder, _logger
+) -> None:
+    """Build the big+red modified-sprite descriptor (best-effort)."""
+    modified_path = modified_sprite_descriptor_path(spr_stem)
+    if not _descriptor_needs_rebuild(modified_path):
+        return
+    try:
+        if modified_path.is_file():
+            _logger(
+                f"[AUTO-BUILD] {asset_name}: rebuilding stale modified-sprite "
+                f"descriptor ({spr_stem})..."
+            )
+        else:
+            _logger(
+                f"[AUTO-BUILD] {asset_name}: building modified-sprite "
+                f"descriptor ({spr_stem})..."
+            )
+        builder.build_modified_sprite(spr_stem, force=True)
+        if _descriptor_needs_rebuild(modified_path):
+            _logger(
+                f"[AUTO-BUILD] {asset_name}: modified-sprite descriptor "
+                "still missing after build"
+            )
+        else:
+            _logger(
+                f"[AUTO-BUILD] {asset_name}: modified-sprite descriptor ready "
+                f"(v{DESCRIPTOR_VERSION})"
+            )
+    except Exception as exc:
+        _logger(
+            f"[AUTO-BUILD] {asset_name}: modified-sprite descriptor failed — {exc}"
+        )
 
 
 def ensure_mob_assets(*, log_fn: Callable[[str], None] | None = None) -> None:
@@ -112,6 +158,18 @@ def ensure_mob_assets(*, log_fn: Callable[[str], None] | None = None) -> None:
     _logger(
         f"[AUTO-BUILD] done — built/updated={built} up-to-date={skipped} failed={failed}"
     )
+
+    # Sync modified-sprite files into sprite.grf for GRF-modified servers.
+    # NOTE: The RO viewer can only handle tables under ~150B compressed / ~130B
+    # from EOF, so we only sync shadow files here.  The per-mob sync happens
+    # later from bot_controller.py once the hunt target is known.
+    from pybot.mobs.sprite_grf import sync_sprite_grf
+    try:
+        added = sync_sprite_grf(PROJECT_ROOT, logger=_logger)
+        if added > 0:
+            _logger(f"[AUTO-BUILD] sprite.grf: {added} file(s) synced")
+    except Exception as exc:
+        _logger(f"[AUTO-BUILD] sprite.grf sync failed — {exc}")
 
 
 def load_mob_catalog(*, ensure_assets: bool = False) -> list[MobEntry]:

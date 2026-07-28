@@ -19,8 +19,8 @@ class DescriptorFacingCoverageTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.builder = DescriptorBuilder(PROJECT_ROOT)
         cls.detector = MobDetector(PROJECT_ROOT, load_detector_config())
-        cls.spr = SprReader(PROJECT_ROOT / "assets/mobs/Noxious/noxious.spr").load()
-        cls.act = ActReader(PROJECT_ROOT / "assets/mobs/Noxious/noxious.act").load()
+        cls.spr = SprReader(PROJECT_ROOT / "assets/mobs/Noxious/sprite/noxious.spr").load()
+        cls.act = ActReader(PROJECT_ROOT / "assets/mobs/Noxious/sprite/noxious.act").load()
         cls.descriptor = cls.builder.build("noxious", force=True)
 
     def _canvas_for_action(self, action_index: int) -> tuple[np.ndarray, int, int]:

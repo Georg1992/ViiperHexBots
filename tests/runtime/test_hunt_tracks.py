@@ -494,6 +494,11 @@ class HuntTracksRulesTests(unittest.TestCase):
 
     def test_opacity_decay_removes_stationary_track(self) -> None:
         track_id = self._create(874, 578)
+        # Seed discovery position so apply_movement_observation sees stationary.
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.last_discovery_x = 874
+        track.last_discovery_y = 578
         # Calibrate living baseline (same pixel → stationary).
         for i in range(4):
             missed, dead = self.tracks.apply_tracking(
@@ -516,10 +521,19 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(dead, [])
         self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
 
-        # Second consecutive decay frame confirms death.
+        # Second decay frame — still not confirmed (needs 3 ticks).
         missed, dead = self.tracks.apply_tracking(
             [_hit(track_id, 874, 578, opacity_score=0.18)],
             now_tick=self.now + 200,
+        )
+        self.assertEqual(missed, [])
+        self.assertEqual(dead, [])
+        self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
+
+        # Third consecutive decay frame confirms death.
+        missed, dead = self.tracks.apply_tracking(
+            [_hit(track_id, 874, 578, opacity_score=0.15)],
+            now_tick=self.now + 300,
         )
         self.assertEqual(missed, [])
         self.assertEqual([e.track_id for e in dead], [track_id])
@@ -614,7 +628,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertFalse(track.was_accessible)
         self.assertEqual(track.idle_attack_count, 1)
 
-    def test_melee_range_idle_resets_streak(self) -> None:
+    def test_melee_range_idle_continues_streak(self) -> None:
         track_id = self._create(100, 100)
         for _ in range(3):
             self.tracks.evaluate_idle_attack(
@@ -624,10 +638,10 @@ class HuntTracksRulesTests(unittest.TestCase):
             track_id, was_idle=True, mob_x=100, mob_y=100, char_x=100, char_y=100,
         )
         self.assertEqual(action, "none")
-        self.assertEqual(count, 0)
+        self.assertEqual(count, 4)
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
-        self.assertEqual(track.idle_attack_count, 0)
+        self.assertEqual(track.idle_attack_count, 4)
 
     def test_accessible_stationary_dies_at_two_idle(self) -> None:
         track_id = self._create(500, 500)
@@ -689,11 +703,17 @@ class HuntTracksRulesTests(unittest.TestCase):
 
     def test_opacity_death_blocks_rediscovery_at_death_site(self) -> None:
         track_id = self._create(500, 500)
+        # Seed discovery position so apply_movement_observation sees stationary.
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.last_discovery_x = 500
+        track.last_discovery_y = 500
         for i in range(4):
             self.tracks.apply_tracking(
                 [_hit(track_id, 500, 500, opacity_score=0.60)],
                 now_tick=self.now + (i + 1) * 16,
             )
+        # One decay frame — not yet confirmed.
         missed, dead = self.tracks.apply_tracking(
             [_hit(track_id, 500, 500, opacity_score=0.20)],
             now_tick=self.now + 100,
@@ -702,6 +722,11 @@ class HuntTracksRulesTests(unittest.TestCase):
         missed, dead = self.tracks.apply_tracking(
             [_hit(track_id, 500, 500, opacity_score=0.18)],
             now_tick=self.now + 200,
+        )
+        self.assertEqual(dead, [])
+        missed, dead = self.tracks.apply_tracking(
+            [_hit(track_id, 500, 500, opacity_score=0.15)],
+            now_tick=self.now + 300,
         )
         self.assertEqual([e.track_id for e in dead], [track_id])
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
@@ -741,7 +766,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(summary.added_count, 1)
         self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 1)
 
-    def test_accessible_without_blob_stationary_removes_at_five(self) -> None:
+    def test_accessible_without_blob_stationary_removes_at_two(self) -> None:
         track_id = self._create(500, 500)
         self.tracks.evaluate_idle_attack(
             track_id, was_idle=False, mob_x=500, mob_y=500, char_x=0, char_y=0,
@@ -749,18 +774,17 @@ class HuntTracksRulesTests(unittest.TestCase):
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
         track.discovery_stationary = False
-        for i in range(4):
-            action, count = self.tracks.evaluate_idle_attack(
-                track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
-            )
-            self.assertEqual(action, "none")
-            self.assertEqual(count, i + 1)
+        action, count = self.tracks.evaluate_idle_attack(
+            track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+        )
+        self.assertEqual(action, "none")
+        self.assertEqual(count, 1)
         action, count = self.tracks.evaluate_idle_attack(
             track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
             now_tick=self.now + 50,
         )
-        self.assertEqual(action, "unreachable")
-        self.assertEqual(count, 5)
+        self.assertEqual(action, "dead")
+        self.assertEqual(count, 2)
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
     def test_discovery_blob_stability_sets_stationary(self) -> None:
         track_id = self._create(500, 500)

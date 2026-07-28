@@ -30,7 +30,6 @@ from pybot.runtime.constants import (
     FLY_WING_WEIGHT,
     STORAGE_CRITICAL_HP_RATIO,
     STORAGE_CURSOR_CLEAR_S,
-    STORAGE_ENTER_SCAN_CODE,
     STORAGE_INV_COLS,
     STORAGE_INV_ROWS,
     STORAGE_MENU_POLL_S,
@@ -369,7 +368,6 @@ class ItemsToStorageWorker:
 
     def _hp_ratio(self) -> float | None:
         """Vision HP / max, or None when the status panel cannot be read."""
-        self._cursor_off_screen()
         frame = self._capture_client()
         values = read_status_panel(frame)
         if values is None or values.hp_max <= 0:
@@ -459,16 +457,6 @@ class ItemsToStorageWorker:
 
         self._recognize("close menus", attempt)
 
-    def _image_on_screen(self, name: str) -> bool:
-        """AHK ``CheckImageOnScreen`` — cursor cleared for capture, then restored."""
-        sx, sy = _cursor_pos()
-        try:
-            self._cursor_off_screen()
-            return find_template(self._capture_client(), name) is not None
-        finally:
-            self._input.move_mouse(sx, sy)
-            time.sleep(STORAGE_CURSOR_CLEAR_S)
-
     # ── AHK flows ─────────────────────────────────────────────────────
 
     def _open_storage(self) -> None:
@@ -540,26 +528,20 @@ class ItemsToStorageWorker:
             )
             self._alt_rmb_deposit()
             deposited += 1
-            self._cursor_off_screen()
         raise InventoryUiError(
             f"Use-tab wing deposit did not clear after {max_passes} passes"
         )
 
-    def _deposit_tab_grid(
-        self,
-        *,
-        tab_label: str,
-        handle_ok: bool = False,
-    ) -> None:
+    def _deposit_tab_grid(self, *, tab_label: str) -> None:
         """Deposit items from the current inventory tab.
-        We move to the first slot once. If it is empty, we are done.
-        Otherwise, keep sending Alt+Right Click.
+
+        Move to the first slot once. If it is empty, we are done.
+        Otherwise, keep sending Alt+Right Click until the slot clears.
         """
         log = self._ctx.logger.behavior
-        inp = self._input
         ox, oy = self._client_origin()
         guard = STORAGE_INV_COLS * STORAGE_INV_ROWS
-        
+
         # Determine the first slot's center and aim position
         frame_init = self._capture_client()
         panel_init = require_inventory_panel(frame_init)
@@ -581,17 +563,6 @@ class ItemsToStorageWorker:
                 return
 
             log(f"[STORAGE] ItemsToStorage deposit {tab_label} item from first slot")
-
-            if handle_ok:
-                time.sleep(0.05)
-                if self._image_on_screen("ok"):
-                    inp.key_tap(STORAGE_ENTER_SCAN_CODE, press_s=0.05, after_s=0.0)
-                    sx, sy = _cursor_pos()
-                    inp.move_mouse(sx + 40, sy)
-                    # Restore cursor to first slot after clicking OK
-                    self._input.move_mouse(ox + first_ax, oy + first_ay)
-                    time.sleep(STORAGE_WING_AIM_SETTLE_S)
-
             self._alt_rmb_deposit()
             # Let the slot clear/next item move into the first slot before next loop
             time.sleep(STORAGE_UI_SETTLE_S)
@@ -628,8 +599,8 @@ class ItemsToStorageWorker:
         time.sleep(STORAGE_UI_SETTLE_S)
 
     def _deposit_inventory_to_storage(self) -> None:
-        """Deposit Use / Eqp / Etc via full-grid scans."""
-        self._deposit_tab_grid(tab_label="Use", handle_ok=True)
+        """Deposit Use / Eqp / Etc tabs."""
+        self._deposit_tab_grid(tab_label="Use")
 
         time.sleep(STORAGE_UI_SETTLE_S)
         self._abort_if_critical_hp()
@@ -638,7 +609,7 @@ class ItemsToStorageWorker:
 
         self._abort_if_critical_hp()
         self._select_inventory_tab("etc")
-        self._deposit_tab_grid(tab_label="Etc", handle_ok=True)
+        self._deposit_tab_grid(tab_label="Etc")
 
     def _restock_fly_wings_from_open_storage(
         self, *, ensure_use_tab: bool = False
