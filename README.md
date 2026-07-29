@@ -45,19 +45,13 @@ Console entry points (after editable install):
 ## Tests
 
 ```powershell
-.\scripts\run_all_hunt_tests.ps1
-```
-
-Or directly after `pip install -e ".[dev]"`:
-
-```powershell
 pytest
 ```
 
 Runs runtime tests (`tests/runtime`), app tests (`tests/app`), recognition tests (`tests/recognition`), and architecture checks (`tests/architecture`). Recognition tests only:
 
 ```powershell
-.\scripts\run_recognition_tests.ps1
+pytest tests/recognition
 ```
 
 ## Layout
@@ -92,7 +86,7 @@ Mob sprites live in `assets/mobs/<MobName>/`. On launch the bot rebuilds descrip
 Build a single mob descriptor manually:
 
 ```powershell
-.\scripts\build-mob-descriptor.ps1 -Mob horn -Force
+python -m pybot.recognition build-descriptor --mob horn --force
 ```
 
 Use `mob-detect` for CLI examples (`mob-detect detect --mob horn --help`). Pipeline source lives in `pybot/recognition/`.
@@ -102,8 +96,6 @@ Use `mob-detect` for CLI examples (`mob-detect detect --mob horn --help`). Pipel
 | Script | Purpose |
 |--------|---------|
 | `scripts/smoke_test.py` | Import/init check before GUI launch |
-| `scripts/test_detection.py` | Live detection overlay on game window |
-| `scripts/capture_detect.py` | One-shot screenshot + detect |
 | `debug_vis.py` | Discovery pipeline fixture visualization (`_debug_vis/`) |
 | `python -m pybot.recognition fixtures --mob <name>` | Run screenshot fixture suite for one mob |
 

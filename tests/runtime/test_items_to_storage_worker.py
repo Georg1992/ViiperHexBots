@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock, patch
+from contextlib import ExitStack
+from unittest.mock import DEFAULT, MagicMock, patch
 
 import numpy as np
 
@@ -17,6 +18,68 @@ from pybot.runtime.workers.items_to_storage_worker import (
     StorageCriticalHpError,
 )
 from pybot.viiper.keyboard import MOD_LEFT_ALT, vk_to_modifier
+
+_WORKER = "pybot.runtime.workers.items_to_storage_worker"
+
+# ── common patches shared across storage / restock tests ─────────────
+
+# Patch targets present in nearly every storage/restock test.
+# Each key is a short name; _enter_worker_patches prepends _WORKER.
+# Wrapped in a factory so every call gets fresh MagicMock instances.
+
+
+def _default_worker_patch_targets():
+    """Return a fresh dict of {target: mock_or_DEFAULT} for storage tests."""
+    return {
+        "time.sleep": MagicMock(return_value=None),
+        "_cursor_pos": MagicMock(return_value=(150, 100)),
+        "ItemsToStorageWorker._close_menus": MagicMock(),
+        "ItemsToStorageWorker._ensure_storage_open": MagicMock(),
+        "ItemsToStorageWorker._ensure_inventory_open": MagicMock(
+            return_value=InventoryPanelHit(x=0, y=0, width=312, height=254)
+        ),
+        "ItemsToStorageWorker._wait_for_inventory_panel": MagicMock(
+            return_value=(
+                InventoryPanelHit(x=0, y=0, width=312, height=254),
+                np.zeros((10, 10, 3), dtype=np.uint8),
+            )
+        ),
+        "require_inventory_panel": MagicMock(),
+    }
+
+
+def _enter_worker_patches(**extras):
+    """Enter all common storage-worker patches, plus any extras.
+
+    Returns ``(stack, mocks)`` where *stack* is an ``ExitStack`` that undoes
+    patches on exit, and *mocks* is a dict keyed by the short attribute name
+    (e.g. ``"_close_menus"``, ``"require_inventory_panel"``).
+
+    Every call creates **fresh** ``MagicMock`` instances, so tests are
+    isolated and call-count assertions don't leak.
+
+    Pass ``DEFAULT`` in *extras* for a bare ``MagicMock()``, or an explicit
+    ``MagicMock(...)`` for a pre-configured one.
+    """
+    stack = ExitStack()
+    mocks: dict[str, MagicMock] = {}
+
+    merged = _default_worker_patch_targets()
+    for k, v in extras.items():
+        merged[k] = v
+
+    for name, value in merged.items():
+        if value is DEFAULT:
+            value = MagicMock()
+        full_target = name if name.startswith(_WORKER) else f"{_WORKER}.{name}"
+        mock = stack.enter_context(patch(full_target, value))
+        # Short key for lookup: drop _WORKER prefix if present.
+        short = name[len(_WORKER) + 1:] if name.startswith(_WORKER) else name
+        mocks[short] = mock
+    return stack, mocks
+
+
+# ── test helpers ────────────────────────────────────────────────────
 
 
 class _FakePoller:
@@ -88,6 +151,9 @@ def _fake_panel(x: int = 0, y: int = 0) -> InventoryPanelHit:
     return InventoryPanelHit(x=x, y=y, width=312, height=254)
 
 
+# ── tests ───────────────────────────────────────────────────────────
+
+
 class ItemsToStorageWorkerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = MagicMock()
@@ -122,6 +188,8 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             hunt_mode=MagicMock(),
             poller=poller,
         )
+
+    # ── unit / no-patch tests ──────────────────────────────────────
 
     def test_vk_menu_maps_to_left_alt(self) -> None:
         self.assertEqual(vk_to_modifier(0x12), MOD_LEFT_ALT)
@@ -163,348 +231,11 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.ctx.note_teleport_for_wings()
         self.assertEqual(self.ctx.wingcount, 2)
 
-    @patch("pybot.runtime.workers.items_to_storage_worker.time.sleep", return_value=None)
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker._cursor_pos",
-        return_value=(150, 100),
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._close_menus"
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_storage_open"
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_inventory_open",
-        return_value=_fake_panel(),
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._wait_for_inventory_panel",
-        return_value=(_fake_panel(), np.zeros((10, 10, 3), dtype=np.uint8)),
-    )
-    @patch("pybot.runtime.workers.items_to_storage_worker.require_inventory_panel")
-    @patch("pybot.runtime.workers.items_to_storage_worker.slot_looks_empty")
-    @patch("pybot.runtime.workers.items_to_storage_worker.require_template")
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.slot_contains_template",
-        return_value=False,
-    )
-    @patch("pybot.runtime.workers.items_to_storage_worker.find_template")
-    def test_items_to_storage_sequence(
-        self,
-        find_tpl: MagicMock,
-        _slot_wing: MagicMock,
-        require_tpl: MagicMock,
-        slot_empty: MagicMock,
-        require_panel: MagicMock,
-        _wait_panel: MagicMock,
-        _ensure_inv_open: MagicMock,
-        ensure_stor_open: MagicMock,
-        close_menus: MagicMock,
-        _cursor: MagicMock,
-        _sleep: MagicMock,
-    ) -> None:
-        require_panel.return_value = _fake_panel()
-        require_tpl.side_effect = lambda _f, name, **_kw: {
-            "use": (10, 10),
-            "eqp": (30, 10),
-            "etc": (40, 10),
-            "close": (50, 50),
-            "wing": (60, 60),
-        }[name]
-        slot_empty.side_effect = (
-            # Use / Eqp / Etc: one occupied slot then empty slot.
-            # We loop over each tab.
-            [False, True, False, True, False, True]
-        )
-        find_tpl.side_effect = lambda _f, name, **_kw: {
-            "use": (10, 10),
-            "eqp": (30, 10),
-            "etc": (40, 10),
-        }.get(name)
-
-        worker = self._worker(_FakePoller(90))
-        worker.items_to_storage()
-
-        kinds = [c[0] for c in self.input.calls]
-        ensure_stor_open.assert_called()
-        close_menus.assert_called()
-        self.assertIn(("left_click",), self.input.calls)
-        self.assertGreaterEqual(kinds.count("alt_rmb"), 3)
-        self.assertEqual(kinds.count("left_click"), 3)  # use/eqp/etc
-
-    @patch("pybot.runtime.workers.items_to_storage_worker.time.sleep", return_value=None)
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker._cursor_pos",
-        return_value=(150, 100),
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._close_menus"
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_storage_open"
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_inventory_open",
-        return_value=_fake_panel(),
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._wait_for_inventory_panel",
-        return_value=(_fake_panel(), np.zeros((10, 10, 3), dtype=np.uint8)),
-    )
-    @patch("pybot.runtime.workers.items_to_storage_worker.require_inventory_panel")
-    @patch("pybot.runtime.workers.items_to_storage_worker.slot_looks_empty")
-    @patch("pybot.runtime.workers.items_to_storage_worker.require_template")
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.slot_contains_template",
-        return_value=False,
-    )
-    def test_items_to_storage_no_ok_dialog_moves_cursor(
-        self,
-        _slot_wing: MagicMock,
-        require_tpl: MagicMock,
-        slot_empty: MagicMock,
-        require_panel: MagicMock,
-        _wait_panel: MagicMock,
-        _ensure_inv_open: MagicMock,
-        _ensure_stor_open: MagicMock,
-        _close_menus: MagicMock,
-        _cursor: MagicMock,
-        _sleep: MagicMock,
-    ) -> None:
-        require_panel.return_value = _fake_panel()
-        require_tpl.return_value = (10, 10)
-        # Use clear, Eqp clear, Etc: one item then clear.
-        slot_empty.side_effect = (
-            [True, True, False, True]
-        )
-
-        worker = self._worker(_FakePoller(90))
-        worker.items_to_storage()
-
-        # OK dialog handling was removed — key_tap must not be called.
-        kinds = [c[0] for c in self.input.calls]
-        self.assertNotIn("key_tap", kinds)
-
-    @patch("pybot.runtime.workers.items_to_storage_worker.time.sleep", return_value=None)
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker._cursor_pos",
-        return_value=(150, 100),
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._close_menus"
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_storage_open"
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_inventory_open",
-        return_value=_fake_panel(),
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._wait_for_inventory_panel",
-        return_value=(_fake_panel(), np.zeros((10, 10, 3), dtype=np.uint8)),
-    )
-    @patch("pybot.runtime.workers.items_to_storage_worker.require_inventory_panel")
-    @patch("pybot.runtime.workers.items_to_storage_worker.find_storage_wing")
-    @patch("pybot.runtime.workers.items_to_storage_worker.find_wings_in_use_grid")
-    @patch("pybot.runtime.workers.items_to_storage_worker.require_template")
-    def test_get_fly_wings_sequence(
-        self,
-        require_tpl: MagicMock,
-        find_wings: MagicMock,
-        find_storage: MagicMock,
-        require_panel: MagicMock,
-        _wait_panel: MagicMock,
-        ensure_inv_open: MagicMock,
-        ensure_stor_open: MagicMock,
-        close_menus: MagicMock,
-        _cursor: MagicMock,
-        _sleep: MagicMock,
-    ) -> None:
-        panel = _fake_panel()
-        require_panel.return_value = panel
-        require_tpl.return_value = (10, 10)
-        find_wings.side_effect = [[(0, 0, 46, 42)], []]
-        find_storage.return_value = (200, 100)
-        self.config.fly_wings_amount = 150
-
-        worker = self._worker(_FakePoller(10))
-        self.assertEqual(self.ctx.wingcount, 0)
-        worker.get_fly_wings()
-
-        ensure_inv_open.assert_called()
-        ensure_stor_open.assert_called()
-        close_menus.assert_called()
-        self.assertIn(("move", 146, 92), self.input.calls)
-        self.assertIn(("move", 98, 48), self.input.calls)
-        self.assertEqual(self.input.calls.count(("alt_rmb",)), 1)
-        self.assertIn(("type", "150"), self.input.calls)
-        self.assertEqual(self.ctx.wingcount, 150)
-        self.assertFalse(self.ctx.fly_wings_exhausted)
-        # Restock-only: Use selected once at session open (soft select may skip).
-        # left_click count depends on whether use_img was found (mocked True → 1).
-
-    @patch("pybot.runtime.workers.items_to_storage_worker.time.sleep", return_value=None)
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._close_menus"
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_inventory_open",
-        return_value=_fake_panel(),
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._open_storage",
-        side_effect=InventoryUiError("storage open failed"),
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.find_template",
-        return_value=None,
-    )
-    def test_storage_session_closes_menus_on_ui_miss(
-        self,
-        _find_tpl: MagicMock,
-        _open_storage: MagicMock,
-        _ensure_inv_open: MagicMock,
-        close_menus: MagicMock,
-        _sleep: MagicMock,
-    ) -> None:
-        worker = self._worker(_FakePoller(10))
-        with self.assertRaises(InventoryUiError):
-            worker.storage_session(dump=False, restock=True)
-        close_menus.assert_called()
-
-    @patch("pybot.runtime.workers.items_to_storage_worker.time.sleep", return_value=None)
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._close_menus"
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_storage_open"
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_inventory_open",
-        return_value=_fake_panel(),
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.find_template",
-        return_value=None,
-    )
-    @patch("pybot.runtime.workers.items_to_storage_worker.read_status_panel")
-    def test_restock_force_closes_only_on_critical_hp(
-        self,
-        read_hp: MagicMock,
-        _find_tpl: MagicMock,
-        _ensure_inv_open: MagicMock,
-        _ensure_stor_open: MagicMock,
-        close_menus: MagicMock,
-        _sleep: MagicMock,
-    ) -> None:
-        from pybot.recognition.ui.status_panel import StatusPanelValues
-
-        read_hp.return_value = StatusPanelValues(
-            hp=40,
-            hp_max=100,
-            sp=50,
-            sp_max=100,
-            weight=10,
-            weight_max=100,
-            panel_origin=(0, 0),
-        )
-        worker = self._worker(_FakePoller(10))
-        with self.assertRaises(StorageCriticalHpError):
-            worker.storage_session(dump=False, restock=True)
-        # Critical path does not use the normal session close — caller force-closes.
-        close_menus.assert_not_called()
-
-    @patch("pybot.runtime.workers.items_to_storage_worker.time.sleep", return_value=None)
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._close_menus"
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_storage_open"
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_inventory_open",
-        return_value=_fake_panel(),
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._wait_for_inventory_panel",
-        return_value=(_fake_panel(), np.zeros((10, 10, 3), dtype=np.uint8)),
-    )
-    @patch("pybot.runtime.workers.items_to_storage_worker.require_inventory_panel")
-    @patch("pybot.runtime.workers.items_to_storage_worker.find_storage_wing")
-    @patch("pybot.runtime.workers.items_to_storage_worker.find_wings_in_use_grid")
-    @patch("pybot.runtime.workers.items_to_storage_worker.require_template")
-    def test_get_fly_wings_abandons_when_storage_empty(
-        self,
-        require_tpl: MagicMock,
-        find_wings: MagicMock,
-        find_storage: MagicMock,
-        require_panel: MagicMock,
-        _wait_panel: MagicMock,
-        _ensure_inv_open: MagicMock,
-        _ensure_stor_open: MagicMock,
-        close_menus: MagicMock,
-        _sleep: MagicMock,
-    ) -> None:
-        require_panel.return_value = _fake_panel()
-        require_tpl.return_value = (10, 10)
-        find_wings.return_value = []
-        find_storage.return_value = None
-        self.config.fly_wings_amount = 150
-        self.config.creamy_tp_button = "w"
-        self.config.creamy_tp_scan_code = 17
-
-        worker = self._worker(_FakePoller(10))
-        worker.get_fly_wings()
-
-        close_menus.assert_called()
-        self.assertTrue(self.ctx.fly_wings_exhausted)
-        self.assertEqual(self.ctx.wingcount, 0)
-        self.assertFalse(self.ctx.should_restock_fly_wings())
-        self.assertNotIn(("type", "150"), self.input.calls)
-
     def test_active_teleport_delegates_to_config(self) -> None:
         self.config.active_teleport_button.return_value = "q"
         self.config.active_teleport_scan_code.return_value = 16
         self.assertEqual(self.ctx.active_teleport_button(), "q")
         self.assertEqual(self.ctx.active_teleport_scan_code(), 16)
-
-    @patch("pybot.runtime.workers.items_to_storage_worker.time.sleep", return_value=None)
-    @patch("pybot.runtime.workers.items_to_storage_worker.is_storage_open")
-    @patch("pybot.runtime.workers.items_to_storage_worker.is_inventory_open")
-    @patch("pybot.runtime.workers.items_to_storage_worker.require_inventory_panel")
-    def test_menu_validation_open_closed(
-        self,
-        require_panel: MagicMock,
-        inv_open: MagicMock,
-        stor_open: MagicMock,
-        _sleep: MagicMock,
-    ) -> None:
-        require_panel.return_value = _fake_panel()
-        worker = self._worker(_FakePoller(10))
-
-        inv_open.return_value = False
-        stor_open.return_value = False
-        with self.assertRaisesRegex(Exception, "inventory open"):
-            worker._wait_menu_state(
-                menu="inventory", want_open=True, label="inventory open", timeout_s=0.0
-            )
-
-        inv_open.return_value = True
-        frame = worker._wait_menu_state(
-            menu="inventory", want_open=True, label="inventory open", timeout_s=0.5
-        )
-        self.assertIs(frame, self.frame)
-
-        stor_open.return_value = True
-        worker._wait_menu_state(
-            menu="storage", want_open=True, label="storage open", timeout_s=0.5
-        )
-        stor_open.return_value = False
-        worker._wait_menu_state(
-            menu="storage", want_open=False, label="storage closed", timeout_s=0.5
-        )
 
     def test_weight_threshold_gate(self) -> None:
         worker = self._worker(_FakePoller(79, 100))
@@ -516,81 +247,221 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.assertFalse(worker._weight_over_threshold())
 
     def test_fly_wings_would_hit_threshold_triggers_dump(self) -> None:
-        # weight 70, max 100, gate 80% → threshold 80.
-        # 150 wings * 5 = 750 → projected 820 >= 80 → dump before restock.
         self.config.weight_modifier = 80
         self.config.fly_wings_amount = 150
         worker = self._worker(_FakePoller(70, 100))
         self.assertFalse(worker._weight_over_threshold())
         self.assertTrue(worker._fly_wings_would_hit_threshold())
-
-        # Small restock that stays under threshold: 1 wing * 5 → 75 < 80.
         self.config.fly_wings_amount = 1
         self.assertFalse(worker._fly_wings_would_hit_threshold())
 
-    @patch("pybot.runtime.workers.items_to_storage_worker.time.sleep", return_value=None)
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker._cursor_pos",
-        return_value=(150, 100),
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._close_menus"
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_storage_open"
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._ensure_inventory_open",
-        return_value=_fake_panel(),
-    )
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.ItemsToStorageWorker._wait_for_inventory_panel",
-        return_value=(_fake_panel(), np.zeros((10, 10, 3), dtype=np.uint8)),
-    )
-    @patch("pybot.runtime.workers.items_to_storage_worker.require_inventory_panel")
-    @patch("pybot.runtime.workers.items_to_storage_worker.slot_looks_empty")
-    @patch("pybot.runtime.workers.items_to_storage_worker.find_storage_wing")
-    @patch("pybot.runtime.workers.items_to_storage_worker.find_wings_in_use_grid")
-    @patch(
-        "pybot.runtime.workers.items_to_storage_worker.slot_contains_template",
-        return_value=False,
-    )
-    @patch("pybot.runtime.workers.items_to_storage_worker.require_template")
-    @patch("pybot.runtime.workers.items_to_storage_worker.find_template")
-    def test_merged_dump_and_restock_opens_storage_once(
-        self,
-        find_tpl: MagicMock,
-        require_tpl: MagicMock,
-        _slot_wing: MagicMock,
-        find_wings: MagicMock,
-        find_storage: MagicMock,
-        slot_empty: MagicMock,
-        require_panel: MagicMock,
-        _wait_panel: MagicMock,
-        _ensure_inv_open: MagicMock,
-        ensure_stor_open: MagicMock,
-        close_menus: MagicMock,
-        _cursor: MagicMock,
-        _sleep: MagicMock,
-    ) -> None:
-        require_panel.return_value = _fake_panel()
-        require_tpl.return_value = (10, 10)
-        find_tpl.return_value = None
-        find_wings.side_effect = [[], []]
-        find_storage.return_value = (200, 100)
-        slot_empty.side_effect = (
-            # Use / Eqp / Etc dump grids, then restock path does not use slot_empty.
-            [False, True, False, True, False, True]
+    # ── items-to-storage (dump) ────────────────────────────────────
+
+    def test_items_to_storage_sequence(self) -> None:
+        stack, m = _enter_worker_patches(
+            slot_looks_empty=DEFAULT,
+            require_template=DEFAULT,
+            slot_contains_template=DEFAULT,
+            find_template=DEFAULT,
         )
-        self.config.fly_wings_amount = 150
+        with stack:
+            m["require_inventory_panel"].return_value = _fake_panel()
+            m["require_template"].side_effect = lambda _f, name, **_kw: {
+                "use": (10, 10), "eqp": (30, 10), "etc": (40, 10),
+                "close": (50, 50), "wing": (60, 60),
+            }[name]
+            m["slot_looks_empty"].side_effect = (
+                [False, True, False, True, False, True]
+            )
+            m["slot_contains_template"].return_value = False
+            m["find_template"].side_effect = lambda _f, name, **_kw: {
+                "use": (10, 10), "eqp": (30, 10), "etc": (40, 10),
+            }.get(name)
 
-        worker = self._worker(_FakePoller(70, 100))
-        worker.storage_session(dump=True, restock=True)
+            worker = self._worker(_FakePoller(90))
+            worker.items_to_storage()
 
-        self.assertEqual(ensure_stor_open.call_count, 1)
-        close_menus.assert_called_once()
-        self.assertEqual(self.ctx.wingcount, 150)
-        self.assertIn(("type", "150"), self.input.calls)
+            kinds = [c[0] for c in self.input.calls]
+            m["ItemsToStorageWorker._ensure_storage_open"].assert_called()
+            m["ItemsToStorageWorker._close_menus"].assert_called()
+            self.assertIn(("left_click",), self.input.calls)
+            self.assertGreaterEqual(kinds.count("alt_rmb"), 3)
+            self.assertEqual(kinds.count("left_click"), 3)
+
+    def test_items_to_storage_no_ok_dialog_moves_cursor(self) -> None:
+        stack, m = _enter_worker_patches(
+            slot_looks_empty=DEFAULT,
+            require_template=DEFAULT,
+            slot_contains_template=DEFAULT,
+        )
+        with stack:
+            m["require_inventory_panel"].return_value = _fake_panel()
+            m["require_template"].return_value = (10, 10)
+            m["slot_looks_empty"].side_effect = [True, True, False, True]
+            m["slot_contains_template"].return_value = False
+
+            worker = self._worker(_FakePoller(90))
+            worker.items_to_storage()
+
+            kinds = [c[0] for c in self.input.calls]
+            self.assertNotIn("key_tap", kinds)
+
+    # ── get-fly-wings (restock) ────────────────────────────────────
+
+    def test_get_fly_wings_sequence(self) -> None:
+        stack, m = _enter_worker_patches(
+            find_storage_wing=DEFAULT,
+            find_wings_in_use_grid=DEFAULT,
+            require_template=DEFAULT,
+        )
+        with stack:
+            panel = _fake_panel()
+            m["require_inventory_panel"].return_value = panel
+            m["require_template"].return_value = (10, 10)
+            m["find_wings_in_use_grid"].side_effect = [[(0, 0, 46, 42)], []]
+            m["find_storage_wing"].return_value = (200, 100)
+            m["ItemsToStorageWorker._ensure_inventory_open"].return_value = panel
+            self.config.fly_wings_amount = 150
+
+            worker = self._worker(_FakePoller(10))
+            self.assertEqual(self.ctx.wingcount, 0)
+            worker.get_fly_wings()
+
+            m["ItemsToStorageWorker._ensure_inventory_open"].assert_called()
+            m["ItemsToStorageWorker._ensure_storage_open"].assert_called()
+            m["ItemsToStorageWorker._close_menus"].assert_called()
+            self.assertIn(("move", 146, 92), self.input.calls)
+            self.assertIn(("move", 98, 48), self.input.calls)
+            self.assertEqual(self.input.calls.count(("alt_rmb",)), 1)
+            self.assertIn(("type", "150"), self.input.calls)
+            self.assertEqual(self.ctx.wingcount, 150)
+            self.assertFalse(self.ctx.fly_wings_exhausted)
+
+    def test_get_fly_wings_abandons_when_storage_empty(self) -> None:
+        stack, m = _enter_worker_patches(
+            find_storage_wing=DEFAULT,
+            find_wings_in_use_grid=DEFAULT,
+            require_template=DEFAULT,
+        )
+        with stack:
+            m["require_inventory_panel"].return_value = _fake_panel()
+            m["require_template"].return_value = (10, 10)
+            m["find_wings_in_use_grid"].return_value = []
+            m["find_storage_wing"].return_value = None
+            self.config.fly_wings_amount = 150
+            self.config.creamy_tp_button = "w"
+            self.config.creamy_tp_scan_code = 17
+
+            worker = self._worker(_FakePoller(10))
+            worker.get_fly_wings()
+
+            m["ItemsToStorageWorker._close_menus"].assert_called()
+            self.assertTrue(self.ctx.fly_wings_exhausted)
+            self.assertEqual(self.ctx.wingcount, 0)
+            self.assertFalse(self.ctx.should_restock_fly_wings())
+            self.assertNotIn(("type", "150"), self.input.calls)
+
+    # ── storage session edge cases ─────────────────────────────────
+
+    def test_storage_session_closes_menus_on_ui_miss(self) -> None:
+        stack, m = _enter_worker_patches(
+            find_template=DEFAULT,
+            **{f"{_WORKER}.ItemsToStorageWorker._open_storage": MagicMock(
+                side_effect=InventoryUiError("storage open failed")
+            )},
+        )
+        with stack:
+            m["find_template"].return_value = None
+
+            worker = self._worker(_FakePoller(10))
+            with self.assertRaises(InventoryUiError):
+                worker.storage_session(dump=False, restock=True)
+            m["ItemsToStorageWorker._close_menus"].assert_called()
+
+    def test_restock_force_closes_only_on_critical_hp(self) -> None:
+        from pybot.recognition.ui.status_panel import StatusPanelValues
+
+        stack, m = _enter_worker_patches(
+            find_template=DEFAULT,
+            read_status_panel=DEFAULT,
+        )
+        with stack:
+            m["find_template"].return_value = None
+            m["read_status_panel"].return_value = StatusPanelValues(
+                hp=40, hp_max=100, sp=50, sp_max=100,
+                weight=10, weight_max=100, panel_origin=(0, 0),
+            )
+
+            worker = self._worker(_FakePoller(10))
+            with self.assertRaises(StorageCriticalHpError):
+                worker.storage_session(dump=False, restock=True)
+            m["ItemsToStorageWorker._close_menus"].assert_not_called()
+
+    def test_menu_validation_open_closed(self) -> None:
+        stack, m = _enter_worker_patches(
+            is_storage_open=DEFAULT,
+            is_inventory_open=DEFAULT,
+        )
+        with stack:
+            m["require_inventory_panel"].return_value = _fake_panel()
+            worker = self._worker(_FakePoller(10))
+
+            m["is_inventory_open"].return_value = False
+            m["is_storage_open"].return_value = False
+            with self.assertRaisesRegex(Exception, "inventory open"):
+                worker._wait_menu_state(
+                    menu="inventory", want_open=True, label="inventory open",
+                    timeout_s=0.0,
+                )
+
+            m["is_inventory_open"].return_value = True
+            frame = worker._wait_menu_state(
+                menu="inventory", want_open=True, label="inventory open",
+                timeout_s=0.5,
+            )
+            self.assertIs(frame, self.frame)
+
+            m["is_storage_open"].return_value = True
+            worker._wait_menu_state(
+                menu="storage", want_open=True, label="storage open",
+                timeout_s=0.5,
+            )
+            m["is_storage_open"].return_value = False
+            worker._wait_menu_state(
+                menu="storage", want_open=False, label="storage closed",
+                timeout_s=0.5,
+            )
+
+    def test_merged_dump_and_restock_opens_storage_once(self) -> None:
+        stack, m = _enter_worker_patches(
+            slot_looks_empty=DEFAULT,
+            find_storage_wing=DEFAULT,
+            find_wings_in_use_grid=DEFAULT,
+            slot_contains_template=DEFAULT,
+            require_template=DEFAULT,
+            find_template=DEFAULT,
+        )
+        with stack:
+            m["require_inventory_panel"].return_value = _fake_panel()
+            m["require_template"].return_value = (10, 10)
+            m["find_template"].return_value = None
+            m["find_wings_in_use_grid"].side_effect = [[], []]
+            m["find_storage_wing"].return_value = (200, 100)
+            m["slot_contains_template"].return_value = False
+            m["slot_looks_empty"].side_effect = (
+                [False, True, False, True, False, True]
+            )
+            self.config.fly_wings_amount = 150
+
+            worker = self._worker(_FakePoller(70, 100))
+            worker.storage_session(dump=True, restock=True)
+
+            self.assertEqual(
+                m["ItemsToStorageWorker._ensure_storage_open"].call_count, 1
+            )
+            m["ItemsToStorageWorker._close_menus"].assert_called_once()
+            self.assertEqual(self.ctx.wingcount, 150)
+            self.assertIn(("type", "150"), self.input.calls)
 
 
 if __name__ == "__main__":

@@ -6,10 +6,8 @@ import threading
 import unittest
 
 import cv2
-import numpy as np
 
 from pybot.runtime.capture.window_roi import HuntRoi
-from pybot.paths import PROJECT_ROOT
 from pybot.recognition.fixtures import default_horn_fixture
 from pybot.recognition.rules import DiscoveryDetection
 from pybot.runtime.config import HuntRuntimeConfig
@@ -24,57 +22,14 @@ from pybot.runtime.validation_log import HuntValidationLogger
 from pybot.runtime.detection.detector_session import DetectorSession
 from pybot.runtime.workers.attack_loop import AttackLoop
 
+from tests.runtime.fixtures import (
+    FakeCapture,
+    FixtureDetector,
+    make_config,
+    playfield_roi,
+)
+
 FIXTURE = default_horn_fixture()
-
-
-def playfield_roi(frame: np.ndarray) -> np.ndarray:
-    height, width = frame.shape[:2]
-    return frame[
-        int(height * 0.08) : int(height * 0.92),
-        int(width * 0.03) : int(width * 0.97),
-    ]
-
-
-class FixtureDetector(DetectorSession):
-    def __init__(self, frame: np.ndarray) -> None:
-        super().__init__("horn", project_root=PROJECT_ROOT)
-        self._fixture_frame = frame
-
-    def discover(self, roi: HuntRoi):
-        return self.discover_frame(self._fixture_frame, roi)
-
-
-class FakeCapture:
-    def __init__(self, roi: HuntRoi) -> None:
-        self._roi = roi
-
-    def is_valid(self) -> bool:
-        return True
-
-    def get_hunt_roi(self) -> HuntRoi:
-        return self._roi
-
-
-def make_config(**overrides) -> HuntRuntimeConfig:
-    base = dict(
-        config_path=PROJECT_ROOT / "config.ini",
-        hwnd=12345,
-        mob_name="horn",
-        hunt_mode="teleport",
-        skill_delay_ms=500,
-        skill_button="e",
-        skill_scan_code=18,
-        teleport_button="q",
-        teleport_scan_code=16,
-        search_range_cells=16,
-        cell_size_px=64,
-        discovery_interval_ms=3000,
-        teleport_duration_ms=500,
-        validation_enabled=False,
-        control_file=None,
-    )
-    base.update(overrides)
-    return HuntRuntimeConfig(**base)
 
 
 def make_context(

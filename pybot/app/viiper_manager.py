@@ -15,6 +15,7 @@ This replaces the old Go bridge (viiper-input.exe) entirely.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -93,6 +94,9 @@ class ViiperManager:
             [str(viiper_path), "server"],
             cwd=str(viiper_path.parent),
             creationflags=subprocess.CREATE_NO_WINDOW,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={**os.environ, "VIIPER_LOG_LEVEL": "error"},
         )
         self._server_proc = proc
 
