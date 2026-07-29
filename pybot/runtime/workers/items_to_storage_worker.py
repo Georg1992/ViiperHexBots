@@ -154,22 +154,37 @@ class ItemsToStorageWorker:
                 ctx.logger.behavior(f"[STORAGE] tick error:\n{traceback.format_exc()}")
 
     def _read_weight(self) -> tuple[int, int] | None:
-        """Return ``(weight, weight_max)`` or None when unavailable."""
+        """Return ``(weight, weight_max)`` or None when unavailable.
+
+        Prefers process memory when valid addresses are configured
+        (HoneyRO / Revenant profiles).  Falls back to Basic Info OCR for
+        Generic and other non-memory profiles.
+        """
         ctx = self._ctx
-        snap = self._poller.read(ctx.config.hwnd, self._memory)
-        if (
-            not snap.ok
-            or snap.weight is None
-            or snap.weight_max is None
-            or snap.weight_max <= 0
-        ):
-            reason = snap.error or "weight_unavailable"
+        use_memory = (
+            self._memory.current_weight > 0
+            and self._memory.max_weight > 0
+        )
+        if use_memory:
+            snap = self._poller.read(ctx.config.hwnd, self._memory)
+            if snap.ok and snap.weight is not None and snap.weight_max is not None and snap.weight_max > 0:
+                self._last_fail_log = ""
+                return int(snap.weight), int(snap.weight_max)
+
+        # Memory unavailable or failed — OCR the Basic Info panel.
+        try:
+            frame = self._capture_client()
+        except InventoryUiError:
+            return None
+        values = read_status_panel(frame)
+        if values is None or values.weight is None or values.weight_max is None or values.weight_max <= 0:
+            reason = "ocr_weight_unavailable"
             if reason != self._last_fail_log:
                 self._last_fail_log = reason
                 ctx.logger.behavior(f"[STORAGE] weight read failed: {reason}")
             return None
         self._last_fail_log = ""
-        return int(snap.weight), int(snap.weight_max)
+        return values.weight, values.weight_max
 
     def _weight_threshold(self, weight_max: int) -> float:
         modifier = int(self._ctx.config.weight_modifier)
