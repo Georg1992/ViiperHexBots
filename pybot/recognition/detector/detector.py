@@ -91,7 +91,7 @@ _EXTRACT_BODY_STRONG_FLOOR_FRAC = 0.75
 # Very small sprites at 2× downscale lose too much signal — GaussianBlur on
 # a sub-24px field smears heat into gate-rejected speckles. Below this work
 # resolution the detector runs at native scale to preserve blob shape.
-_DOWNSCALE_MIN_WORK_RESOLUTION_PX = 24.0
+_DOWNSCALE_MIN_WORK_RESOLUTION_PX = 16.0
 
 # Extract / content-noise thresholds shared by silhouette gate control flow
 # and the post-gate noisy_extract cleanup hook.

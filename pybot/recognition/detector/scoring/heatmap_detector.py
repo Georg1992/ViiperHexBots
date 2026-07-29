@@ -302,6 +302,31 @@ def required_groups_structure(
 
 
 
+def _multi_cluster_match_max(bgr_f: np.ndarray, clusters: list[ColorCluster]) -> np.ndarray:
+    if not clusters:
+        return np.zeros(bgr_f.shape[:2], dtype=np.float32)
+    
+    pixels = bgr_f.reshape(-1, 3)
+    n_pixels = pixels.shape[0]
+    
+    centers = np.array([c.bgr for c in clusters], dtype=np.float32)
+    max_dists = np.array([max(float(c.max_distance), 1.0) for c in clusters], dtype=np.float32)
+    
+    p_norm = np.sum(pixels * pixels, axis=1, keepdims=True)
+    c_norm = np.sum(centers * centers, axis=1, keepdims=True)
+    
+    dist_sq = np.dot(pixels, centers.T)
+    dist_sq *= np.float32(-2.0)
+    dist_sq += p_norm
+    dist_sq += c_norm.T
+    np.maximum(dist_sq, np.float32(0.0), out=dist_sq)
+    
+    dist = np.sqrt(dist_sq)
+    match = np.float32(1.0) - (dist / max_dists)
+    
+    return np.clip(match.max(axis=1), 0.0, 1.0).reshape(bgr_f.shape[:2]).astype(np.float32)
+
+
 def apply_body_cluster_diversity(
     base_sprite: np.ndarray,
     frame_bgr: np.ndarray,
@@ -344,10 +369,7 @@ def apply_body_cluster_diversity(
 
     if body_clusters:
         bgr_f = frame_bgr.astype(np.float32)
-        body_best = np.stack(
-            [_cluster_match(bgr_f, cluster) for cluster in body_clusters],
-            axis=2,
-        ).max(axis=2).astype(np.float32)
+        body_best = _multi_cluster_match_max(bgr_f, body_clusters)
         strong = (body_best >= _BODY_STRONG_SIM).astype(np.float32)
         local_body = cv2.boxFilter(
             strong, ddepth=-1, ksize=ksize, normalize=True,
