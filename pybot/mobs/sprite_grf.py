@@ -27,11 +27,9 @@ _GRF_HEADER_SIZE_LEGACY = 46  # older custom format: reserved(7) instead of file
 _GRF_VERSION = 0x200
 
 # Subdirectory inside the GRF where custom sprites live.
-# wild_rose uses the Korean name ``바이올렛`` (violet) — we keep the same
-# convention: one folder per mob using the Korean mob name.
-# Since we do not have a Korean-name mapping, the mob's lowercased English stem
-# is used as the folder name so detection tools can still find the files.
-_GRF_SPRITE_DIR = "data\\sprite"
+# All RO monsters must be inside the Korean "몹몬스터" directory.
+# \xb8\xf3\xbd\xba\xc5\xcd is EUC-KR for "몹몬스터" (monster).
+_GRF_SPRITE_DIR_BYTES = b"data\\sprite\\\xb8\xf3\xbd\xba\xc5\xcd"
 
 
 @dataclass
@@ -198,10 +196,6 @@ class SpriteGrf:
         self._table_compressed_first: bool = True  # True=comp→uncomp, False=uncomp→comp
         self._orig_header_tail: bytes = b""  # raw[16:header_size] from original file
         self._raw_container: bytes = b""  # raw compressed file data (between header and table)
-        # Raw bytes of the sprite subfolder (discovered during _load).
-        # Preserves the exact encoding (e.g. EUC-KR Korean for wild_rose)
-        # so that new entries use the correct path bytes.
-        self._sprite_dir_bytes: bytes = _GRF_SPRITE_DIR.encode("utf-8")
         if self._path.is_file():
             self._load()
 
@@ -264,18 +258,6 @@ class SpriteGrf:
                 )
 
         self._entries = _parse_table(table_data)
-
-        # Discover the sprite subdirectory bytes from the first entry that
-        # has a subfolder (e.g. the Korean ``바이올렛`` folder for wild_rose).
-        # We store raw bytes so new entries preserve the exact encoding.
-        _sprite_prefix = _GRF_SPRITE_DIR.encode("utf-8") + b"\\"
-        for entry in self._entries:
-            pb = entry._path_bytes
-            if pb and pb.startswith(_sprite_prefix):
-                rest = pb[len(_sprite_prefix):]
-                if b"\\" in rest:
-                    self._sprite_dir_bytes = pb[:pb.rfind(b"\\")]
-                    break
 
         # Extract each file's raw (decompressed) data from the container.
         # The reference GRF stores files as individually-compressed zlib
@@ -518,16 +500,6 @@ class SpriteGrf:
 # ------------------------------------------------------------------
 
 
-def _discover_sprite_dir(grf) -> str:
-    """Return the sprite subdirectory path bytes discovered during load.
-
-    This preserves the original encoding (e.g. EUC-KR for Korean folder
-    names) instead of using a corrupted string with ``\ufffd`` replacements.
-    Falls back to ``data\\sprite`` when no subfolder exists.
-    """
-    return getattr(grf, "_sprite_dir_bytes", _GRF_SPRITE_DIR.encode("utf-8"))
-
-
 def sync_sprite_grf(
     project_root: Path | None = None,
     *,
@@ -568,11 +540,6 @@ def sync_sprite_grf(
     if not MOBS_DIR.is_dir():
         return 0
 
-    # The sprite subdirectory path (e.g. ``data\sprite\Violet`` in the
-    # original file's encoding).  When bootstrapped from the legacy GRF
-    # this will be the Korean-named folder.
-    sprite_dir_bytes = _discover_sprite_dir(grf)
-
     for mob_dir in sorted(MOBS_DIR.iterdir()):
         if not mob_dir.is_dir():
             continue
@@ -604,7 +571,7 @@ def sync_sprite_grf(
                 if existing_entry:
                     grf.remove_entry_by_name(filename)
                     
-                path_bytes = sprite_dir_bytes + b"\\" + filename.encode("utf-8")
+                path_bytes = _GRF_SPRITE_DIR_BYTES + b"\\" + filename.encode("utf-8")
                 grf.add_file_raw(path_bytes, new_data)
                 changed += 1
                 _log(f"[GRF] {'replaced' if existing_entry else 'added'} "
