@@ -312,25 +312,13 @@ class SpriteGrf:
             self._data_section += raw_data
 
     @staticmethod
-    def _find_table_header(data: bytes, hint_offset: int = -1) -> int:
+    def _find_table_header(data: bytes) -> int:
         """Find the table header near the end of the file.
-
-        ``hint_offset`` comes from the header's ``table_offset`` field at
-        bytes 31-34, which the RO viewer uses as a magic format marker
-        (value must be 112).  We try it via ``file_size - hint_offset``
-        as a hint, but for most file sizes this will not point to the
-        actual table — the scanner fallback below handles that.
 
         The table HEADER (2 x uint32) is the 8 bytes immediately before
         the zlib-compressed table data.  We return that position.
         """
-        # 1. Try interpreting hint as EOF distance for the compressed data.
-        if hint_offset > 0:
-            table_data_start = len(data) - hint_offset
-            if table_data_start > 8 and data[table_data_start] == 0x78:
-                return table_data_start - 8
-
-        # 2. Fall back to scanning backwards.
+        # Scan backwards for the zlib magic byte (0x78)
         for off in range(len(data) - 8, max(0, len(data) - 512), -1):
             if data[off] != 0x78:
                 continue
@@ -483,14 +471,6 @@ class SpriteGrf:
         comp_table = zlib.compress(table_raw, 9)
 
         # Header.
-        # NOTE: The RO viewer treats bytes 31-34 (table_offset) as a magic
-        # format marker equal to 112.  It must **not** be changed — the
-        # viewer finds the actual table by scanning backwards from EOF for
-        # a zlib magic (0x78) preceded by plausible uint32 size fields.
-        # If table_offset != 112 the viewer rejects the file with
-        # "array dimensions exceeded".
-        MAGIC_TABLE_OFFSET = 112
-
         header = bytearray()
         header += _GRF_MAGIC
 
@@ -505,15 +485,16 @@ class SpriteGrf:
             tail[off_start:off_start+4] = struct.pack("<I", rel_table_offset)
             header += bytes(tail)
         else:
-            # New GRF
-            header += _GRF_KEY
+            # New GRF: write the real offset, and use the legacy 46-byte header format.
+            # Legacy key is 14 bytes: 0x01 .. 0x0E
+            legacy_key = bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
+            header += legacy_key
+            
             header += struct.pack("<I", rel_table_offset)
-            header += struct.pack("<I", 0)  # seed
-            if self._header_size == _GRF_HEADER_SIZE:
-                header += struct.pack("<I", len(self._entries))
-                header += struct.pack("<I", _GRF_VERSION)
-            else:
-                header += b"\x00" * 7
+            
+            # skip (0), count1 (len+7), version (0x200)
+            count1 = len(self._entries) + 7
+            header += struct.pack("<III", 0, count1, _GRF_VERSION)
 
         # Table header (compressed-first).
         table_hdr = struct.pack("<I", len(comp_table))
