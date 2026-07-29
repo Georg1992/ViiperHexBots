@@ -161,6 +161,11 @@ def read_snapshot(
                 return None
             return _read_uint32(handle, module_base + offset)
 
+        def optional_weight(offset: int) -> int | None:
+            val = optional_u32(offset)
+            # RO weight in memory is scaled by 10 (e.g. 5.5 UI weight -> 55).
+            return val // 10 if val is not None else None
+
         def optional_name(offset: int) -> str | None:
             if not offset:
                 return None
@@ -171,8 +176,8 @@ def read_snapshot(
             char_name=optional_name(addresses.char_name),
             sp=optional_u32(addresses.current_sp),
             sp_max=optional_u32(addresses.max_sp),
-            weight=optional_u32(addresses.current_weight),
-            weight_max=optional_u32(addresses.max_weight),
+            weight=optional_weight(addresses.current_weight),
+            weight_max=optional_weight(addresses.max_weight),
             ok=True,
         )
     except OSError as exc:
