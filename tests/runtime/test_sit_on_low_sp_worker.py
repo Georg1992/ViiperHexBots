@@ -197,6 +197,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
     def test_sit_session_returns_danger_on_sp_drop_and_near_objects(self) -> None:
         # SP drop marks stall immediately; keep mid ratios so we never resume.
         vitals = _ScriptedVitals([0.40, 0.30] + [0.30] * 30)
+        # HP is steady (no drop) so danger comes from near_objects only.
+        vitals.publish_hp(1000, 5000)
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
@@ -214,17 +216,16 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
                 0.0,
             ):
                 with patch.object(worker, "_capture_client", return_value=object()):
-                    with patch.object(worker, "_read_hp", return_value=1000):
-                        with patch.object(
-                            worker,
-                            "_assess_danger",
-                            return_value=DangerReport(
-                                in_danger=True,
-                                reasons=("near_objects:1",),
-                                near_object_count=1,
-                            ),
-                        ):
-                            outcome = worker._sit_session()
+                    with patch.object(
+                        worker,
+                        "_assess_danger",
+                        return_value=DangerReport(
+                            in_danger=True,
+                            reasons=("near_objects:1",),
+                            near_object_count=1,
+                        ),
+                    ):
+                        outcome = worker._sit_session()
 
         self.assertEqual(outcome, "danger")
         self.assertGreaterEqual(self.input.teleport_key.call_count, 1)
@@ -240,7 +241,10 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             vitals=vitals,
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-        hp_values = iter([1000, 900])
+
+        # Script hp_pair to return 1000→900 so the detector sees the drop
+        # happen between successive poll ticks.
+        hp_values = [(1000, 5000), (900, 5000)] + [(900, 5000)] * 100
 
         with patch(
             "pybot.runtime.workers.sit_on_low_sp_worker.SIT_HP_POLL_S",
@@ -248,14 +252,12 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         ):
             with patch.object(worker, "_capture_client", return_value=object()):
                 with patch.object(
-                    worker, "_read_hp", side_effect=lambda _f: next(hp_values, 900)
+                    worker, "_assess_danger",
+                    return_value=DangerReport(
+                        in_danger=False, reasons=(), near_object_count=0,
+                    ),
                 ):
-                    with patch.object(
-                        worker, "_assess_danger",
-                        return_value=DangerReport(
-                            in_danger=False, reasons=(), near_object_count=0,
-                        ),
-                    ):
+                    with patch.object(vitals, "hp_pair", side_effect=hp_values):
                         outcome = worker._sit_session()
 
         self.assertEqual(outcome, "danger")

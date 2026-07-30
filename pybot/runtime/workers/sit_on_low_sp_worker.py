@@ -3,16 +3,15 @@
 Before sitting: teleport until a discovery scan sees no living mobs, idle 1s,
 measure standing pose, sit and confirm the shorter sitting pose (retry on
 failure), then regenerate. While regenerating: interrupt on danger — HP
-dropping (vision; already standing from the hit), or SP stall/drop with
-nearby foreign sprites (stand key with pose confirm if still seated) — then
-teleport to a quiet area and sit again. On SP recover: stand and confirm
-standing pose before resume (retry on failure).
+dropping or SP stall/drop with nearby foreign sprites — then teleport to a
+quiet area and sit again. On SP recover: stand and confirm standing pose
+before resume (retry on failure).
 
 Each sit teleport clears tracking (same as hunt-mode teleport) so workers
 resume against the new screen only.
 
-SP comes from shared ``PlayerVitals`` (UI publishes memory or Basic Info OCR).
-HP for danger is always vision (status panel).
+SP and HP come from shared ``PlayerVitals`` (UI publishes from memory or
+status-panel OCR).  The DangerDetector observes HP internally.
 """
 
 from __future__ import annotations
@@ -22,7 +21,6 @@ import time
 from pybot.game_state import PlayerVitals
 from pybot.recognition.danger import DangerReport, assess_danger
 from pybot.recognition.ui.character_pose import CharacterPose, measure_center_pose
-from pybot.recognition.ui.status_panel import read_status_panel
 from pybot.runtime.clear_area import HuntModeAreaReset, teleport_until_quiet
 from pybot.runtime.constants import (
     SIT_HP_POLL_S,
@@ -118,11 +116,6 @@ class SitOnLowSpWorker:
             return None
         return measure_center_pose(frame)
 
-    def _read_hp(self, frame) -> int | None:
-        """OCR current HP from Basic Info (vision-only)."""
-        values = read_status_panel(frame)
-        return None if values is None else values.hp
-
     def _assess_danger(
         self,
         frame,
@@ -133,8 +126,6 @@ class SitOnLowSpWorker:
         return assess_danger(
             frame,
             cell_size_px=int(self._ctx.config.cell_size_px),
-            hp=hp,
-            previous_hp=previous_hp,
         )
 
     def _recover_sp(self, low_ratio: float) -> None:
@@ -188,7 +179,6 @@ class SitOnLowSpWorker:
         sp_state = self._sp_snapshot()
         last_sp = sp_state[0] if sp_state is not None else None
         last_progress = time.monotonic()
-        last_hp: int | None = None
         last_hp_poll = 0.0
 
         while not ctx.is_stopped():
@@ -217,23 +207,19 @@ class SitOnLowSpWorker:
                 elif now - last_progress >= SIT_SP_STALL_S:
                     sp_stalled = True
 
-                # HP OCR on its own cadence (always vision).
+                # HP check: read from shared vitals (UI publishes every 200ms).
                 if now - last_hp_poll >= SIT_HP_POLL_S:
                     frame = self._capture_client()
                     last_hp_poll = now
                     if frame is not None:
-                        hp = self._read_hp(frame)
-                        # Feed every HP reading to the detector — it
-                        # teleports synchronously on drop.
-                        if self._danger.feed_hp(hp):
+                        hp, hp_max = self._vitals.hp_pair()
+                        if hp is not None and self._danger.feed_hp(hp, hp_max):
                             ctx.logger.behavior(
                                 f"[SIT] danger while sitting sp={sp} "
                                 "(hp dropped, danger tp executed)"
                             )
                             return "danger"
-                        danger = self._assess_danger(
-                            frame, hp=hp, previous_hp=last_hp
-                        )
+                        danger = self._assess_danger(frame)
                         if (
                             sp_stalled
                             and danger.has_near_objects
@@ -244,8 +230,6 @@ class SitOnLowSpWorker:
                             )
                             self._ensure_standing(sit_scan)
                             return "danger"
-                        if hp is not None:
-                            last_hp = hp
                     if sp_stalled:
                         last_progress = now
                 elif sp_stalled:
