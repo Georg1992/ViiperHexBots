@@ -664,49 +664,53 @@ def main() -> None:
             if frame is None:
                 continue
 
+            is_modified = "_ModifiedSprite" in image.file_name
             frame = fixture_search_frame(frame)
-            result = detector.detect(frame, mob_name)
 
-            pane_heat = heatmap_to_color(result.sprite_heatmap)
-            annotate_heatmap_pane(pane_heat, result)
-            pane_overlay = draw_detection_overlay(frame, result)
-            pane_sil = allocate_silhouette_panel(
-                result.descriptor,
-                result.silhouette_checks,
-                420,
-                frame.shape[0],
-                min_recall=float(config["minSilhouetteRecall"]),
-                min_precision=float(config["minSilhouettePrecision"]),
-            )
+            # ── normal path (skip ModifiedSprite fixtures) ──
+            if not is_modified:
+                result = detector.detect(frame, mob_name)
 
-            combined_height = max(
-                pane_heat.shape[0], pane_overlay.shape[0], pane_sil.shape[0],
-            )
-            combined = np.hstack([
-                pad_to_height(pane_heat, combined_height),
-                pad_to_height(pane_overlay, combined_height),
-                pad_to_height(pane_sil, combined_height),
-            ])
+                pane_heat = heatmap_to_color(result.sprite_heatmap)
+                annotate_heatmap_pane(pane_heat, result)
+                pane_overlay = draw_detection_overlay(frame, result)
+                pane_sil = allocate_silhouette_panel(
+                    result.descriptor,
+                    result.silhouette_checks,
+                    420,
+                    frame.shape[0],
+                    min_recall=float(config["minSilhouetteRecall"]),
+                    min_precision=float(config["minSilhouettePrecision"]),
+                )
 
-            stem = image.file_name.replace(".png", "")
-            cv2.imwrite(str(mob_dir / f"{stem}_viz.png"), combined)
-            viz_count += 1
+                combined_height = max(
+                    pane_heat.shape[0], pane_overlay.shape[0], pane_sil.shape[0],
+                )
+                combined = np.hstack([
+                    pad_to_height(pane_heat, combined_height),
+                    pad_to_height(pane_overlay, combined_height),
+                    pad_to_height(pane_sil, combined_height),
+                ])
 
-            n_acc = len(result.accepted)
-            expected = image.expected_count
-            ok = "OK" if n_acc == expected else "FAIL"
-            print(
-                f"  {mob_name:15s} {stem:20s}  "
-                f"expect={expected} got={n_acc}  "
-                f"sil={len(result.silhouette_checks)}  {ok}"
-            )
-            print(f"    {format_timing_ms(result.timing)}")
-            timing_runs += 1
-            for key, sec in result.timing.items():
-                timing_totals[key] = timing_totals.get(key, 0.0) + sec
+                stem = image.file_name.replace(".png", "")
+                cv2.imwrite(str(mob_dir / f"{stem}_viz.png"), combined)
+                viz_count += 1
 
-            # ── sprite.grf pass (modified sprites, 4× downscale) ──
-            if mod_desc_path.is_file():
+                n_acc = len(result.accepted)
+                expected = image.expected_count
+                ok = "OK" if n_acc == expected else "FAIL"
+                print(
+                    f"  {mob_name:15s} {stem:20s}  "
+                    f"expect={expected} got={n_acc}  "
+                    f"sil={len(result.silhouette_checks)}  {ok}"
+                )
+                print(f"    {format_timing_ms(result.timing)}")
+                timing_runs += 1
+                for key, sec in result.timing.items():
+                    timing_totals[key] = timing_totals.get(key, 0.0) + sec
+
+            # ── sprite.grf pass (ModifiedSprite fixtures only) ──
+            if is_modified and mod_desc_path.is_file():
                 result_sg = detector_spritegrf.detect(frame, mob_name)
 
                 pane_heat_sg = heatmap_to_color(result_sg.sprite_heatmap)
@@ -730,6 +734,7 @@ def main() -> None:
                     pad_to_height(pane_sil_sg, combined_height_sg),
                 ])
 
+                stem = image.file_name.replace(".png", "")
                 cv2.imwrite(str(mob_dir / f"{stem}_viz_spritegrf.png"), combined_sg)
                 viz_count += 1
 
