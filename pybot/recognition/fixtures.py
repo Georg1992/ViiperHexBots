@@ -119,7 +119,7 @@ MOB_FIXTURE_SUITES: tuple[MobFixtureSuite, ...] = (
         folder="WildRose",
         mob_name="wild_rose",
         pattern=re.compile(
-            r"^(\d+)WildRose(?:_Gray\d*|False\d*)?\.png$",
+            r"^(\d+)WildRose(?:_ModifiedSprite_Gray|_Gray\d*|False\d*)?\.png$",
             re.IGNORECASE,
         ),
     ),

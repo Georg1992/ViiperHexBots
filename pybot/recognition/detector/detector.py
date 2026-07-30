@@ -1251,10 +1251,12 @@ class MobDetector:
         return passed, extract_bbox if extract_bbox is not None else bbox, float(sim)
 
     # ------------------------------------------------------------------
-    #  Simple palette detection (sprite.grf mode — exact pixel match)
+    #  Simple palette detection (sprite.grf mode — distance-based match)
     # ------------------------------------------------------------------
 
     _SIMPLE_PALETTE_TOP_COLORS = 3
+    _SIMPLE_PALETTE_MAX_DISTANCE = 10.0
+    _SIMPLE_PALETTE_MATCH_THRESHOLD = 0.6
     _SIMPLE_PALETTE_MIN_COMPONENT_AREA = 4
 
     def _top_main_colors(self, descriptor: MobDescriptor) -> list[tuple[int, int, int]]:
@@ -1266,32 +1268,54 @@ class MobDetector:
         top_n = min(self._SIMPLE_PALETTE_TOP_COLORS, len(descriptor.match_palette_bgr))
         return [descriptor.match_palette_bgr[i] for i, _w in indexed[:top_n]]
 
+    @staticmethod
+    def _simple_palette_mask(
+        frame_bgr: np.ndarray,
+        palette: list[tuple[int, int, int]],
+    ) -> np.ndarray:
+        """Binary mask: pixels within ``_SIMPLE_PALETTE_MAX_DISTANCE`` of any
+        palette color, thresholded at ``_SIMPLE_PALETTE_MATCH_THRESHOLD``.
+
+        Uses ``sprite_palette_heatmap`` with a tight distance so only pixels
+        genuinely close to the top 3 main colors pass.  JPEG compression
+        artefacts (1-3 per channel) fall within this budget.
+        """
+        heat = sprite_palette_heatmap(
+            frame_bgr, palette,
+            max_distance=MobDetector._SIMPLE_PALETTE_MAX_DISTANCE,
+        )
+        return (heat >= MobDetector._SIMPLE_PALETTE_MATCH_THRESHOLD).astype(np.uint8)
+
     def detect_simple_palette(
         self,
         frame_bgr: np.ndarray,
         mob_name: str,
     ) -> DetectionResult:
-        """Simplified discovery for sprite.grf mode — exact palette pixel search.
+        """Simplified discovery for sprite.grf mode — distance-based palette search.
 
-        Finds pixels matching any of the top 3 main palette colors exactly,
-        clusters them into connected components, and returns centroids as
-        detection candidates. No heatmaps, silhouette gates, or death checks.
+        Finds pixels close to any of the top 3 main palette colors (within
+        ``_SIMPLE_PALETTE_MAX_DISTANCE`` Euclidean BGR distance), clusters them
+        into connected components, and returns centroids as detection candidates.
+        No heatmaps, silhouette gates, or death checks.
         """
         start = time.perf_counter()
         descriptor = self.ensure_descriptor(mob_name)
 
         top_colors = self._top_main_colors(descriptor)
-        fh, fw = frame_bgr.shape[:2]
-
-        # Build combined exact-match mask for top 3 colors.
-        mask = np.zeros((fh, fw), dtype=np.uint8)
-        for b, g, r in top_colors:
-            match = (
-                (frame_bgr[:, :, 0] == b)
-                & (frame_bgr[:, :, 1] == g)
-                & (frame_bgr[:, :, 2] == r)
+        if not top_colors:
+            elapsed = time.perf_counter() - start
+            return DetectionResult(
+                mob_name=mob_name.lower(),
+                descriptor=descriptor,
+                candidates=[],
+                accepted=[],
+                elapsed_s=elapsed,
+                timing={"total": elapsed},
+                sprite_heatmap=np.zeros((1, 1), dtype=np.float32),
+                silhouette_checks=[],
             )
-            mask[match] = 255
+
+        mask = self._simple_palette_mask(frame_bgr, top_colors) * 255
 
         # Connected components.
         _nl, labels, stats, centroids = cv2.connectedComponentsWithStats(
@@ -1344,10 +1368,10 @@ class MobDetector:
         cy: int,
         scale: float = 1.0,
     ) -> tuple[bool, tuple[int, int, int, int] | None, float]:
-        """Simplified tracking score for sprite.grf mode — palette search window.
+        """Simplified tracking score for sprite.grf mode — distance-based palette
+        search in a window around the expected position.
 
-        Searches around (cx, cy) with the configured local-track radius for
-        exact palette matches. Returns the closest CC or (False, None, 0.0).
+        Returns the closest CC or (False, None, 0.0).
         """
         top_colors = self._top_main_colors(descriptor)
         if not top_colors:
@@ -1368,15 +1392,8 @@ class MobDetector:
         crop = frame_bgr[y0:y1, x0:x1]
         ch, cw = crop.shape[:2]
 
-        # Exact-match mask within the search window.
-        mask = np.zeros((ch, cw), dtype=np.uint8)
-        for b, g, r in top_colors:
-            match = (
-                (crop[:, :, 0] == b)
-                & (crop[:, :, 1] == g)
-                & (crop[:, :, 2] == r)
-            )
-            mask[match] = 255
+        # Distance-based mask within the search window.
+        mask = self._simple_palette_mask(crop, top_colors) * 255
 
         if not np.any(mask):
             return False, None, 0.0
