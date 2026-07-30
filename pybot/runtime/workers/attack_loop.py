@@ -145,47 +145,47 @@ class AttackLoop:
         moving = snap.moving
         idle_before = snap.idle_attack_count
 
-        # sprite.grf removes death animations — idle-death detection is meaningless.
-        if not ctx.config.use_sprite_grf:
-            action, idle_count = ctx.tracks.evaluate_idle_attack(
-                target_id,
-                was_idle=was_idle,
-                mob_x=click_x,
-                mob_y=click_y,
-                char_x=char_x,
-                char_y=char_y,
-                now_tick=now_tick,
+        # sprite.grf: no death animations → idle-dead is meaningless, but
+        # unreachable is about pathfinding and still matters.
+        action, idle_count = ctx.tracks.evaluate_idle_attack(
+            target_id,
+            was_idle=was_idle,
+            mob_x=click_x,
+            mob_y=click_y,
+            char_x=char_x,
+            char_y=char_y,
+            now_tick=now_tick,
+        )
+        if not ctx.config.use_sprite_grf and action == "dead":
+            ctx.logger.behavior(
+                f"[DEATH] path=idle-dead id={target_id} @{click_x},{click_y} "
+                f"idle={idle_count} accessible={accessible} "
+                f"blob_stationary={blob_stationary} moving={moving} "
+                f"pre_sp={pre_sp} post_sp={post_sp} — track removed, death-site recorded"
             )
-            if action == "dead":
-                ctx.logger.behavior(
-                    f"[DEATH] path=idle-dead id={target_id} @{click_x},{click_y} "
-                    f"idle={idle_count} accessible={accessible} "
-                    f"blob_stationary={blob_stationary} moving={moving} "
-                    f"pre_sp={pre_sp} post_sp={post_sp} — track removed, death-site recorded"
-                )
-                return
-            if action == "unreachable":
-                ctx.logger.behavior(
-                    f"[DEATH] path=idle-unreachable id={target_id} @{click_x},{click_y} "
-                    f"idle={idle_count} accessible={accessible} "
-                    f"blob_stationary={blob_stationary} moving={moving} "
-                    f"pre_sp={pre_sp} post_sp={post_sp} — track removed, death-site recorded"
-                )
-                return
-            if was_idle is True and idle_count > 0:
-                ctx.logger.behavior(
-                    f"[IDLE] path=progress id={target_id} "
-                    f"idle={idle_count}/{IDLE_UNREACHABLE_ATTACK_COUNT} "
-                    f"(dead_at={IDLE_DEAD_ATTACK_COUNT} if accessible+stationary) "
-                    f"accessible={accessible} blob_stationary={blob_stationary} "
-                    f"moving={moving} idle_before={idle_before} "
-                    f"pre_sp={pre_sp} post_sp={post_sp}"
-                )
-            elif was_idle is False and not accessible:
-                ctx.logger.behavior(
-                    f"[IDLE] path=first-hit id={target_id} "
-                    f"pre_sp={pre_sp} post_sp={post_sp} — SP spent, now accessible"
-                )
+            return
+        if action == "unreachable":
+            ctx.logger.behavior(
+                f"[DEATH] path=idle-unreachable id={target_id} @{click_x},{click_y} "
+                f"idle={idle_count} accessible={accessible} "
+                f"blob_stationary={blob_stationary} moving={moving} "
+                f"pre_sp={pre_sp} post_sp={post_sp} — track removed, death-site recorded"
+            )
+            return
+        if was_idle is True and idle_count > 0:
+            ctx.logger.behavior(
+                f"[IDLE] path=progress id={target_id} "
+                f"idle={idle_count}/{IDLE_UNREACHABLE_ATTACK_COUNT} "
+                f"(dead_at={IDLE_DEAD_ATTACK_COUNT} if accessible+stationary) "
+                f"accessible={accessible} blob_stationary={blob_stationary} "
+                f"moving={moving} idle_before={idle_before} "
+                f"pre_sp={pre_sp} post_sp={post_sp}"
+            )
+        elif was_idle is False and not accessible:
+            ctx.logger.behavior(
+                f"[IDLE] path=first-hit id={target_id} "
+                f"pre_sp={pre_sp} post_sp={post_sp} — SP spent, now accessible"
+            )
 
         ctx.tracks.apply_attack_event(target_id, now_tick=now_tick)
         ctx.policy.note_attack_target(target_id)
