@@ -64,6 +64,7 @@ def _descriptor_needs_rebuild(descriptor_path_file: Path) -> bool:
 
 
 def _build_descriptor(asset_name: str, spr_stem: str, _logger) -> None:
+    """Build the normal descriptor if missing/stale (skip if up-to-date)."""
     descriptor_path_file = descriptor_path(spr_stem)
     if not _descriptor_needs_rebuild(descriptor_path_file):
         return
@@ -83,9 +84,6 @@ def _build_descriptor(asset_name: str, spr_stem: str, _logger) -> None:
             f"descriptor still missing or below version {DESCRIPTOR_VERSION} after build"
         )
     _logger(f"[AUTO-BUILD] {asset_name}: descriptor ready (v{DESCRIPTOR_VERSION})")
-
-    # Build modified-sprite descriptor for GRF-modified servers.
-    _build_modified_descriptor(asset_name, spr_stem, builder, _logger)
 
 
 def _build_modified_descriptor(
@@ -142,6 +140,8 @@ def ensure_mob_assets(*, log_fn: Callable[[str], None] | None = None) -> None:
     built = 0
     skipped = 0
     failed = 0
+    from pybot.recognition.detector.descriptors.descriptor_builder import DescriptorBuilder
+
     for asset_name, spr_stem in pairs:
         path = descriptor_path(spr_stem)
         needed = _descriptor_needs_rebuild(path)
@@ -151,6 +151,10 @@ def ensure_mob_assets(*, log_fn: Callable[[str], None] | None = None) -> None:
                 built += 1
             else:
                 skipped += 1
+            # Modified-sprite descriptor is independent — check/rebuilt
+            # even when the normal descriptor is up-to-date.
+            builder = DescriptorBuilder(PROJECT_ROOT)
+            _build_modified_descriptor(asset_name, spr_stem, builder, _logger)
         except Exception as exc:
             failed += 1
             _logger(f"[AUTO-BUILD] {asset_name}: build failed — {exc}")
