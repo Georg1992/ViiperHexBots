@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ctypes
 import time
+import traceback
 from ctypes import wintypes
 
 from pybot.game_state import GameMemoryPoller
@@ -140,8 +141,6 @@ class ItemsToStorageWorker:
                 except InventoryUiError as exc:
                     ctx.logger.behavior(f"[STORAGE] UI miss: {exc}")
                 except Exception:
-                    import traceback
-
                     ctx.logger.behavior(
                         f"[STORAGE] cycle error:\n{traceback.format_exc()}"
                     )
@@ -149,8 +148,6 @@ class ItemsToStorageWorker:
                     ctx.end_storage_ops()
                     ctx.discovery_wake.set()
             except Exception:
-                import traceback
-
                 ctx.logger.behavior(f"[STORAGE] tick error:\n{traceback.format_exc()}")
 
     def _read_weight(self) -> tuple[int, int] | None:
