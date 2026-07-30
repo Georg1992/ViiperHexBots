@@ -40,6 +40,7 @@ class DangerDetector:
         self._mob_behavior = mob_behavior
         self._vitals = vitals
         self._prev_hp: int | None = None
+        self._teleported: bool = False
 
     # ── Worker loop ───────────────────────────────────────────────
 
@@ -66,11 +67,20 @@ class DangerDetector:
                 self._mob_behavior.execute_danger_teleport(
                     self._ctx, self._input, reason="critical_hp",
                 )
+                self._teleported = True
             else:
                 self._mob_behavior.execute_danger_teleport(
                     self._ctx, self._input, reason="hp_drop",
                 )
+                self._teleported = True
         self._prev_hp = hp
+
+    def pop_teleported(self) -> bool:
+        """Return and clear the teleported flag for consumers (sit worker)."""
+        if self._teleported:
+            self._teleported = False
+            return True
+        return False
 
     # ── Track data ────────────────────────────────────────────────
 

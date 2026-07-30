@@ -1,18 +1,12 @@
 """Sit when SP is low; pause hunting (and timers) until SP recovers.
 
-Before sitting: teleport until a discovery scan sees no living mobs, idle 1s,
-measure standing pose, sit and confirm the shorter sitting pose (retry on
-failure), then regenerate. While regenerating: if something makes the character stand up (e.g.
-DangerDetector teleport), the pose changes — detected and the sit session
-returns ``"interrupted"`` so ``_recover_sp`` loops to find a new quiet spot.
-On SP recover: stand and confirm standing pose before resume (retry on
-failure).
+Before sitting: teleport until discovery sees no mobs, then sit.
+While sitting: if DangerDetector teleports us (HP drop), the sit session
+returns ``"interrupted"`` so ``_recover_sp`` finds a new spot and sits again.
+On SP recover: stand and resume.
 
-Each sit teleport clears tracking (same as hunt-mode teleport) so workers
-resume against the new screen only.
-
-SP comes from shared ``PlayerVitals``. Danger detection (HP, critical, surrounded) is handled by
-``DangerDetector`` — the sit worker only detects interruptions.
+SP comes from shared ``PlayerVitals``. Danger detection is handled by
+``DangerDetector`` — the sit worker only checks a flag.
 """
 
 from __future__ import annotations
@@ -20,25 +14,18 @@ from __future__ import annotations
 import time
 
 from pybot.game_state import PlayerVitals
-from pybot.recognition.ui.character_pose import CharacterPose, measure_center_pose
 from pybot.runtime.clear_area import HuntModeAreaReset, teleport_until_quiet
 from pybot.runtime.constants import (
-    SIT_POSE_CHECK_S,
     SIT_LOW_SP_RATIO,
-    SIT_POSE_MAX_ATTEMPTS,
-    SIT_POSE_MIN_HEIGHT_DROP,
     SIT_POSE_SETTLE_S,
     SIT_RESUME_SP_RATIO,
     SIT_SP_POLL_INTERVAL_S,
-    SIT_SP_STALL_S,
     SIT_STAND_RESUME_DELAY_S,
 )
 from pybot.runtime.danger_detector import DangerDetector
 from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.mob_behaviors import MobBehavior
 from pybot.runtime.workers.worker_contexts import SitOnLowSpWorkerContext
-
-_STAND_HEIGHT = 99  # standing pose body_height for interruption check
 
 
 class SitOnLowSpWorker:
@@ -106,18 +93,6 @@ class SitOnLowSpWorker:
         snap = self._sp_snapshot()
         return None if snap is None else snap[1]
 
-    def _capture_client(self):
-        frame = self._ctx.capture.capture_client()
-        if frame is None or getattr(frame, "size", 0) == 0:
-            return None
-        return frame
-
-    def _measure_pose(self) -> CharacterPose | None:
-        frame = self._capture_client()
-        if frame is None:
-            return None
-        return measure_center_pose(frame)
-
     def _recover_sp(self, low_ratio: float) -> None:
         ctx = self._ctx
         if not ctx.begin_sit_regen():
@@ -153,22 +128,26 @@ class SitOnLowSpWorker:
             ctx.discovery_wake.set()
 
     def _sit_session(self) -> str:
-        """Sit and wait for SP recovery.            Returns:
-                ``"recovered"`` — stood after SP ≥ resume threshold.
-                ``"interrupted"`` — no longer sitting (teleported, stood up, etc.).
+        """Sit until SP recovers.
+
+        Returns:
+            ``"recovered"`` — stood after SP ≥ resume threshold.
+            ``"interrupted"`` — DangerDetector teleported (HP drop while sitting).
         """
         ctx = self._ctx
         sit_scan = ctx.config.sit_on_low_sp_scan_code
 
+        # Reset the flag so we only detect teleports WHILE sitting.
+        self._danger.pop_teleported()
+
         self._ensure_sitting(sit_scan)
         ctx.logger.behavior("[SIT] Pressed sit button, waiting for regen")
 
-        sp_state = self._sp_snapshot()
-        last_sp = sp_state[0] if sp_state is not None else None
-        last_pose_check = 0.0
-        stall_start: float | None = None
-
         while not ctx.is_stopped():
+            if self._danger.pop_teleported():
+                ctx.logger.behavior("[SIT] interrupted by danger teleport — finding new spot")
+                return "interrupted"
+
             sp_state = self._sp_snapshot()
             if sp_state is not None:
                 sp, ratio = sp_state
@@ -179,34 +158,6 @@ class SitOnLowSpWorker:
                     self._ensure_standing(sit_scan)
                     ctx.wait_unless_stopped(SIT_STAND_RESUME_DELAY_S)
                     return "recovered"
-
-                now = time.monotonic()
-                if last_sp is None:
-                    last_sp = sp
-                    stall_start = None
-                elif sp > last_sp:
-                    last_sp = sp
-                    stall_start = None
-                elif stall_start is None:
-                    stall_start = now
-                elif now - stall_start >= SIT_SP_STALL_S:
-                    ctx.logger.behavior(
-                        f"[SIT] SP stalled {SIT_SP_STALL_S:.0f}s at sp={sp} — "
-                        "not recovering, finding new spot"
-                    )
-                    return "interrupted"
-
-                # Periodic pose check: if standing when we should be sitting,
-                # something interrupted us (teleport, manual, etc.) — retry.
-                if now - last_pose_check >= SIT_POSE_CHECK_S:
-                    last_pose_check = now
-                    pose = self._measure_pose()
-                    if pose is not None and pose.body_height >= _STAND_HEIGHT:
-                        ctx.logger.behavior(
-                            f"[SIT] interrupted while sitting sp={sp} — "
-                            "standing pose detected"
-                        )
-                        return "interrupted"
 
             ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
 

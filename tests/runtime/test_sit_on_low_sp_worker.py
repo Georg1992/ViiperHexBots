@@ -4,18 +4,14 @@ from __future__ import annotations
 
 import threading
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from pybot.game_state import PlayerVitals
-from pybot.recognition.ui.character_pose import CharacterPose
 from pybot.runtime.constants import SIT_LOW_SP_RATIO, SIT_RESUME_SP_RATIO
 from pybot.runtime.detection.detector_session import DiscoveryScanResult, RawDetection
 from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.workers.sit_on_low_sp_worker import SitOnLowSpWorker
-
-_STAND = CharacterPose(body_height=99, fg_count=2500)
-_SIT = CharacterPose(body_height=60, fg_count=2200)
 
 
 class _ScriptedVitals(PlayerVitals):
@@ -108,17 +104,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         )
         return [living_scan, empty, empty, empty, empty]
 
-    def _pose_side_effect(self, poses: list[CharacterPose]):
-        it = iter(poses)
-
-        def _next() -> CharacterPose:
-            try:
-                return next(it)
-            except StopIteration:
-                return poses[-1]
-
-        return _next
-
     def test_sitting_blocks_should_run_workers(self) -> None:
         self.assertTrue(self.ctx.should_run_workers())
         self.ctx.begin_sit_regen()
@@ -142,8 +127,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             vitals=vitals,
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-        # stand calibrate, sit confirm, stand check (still sit), stand after press
-        poses = [_STAND, _SIT, _SIT, _STAND]
 
         def stop_after_recover() -> None:
             while self.input.teleport_key.call_count < 3 and not self.ctx.is_stopped():
@@ -151,8 +134,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             self.ctx.stop_event.set()
 
         threading.Thread(target=stop_after_recover, daemon=True).start()
-        with patch.object(worker, "_measure_pose", side_effect=self._pose_side_effect(poses)):
-            worker.run()
+        worker.run()
 
         self.assertGreaterEqual(self.input.teleport_key.call_count, 3)
         self.assertEqual(self.input.teleport_key.call_args_list[0].args[0], 16)
@@ -179,7 +161,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             vitals=vitals,
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-        poses = [_STAND, _SIT, _SIT, _STAND]
 
         def stop_after_recover() -> None:
             while self.input.teleport_key.call_count < 3 and not self.ctx.is_stopped():
@@ -187,14 +168,13 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             self.ctx.stop_event.set()
 
         threading.Thread(target=stop_after_recover, daemon=True).start()
-        with patch.object(worker, "_measure_pose", side_effect=self._pose_side_effect(poses)):
-            worker.run()
+        worker.run()
 
         self.ctx.overlay.set_track_positions.assert_called_with([])
         self.ctx.overlay.set_track_stats.assert_any_call(track_count=0, alive_count=0)
 
-    def test_sit_session_returns_interrupted_on_standing_pose(self) -> None:
-        """Standing pose while sitting → returns "interrupted", not "danger"."""
+    def test_sit_session_interrupted_on_danger_teleport(self) -> None:
+        """DangerDetector teleports → pop_teleported True → returns "interrupted"."""
         vitals = _ScriptedVitals([0.40] * 20)
         worker = SitOnLowSpWorker(
             self.ctx,
@@ -204,12 +184,9 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
 
-        with patch(
-            "pybot.runtime.workers.sit_on_low_sp_worker.SIT_POSE_CHECK_S",
-            0.0,
-        ):
-            with patch.object(worker, "_measure_pose", return_value=_STAND):
-                outcome = worker._sit_session()
+        # Mock pop_teleported: first call (reset) returns False, second (loop check) returns True.
+        worker._danger.pop_teleported = MagicMock(side_effect=[False, True])
+        outcome = worker._sit_session()
 
         self.assertEqual(outcome, "interrupted")
 
