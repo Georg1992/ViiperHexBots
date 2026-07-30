@@ -155,7 +155,7 @@ def hunt_runtime_config_from_settings(
         creamy_tp_scan_code=key_name_to_scan_code(settings.creamy_tp_button),
         search_range_cells=settings.search_range or DEFAULT_SEARCH_RANGE_CELLS,
         cell_size_px=CELL_SIZE_PX,
-        discovery_interval_ms=HUNT_DISCOVERY_INTERVAL_MS,
+        discovery_interval_ms=250 if settings.use_sprite_grf else HUNT_DISCOVERY_INTERVAL_MS,
         teleport_duration_ms=settings.teleport_delay,
         validation_enabled=val_enabled,
         control_file=resolved_control,
