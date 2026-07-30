@@ -601,6 +601,7 @@ def main() -> None:
     print("Ensuring prod descriptors (ensure_mob_assets)...")
     ensure_mob_assets()
     detector = MobDetector(PROJECT_ROOT, config)
+    detector_spritegrf = MobDetector(PROJECT_ROOT, config, use_sprite_grf=True)
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     if OUT_DIR.exists():
@@ -703,6 +704,43 @@ def main() -> None:
             timing_runs += 1
             for key, sec in result.timing.items():
                 timing_totals[key] = timing_totals.get(key, 0.0) + sec
+
+            # ── sprite.grf pass (modified sprites, 4× downscale) ──
+            if mod_desc_path.is_file():
+                result_sg = detector_spritegrf.detect(frame, mob_name)
+
+                pane_heat_sg = heatmap_to_color(result_sg.sprite_heatmap)
+                annotate_heatmap_pane(pane_heat_sg, result_sg)
+                pane_overlay_sg = draw_detection_overlay(frame, result_sg)
+                pane_sil_sg = allocate_silhouette_panel(
+                    result_sg.descriptor,
+                    result_sg.silhouette_checks,
+                    420,
+                    frame.shape[0],
+                    min_recall=float(config["minSilhouetteRecall"]),
+                    min_precision=float(config["minSilhouettePrecision"]),
+                )
+
+                combined_height_sg = max(
+                    pane_heat_sg.shape[0], pane_overlay_sg.shape[0], pane_sil_sg.shape[0],
+                )
+                combined_sg = np.hstack([
+                    pad_to_height(pane_heat_sg, combined_height_sg),
+                    pad_to_height(pane_overlay_sg, combined_height_sg),
+                    pad_to_height(pane_sil_sg, combined_height_sg),
+                ])
+
+                cv2.imwrite(str(mob_dir / f"{stem}_viz_spritegrf.png"), combined_sg)
+                viz_count += 1
+
+                n_acc_sg = len(result_sg.accepted)
+                ok_sg = "OK" if n_acc_sg == expected else "FAIL"
+                print(
+                    f"  {mob_name:15s} {stem:20s}  "
+                    f"[spritegrf] expect={expected} got={n_acc_sg}  "
+                    f"sil={len(result_sg.silhouette_checks)}  {ok_sg}"
+                )
+                print(f"    {format_timing_ms(result_sg.timing)}")
 
     print(
         f"\nDone — {viz_count} viz, {descriptor_count} descriptors, "
