@@ -55,6 +55,39 @@ class MobBehavior:
         """
         return False, ""
 
+    def execute_danger_teleport(
+        self,
+        ctx,
+        hunt_mode,
+        input_backend: InputBackend,
+        *,
+        reason: str = "",
+    ) -> bool:
+        """Clear tracks and teleport away using the danger key (wing-first).
+
+        Call this from any worker when a mob-specific danger is detected.
+        Returns ``True`` when a teleport was executed.
+
+        *ctx* must provide ``config``, ``tracks``, ``logger``, ``overlay``,
+        and ``stop_event``.
+        """
+        tp_scan = ctx.config.danger_teleport_scan_code()
+        prefix = f"{reason} " if reason else ""
+        ctx.logger.behavior(
+            f"[DANGER] {prefix}teleport_scan={tp_scan} — teleporting"
+        )
+        if tp_scan <= 0:
+            return False
+        ctx.tracks.area_reset()
+        hunt_mode.on_area_reset()
+        try:
+            input_backend.teleport_key(tp_scan)
+        except Exception as exc:
+            ctx.logger.behavior(f"[DANGER] teleport input error: {exc}")
+        ctx.overlay.increment_teleports()
+        ctx.stop_event.wait(ctx.config.teleport_duration_ms / 1000.0)
+        return True
+
 
 class AnubisBehavior(MobBehavior):
     """Anubis kites: walk away from the mob after each attack."""

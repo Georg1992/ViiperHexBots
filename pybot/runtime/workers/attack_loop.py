@@ -90,20 +90,10 @@ class AttackLoop:
             char_x, char_y, all_mobs,
         )
         if is_surrounded:
-            tp_scan = ctx.config.danger_teleport_scan_code()
-            ctx.logger.behavior(
-                f"[DANGER] surrounded reason={reason} mobs={len(all_mobs)} "
-                f"teleport_scan={tp_scan} — teleporting"
+            self._mob_behavior.execute_danger_teleport(
+                ctx, self._hunt_mode, self._input,
+                reason=f"surrounded {reason} mobs={len(all_mobs)}",
             )
-            if tp_scan > 0:
-                ctx.tracks.area_reset()
-                self._hunt_mode.on_area_reset()
-                try:
-                    self._input.teleport_key(tp_scan)
-                except Exception as exc:
-                    ctx.logger.behavior(f"[DANGER] teleport input error: {exc}")
-                ctx.overlay.increment_teleports()
-                ctx.stop_event.wait(ctx.config.teleport_duration_ms / 1000.0)
             return
 
         # Idle death: cheap cache samples around the configured skill delay.
