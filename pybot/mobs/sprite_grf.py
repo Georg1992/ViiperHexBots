@@ -508,9 +508,8 @@ def sync_sprite_grf(
 ) -> int:
     """Ensure modified-sprite assets are synced into ``sprite.grf``.
 
-    When ``sprite.grf`` does not exist it is bootstrapped from
-    ``sprite_legacy.grf`` (which provides the shadow files and the Korean
-    subfolder structure).  For each mob that has a ``modified_sprite/``
+    If ``sprite.grf`` does not exist a fresh archive is created.
+    For each mob that has a ``modified_sprite/``
     folder, any existing entry with the same filename is removed and
     replaced with the modified SPR+ACT pair.
 
@@ -521,13 +520,9 @@ def sync_sprite_grf(
 
     root = project_root or Path.cwd()
     grf_path = root / "sprite.grf"
-    legacy_path = root / "sprite_legacy.grf"
 
     if grf_path.is_file():
         grf = SpriteGrf(grf_path)
-    elif legacy_path.is_file():
-        grf = SpriteGrf(legacy_path)
-        grf._path = grf_path
     else:
         grf = SpriteGrf()
         grf._path = grf_path
