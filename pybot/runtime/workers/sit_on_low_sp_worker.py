@@ -141,16 +141,16 @@ class SitOnLowSpWorker:
                 f"[SIT] low SP ratio={low_ratio:.1%} — pausing hunt/timers, "
                 "teleport until clear before sit"
             )
-            leave_screen = False
             while not ctx.is_stopped():
-                # After sit danger (HP drop from unseen mobs), always TP once
-                # before the discovery clear loop — otherwise 0 detections skip TP.
+                # teleport_until_quiet scans the screen for a safe place.
+                # Danger teleport (wing-first) is handled inside _sit_session
+                # by execute_danger_teleport — this function only finds quiet.
                 if not teleport_until_quiet(
                     ctx,
                     self._input,
                     self._hunt_mode,
                     log_tag="SIT",
-                    force_first=leave_screen,
+                    force_first=False,
                 ):
                     return
                 outcome = self._sit_session()
@@ -158,10 +158,9 @@ class SitOnLowSpWorker:
                     return
                 if outcome == "stopped":
                     return
-                leave_screen = True
                 ctx.logger.behavior(
                     f"[SIT] {outcome} while regenerating — "
-                    "force teleport, then find another sit spot"
+                    "finding another sit spot"
                 )
         finally:
             ctx.end_sit_regen()
