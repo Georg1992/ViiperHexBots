@@ -1129,7 +1129,12 @@ class MainWindow:
         client_left: int,
         client_top: int,
     ) -> None:
-        """Store a successful read; UI stats update only when numbers change."""
+        """Store a successful read; UI stats update only when numbers change.
+
+        When the reader has doubts (SP dropped suspiciously from the
+        previous tick), the previous SP value is kept for vitals so
+        transient OCR noise never reaches the hunt workers.
+        """
         previous = self._status_panel_confirmed
         self._status_panel_confirmed = values
         self._status_panel_anchor = values.panel_origin
@@ -1139,8 +1144,17 @@ class MainWindow:
         # HP is vision-only — always mirror into the bot UI from panel OCR.
         self.memory_hp.configure(text=self._format_pair(values.hp, values.hp_max))
         # Publish final SP every successful OCR tick when vision owns SP/Weight.
+        # When SP drops dramatically from the previous reading (e.g. 200→1), the
+        # OCR is seeing an artifact — keep the previous value for hunt workers.
         if self._panel_owns_sp_weight():
-            self.vitals.publish_sp(values.sp, values.sp_max)
+            if (
+                previous is not None
+                and values.sp < previous.sp // 2
+            ):
+                # Reader has doubts — keep previous SP, publish stale value.
+                self.vitals.publish_sp(previous.sp, previous.sp_max)
+            else:
+                self.vitals.publish_sp(values.sp, values.sp_max)
         if previous is not None and self._status_panel_numbers(
             previous
         ) == self._status_panel_numbers(values):
