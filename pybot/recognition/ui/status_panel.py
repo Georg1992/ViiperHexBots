@@ -1,7 +1,8 @@
 """Locate the Basic Info status panel and parse HP / SP / Weight.
 
-Uses OpenCV template matching for the panel header, fixed relative ROIs for
-value bands, and RO digit-glyph templates under ``assets/UI/digits/``.
+Uses OpenCV template matching for the panel header, ``/``-anchored dynamic
+ROIs (finds the ``/`` separator first, builds a bounded scanning window
+around it), and RO digit-glyph templates under ``assets/UI/digits/``.
 
 Two polling cadences share the same function ``read_status_panel``:
 
@@ -50,19 +51,7 @@ MAX_LEADING_ORPHAN_GAP_PX = 6
 PANEL_WIDTH = 219
 PANEL_HEIGHT = 143
 
-# Value ROIs relative to the full Basic Info panel origin (x, y, w, h).
-# Padded so ±2px header/origin jitter still keeps full glyph height/width.
-# HP sits directly above SP on the same digit column.
-HP_ROI = (50, 45, 110, 18)
-SP_ROI = (50, 66, 110, 16)
-# Weight digits shift left when Zeny is long (e.g. "1,234,567z") — the first
-# digit of a 5-digit weight can start as early as x≈76.  x=75 captures that
-# without reaching the colon (x≈68-70) which would be misread as "/".
-# Width 84 keeps the same right edge (75+84=159) as the previous (85+74=159)
-# so trailing Zeny crumbs still stay below threshold and strip.
-WEIGHT_ROI = (75, 116, 84, 14)
-
-# ── Dynamic scan zones ─────────────────────────────────────────────
+# ── Scan zones (wide enough to always contain "/" separator) ───────
 # These are wide enough to *always* contain the "/" separator regardless
 # of digit length or Zeny shift.  Once "/" is located a tighter ROI is
 # built around it with generous horizontal expansion so no digit is cropped.

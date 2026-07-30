@@ -10,7 +10,7 @@ import numpy as np
 from pybot.paths import PROJECT_ROOT
 from pybot.recognition.ui.status_panel import (
     BINARIZE_THRESHOLD,
-    SP_ROI,
+    SP_SCAN_ZONE,
     StatusPanelValues,
     clear_template_cache,
     find_status_panel,
@@ -46,7 +46,7 @@ def _with_sp_fill_ratio(
     """Keep SP digit ink; paint empty-bar gray over non-ink right of *fill_ratio*."""
     out = frame.copy()
     ox, oy = origin
-    x, y, w, h = SP_ROI
+    x, y, w, h = SP_SCAN_ZONE
     x0, y0 = ox + x, oy + y
     region = out[y0 : y0 + h, x0 : x0 + w]
     gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
@@ -178,7 +178,7 @@ class StatusPanelTests(unittest.TestCase):
         self.assertIsNotNone(origin)
         assert origin is not None
         ox, oy = origin
-        x, y, w, h = SP_ROI
+        x, y, w, h = SP_SCAN_ZONE
         x0, y0 = ox + x, oy + y
         gray = cv2.cvtColor(frame[y0 : y0 + h, x0 : x0 + w], cv2.COLOR_BGR2GRAY)
         ink = gray <= 16

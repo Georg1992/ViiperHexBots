@@ -39,9 +39,6 @@ from pybot.recognition.detector.discovery_pipeline import (
 from pybot.recognition.fixtures import MOB_FIXTURE_SUITES, fixture_search_frame
 from pybot.recognition.ui.character_pose import measure_center_pose, detect_nearby_any_mobs
 from pybot.recognition.ui.status_panel import (
-    HP_ROI,
-    SP_ROI,
-    WEIGHT_ROI,
     HP_SCAN_ZONE,
     SP_SCAN_ZONE,
     WEIGHT_SCAN_ZONE,
@@ -902,16 +899,14 @@ def render_status_panel_rois(fixture_name: str) -> np.ndarray:
     values = read_status_panel(frame, origin=origin)
     ox, oy = origin
 
-    # ── Left panel: full frame with ROIs overlaid ────────────────
+    # ── Left panel: full frame with scan zones overlaid ──────────
     full = frame.copy()
-    scan_defs = [
-        ("HP", HP_SCAN_ZONE, HP_ROI, (0, 0, 255)),
-        ("SP", SP_SCAN_ZONE, SP_ROI, (0, 220, 0)),
-        ("WEIGHT", WEIGHT_SCAN_ZONE, WEIGHT_ROI, (255, 180, 0)),
+    zone_defs = [
+        ("HP", HP_SCAN_ZONE, (0, 0, 255)),
+        ("SP", SP_SCAN_ZONE, (0, 220, 0)),
+        ("WEIGHT", WEIGHT_SCAN_ZONE, (255, 180, 0)),
     ]
-    for name, scan_roi, old_roi, color in scan_defs:
-        # Scan zone — dashed, larger, shows where the "/" search happens
-        sx, sy, sw, sh = scan_roi
+    for name, (sx, sy, sw, sh), color in zone_defs:
         sx1, sy1 = ox + sx, oy + sy
         sx2, sy2 = sx1 + sw, sy1 + sh
         for dx in range(sx1, sx2, 6):
@@ -920,16 +915,8 @@ def render_status_panel_rois(fixture_name: str) -> np.ndarray:
         for dy in range(sy1, sy2, 6):
             cv2.line(full, (sx1, dy), (sx1, min(dy + 3, sy2)), color, 1)
             cv2.line(full, (sx2 - 1, dy), (sx2 - 1, min(dy + 3, sy2)), color, 1)
-        cv2.putText(full, f"{name} SCAN", (sx1, max(sy1 - 8, 12)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
-
-        # Old fixed ROI — solid rectangle
-        rx, ry, rw, rh = old_roi
-        rx1, ry1 = ox + rx, oy + ry
-        rx2, ry2 = rx1 + rw, ry1 + rh
-        cv2.rectangle(full, (rx1, ry1), (rx2, ry2), color, 1, cv2.LINE_AA)
-        label = f"{name} ROI ({rw}x{rh})"
-        cv2.putText(full, label, (rx1, max(ry1 - 6, 12)),
+        label = f"{name} SCAN ({sw}x{sh})"
+        cv2.putText(full, label, (sx1, max(sy1 - 8, 12)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
 
     # ── Info bar ─────────────────────────────────────────────────
@@ -969,14 +956,13 @@ def render_status_panel_rois(fixture_name: str) -> np.ndarray:
                 (8, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (220, 220, 220), 1, cv2.LINE_AA)
     full = np.vstack([info_bg, full])
 
-    # ── Right panel: extracted ROI crops stacked ────────────────
+    # ── Right panel: extracted scan zone crops stacked ──────────
     crop_scale = 4
     right_parts: list[np.ndarray] = []
 
-    for name, _scan_roi, old_roi, color in scan_defs:
-        rx, ry, rw, rh = old_roi
-        crop = frame[oy + ry : oy + ry + rh, ox + rx : ox + rx + rw]
-        crop_big = cv2.resize(crop, (rw * crop_scale, rh * crop_scale),
+    for name, (sx, sy, sw, sh), color in zone_defs:
+        crop = frame[oy + sy : oy + sy + sh, ox + sx : ox + sx + sw]
+        crop_big = cv2.resize(crop, (sw * crop_scale, sh * crop_scale),
                               interpolation=cv2.INTER_NEAREST)
         # Border to match the color
         cv2.rectangle(crop_big, (0, 0), (crop_big.shape[1] - 1, crop_big.shape[0] - 1),
