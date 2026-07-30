@@ -161,6 +161,18 @@ def create_runtime_deps(
     input_backend: InputBackend = (
         ViiperBackend()
     )
+
+    # Teleport mode requires at least one configured teleport key (wing or creamy).
+    if ctx.config.hunt_mode == "teleport":
+        if ctx.config.active_teleport_scan_code() <= 0:
+            tp_button = ctx.config.teleport_button or "(unset)"
+            creamy = ctx.config.creamy_tp_button or "(unset)"
+            raise ValueError(
+                f"Teleport hunt mode requires a teleport key. "
+                f"Set at least one of Teleport Key={tp_button!r} "
+                f"or Creamy TP Key={creamy!r} in the Keybindings tab."
+            )
+
     hunt_mode = create_hunt_mode(ctx, input_backend)
     tracking = CoordTrackingWorker(ctx)
     profile = load_client_profile(ctx.config.client_profile)
