@@ -43,6 +43,7 @@ from pybot.app.storage_chain_dialog import (
 )
 from pybot.config.schema import MAX_SKILL_TIMERS, KeyChainStep, SkillTimerSetting
 from pybot.mobs.catalog import load_mob_catalog
+from pybot.runtime.mob_behaviors import get_mob_behavior
 from pybot.runtime.input.scan_codes import keysym_to_key_name
 from pybot.recognition.capture import capture_region
 from pybot.recognition.ui.status_panel import (
@@ -186,9 +187,13 @@ class MainWindow:
             radio.destroy()
         self._mob_radios.clear()
         for index, mob in enumerate(self.mob_catalog, start=1):
+            label = mob.display_name
+            behavior = get_mob_behavior(mob.descriptor_name)
+            if behavior.has_custom_behavior():
+                label = f"{mob.display_name}  (custom behavior)"
             radio = ttk.Radiobutton(
                 frame,
-                text=mob.display_name,
+                text=label,
                 variable=self.mob_var,
                 value=index,
                 command=self._apply_ui_settings,
