@@ -1,11 +1,11 @@
-"""HP Restore worker — press HP key when vision HP is under threshold."""
+"""HP Restore worker — press HP key when HP falls below threshold."""
 
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-from pybot.recognition.ui.status_panel import StatusPanelValues
+from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import HP_RESTORE_RATIO
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.workers.hp_restore_worker import HpRestoreWorker
@@ -30,27 +30,18 @@ class HpRestoreWorkerTests(unittest.TestCase):
             overlay=MagicMock(),
         )
         self.ctx.capture.is_valid.return_value = True
-        self.ctx.capture.capture_client.return_value = MagicMock(size=1)
         self.input = MagicMock()
+        self.vitals = PlayerVitals()
 
     def test_skips_when_no_hp_key(self) -> None:
         self.config.hp_scan_code = 0
-        worker = HpRestoreWorker(self.ctx, self.input)
+        worker = HpRestoreWorker(self.ctx, self.input, self.vitals)
         worker.run()
         self.input.teleport_key.assert_not_called()
 
-    @patch("pybot.runtime.workers.hp_restore_worker.read_status_panel")
-    def test_presses_when_hp_below_threshold(self, read_hp: MagicMock) -> None:
-        read_hp.return_value = StatusPanelValues(
-            hp=40,
-            hp_max=100,
-            sp=50,
-            sp_max=100,
-            weight=10,
-            weight_max=100,
-            panel_origin=(0, 0),
-        )
-        worker = HpRestoreWorker(self.ctx, self.input)
+    def test_presses_when_hp_below_threshold(self) -> None:
+        self.vitals.publish_hp(40, 100)
+        worker = HpRestoreWorker(self.ctx, self.input, self.vitals)
 
         def stop_after_press(*_a, **_k):
             self.ctx.stop_event.set()
@@ -61,18 +52,9 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self.input.teleport_key.assert_called_with(59)
         self.assertLess(40 / 100, HP_RESTORE_RATIO)
 
-    @patch("pybot.runtime.workers.hp_restore_worker.read_status_panel")
-    def test_no_press_when_hp_ok(self, read_hp: MagicMock) -> None:
-        read_hp.return_value = StatusPanelValues(
-            hp=80,
-            hp_max=100,
-            sp=50,
-            sp_max=100,
-            weight=10,
-            weight_max=100,
-            panel_origin=(0, 0),
-        )
-        worker = HpRestoreWorker(self.ctx, self.input)
+    def test_no_press_when_hp_ok(self) -> None:
+        self.vitals.publish_hp(80, 100)
+        worker = HpRestoreWorker(self.ctx, self.input, self.vitals)
 
         def stop_soon(*_a, **_k):
             self.ctx.stop_event.set()

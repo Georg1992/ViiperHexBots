@@ -1,14 +1,14 @@
-"""Press HP Restore Key when vision HP falls below the restore threshold.
+"""Press HP Restore Key when HP falls below the restore threshold.
 
-Enabled when ``hp_scan_code`` is set. Heal-skill path is reserved for later
-(``heal_skill`` is ignored here).
+Reads from shared ``PlayerVitals`` (UI publishes from status-panel OCR)
+rather than doing its own OCR — clean architecture, one source of truth.
 """
 
 from __future__ import annotations
 
 import time
 
-from pybot.recognition.ui.status_panel import read_status_panel
+from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import (
     HP_RESTORE_COOLDOWN_S,
     HP_RESTORE_POLL_S,
@@ -19,17 +19,18 @@ from pybot.runtime.workers.worker_contexts import HpRestoreWorkerContext
 
 
 class HpRestoreWorker:
-    """When vision HP < ``HP_RESTORE_RATIO``, press the HP Restore Key."""
+    """When HP < ``HP_RESTORE_RATIO``, press the HP Restore Key."""
 
     def __init__(
         self,
         ctx: HpRestoreWorkerContext,
         input_backend: InputBackend,
+        vitals: PlayerVitals,
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
+        self._vitals = vitals
         self._last_press_mono = 0.0
-        self._last_fail_log = ""
 
     def run(self) -> None:
         ctx = self._ctx
@@ -70,19 +71,8 @@ class HpRestoreWorker:
                 ctx.logger.behavior(f"[HP] tick error:\n{traceback.format_exc()}")
 
     def _hp_ratio(self) -> float | None:
-        """Vision HP / max, or None when the status panel cannot be read."""
-        ctx = self._ctx
-        if not ctx.capture.is_valid():
+        """HP / max from shared vitals, or None when unavailable."""
+        hp, hp_max = self._vitals.hp_pair()
+        if hp is None or hp_max is None or hp_max <= 0:
             return None
-        frame = ctx.capture.capture_client()
-        if frame is None or getattr(frame, "size", 0) == 0:
-            return None
-        values = read_status_panel(frame)
-        if values is None or values.hp_max <= 0:
-            reason = "status_panel_unavailable"
-            if reason != self._last_fail_log:
-                self._last_fail_log = reason
-                ctx.logger.behavior(f"[HP] panel read failed: {reason}")
-            return None
-        self._last_fail_log = ""
-        return values.hp / float(values.hp_max)
+        return hp / float(hp_max)

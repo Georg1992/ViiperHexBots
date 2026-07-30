@@ -205,7 +205,7 @@ def create_runtime_deps(
         workers.append(("skill_timer", skill_timer.run))
     if ctx.config.hp_scan_code > 0:
         workers.append(
-            ("hp_restore", HpRestoreWorker(ctx, input_backend).run)
+            ("hp_restore", HpRestoreWorker(ctx, input_backend, player_vitals).run)
         )
     if ctx.config.sit_on_low_sp:
         if ctx.config.sit_on_low_sp_scan_code <= 0:
