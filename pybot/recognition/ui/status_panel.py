@@ -47,11 +47,12 @@ PANEL_HEIGHT = 143
 # HP sits directly above SP on the same digit column.
 HP_ROI = (50, 45, 110, 18)
 SP_ROI = (50, 66, 110, 16)
-# Weight starts after the ``Weight :`` colon so label ink is not classified.
-# Left edge includes 4-digit current weight (heavy/red); keep clear of colon under ±2 jitter.
-# Width 74 covers right-shifted values when Zeny is short (WeightIssue) under
-# ±2px origin jitter; trailing Zeny-label crumbs stay below threshold and strip.
-WEIGHT_ROI = (85, 116, 74, 14)
+# Weight digits shift left when Zeny is long (e.g. "1,234,567z") — the first
+# digit of a 5-digit weight can start as early as x≈76.  x=75 captures that
+# without reaching the colon (x≈68-70) which would be misread as "/".
+# Width 84 keeps the same right edge (75+84=159) as the previous (85+74=159)
+# so trailing Zeny crumbs still stay below threshold and strip.
+WEIGHT_ROI = (75, 116, 84, 14)
 
 
 @dataclass(frozen=True)
