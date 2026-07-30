@@ -174,7 +174,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.overlay.set_track_stats.assert_any_call(track_count=0, alive_count=0)
 
     def test_sit_session_interrupted_on_danger_teleport(self) -> None:
-        """DangerDetector teleports → pop_teleported True → returns "interrupted"."""
+        """DangerDetector detects damage → pop_damage_detected True → returns "interrupted"."""
         vitals = _ScriptedVitals([0.40] * 20)
         worker = SitOnLowSpWorker(
             self.ctx,
@@ -184,8 +184,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
 
-        # Mock pop_teleported: first call (reset) returns False, second (loop check) returns True.
-        worker._danger.pop_teleported = MagicMock(side_effect=[False, True])
+        # Mock pop_damage_detected: first call (reset) returns False, second (loop check) returns True.
+        worker._danger.pop_damage_detected = MagicMock(side_effect=[False, True])
         outcome = worker._sit_session()
 
         self.assertEqual(outcome, "interrupted")

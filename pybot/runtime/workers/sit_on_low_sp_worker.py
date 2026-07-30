@@ -1,7 +1,7 @@
 """Sit when SP is low; pause hunting (and timers) until SP recovers.
 
 Before sitting: teleport until discovery sees no mobs, then sit.
-While sitting: if DangerDetector teleports us (HP drop), the sit session
+While sitting: if DangerDetector detects damage (HP drop), the sit session
 returns ``"interrupted"`` so ``_recover_sp`` finds a new spot and sits again.
 On SP recover: stand and resume.
 
@@ -132,20 +132,20 @@ class SitOnLowSpWorker:
 
         Returns:
             ``"recovered"`` — stood after SP ≥ resume threshold.
-            ``"interrupted"`` — DangerDetector teleported (HP drop while sitting).
+            ``"interrupted"`` — DangerDetector detected damage (HP drop while sitting).
         """
         ctx = self._ctx
         sit_scan = ctx.config.sit_on_low_sp_scan_code
 
-        # Reset the flag so we only detect teleports WHILE sitting.
-        self._danger.pop_teleported()
+        # Reset the flag so we only detect damage WHILE sitting.
+        self._danger.pop_damage_detected()
 
         self._ensure_sitting(sit_scan)
         ctx.logger.behavior("[SIT] Pressed sit button, waiting for regen")
 
         while not ctx.is_stopped():
-            if self._danger.pop_teleported():
-                ctx.logger.behavior("[SIT] interrupted by danger teleport — finding new spot")
+            if self._danger.pop_damage_detected():
+                ctx.logger.behavior("[SIT] interrupted by damage — finding new spot")
                 return "interrupted"
 
             sp_state = self._sp_snapshot()
