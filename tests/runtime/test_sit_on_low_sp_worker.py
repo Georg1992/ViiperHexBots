@@ -7,7 +7,6 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from pybot.game_state import PlayerVitals
-from pybot.recognition.danger import DangerReport
 from pybot.recognition.ui.character_pose import CharacterPose
 from pybot.runtime.constants import SIT_LOW_SP_RATIO, SIT_RESUME_SP_RATIO
 from pybot.runtime.detection.detector_session import DiscoveryScanResult, RawDetection
@@ -194,11 +193,9 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.overlay.set_track_positions.assert_called_with([])
         self.ctx.overlay.set_track_stats.assert_any_call(track_count=0, alive_count=0)
 
-    def test_sit_session_returns_danger_on_sp_drop_and_near_objects(self) -> None:
-        # SP drop marks stall immediately; keep mid ratios so we never resume.
-        vitals = _ScriptedVitals([0.40, 0.30] + [0.30] * 30)
-        # HP is steady (no drop) so danger comes from near_objects only.
-        vitals.publish_hp(1000, 5000)
+    def test_sit_session_returns_danger_on_interruption(self) -> None:
+        """Sitting interrupted by DangerDetector → standing pose → return danger."""
+        vitals = _ScriptedVitals([0.40] * 20)
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
@@ -208,27 +205,13 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
 
         with patch(
-            "pybot.runtime.workers.sit_on_low_sp_worker.SIT_HP_POLL_S",
+            "pybot.runtime.workers.sit_on_low_sp_worker.SIT_POSE_CHECK_S",
             0.0,
         ):
-            with patch(
-                "pybot.runtime.workers.sit_on_low_sp_worker.SIT_SP_STALL_S",
-                0.0,
-            ):
-                with patch.object(worker, "_capture_client", return_value=object()):
-                    with patch.object(
-                        worker,
-                        "_assess_danger",
-                        return_value=DangerReport(
-                            in_danger=True,
-                            reasons=("near_objects:1",),
-                            near_object_count=1,
-                        ),
-                    ):
-                        outcome = worker._sit_session()
+            with patch.object(worker, "_measure_pose", return_value=_STAND):
+                outcome = worker._sit_session()
 
         self.assertEqual(outcome, "danger")
-        self.assertGreaterEqual(self.input.teleport_key.call_count, 1)
 
     def test_ensure_sitting_presses_once(self) -> None:
         worker = SitOnLowSpWorker(

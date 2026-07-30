@@ -37,8 +37,8 @@ SIT_POSE_MAX_ATTEMPTS = 5
 SIT_POSE_MIN_HEIGHT_DROP = 8
 # SP ticks roughly every 4s while sitting; no increase for this long → stall.
 SIT_SP_STALL_S = 15.0
-# How often to OCR HP while sitting (vision-only; Gepard-sensitive).
-SIT_HP_POLL_S = 1.0
+# How often to check if sitting was interrupted (pose check).
+SIT_POSE_CHECK_S = 1.0
 # Press HP Restore Key when vision HP/max is below this (item path).
 HP_RESTORE_RATIO = 0.5
 # Vision HP poll / min gap between HP Restore Key presses.
@@ -98,7 +98,7 @@ __all__ = [
     "SIT_POSE_MAX_ATTEMPTS",
     "SIT_POSE_MIN_HEIGHT_DROP",
     "SIT_SP_STALL_S",
-    "SIT_HP_POLL_S",
+    "SIT_POSE_CHECK_S",
     "HP_RESTORE_RATIO",
     "HP_RESTORE_POLL_S",
     "HP_RESTORE_COOLDOWN_S",
