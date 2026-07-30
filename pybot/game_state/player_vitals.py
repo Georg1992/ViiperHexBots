@@ -11,7 +11,7 @@ import time
 
 
 class PlayerVitals:
-    """Thread-safe holder for the latest known HP and SP values."""
+    """Thread-safe holder for the latest known HP, SP and Weight values."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -19,6 +19,8 @@ class PlayerVitals:
         self._hp_max: int | None = None
         self._sp: int | None = None
         self._sp_max: int | None = None
+        self._weight: int | None = None
+        self._weight_max: int | None = None
         # Last UI observation (bumped on every publish, including same values).
         self._observed_ms: int = 0
         # Last time any value actually changed.
@@ -89,3 +91,22 @@ class PlayerVitals:
         """Atomic ``(sp, observed_ms, changed_ms)`` for pre/post idle comparisons."""
         with self._lock:
             return self._sp, self._observed_ms, self._changed_ms
+
+    # ── Weight ────────────────────────────────────────────────────
+
+    def publish_weight(self, weight: int | None, weight_max: int | None) -> None:
+        with self._lock:
+            now = int(time.monotonic() * 1000)
+            self._observed_ms = now
+            if weight != self._weight or weight_max != self._weight_max:
+                self._weight = weight
+                self._weight_max = weight_max
+                self._changed_ms = now
+
+    def weight_pair(self) -> tuple[int | None, int | None]:
+        """Atomic ``(weight, weight_max)`` for storage checks."""
+        with self._lock:
+            return self._weight, self._weight_max
+
+    def clear_weight(self) -> None:
+        self.publish_weight(None, None)

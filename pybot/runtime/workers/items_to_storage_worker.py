@@ -2,6 +2,10 @@
 
 Faithful port of AHK HexBots ``ItemsToStorage`` / ``GetFlyWings``:
 image templates under ``assets/UI``, Alt+E inventory toggle, Alt+RMB deposit.
+
+Weight and HP are read from ``PlayerVitals`` which is published by the UI
+(either from status-panel OCR or process-memory polls).  The worker must
+never re-OCR or re-read process memory.
 """
 
 from __future__ import annotations
@@ -11,8 +15,7 @@ import time
 import traceback
 from ctypes import wintypes
 
-from pybot.game_state import GameMemoryPoller
-from pybot.config.clients import MemoryAddresses
+from pybot.game_state import PlayerVitals
 from pybot.recognition.ui.inventory import (
     InventoryUiError,
     find_storage_wing,
@@ -25,7 +28,6 @@ from pybot.recognition.ui.inventory import (
     slot_contains_template,
     slot_looks_empty,
 )
-from pybot.recognition.ui.status_panel import read_status_panel
 from pybot.runtime.clear_area import HuntModeAreaReset, teleport_until_quiet
 from pybot.runtime.constants import (
     FLY_WING_WEIGHT,
@@ -48,7 +50,7 @@ user32 = ctypes.windll.user32
 
 
 class StorageCriticalHpError(RuntimeError):
-    """Vision HP fell below the critical ratio during restock — force-close UI."""
+    """HP fell below the critical restock threshold — force-close UI."""
 
 
 def _cursor_pos() -> tuple[int, int]:
@@ -65,17 +67,14 @@ class ItemsToStorageWorker:
         self,
         ctx: ItemsToStorageWorkerContext,
         input_backend: InputBackend,
-        memory: MemoryAddresses,
         hunt_mode: HuntModeAreaReset,
         *,
-        poller: GameMemoryPoller | None = None,
+        vitals: PlayerVitals | None = None,
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
-        self._memory = memory
         self._hunt_mode = hunt_mode
-        self._poller = poller or GameMemoryPoller()
-        self._last_fail_log = ""
+        self._vitals = vitals or PlayerVitals()
 
     def run(self) -> None:
         ctx = self._ctx
@@ -150,43 +149,6 @@ class ItemsToStorageWorker:
             except Exception:
                 ctx.logger.behavior(f"[STORAGE] tick error:\n{traceback.format_exc()}")
 
-    def _read_weight(self) -> tuple[int, int] | None:
-        """Return ``(weight, weight_max)`` or None when unavailable.
-
-        Memory mode (HoneyRO / Revenant): process memory only, no OCR.
-        OCR mode (Generic): Basic Info panel only.
-        """
-        ctx = self._ctx
-        use_memory = (
-            self._memory.current_weight > 0
-            and self._memory.max_weight > 0
-        )
-        if use_memory:
-            snap = self._poller.read(ctx.config.hwnd, self._memory)
-            if snap.ok and snap.weight is not None and snap.weight_max is not None and snap.weight_max > 0:
-                self._last_fail_log = ""
-                return int(snap.weight), int(snap.weight_max)
-            reason = "memory_weight_unavailable"
-            if reason != self._last_fail_log:
-                self._last_fail_log = reason
-                ctx.logger.behavior(f"[STORAGE] weight read failed: {reason}")
-            return None
-
-        # OCR mode.
-        try:
-            frame = self._capture_client()
-        except InventoryUiError:
-            return None
-        values = read_status_panel(frame)
-        if values is None or values.weight is None or values.weight_max is None or values.weight_max <= 0:
-            reason = "ocr_weight_unavailable"
-            if reason != self._last_fail_log:
-                self._last_fail_log = reason
-                ctx.logger.behavior(f"[STORAGE] weight read failed: {reason}")
-            return None
-        self._last_fail_log = ""
-        return values.weight, values.weight_max
-
     def _weight_threshold(self, weight_max: int) -> float:
         modifier = int(self._ctx.config.weight_modifier)
         return weight_max * modifier / 100.0
@@ -195,10 +157,9 @@ class ItemsToStorageWorker:
         ctx = self._ctx
         if int(ctx.config.weight_modifier) < STORAGE_WEIGHT_MODIFIER_MIN:
             return False
-        read = self._read_weight()
-        if read is None:
+        weight, weight_max = self._vitals.weight_pair()
+        if weight is None or weight_max is None or weight_max <= 0:
             return False
-        weight, weight_max = read
         return weight >= self._weight_threshold(weight_max)
 
     def _fly_wings_would_hit_threshold(self) -> bool:
@@ -209,10 +170,9 @@ class ItemsToStorageWorker:
         amount = int(ctx.config.fly_wings_amount)
         if amount <= 0:
             return False
-        read = self._read_weight()
-        if read is None:
+        weight, weight_max = self._vitals.weight_pair()
+        if weight is None or weight_max is None or weight_max <= 0:
             return False
-        weight, weight_max = read
         projected = weight + amount * FLY_WING_WEIGHT
         return projected >= self._weight_threshold(weight_max)
 
@@ -382,19 +342,12 @@ class ItemsToStorageWorker:
         except Exception as exc:
             self._ctx.logger.behavior(f"[STORAGE] force close error: {exc}")
 
-    def _hp_ratio(self) -> float | None:
-        """Vision HP / max, or None when the status panel cannot be read."""
-        frame = self._capture_client()
-        values = read_status_panel(frame)
-        if values is None or values.hp_max <= 0:
-            return None
-        return values.hp / float(values.hp_max)
-
     def _abort_if_critical_hp(self) -> None:
-        """Raise when vision HP is below the critical restock threshold."""
-        ratio = self._hp_ratio()
-        if ratio is None:
+        """Raise when HP (from PlayerVitals) is below the critical restock threshold."""
+        hp, hp_max = self._vitals.hp_pair()
+        if hp is None or hp_max is None or hp_max <= 0:
             return
+        ratio = hp / float(hp_max)
         if ratio < STORAGE_CRITICAL_HP_RATIO:
             raise StorageCriticalHpError(
                 f"HP {ratio:.0%} < {STORAGE_CRITICAL_HP_RATIO:.0%}"

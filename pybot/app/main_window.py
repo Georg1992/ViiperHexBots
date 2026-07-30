@@ -1032,6 +1032,7 @@ class MainWindow:
             text=self._format_pair(snap.weight, snap.weight_max)
         )
         self.vitals.publish_sp(snap.sp, snap.sp_max)
+        self.vitals.publish_weight(snap.weight, snap.weight_max)
         # HP is vision-only — never overwrite from memory polls.
 
     def _apply_status_panel_stats(self, values: StatusPanelValues) -> None:
@@ -1157,6 +1158,8 @@ class MainWindow:
                 self.vitals.publish_sp(previous.sp, previous.sp_max)
             else:
                 self.vitals.publish_sp(values.sp, values.sp_max)
+            # Weight is published from the panel when vision owns it.
+            self.vitals.publish_weight(values.weight, values.weight_max)
         if previous is not None and self._status_panel_numbers(
             previous
         ) == self._status_panel_numbers(values):

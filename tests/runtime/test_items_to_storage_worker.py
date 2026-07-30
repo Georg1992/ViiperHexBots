@@ -1,4 +1,8 @@
-"""ItemsToStorage / GetFlyWings worker — AHK call-sequence fidelity."""
+"""ItemsToStorage / GetFlyWings worker — AHK call-sequence fidelity.
+
+Weight and HP are read from PlayerVitals (published by the UI).  Tests that
+need specific weight/HP values publish into a real PlayerVitals instance.
+"""
 
 from __future__ import annotations
 
@@ -8,10 +12,8 @@ from unittest.mock import DEFAULT, MagicMock, patch
 
 import numpy as np
 
-from pybot.game_state import MemorySnapshot
-from pybot.config.clients import MemoryAddresses
+from pybot.game_state import PlayerVitals
 from pybot.recognition.ui.inventory import InventoryPanelHit, InventoryUiError
-from pybot.recognition.ui.status_panel import StatusPanelValues
 from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.workers.items_to_storage_worker import (
@@ -81,20 +83,6 @@ def _enter_worker_patches(**extras):
 
 
 # ── test helpers ────────────────────────────────────────────────────
-
-
-class _FakePoller:
-    def __init__(self, weight: int, weight_max: int = 100) -> None:
-        self.weight = weight
-        self.weight_max = weight_max
-        self.calls = 0
-
-    def read(self, hwnd: int, addresses: MemoryAddresses) -> MemorySnapshot:
-        del hwnd, addresses
-        self.calls += 1
-        return MemorySnapshot(
-            weight=self.weight, weight_max=self.weight_max, ok=True
-        )
 
 
 class _RecordingInput(ShadowInputBackend):
@@ -179,15 +167,14 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.ctx.capture.capture_client.return_value = self.frame
         self.ctx.capture.get_client_rect_screen.return_value = (100, 50, 800, 600)
         self.input = _RecordingInput()
-        self.memory = MemoryAddresses(current_weight=1, max_weight=2)
+        self.vitals = PlayerVitals()
 
-    def _worker(self, poller: _FakePoller) -> ItemsToStorageWorker:
+    def _worker(self) -> ItemsToStorageWorker:
         return ItemsToStorageWorker(
             self.ctx,
             self.input,
-            self.memory,
             hunt_mode=MagicMock(),
-            poller=poller,
+            vitals=self.vitals,
         )
 
     # ── unit / no-patch tests ──────────────────────────────────────
@@ -239,10 +226,11 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.assertEqual(self.ctx.active_teleport_scan_code(), 16)
 
     def test_weight_threshold_gate(self) -> None:
-        worker = self._worker(_FakePoller(79, 100))
+        worker = self._worker()
         self.config.weight_modifier = 80
+        self.vitals.publish_weight(79, 100)
         self.assertFalse(worker._weight_over_threshold())
-        worker = self._worker(_FakePoller(80, 100))
+        self.vitals.publish_weight(80, 100)
         self.assertTrue(worker._weight_over_threshold())
         self.config.weight_modifier = 49
         self.assertFalse(worker._weight_over_threshold())
@@ -250,7 +238,8 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
     def test_fly_wings_would_hit_threshold_triggers_dump(self) -> None:
         self.config.weight_modifier = 80
         self.config.fly_wings_amount = 150
-        worker = self._worker(_FakePoller(70, 100))
+        worker = self._worker()
+        self.vitals.publish_weight(70, 100)
         self.assertFalse(worker._weight_over_threshold())
         self.assertTrue(worker._fly_wings_would_hit_threshold())
         self.config.fly_wings_amount = 1
@@ -279,7 +268,9 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
                 "use": (10, 10), "eqp": (30, 10), "etc": (40, 10),
             }.get(name)
 
-            worker = self._worker(_FakePoller(90))
+            self.vitals.publish_weight(90, 100)
+            self.vitals.publish_hp(1000, 1000)
+            worker = self._worker()
             worker.items_to_storage()
 
             kinds = [c[0] for c in self.input.calls]
@@ -301,7 +292,9 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             m["slot_looks_empty"].side_effect = [True, True, False, True]
             m["slot_contains_template"].return_value = False
 
-            worker = self._worker(_FakePoller(90))
+            self.vitals.publish_weight(90, 100)
+            self.vitals.publish_hp(1000, 1000)
+            worker = self._worker()
             worker.items_to_storage()
 
             kinds = [c[0] for c in self.input.calls]
@@ -324,7 +317,9 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             m["ItemsToStorageWorker._ensure_inventory_open"].return_value = panel
             self.config.fly_wings_amount = 150
 
-            worker = self._worker(_FakePoller(10))
+            self.vitals.publish_weight(10, 100)
+            self.vitals.publish_hp(1000, 1000)
+            worker = self._worker()
             self.assertEqual(self.ctx.wingcount, 0)
             worker.get_fly_wings()
 
@@ -353,7 +348,9 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             self.config.creamy_tp_button = "w"
             self.config.creamy_tp_scan_code = 17
 
-            worker = self._worker(_FakePoller(10))
+            self.vitals.publish_weight(10, 100)
+            self.vitals.publish_hp(1000, 1000)
+            worker = self._worker()
             worker.get_fly_wings()
 
             m["ItemsToStorageWorker._close_menus"].assert_called()
@@ -374,7 +371,8 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         with stack:
             m["find_template"].return_value = None
 
-            worker = self._worker(_FakePoller(10))
+            self.vitals.publish_hp(1000, 1000)
+            worker = self._worker()
             with self.assertRaises(InventoryUiError):
                 worker.storage_session(dump=False, restock=True)
             m["ItemsToStorageWorker._close_menus"].assert_called()
@@ -382,16 +380,12 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
     def test_restock_force_closes_only_on_critical_hp(self) -> None:
         stack, m = _enter_worker_patches(
             find_template=DEFAULT,
-            read_status_panel=DEFAULT,
         )
         with stack:
             m["find_template"].return_value = None
-            m["read_status_panel"].return_value = StatusPanelValues(
-                hp=40, hp_max=100, sp=50, sp_max=100,
-                weight=10, weight_max=100, panel_origin=(0, 0),
-            )
 
-            worker = self._worker(_FakePoller(10))
+            self.vitals.publish_hp(40, 100)
+            worker = self._worker()
             with self.assertRaises(StorageCriticalHpError):
                 worker.storage_session(dump=False, restock=True)
             m["ItemsToStorageWorker._close_menus"].assert_not_called()
@@ -403,7 +397,8 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         )
         with stack:
             m["require_inventory_panel"].return_value = _fake_panel()
-            worker = self._worker(_FakePoller(10))
+            self.vitals.publish_hp(1000, 1000)
+            worker = self._worker()
 
             m["is_inventory_open"].return_value = False
             m["is_storage_open"].return_value = False
@@ -452,7 +447,9 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             )
             self.config.fly_wings_amount = 150
 
-            worker = self._worker(_FakePoller(70, 100))
+            self.vitals.publish_weight(70, 100)
+            self.vitals.publish_hp(1000, 1000)
+            worker = self._worker()
             worker.storage_session(dump=True, restock=True)
 
             self.assertEqual(
@@ -461,313 +458,6 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             m["ItemsToStorageWorker._close_menus"].assert_called_once()
             self.assertEqual(self.ctx.wingcount, 150)
             self.assertIn(("type", "150"), self.input.calls)
-
-
-# ── _read_weight unit tests (OCR and memory modes) ──────────────
-
-
-class ItemsToStorageWorkerReadWeightTests(unittest.TestCase):
-    """Unit tests for ``_read_weight()`` covering both memory and OCR paths."""
-
-    def setUp(self) -> None:
-        self.config = MagicMock()
-        self.config.hwnd = 1
-        self.config.weight_modifier = 80
-        self.ctx = HuntRuntimeContext(
-            config=self.config,
-            logger=MagicMock(),
-            tracks=MagicMock(),
-            policy=MagicMock(),
-            capture=MagicMock(),
-            detector=MagicMock(),
-            tracker=MagicMock(),
-            validation=MagicMock(),
-            control=MagicMock(),
-            overlay=MagicMock(),
-        )
-        self.frame = np.zeros((240, 320, 3), dtype=np.uint8)
-        self.ctx.capture.capture_client.return_value = self.frame
-        self.input = _RecordingInput()
-
-    def _worker(
-        self,
-        poller: _FakePoller,
-        memory: MemoryAddresses | None = None,
-    ) -> ItemsToStorageWorker:
-        if memory is None:
-            memory = MemoryAddresses(current_weight=1, max_weight=2)
-        return ItemsToStorageWorker(
-            self.ctx,
-            self.input,
-            memory,
-            hunt_mode=MagicMock(),
-            poller=poller,
-        )
-
-    # ── memory mode ─────────────────────────────────────────────────
-
-    def test_memory_mode_returns_weight(self) -> None:
-        """snap.ok=True with valid weights → (weight, weight_max)"""
-        worker = self._worker(_FakePoller(450, 500))
-        result = worker._read_weight()
-        self.assertEqual(result, (450, 500))
-
-    def test_memory_mode_returns_none_when_snap_not_ok(self) -> None:
-        """snap.ok=False → None, logs once"""
-
-        class _FailPoller:
-            def read(self, hwnd, addresses) -> MemorySnapshot:
-                return MemorySnapshot(ok=False, error="read failed")
-
-        worker = self._worker(_FailPoller())
-        result = worker._read_weight()
-        self.assertIsNone(result)
-        # Should have logged once
-        self.assertEqual(
-            self.ctx.logger.behavior.call_count, 1
-        )
-        log_msg = self.ctx.logger.behavior.call_args[0][0]
-        self.assertIn("memory_weight_unavailable", log_msg)
-
-    def test_memory_mode_returns_none_when_weight_none(self) -> None:
-        """snap.weight=None → None"""
-
-        class _NoneWeightPoller:
-            def read(self, hwnd, addresses) -> MemorySnapshot:
-                return MemorySnapshot(
-                    weight=None, weight_max=500, ok=True
-                )
-
-        worker = self._worker(_NoneWeightPoller())
-        result = worker._read_weight()
-        self.assertIsNone(result)
-
-    def test_memory_mode_returns_none_when_max_weight_none(self) -> None:
-        """snap.weight_max=None → None"""
-
-        class _NoneMaxPoller:
-            def read(self, hwnd, addresses) -> MemorySnapshot:
-                return MemorySnapshot(
-                    weight=450, weight_max=None, ok=True
-                )
-
-        worker = self._worker(_NoneMaxPoller())
-        result = worker._read_weight()
-        self.assertIsNone(result)
-
-    def test_memory_mode_returns_none_when_max_weight_zero(self) -> None:
-        """snap.weight_max=0 → None"""
-
-        class _ZeroMaxPoller:
-            def read(self, hwnd, addresses) -> MemorySnapshot:
-                return MemorySnapshot(
-                    weight=450, weight_max=0, ok=True
-                )
-
-        worker = self._worker(_ZeroMaxPoller())
-        result = worker._read_weight()
-        self.assertIsNone(result)
-
-    # ── OCR mode ────────────────────────────────────────────────────
-
-    def test_ocr_mode_falls_through_when_no_memory_addresses(self) -> None:
-        """current_weight=0 → uses OCR path"""
-        # Memory addresses all zero → OCR path
-        memory = MemoryAddresses(current_weight=0, max_weight=0)
-        worker = self._worker(_FakePoller(450, 500), memory=memory)
-
-        # _capture_client() returns self.frame, read_status_panel
-        # returns valid OCR data.  Both are mocked on the context.
-        with patch(
-            f"{_WORKER}.read_status_panel",
-            return_value=StatusPanelValues(
-                hp=100,
-                hp_max=100,
-                sp=100,
-                sp_max=100,
-                weight=300,
-                weight_max=400,
-                panel_origin=(0, 0),
-            ),
-        ):
-            result = worker._read_weight()
-
-        self.assertEqual(result, (300, 400))
-
-    def test_ocr_mode_returns_none_on_capture_error(self) -> None:
-        """_capture_client raises InventoryUiError → None, no log"""
-        memory = MemoryAddresses(current_weight=0, max_weight=0)
-        worker = self._worker(_FakePoller(450, 500), memory=memory)
-
-        # Make capture_client raise
-        self.ctx.capture.capture_client.side_effect = InventoryUiError(
-            "capture failed"
-        )
-        result = worker._read_weight()
-        self.assertIsNone(result)
-        # OCR mode doesn't log on capture failure
-        self.ctx.logger.behavior.assert_not_called()
-
-    def test_ocr_mode_returns_none_when_panel_none(self) -> None:
-        """read_status_panel returns None → None, log once"""
-        memory = MemoryAddresses(current_weight=0, max_weight=0)
-        worker = self._worker(_FakePoller(450, 500), memory=memory)
-
-        with patch(f"{_WORKER}.read_status_panel", return_value=None):
-            result = worker._read_weight()
-
-        self.assertIsNone(result)
-        self.assertEqual(self.ctx.logger.behavior.call_count, 1)
-        log_msg = self.ctx.logger.behavior.call_args[0][0]
-        self.assertIn("ocr_weight_unavailable", log_msg)
-
-    def test_ocr_mode_returns_none_when_weight_none(self) -> None:
-        """StatusPanelValues.weight=None → None"""
-        memory = MemoryAddresses(current_weight=0, max_weight=0)
-        worker = self._worker(_FakePoller(450, 500), memory=memory)
-
-        with patch(
-            f"{_WORKER}.read_status_panel",
-            return_value=StatusPanelValues(
-                hp=100,
-                hp_max=100,
-                sp=100,
-                sp_max=100,
-                weight=None,
-                weight_max=400,
-                panel_origin=(0, 0),
-            ),
-        ):
-            result = worker._read_weight()
-
-        self.assertIsNone(result)
-
-    def test_ocr_mode_returns_none_when_max_weight_none(self) -> None:
-        """StatusPanelValues.weight_max=None → None"""
-        memory = MemoryAddresses(current_weight=0, max_weight=0)
-        worker = self._worker(_FakePoller(450, 500), memory=memory)
-
-        with patch(
-            f"{_WORKER}.read_status_panel",
-            return_value=StatusPanelValues(
-                hp=100,
-                hp_max=100,
-                sp=100,
-                sp_max=100,
-                weight=300,
-                weight_max=None,
-                panel_origin=(0, 0),
-            ),
-        ):
-            result = worker._read_weight()
-
-        self.assertIsNone(result)
-
-    def test_ocr_mode_returns_none_when_max_weight_zero(self) -> None:
-        """StatusPanelValues.weight_max=0 → None"""
-        memory = MemoryAddresses(current_weight=0, max_weight=0)
-        worker = self._worker(_FakePoller(450, 500), memory=memory)
-
-        with patch(
-            f"{_WORKER}.read_status_panel",
-            return_value=StatusPanelValues(
-                hp=100,
-                hp_max=100,
-                sp=100,
-                sp_max=100,
-                weight=300,
-                weight_max=0,
-                panel_origin=(0, 0),
-            ),
-        ):
-            result = worker._read_weight()
-
-        self.assertIsNone(result)
-
-    def test_ocr_mode_returns_weight_on_success(self) -> None:
-        """Valid StatusPanelValues → (weight, weight_max)"""
-        memory = MemoryAddresses(current_weight=0, max_weight=0)
-        worker = self._worker(_FakePoller(450, 500), memory=memory)
-
-        with patch(
-            f"{_WORKER}.read_status_panel",
-            return_value=StatusPanelValues(
-                hp=100,
-                hp_max=100,
-                sp=100,
-                sp_max=100,
-                weight=250,
-                weight_max=350,
-                panel_origin=(0, 0),
-            ),
-        ):
-            result = worker._read_weight()
-
-        self.assertEqual(result, (250, 350))
-
-    # ── logging dedup ───────────────────────────────────────────────
-
-    def test_memory_failure_logs_once_then_skips_repeat(self) -> None:
-        """Second consecutive failure doesn't re-log"""
-
-        class _FailPoller:
-            def read(self, hwnd, addresses) -> MemorySnapshot:
-                return MemorySnapshot(ok=False, error="fail")
-
-        worker = self._worker(_FailPoller())
-        worker._read_weight()
-        worker._read_weight()
-        worker._read_weight()
-        self.assertEqual(self.ctx.logger.behavior.call_count, 1)
-
-    def test_ocr_failure_logs_once_then_skips_repeat(self) -> None:
-        """Second consecutive OCR failure doesn't re-log"""
-        memory = MemoryAddresses(current_weight=0, max_weight=0)
-        worker = self._worker(_FakePoller(450, 500), memory=memory)
-
-        with patch(f"{_WORKER}.read_status_panel", return_value=None):
-            worker._read_weight()
-            worker._read_weight()
-            worker._read_weight()
-
-        self.assertEqual(self.ctx.logger.behavior.call_count, 1)
-
-    def test_success_clears_fail_log_so_next_failure_relogs(self) -> None:
-        """Success resets last_fail_log → next failure logs again"""
-        memory = MemoryAddresses(current_weight=0, max_weight=0)
-        worker = self._worker(_FakePoller(450, 500), memory=memory)
-
-        # First call: fail
-        with patch(f"{_WORKER}.read_status_panel", return_value=None):
-            worker._read_weight()
-
-        self.assertEqual(self.ctx.logger.behavior.call_count, 1)
-
-        # Second call: succeed (clears last_fail_log)
-        with patch(
-            f"{_WORKER}.read_status_panel",
-            return_value=StatusPanelValues(
-                hp=100,
-                hp_max=100,
-                sp=100,
-                sp_max=100,
-                weight=250,
-                weight_max=350,
-                panel_origin=(0, 0),
-            ),
-        ):
-            result = worker._read_weight()
-
-        self.assertEqual(result, (250, 350))
-        # Success doesn't increment behavior call count
-        self.assertEqual(self.ctx.logger.behavior.call_count, 1)
-
-        # Third call: fail again (should re-log because last_fail_log
-        # was cleared by the success)
-        with patch(f"{_WORKER}.read_status_panel", return_value=None):
-            worker._read_weight()
-
-        self.assertEqual(self.ctx.logger.behavior.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -242,7 +242,7 @@ def create_runtime_deps(
                     f"and totalWeightAddress (profile={ctx.config.client_profile!r})."
                 )
         storage_worker = ItemsToStorageWorker(
-            ctx, input_backend, memory, hunt_mode=hunt_mode
+            ctx, input_backend, hunt_mode=hunt_mode, vitals=player_vitals
         )
         workers.append(("storage", storage_worker.run))
 
