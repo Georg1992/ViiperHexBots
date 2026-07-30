@@ -188,9 +188,22 @@ class HuntModeStrategy(ABC):
 class TeleportStrategy(HuntModeStrategy):
     """Teleport when area is clear of mobs."""
 
+    def __init__(
+        self,
+        ctx: HuntModeControllerContext,
+        input_backend: InputBackend,
+        teleport_controller=None,
+    ) -> None:
+        super().__init__(ctx, input_backend)
+        self._teleport = teleport_controller
+
     def _handle_no_targets_impl(self) -> bool:
         ctx = self._ctx
         context = self._build_no_target_context()
+
+        if self._teleport is None:
+            self._log_no_target("wait", "no_teleport_controller")
+            return False
 
         # Require a discovery scan that left zero alive tracks. Tracks can drop
         # earlier (lost) while mobs are still on screen; without this gate we
@@ -208,60 +221,12 @@ class TeleportStrategy(HuntModeStrategy):
             self._log_no_target("wait", reason, context)
             return False
 
-        area = ctx.tracks.get_area_clear_candidate()
-        if not area.clear:
-            self._log_no_target_blocked(area.reason)
-            self._log_no_target("wait", area.reason, context)
-            return False
-
-        if not ctx.active_teleport_scan_code():
+        if not self._teleport.active_scan_code():
             self._log_no_target("wait", "no_teleport_key", context)
             return False
 
-        # Suspend discovery before claim so the 1s cadence cannot scan during
-        # teleport settle and confirm clear on a loading/empty frame.
-        ctx.discovery_suspend.set()
-        ctx.discovery_wake.clear()
-
-        # Claim under the tracks lock before input so a concurrent discovery
-        # reconcile cannot spawn tracks into the area we are leaving.
-        if not ctx.tracks.try_claim_clear_for_teleport():
-            ctx.discovery_suspend.clear()
-            self._log_no_target_blocked("alive_tracks")
-            self._log_no_target("wait", "alive_tracks", context)
-            return False
-        ctx.policy.reset()
-        ctx.validation.log_area_reset("pre_teleport")
-        self.on_area_reset()
-
-        tp_button = ctx.active_teleport_button()
-        ctx.logger.behavior(
-            f"[MODE] teleport area_clear tracks={area.alive_count} "
-            f"key={tp_button!r} wingsExhausted={ctx.fly_wings_exhausted}"
-        )
         self._log_no_target("teleport", "area_clear", context)
-
-        try:
-            self._input.teleport_key(ctx.active_teleport_scan_code())
-        except Exception as exc:
-            ctx.logger.behavior(
-                f"[MODE] teleport input error: {exc}"
-            )
-            self._release_discovery_after_teleport()
-            return False
-        ctx.note_teleport_for_wings()
-        ctx.overlay.increment_teleports()
-        if not ctx.wait_unless_stopped(ctx.config.teleport_duration_ms / 1000.0):
-            self._release_discovery_after_teleport()
-            return False
-        self._release_discovery_after_teleport()
-        return True
-
-    def _release_discovery_after_teleport(self) -> None:
-        """Allow discovery again and wake it for the post-settle scan."""
-        ctx = self._ctx
-        ctx.discovery_suspend.clear()
-        ctx.discovery_wake.set()
+        return self._teleport.mode_teleport()
 
 
 class HybridStrategy(HuntModeStrategy):

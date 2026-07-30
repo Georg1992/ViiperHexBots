@@ -30,6 +30,7 @@ from pybot.runtime.workers.attack_loop import AttackLoop
 from pybot.runtime.workers.coord_tracking_worker import CoordTrackingWorker
 from pybot.runtime.mob_behaviors import get_mob_behavior
 from pybot.runtime.danger_detector import DangerDetector
+from pybot.runtime.teleport import TeleportController
 from pybot.game_state import PlayerVitals
 
 from pybot.runtime.workers.discovery_worker import DiscoveryWorker
@@ -161,9 +162,12 @@ def create_runtime_deps(
         ViiperBackend()
     )
 
+    # Create TeleportController early — every teleport concern lives here.
+    tport = TeleportController(ctx, input_backend, None)
+
     # Teleport mode requires at least one configured teleport key (wing or creamy).
     if ctx.config.hunt_mode == "teleport":
-        if ctx.config.active_teleport_scan_code() <= 0:
+        if tport.active_scan_code() <= 0:
             tp_button = ctx.config.teleport_button or "(unset)"
             creamy = ctx.config.creamy_tp_button or "(unset)"
             raise ValueError(
@@ -172,7 +176,7 @@ def create_runtime_deps(
                 f"or Creamy TP Key={creamy!r} in the Keybindings tab."
             )
 
-    hunt_mode = create_hunt_mode(ctx, input_backend)
+    hunt_mode = create_hunt_mode(ctx, input_backend, teleport_controller=tport)
     tracking = CoordTrackingWorker(ctx)
     profile = load_client_profile(ctx.config.client_profile)
     memory = MemoryAddresses() if profile is None else profile.memory
@@ -182,7 +186,7 @@ def create_runtime_deps(
     char_y = roi.y + roi.h // 2 if roi else 0
     player_vitals = vitals or PlayerVitals()
     mob_behavior = get_mob_behavior(config.mob_name)
-    danger = DangerDetector(ctx, input_backend, mob_behavior, vitals=player_vitals)
+    danger = DangerDetector(ctx, tport, mob_behavior, vitals=player_vitals)
     attack = AttackLoop(
         ctx, hunt_mode, input_backend,
         danger=danger,
@@ -220,7 +224,7 @@ def create_runtime_deps(
                 f"and maxSpAddress (profile={ctx.config.client_profile!r})."
             )
         sit_worker = SitOnLowSpWorker(
-            ctx, input_backend, hunt_mode=hunt_mode,
+            ctx, input_backend, tport,
             danger=danger, mob_behavior=mob_behavior, vitals=player_vitals,
         )
         workers.append(("sit_sp", sit_worker.run))
@@ -238,9 +242,12 @@ def create_runtime_deps(
                     f"and totalWeightAddress (profile={ctx.config.client_profile!r})."
                 )
         storage_worker = ItemsToStorageWorker(
-            ctx, input_backend, hunt_mode=hunt_mode, vitals=player_vitals
+            ctx, input_backend, tport, vitals=player_vitals
         )
         workers.append(("storage", storage_worker.run))
+
+    # Wire TeleportController's hunt_mode now that it's created.
+    tport._hunt_mode = hunt_mode
 
     return RuntimeDependencies(
         ctx=ctx,
@@ -333,7 +340,7 @@ class HuntRuntime:
         ctx.logger.behavior(
             f"[MODE] active={ctx.config.hunt_mode} "
             f"skill={ctx.config.skill_button} "
-            f"teleport={ctx.active_teleport_button()!r}"
+            f"teleport={tport.active_button()!r}"
         )
 
         threads = [

@@ -18,6 +18,16 @@ from pybot.runtime.logging import HuntLogger
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.validation_log import HuntValidationLogger
 from pybot.runtime.detection.detector_session import DetectorSession
+from pybot.runtime.teleport import TeleportController
+
+
+def _make_tport(ctx, input_backend):
+    """Create a TeleportController for tests with a mocked hunt_mode."""
+    from unittest.mock import MagicMock
+    tport = TeleportController(ctx, input_backend, MagicMock())
+    # Only mock the scan code lookup — teleport_once uses the real ctx.
+    tport.active_scan_code = MagicMock(return_value=16)  # type: ignore[method-assign]
+    return tport
 
 
 def make_config(**overrides) -> HuntRuntimeConfig:
@@ -61,7 +71,10 @@ class HuntModeTests(unittest.TestCase):
             validation=HuntValidationLogger(self.logger, self.tracks, enabled=False),
             control=RuntimeControl(None),
         )
-        self.mode = create_hunt_mode(self.ctx, ShadowInputBackend())
+        self.mode = create_hunt_mode(
+            self.ctx, ShadowInputBackend(),
+            teleport_controller=_make_tport(self.ctx, ShadowInputBackend()),
+        )
 
     def test_blocks_teleport_without_discovery(self) -> None:
         teleported = self.mode.on_no_attackable_targets()
@@ -191,7 +204,10 @@ class HuntModeTests(unittest.TestCase):
             validation=HuntValidationLogger(self.logger, self.tracks, enabled=False),
             control=RuntimeControl(None),
         )
-        self.mode = create_hunt_mode(self.ctx, ShadowInputBackend())
+        self.mode = create_hunt_mode(
+            self.ctx, ShadowInputBackend(),
+            teleport_controller=_make_tport(self.ctx, ShadowInputBackend()),
+        )
         self.mode.note_discovery_scan_completed(
             living_count=0,
             added_count=0,

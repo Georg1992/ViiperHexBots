@@ -55,34 +55,6 @@ class MobBehavior:
         """
         return False, ""
 
-    def execute_danger_teleport(
-        self,
-        ctx,
-        input_backend: InputBackend,
-        *,
-        reason: str = "",
-    ) -> None:
-        """Press teleport key, wait, then clear tracks immediately.
-
-Called by :class:`DangerDetector` only — no other module calls this
-method.  Tracks are cleared right after the teleport settles so stale
-mob positions are never used post-teleport.
-
-        *ctx* must provide ``config``, ``logger``, ``stop_event``, and
-        ``area_reset``.
-        """
-        tp_scan = ctx.config.teleport_scan_code or ctx.config.creamy_tp_scan_code
-        prefix = f"{reason} " if reason else ""
-        ctx.logger.behavior(
-            f"[DANGER] {prefix}teleport_scan={tp_scan} — teleporting"
-        )
-        try:
-            input_backend.teleport_key(tp_scan)
-        except Exception as exc:
-            ctx.logger.behavior(f"[DANGER] teleport input error: {exc}")
-        ctx.stop_event.wait(ctx.config.teleport_duration_ms / 1000.0)
-        ctx.area_reset(reason="danger_teleport")
-
 
 class AnubisBehavior(MobBehavior):
     """Anubis kites: walk away from the mob after each attack."""

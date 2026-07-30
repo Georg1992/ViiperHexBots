@@ -5,7 +5,6 @@ from __future__ import annotations
 from pybot.recognition.rules import HUNT_OBJECT_RADIUS
 
 HUNT_DISCOVERY_INTERVAL_MS = 1000
-HUNT_TELEPORT_DURATION_MS = 800
 WORKER_SHUTDOWN_TIMEOUT_S = 2.0
 CELL_SIZE_PX = 64
 DEFAULT_SEARCH_RANGE_CELLS = 16
@@ -30,15 +29,6 @@ SIT_IDLE_BEFORE_SIT_S = 1.0
 SIT_STAND_RESUME_DELAY_S = 0.5
 # Wait for sit/stand animation before measuring the center sprite.
 SIT_POSE_SETTLE_S = 0.4
-# Max sit/stand key attempts while waiting for pose confirmation.
-SIT_POSE_MAX_ATTEMPTS = 5
-# Sitting must shrink body height by at least this many px vs stand pose
-# (matches character-pose fixture gap; see test_character_pose).
-SIT_POSE_MIN_HEIGHT_DROP = 8
-# SP ticks roughly every 4s while sitting; no increase for this long → stall.
-SIT_SP_STALL_S = 15.0
-# How often to check if sitting was interrupted (pose check).
-SIT_POSE_CHECK_S = 1.0
 # Press HP Restore Key when vision HP/max is below this (item path).
 HP_RESTORE_RATIO = 0.5
 # Vision HP poll / min gap between HP Restore Key presses.
@@ -74,7 +64,6 @@ STORAGE_CURSOR_CLEAR_S = 0.05
 __all__ = [
     "HUNT_DISCOVERY_INTERVAL_MS",
     "HUNT_OBJECT_RADIUS",
-    "HUNT_TELEPORT_DURATION_MS",
     "WORKER_SHUTDOWN_TIMEOUT_S",
     "CELL_SIZE_PX",
     "DEFAULT_SEARCH_RANGE_CELLS",
@@ -92,10 +81,6 @@ __all__ = [
     "SIT_IDLE_BEFORE_SIT_S",
     "SIT_STAND_RESUME_DELAY_S",
     "SIT_POSE_SETTLE_S",
-    "SIT_POSE_MAX_ATTEMPTS",
-    "SIT_POSE_MIN_HEIGHT_DROP",
-    "SIT_SP_STALL_S",
-    "SIT_POSE_CHECK_S",
     "HP_RESTORE_RATIO",
     "HP_RESTORE_POLL_S",
     "HP_RESTORE_COOLDOWN_S",

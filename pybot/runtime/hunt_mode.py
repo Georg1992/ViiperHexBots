@@ -65,6 +65,7 @@ class HuntModeController:
 def create_hunt_mode(
     ctx: HuntModeControllerContext,
     input_backend: InputBackend,
+    teleport_controller=None,
 ) -> HuntModeController:
     """Create a HuntModeController wired to the appropriate strategy.
 
@@ -80,7 +81,7 @@ def create_hunt_mode(
     elif mode == HuntModeController.MODE_HYBRID:
         strategy = HybridStrategy(ctx, input_backend)
     elif mode == HuntModeController.MODE_TELEPORT:
-        strategy = TeleportStrategy(ctx, input_backend)
+        strategy = TeleportStrategy(ctx, input_backend, teleport_controller)
     else:
         raise ValueError(f"unknown hunt mode: {mode!r}")
     return HuntModeController(strategy)

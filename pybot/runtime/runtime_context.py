@@ -187,12 +187,6 @@ class HuntRuntimeContext:
         self.fly_wings_exhausted = True
         self.wingcount = 0
 
-    def active_teleport_scan_code(self) -> int:
-        return self.config.active_teleport_scan_code()
-
-    def active_teleport_button(self) -> str:
-        return self.config.active_teleport_button()
-
     def is_stopped(self) -> bool:
         return self.stop_event.is_set()
 

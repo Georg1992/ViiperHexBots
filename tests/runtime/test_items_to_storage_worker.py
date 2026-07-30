@@ -169,10 +169,12 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.vitals = PlayerVitals()
 
     def _worker(self) -> ItemsToStorageWorker:
+        from pybot.runtime.teleport import TeleportController
+        tport = TeleportController(self.ctx, self.input, MagicMock())
         return ItemsToStorageWorker(
             self.ctx,
             self.input,
-            hunt_mode=MagicMock(),
+            tport,
             vitals=self.vitals,
         )
 
@@ -217,12 +219,6 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.config.take_fly_wings = False
         self.ctx.note_teleport_for_wings()
         self.assertEqual(self.ctx.wingcount, 2)
-
-    def test_active_teleport_delegates_to_config(self) -> None:
-        self.config.active_teleport_button.return_value = "q"
-        self.config.active_teleport_scan_code.return_value = 16
-        self.assertEqual(self.ctx.active_teleport_button(), "q")
-        self.assertEqual(self.ctx.active_teleport_scan_code(), 16)
 
     def test_weight_threshold_gate(self) -> None:
         worker = self._worker()

@@ -1,11 +1,11 @@
-"""Quiet-area helpers: clear + idle + recheck."""
+"""Quiet-area helpers: clear + idle + recheck (via TeleportController)."""
 
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-from pybot.runtime.clear_area import teleport_until_quiet
+from pybot.runtime.teleport import TeleportController
 
 
 class TeleportUntilQuietTests(unittest.TestCase):
@@ -14,34 +14,30 @@ class TeleportUntilQuietTests(unittest.TestCase):
         self.ctx.is_stopped.return_value = False
         self.ctx.wait_unless_stopped.return_value = True
         self.ctx.logger = MagicMock()
+        self.ctx.capture.is_valid.return_value = False
         self.input = MagicMock()
         self.hunt_mode = MagicMock()
+        self.tport = TeleportController(self.ctx, self.input, self.hunt_mode)
 
-    @patch("pybot.runtime.clear_area.scan_living_count")
-    @patch("pybot.runtime.clear_area.teleport_until_clear", return_value=True)
-    def test_proceeds_when_still_clear_after_idle(
-        self, _clear: MagicMock, scan: MagicMock
-    ) -> None:
-        scan.return_value = 0
-        ok = teleport_until_quiet(
-            self.ctx, self.input, self.hunt_mode, log_tag="STORAGE", idle_s=1.0
+    def test_proceeds_when_still_clear_after_idle(self) -> None:
+        self.tport._scan_living_count = MagicMock(return_value=0)  # type: ignore[method-assign]
+        self.tport.teleport_until_clear = MagicMock(return_value=True)  # type: ignore[method-assign]
+        ok = self.tport.teleport_until_quiet(
+            log_tag="STORAGE", idle_s=1.0
         )
         self.assertTrue(ok)
         self.ctx.wait_unless_stopped.assert_called_once_with(1.0)
-        scan.assert_called_once()
+        self.tport._scan_living_count.assert_called_once()
 
-    @patch("pybot.runtime.clear_area.scan_living_count")
-    @patch("pybot.runtime.clear_area.teleport_until_clear", return_value=True)
-    def test_retries_when_mobs_appear_during_idle(
-        self, clear: MagicMock, scan: MagicMock
-    ) -> None:
-        scan.side_effect = [2, 0]
-        ok = teleport_until_quiet(
-            self.ctx, self.input, self.hunt_mode, log_tag="STORAGE", idle_s=1.0
+    def test_retries_when_mobs_appear_during_idle(self) -> None:
+        self.tport._scan_living_count = MagicMock(side_effect=[2, 0])  # type: ignore[method-assign]
+        self.tport.teleport_until_clear = MagicMock(return_value=True)  # type: ignore[method-assign]
+        ok = self.tport.teleport_until_quiet(
+            log_tag="STORAGE", idle_s=1.0
         )
         self.assertTrue(ok)
-        self.assertEqual(clear.call_count, 2)
-        self.assertEqual(scan.call_count, 2)
+        self.assertEqual(self.tport.teleport_until_clear.call_count, 2)
+        self.assertEqual(self.tport._scan_living_count.call_count, 2)
 
 
 

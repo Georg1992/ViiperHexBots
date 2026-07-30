@@ -46,8 +46,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.config.creamy_tp_scan_code = 17
         self.config.take_fly_wings = False
         self.config.open_storage_steps = ()
-        self.config.active_teleport_scan_code.return_value = 16
-        self.config.active_teleport_button.return_value = "q"
         self.ctx = HuntRuntimeContext(
             config=self.config,
             logger=MagicMock(),
@@ -65,7 +63,13 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.capture.capture_roi.return_value = MagicMock(size=1)
         self.ctx.capture.capture_client.return_value = object()
         self.input = MagicMock(spec=ShadowInputBackend)
-        self.hunt_mode = MagicMock()
+        # Wire the controller so teleport_until_quiet calls succeed.
+        from pybot.runtime.teleport import TeleportController
+        self.teleport = TeleportController(self.ctx, self.input, MagicMock())
+        # Speed tests: make teleport_once a no-op (already clear).
+        self.teleport.teleport_once = MagicMock(return_value=True)  # type: ignore[method-assign]
+        self.teleport.teleport_until_clear = MagicMock(return_value=True)  # type: ignore[method-assign]
+        self.teleport._scan_living_count = MagicMock(return_value=0)  # type: ignore[method-assign]
 
     def _empty_scans(self, n: int = 5) -> list[DiscoveryScanResult]:
         empty = DiscoveryScanResult(
@@ -123,7 +127,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
-            hunt_mode=self.hunt_mode,
+            self.teleport,
             vitals=vitals,
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
@@ -145,7 +149,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertFalse(self.ctx.sitting_event.is_set())
         self.assertTrue(self.ctx.discovery_wake.is_set())
         self.assertGreaterEqual(self.ctx.tracks.area_reset.call_count, 1)
-        self.assertGreaterEqual(self.hunt_mode.on_area_reset.call_count, 1)
 
     def test_thresholds(self) -> None:
         self.assertAlmostEqual(SIT_LOW_SP_RATIO, 0.05)
@@ -157,7 +160,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
-            hunt_mode=self.hunt_mode,
+            self.teleport,
             vitals=vitals,
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
@@ -179,7 +182,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
-            hunt_mode=self.hunt_mode,
+            self.teleport,
             vitals=vitals,
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
@@ -194,7 +197,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
-            hunt_mode=self.hunt_mode,
+            self.teleport,
             vitals=_ScriptedVitals([]),
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
@@ -206,7 +209,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
-            hunt_mode=self.hunt_mode,
+            self.teleport,
             vitals=_ScriptedVitals([]),
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
@@ -218,7 +221,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker = SitOnLowSpWorker(
             self.ctx,
             self.input,
-            hunt_mode=self.hunt_mode,
+            self.teleport,
             vitals=_ScriptedVitals([]),
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]

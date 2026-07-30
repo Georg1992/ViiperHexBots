@@ -14,7 +14,6 @@ from __future__ import annotations
 import time
 
 from pybot.game_state import PlayerVitals
-from pybot.runtime.clear_area import HuntModeAreaReset, teleport_until_quiet
 from pybot.runtime.constants import (
     SIT_LOW_SP_RATIO,
     SIT_POSE_SETTLE_S,
@@ -25,6 +24,7 @@ from pybot.runtime.constants import (
 from pybot.runtime.danger_detector import DangerDetector
 from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.mob_behaviors import MobBehavior
+from pybot.runtime.teleport import TeleportController
 from pybot.runtime.workers.worker_contexts import SitOnLowSpWorkerContext
 
 
@@ -35,7 +35,7 @@ class SitOnLowSpWorker:
         self,
         ctx: SitOnLowSpWorkerContext,
         input_backend: InputBackend,
-        hunt_mode: HuntModeAreaReset,
+        teleport: TeleportController,
         *,
         danger: DangerDetector | None = None,
         mob_behavior: MobBehavior | None = None,
@@ -43,11 +43,11 @@ class SitOnLowSpWorker:
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
-        self._hunt_mode = hunt_mode
+        self._teleport = teleport
         self._mob_behavior = mob_behavior or MobBehavior()
         self._vitals = vitals or PlayerVitals()
         self._danger = danger or DangerDetector(
-            ctx, input_backend, self._mob_behavior, vitals=self._vitals,
+            ctx, teleport, self._mob_behavior, vitals=self._vitals,
         )
         self._last_fail_log = ""
 
@@ -103,14 +103,8 @@ class SitOnLowSpWorker:
                 "teleport until clear before sit"
             )
             while not ctx.is_stopped():
-                # teleport_until_quiet scans the screen for a safe place
-                # using the normal (creamy-first) teleport key.
-                if not teleport_until_quiet(
-                    ctx,
-                    self._input,
-                    self._hunt_mode,
+                if not self._teleport.teleport_until_quiet(
                     log_tag="SIT",
-
                 ):
                     return
                 outcome = self._sit_session()

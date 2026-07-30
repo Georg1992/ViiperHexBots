@@ -63,17 +63,6 @@ class HuntRuntimeConfig:
     use_sprite_grf: bool = False
     client_profile: str = "Generic"
 
-    def active_teleport_scan_code(self) -> int:
-        """Normal teleport key: Creamy TP first, fall back to wing key."""
-        if self.creamy_tp_scan_code > 0:
-            return self.creamy_tp_scan_code
-        return self.teleport_scan_code
-
-    def active_teleport_button(self) -> str:
-        if self.creamy_tp_scan_code > 0:
-            return self.creamy_tp_button
-        return self.teleport_button
-
 
 def resolve_mob_name(
     source: configparser.ConfigParser | AppSettings,

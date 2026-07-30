@@ -28,7 +28,6 @@ from pybot.recognition.ui.inventory import (
     slot_contains_template,
     slot_looks_empty,
 )
-from pybot.runtime.clear_area import HuntModeAreaReset, teleport_until_quiet
 from pybot.runtime.constants import (
     FLY_WING_WEIGHT,
     STORAGE_CURSOR_CLEAR_S,
@@ -43,6 +42,7 @@ from pybot.runtime.constants import (
 )
 from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.input.scan_codes import key_name_to_scan_code
+from pybot.runtime.teleport import TeleportController
 from pybot.runtime.workers.worker_contexts import ItemsToStorageWorkerContext
 
 user32 = ctypes.windll.user32
@@ -62,13 +62,13 @@ class ItemsToStorageWorker:
         self,
         ctx: ItemsToStorageWorkerContext,
         input_backend: InputBackend,
-        hunt_mode: HuntModeAreaReset,
+        teleport: TeleportController,
         *,
         vitals: PlayerVitals | None = None,
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
-        self._hunt_mode = hunt_mode
+        self._teleport = teleport
         self._vitals = vitals or PlayerVitals()
 
     def run(self) -> None:
@@ -119,8 +119,8 @@ class ItemsToStorageWorker:
                     ctx.logger.behavior(
                         "[STORAGE] teleport until quiet before storage UI"
                     )
-                    if not teleport_until_quiet(
-                        ctx, self._input, self._hunt_mode, log_tag="STORAGE"
+                    if not self._teleport.teleport_until_quiet(
+                        log_tag="STORAGE"
                     ):
                         ctx.logger.behavior(
                             "[STORAGE] area clear aborted — skip storage session"

@@ -9,6 +9,8 @@ Inputs:
   teleport; drops below 50% of max are logged as critical
 * ``feed_tracks(char_x, char_y, all_mobs)`` — surrounded triggers
   teleport (only for mobs with custom behavior — Anubis for now)
+
+Teleport execution delegated to :class:`TeleportController`.
 """
 
 from __future__ import annotations
@@ -19,8 +21,7 @@ from pybot.runtime.constants import WORKER_POLL_INTERVAL_S
 
 if TYPE_CHECKING:
     from pybot.game_state import PlayerVitals
-    from pybot.runtime.input.input_backend import InputBackend
-    from pybot.runtime.mob_behaviors import MobBehavior
+    from pybot.runtime.teleport import TeleportController
 
 CRITICAL_HP_RATIO = 0.5
 
@@ -31,12 +32,12 @@ class DangerDetector:
     def __init__(
         self,
         ctx,
-        input_backend: InputBackend,
-        mob_behavior: MobBehavior,
+        teleport: TeleportController,
+        mob_behavior,
         vitals: PlayerVitals,
     ) -> None:
         self._ctx = ctx
-        self._input = input_backend
+        self._teleport = teleport
         self._mob_behavior = mob_behavior
         self._vitals = vitals
         self._prev_hp: int | None = None
@@ -65,13 +66,9 @@ class DangerDetector:
             )
             self._damage_detected = True
             if is_critical:
-                self._mob_behavior.execute_danger_teleport(
-                    self._ctx, self._input, reason="critical_hp",
-                )
+                self._teleport.danger_teleport(reason="critical_hp")
             else:
-                self._mob_behavior.execute_danger_teleport(
-                    self._ctx, self._input, reason="hp_drop",
-                )
+                self._teleport.danger_teleport(reason="hp_drop")
         self._prev_hp = hp
 
     def pop_damage_detected(self) -> bool:
@@ -100,8 +97,6 @@ class DangerDetector:
             char_x, char_y, all_mobs,
         )
         if is_surrounded:
-            self._mob_behavior.execute_danger_teleport(
-                self._ctx, self._input, reason=f"surrounded {reason}",
-            )
+            self._teleport.danger_teleport(reason=f"surrounded {reason}")
             return True
         return False
