@@ -1,17 +1,12 @@
-"""Centralized danger detection — observes game state, triggers teleport.
+"""DangerDetector — isolated danger observer.
 
-The :class:`DangerDetector` is an **observer**: callers *feed* it data
-(HP, track positions) and it decides when danger exists.  No module
-calls a danger method directly — they just provide the latest readings.
+Callers feed data in; the detector decides danger and teleports.
+Nothing comes back out.  No other module knows danger exists.
 
-Currently observed signals:
-
-* ``feed_hp(hp)`` — HP drop (universal)
-* ``feed_tracks(char_x, char_y, all_mobs)`` — surrounded (only for mobs
-  with ``has_custom_behavior()`` — Anubis for now)
-
-When any signal fires, :meth:`_fire` executes danger teleport via
-``MobBehavior.execute_danger_teleport`` (wing-first key).
+Inputs:
+* ``feed_hp(hp)`` — HP drop triggers teleport (universal)
+* ``feed_tracks(char_x, char_y, all_mobs)`` — surrounded triggers
+  teleport (only for mobs with custom behavior — Anubis for now)
 """
 
 from __future__ import annotations
@@ -29,12 +24,10 @@ class DangerDetector:
     def __init__(
         self,
         ctx,
-        hunt_mode,
         input_backend: InputBackend,
         mob_behavior: MobBehavior,
     ) -> None:
         self._ctx = ctx
-        self._hunt_mode = hunt_mode
         self._input = input_backend
         self._mob_behavior = mob_behavior
         self._prev_hp: int | None = None
@@ -42,15 +35,16 @@ class DangerDetector:
     # ── Data-in methods ──────────────────────────────────────────
 
     def feed_hp(self, hp: int | None) -> bool:
-        """Observe current HP.  Triggers on HP drop.
+        """Observe current HP.  Teleports on drop.
 
-        Returns ``True`` when danger teleport was executed.
+        Returns ``True`` when the detector teleported.
         """
         if hp is not None and self._prev_hp is not None and hp < self._prev_hp:
-            if self._fire("hp_drop"):
-                self._prev_hp = hp
-                return True
-            return False
+            self._mob_behavior.execute_danger_teleport(
+                self._ctx, self._input, reason="hp_drop",
+            )
+            self._prev_hp = hp
+            return True
         self._prev_hp = hp
         return False
 
@@ -60,11 +54,10 @@ class DangerDetector:
         char_y: int,
         all_mobs: list[tuple[int, int]],
     ) -> bool:
-        """Observe tracked mob positions.  Triggers on surrounded.
+        """Observe tracked mob positions.  Teleports if surrounded.
 
-        Surrounded is only active for mobs with custom behavior
-        (Anubis for now).  Returns ``True`` when danger teleport
-        was executed.
+        Only active for mobs with custom behavior (Anubis for now).
+        Returns ``True`` when the detector teleported.
         """
         if not self._mob_behavior.has_custom_behavior():
             return False
@@ -72,13 +65,8 @@ class DangerDetector:
             char_x, char_y, all_mobs,
         )
         if is_surrounded:
-            return self._fire(f"surrounded {reason}")
+            self._mob_behavior.execute_danger_teleport(
+                self._ctx, self._input, reason=f"surrounded {reason}",
+            )
+            return True
         return False
-
-    # ── Internal ─────────────────────────────────────────────────
-
-    def _fire(self, reason: str) -> bool:
-        """Execute danger teleport unconditionally."""
-        return self._mob_behavior.execute_danger_teleport(
-            self._ctx, self._hunt_mode, self._input, reason=reason,
-        )

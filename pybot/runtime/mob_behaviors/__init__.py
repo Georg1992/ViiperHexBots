@@ -58,33 +58,28 @@ class MobBehavior:
     def execute_danger_teleport(
         self,
         ctx,
-        hunt_mode,
         input_backend: InputBackend,
         *,
         reason: str = "",
-    ) -> bool:
-        """Clear tracks and teleport away using the danger key (wing-first).
+    ) -> None:
+        """Press teleport key (wing-first, creamy-fallback) and wait.
 
-        Call this from any worker when a mob-specific danger is detected.
-        Returns ``True`` when a teleport was executed.
+        Called by :class:`DangerDetector` only — no other module touches
+        teleport for danger.  No tracks reset, no overlay counters — the
+        hunt loop handles those naturally.
 
-        *ctx* must provide ``config``, ``tracks``, ``logger``, ``overlay``,
-        and ``stop_event``.
+        *ctx* must provide ``config``, ``logger``, and ``stop_event``.
         """
-        tp_scan = ctx.config.danger_teleport_scan_code()
+        tp_scan = ctx.config.teleport_scan_code or ctx.config.creamy_tp_scan_code
         prefix = f"{reason} " if reason else ""
         ctx.logger.behavior(
             f"[DANGER] {prefix}teleport_scan={tp_scan} — teleporting"
         )
-        ctx.tracks.area_reset()
-        hunt_mode.on_area_reset()
         try:
             input_backend.teleport_key(tp_scan)
         except Exception as exc:
             ctx.logger.behavior(f"[DANGER] teleport input error: {exc}")
-        ctx.overlay.increment_teleports()
         ctx.stop_event.wait(ctx.config.teleport_duration_ms / 1000.0)
-        return True
 
 
 class AnubisBehavior(MobBehavior):

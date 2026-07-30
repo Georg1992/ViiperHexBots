@@ -59,7 +59,7 @@ class SitOnLowSpWorker:
         self._hunt_mode = hunt_mode
         self._mob_behavior = mob_behavior or MobBehavior()
         self._danger = danger or DangerDetector(
-            ctx, hunt_mode, input_backend, self._mob_behavior,
+            ctx, input_backend, self._mob_behavior,
         )
         self._vitals = vitals or PlayerVitals()
         self._last_fail_log = ""
@@ -223,12 +223,12 @@ class SitOnLowSpWorker:
                     last_hp_poll = now
                     if frame is not None:
                         hp = self._read_hp(frame)
-                        # Feed every HP reading to the detector — it tracks
-                        # previous HP internally and fires danger tp on drops.
+                        # Feed every HP reading to the detector — it
+                        # teleports synchronously on drop.
                         if self._danger.feed_hp(hp):
                             ctx.logger.behavior(
                                 f"[SIT] danger while sitting sp={sp} "
-                                "(hp dropped, danger tp triggered)"
+                                "(hp dropped, danger tp executed)"
                             )
                             return "danger"
                         danger = self._assess_danger(

@@ -37,7 +37,7 @@ class AttackLoop:
         self._input = input_backend
         self._mob_behavior = mob_behavior or MobBehavior()
         self._danger = danger or DangerDetector(
-            ctx, hunt_mode, input_backend, self._mob_behavior,
+            ctx, input_backend, self._mob_behavior,
         )
         self._vitals = vitals or PlayerVitals()
         self._char_x = char_x
@@ -88,11 +88,11 @@ class AttackLoop:
         click_x, click_y = snap.x, snap.y
         char_x, char_y = self._character_pos()
 
-        # Danger detector observes track positions — triggers teleport
-        # automatically if surrounded (Anubis only for now).
+        # Danger detector observes track positions — teleports if surrounded
+        # (Anubis only for now).  Synchronous: returns after teleport completes.
         all_mobs = ctx.tracks.positions_snapshot()
         if self._danger.feed_tracks(char_x, char_y, all_mobs):
-            return  # danger handled — teleported away
+            return  # character elsewhere — abandon this target
 
         # Idle death: cheap cache samples around the configured skill delay.
         # Pacing is exactly skill_delay_ms (plus click) — no OCR / capture here.

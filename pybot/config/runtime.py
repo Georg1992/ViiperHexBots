@@ -74,17 +74,6 @@ class HuntRuntimeConfig:
             return self.creamy_tp_button
         return self.teleport_button
 
-    def danger_teleport_scan_code(self) -> int:
-        """Danger teleport: wing key first (reliable escape), fall back to Creamy."""
-        if self.teleport_scan_code > 0:
-            return self.teleport_scan_code
-        return self.creamy_tp_scan_code
-
-    def danger_teleport_button(self) -> str:
-        if self.teleport_scan_code > 0:
-            return self.teleport_button
-        return self.creamy_tp_button
-
 
 def resolve_mob_name(
     source: configparser.ConfigParser | AppSettings,

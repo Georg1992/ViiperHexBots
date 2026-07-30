@@ -184,7 +184,7 @@ def create_runtime_deps(
     char_y = roi.y + roi.h // 2 if roi else 0
     player_vitals = vitals or PlayerVitals()
     mob_behavior = get_mob_behavior(config.mob_name)
-    danger = DangerDetector(ctx, hunt_mode, input_backend, mob_behavior)
+    danger = DangerDetector(ctx, input_backend, mob_behavior)
     attack = AttackLoop(
         ctx, hunt_mode, input_backend,
         danger=danger,
