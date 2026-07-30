@@ -464,5 +464,324 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             self.assertIn(("type", "150"), self.input.calls)
 
 
+# ── _read_weight unit tests (OCR and memory modes) ──────────────
+
+
+class ItemsToStorageWorkerReadWeightTests(unittest.TestCase):
+    """Unit tests for ``_read_weight()`` covering both memory and OCR paths."""
+
+    def setUp(self) -> None:
+        self.config = MagicMock()
+        self.config.hwnd = 1
+        self.config.weight_modifier = 80
+        self.ctx = HuntRuntimeContext(
+            config=self.config,
+            logger=MagicMock(),
+            tracks=MagicMock(),
+            policy=MagicMock(),
+            capture=MagicMock(),
+            detector=MagicMock(),
+            tracker=MagicMock(),
+            validation=MagicMock(),
+            control=MagicMock(),
+            overlay=MagicMock(),
+        )
+        self.frame = np.zeros((240, 320, 3), dtype=np.uint8)
+        self.ctx.capture.capture_client.return_value = self.frame
+        self.input = _RecordingInput()
+
+    def _worker(
+        self,
+        poller: _FakePoller,
+        memory: MemoryAddresses | None = None,
+    ) -> ItemsToStorageWorker:
+        if memory is None:
+            memory = MemoryAddresses(current_weight=1, max_weight=2)
+        return ItemsToStorageWorker(
+            self.ctx,
+            self.input,
+            memory,
+            hunt_mode=MagicMock(),
+            poller=poller,
+        )
+
+    # ── memory mode ─────────────────────────────────────────────────
+
+    def test_memory_mode_returns_weight(self) -> None:
+        """snap.ok=True with valid weights → (weight, weight_max)"""
+        worker = self._worker(_FakePoller(450, 500))
+        result = worker._read_weight()
+        self.assertEqual(result, (450, 500))
+
+    def test_memory_mode_returns_none_when_snap_not_ok(self) -> None:
+        """snap.ok=False → None, logs once"""
+
+        class _FailPoller:
+            def read(self, hwnd, addresses) -> MemorySnapshot:
+                return MemorySnapshot(ok=False, error="read failed")
+
+        worker = self._worker(_FailPoller())
+        result = worker._read_weight()
+        self.assertIsNone(result)
+        # Should have logged once
+        self.assertEqual(
+            self.ctx.logger.behavior.call_count, 1
+        )
+        log_msg = self.ctx.logger.behavior.call_args[0][0]
+        self.assertIn("memory_weight_unavailable", log_msg)
+
+    def test_memory_mode_returns_none_when_weight_none(self) -> None:
+        """snap.weight=None → None"""
+
+        class _NoneWeightPoller:
+            def read(self, hwnd, addresses) -> MemorySnapshot:
+                return MemorySnapshot(
+                    weight=None, weight_max=500, ok=True
+                )
+
+        worker = self._worker(_NoneWeightPoller())
+        result = worker._read_weight()
+        self.assertIsNone(result)
+
+    def test_memory_mode_returns_none_when_max_weight_none(self) -> None:
+        """snap.weight_max=None → None"""
+
+        class _NoneMaxPoller:
+            def read(self, hwnd, addresses) -> MemorySnapshot:
+                return MemorySnapshot(
+                    weight=450, weight_max=None, ok=True
+                )
+
+        worker = self._worker(_NoneMaxPoller())
+        result = worker._read_weight()
+        self.assertIsNone(result)
+
+    def test_memory_mode_returns_none_when_max_weight_zero(self) -> None:
+        """snap.weight_max=0 → None"""
+
+        class _ZeroMaxPoller:
+            def read(self, hwnd, addresses) -> MemorySnapshot:
+                return MemorySnapshot(
+                    weight=450, weight_max=0, ok=True
+                )
+
+        worker = self._worker(_ZeroMaxPoller())
+        result = worker._read_weight()
+        self.assertIsNone(result)
+
+    # ── OCR mode ────────────────────────────────────────────────────
+
+    def test_ocr_mode_falls_through_when_no_memory_addresses(self) -> None:
+        """current_weight=0 → uses OCR path"""
+        from pybot.recognition.ui.status_panel import StatusPanelValues
+
+        # Memory addresses all zero → OCR path
+        memory = MemoryAddresses(current_weight=0, max_weight=0)
+        worker = self._worker(_FakePoller(450, 500), memory=memory)
+
+        # _capture_client() returns self.frame, read_status_panel
+        # returns valid OCR data.  Both are mocked on the context.
+        with patch(
+            f"{_WORKER}.read_status_panel",
+            return_value=StatusPanelValues(
+                hp=100,
+                hp_max=100,
+                sp=100,
+                sp_max=100,
+                weight=300,
+                weight_max=400,
+                panel_origin=(0, 0),
+            ),
+        ):
+            result = worker._read_weight()
+
+        self.assertEqual(result, (300, 400))
+
+    def test_ocr_mode_returns_none_on_capture_error(self) -> None:
+        """_capture_client raises InventoryUiError → None, no log"""
+        memory = MemoryAddresses(current_weight=0, max_weight=0)
+        worker = self._worker(_FakePoller(450, 500), memory=memory)
+
+        # Make capture_client raise
+        self.ctx.capture.capture_client.side_effect = InventoryUiError(
+            "capture failed"
+        )
+        result = worker._read_weight()
+        self.assertIsNone(result)
+        # OCR mode doesn't log on capture failure
+        self.ctx.logger.behavior.assert_not_called()
+
+    def test_ocr_mode_returns_none_when_panel_none(self) -> None:
+        """read_status_panel returns None → None, log once"""
+        memory = MemoryAddresses(current_weight=0, max_weight=0)
+        worker = self._worker(_FakePoller(450, 500), memory=memory)
+
+        with patch(f"{_WORKER}.read_status_panel", return_value=None):
+            result = worker._read_weight()
+
+        self.assertIsNone(result)
+        self.assertEqual(self.ctx.logger.behavior.call_count, 1)
+        log_msg = self.ctx.logger.behavior.call_args[0][0]
+        self.assertIn("ocr_weight_unavailable", log_msg)
+
+    def test_ocr_mode_returns_none_when_weight_none(self) -> None:
+        """StatusPanelValues.weight=None → None"""
+        from pybot.recognition.ui.status_panel import StatusPanelValues
+
+        memory = MemoryAddresses(current_weight=0, max_weight=0)
+        worker = self._worker(_FakePoller(450, 500), memory=memory)
+
+        with patch(
+            f"{_WORKER}.read_status_panel",
+            return_value=StatusPanelValues(
+                hp=100,
+                hp_max=100,
+                sp=100,
+                sp_max=100,
+                weight=None,
+                weight_max=400,
+                panel_origin=(0, 0),
+            ),
+        ):
+            result = worker._read_weight()
+
+        self.assertIsNone(result)
+
+    def test_ocr_mode_returns_none_when_max_weight_none(self) -> None:
+        """StatusPanelValues.weight_max=None → None"""
+        from pybot.recognition.ui.status_panel import StatusPanelValues
+
+        memory = MemoryAddresses(current_weight=0, max_weight=0)
+        worker = self._worker(_FakePoller(450, 500), memory=memory)
+
+        with patch(
+            f"{_WORKER}.read_status_panel",
+            return_value=StatusPanelValues(
+                hp=100,
+                hp_max=100,
+                sp=100,
+                sp_max=100,
+                weight=300,
+                weight_max=None,
+                panel_origin=(0, 0),
+            ),
+        ):
+            result = worker._read_weight()
+
+        self.assertIsNone(result)
+
+    def test_ocr_mode_returns_none_when_max_weight_zero(self) -> None:
+        """StatusPanelValues.weight_max=0 → None"""
+        from pybot.recognition.ui.status_panel import StatusPanelValues
+
+        memory = MemoryAddresses(current_weight=0, max_weight=0)
+        worker = self._worker(_FakePoller(450, 500), memory=memory)
+
+        with patch(
+            f"{_WORKER}.read_status_panel",
+            return_value=StatusPanelValues(
+                hp=100,
+                hp_max=100,
+                sp=100,
+                sp_max=100,
+                weight=300,
+                weight_max=0,
+                panel_origin=(0, 0),
+            ),
+        ):
+            result = worker._read_weight()
+
+        self.assertIsNone(result)
+
+    def test_ocr_mode_returns_weight_on_success(self) -> None:
+        """Valid StatusPanelValues → (weight, weight_max)"""
+        from pybot.recognition.ui.status_panel import StatusPanelValues
+
+        memory = MemoryAddresses(current_weight=0, max_weight=0)
+        worker = self._worker(_FakePoller(450, 500), memory=memory)
+
+        with patch(
+            f"{_WORKER}.read_status_panel",
+            return_value=StatusPanelValues(
+                hp=100,
+                hp_max=100,
+                sp=100,
+                sp_max=100,
+                weight=250,
+                weight_max=350,
+                panel_origin=(0, 0),
+            ),
+        ):
+            result = worker._read_weight()
+
+        self.assertEqual(result, (250, 350))
+
+    # ── logging dedup ───────────────────────────────────────────────
+
+    def test_memory_failure_logs_once_then_skips_repeat(self) -> None:
+        """Second consecutive failure doesn't re-log"""
+
+        class _FailPoller:
+            def read(self, hwnd, addresses) -> MemorySnapshot:
+                return MemorySnapshot(ok=False, error="fail")
+
+        worker = self._worker(_FailPoller())
+        worker._read_weight()
+        worker._read_weight()
+        worker._read_weight()
+        self.assertEqual(self.ctx.logger.behavior.call_count, 1)
+
+    def test_ocr_failure_logs_once_then_skips_repeat(self) -> None:
+        """Second consecutive OCR failure doesn't re-log"""
+        memory = MemoryAddresses(current_weight=0, max_weight=0)
+        worker = self._worker(_FakePoller(450, 500), memory=memory)
+
+        with patch(f"{_WORKER}.read_status_panel", return_value=None):
+            worker._read_weight()
+            worker._read_weight()
+            worker._read_weight()
+
+        self.assertEqual(self.ctx.logger.behavior.call_count, 1)
+
+    def test_success_clears_fail_log_so_next_failure_relogs(self) -> None:
+        """Success resets last_fail_log → next failure logs again"""
+        from pybot.recognition.ui.status_panel import StatusPanelValues
+
+        memory = MemoryAddresses(current_weight=0, max_weight=0)
+        worker = self._worker(_FakePoller(450, 500), memory=memory)
+
+        # First call: fail
+        with patch(f"{_WORKER}.read_status_panel", return_value=None):
+            worker._read_weight()
+
+        self.assertEqual(self.ctx.logger.behavior.call_count, 1)
+
+        # Second call: succeed (clears last_fail_log)
+        with patch(
+            f"{_WORKER}.read_status_panel",
+            return_value=StatusPanelValues(
+                hp=100,
+                hp_max=100,
+                sp=100,
+                sp_max=100,
+                weight=250,
+                weight_max=350,
+                panel_origin=(0, 0),
+            ),
+        ):
+            result = worker._read_weight()
+
+        self.assertEqual(result, (250, 350))
+        # Success doesn't increment behavior call count
+        self.assertEqual(self.ctx.logger.behavior.call_count, 1)
+
+        # Third call: fail again (should re-log because last_fail_log
+        # was cleared by the success)
+        with patch(f"{_WORKER}.read_status_panel", return_value=None):
+            worker._read_weight()
+
+        self.assertEqual(self.ctx.logger.behavior.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
