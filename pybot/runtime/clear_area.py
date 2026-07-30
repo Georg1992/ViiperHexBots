@@ -76,41 +76,6 @@ def reset_tracking_after_teleport(
     ctx.logger.behavior(f"[{log_tag}] tracking reset reason={reason}")
 
 
-def force_teleport(
-    ctx: _ClearAreaContext,
-    input_backend: InputBackend,
-    hunt_mode: HuntModeAreaReset,
-    *,
-    log_tag: str,
-) -> bool:
-    """Always press teleport once and settle.
-
-    Used after sit danger (HP drop / hits): damage can come from mobs that
-    discovery does not see, so ``teleport_until_clear`` must not skip the key.
-    """
-    tp_scan = ctx.active_teleport_scan_code()
-    if tp_scan <= 0:
-        key_name = ctx.active_teleport_button() or "(unset)"
-        ctx.logger.behavior(
-            f"[{log_tag}] no teleport key configured ({key_name!r}) — "
-            "cannot leave screen"
-        )
-        return False
-    ctx.logger.behavior(
-        f"[{log_tag}] force teleport key={ctx.active_teleport_button()!r} "
-        "(leave screen after danger)"
-    )
-    input_backend.teleport_key(tp_scan)
-    ctx.note_teleport_for_wings()
-    ctx.overlay.increment_teleports()
-    delay_s = ctx.config.teleport_duration_ms / 1000.0
-    if not ctx.wait_unless_stopped(delay_s):
-        return False
-    reset_tracking_after_teleport(
-        ctx, hunt_mode, f"{log_tag.lower()}_force_teleport", log_tag=log_tag
-    )
-    return True
-
 
 def teleport_until_clear(
     ctx: _ClearAreaContext,
@@ -163,21 +128,16 @@ def teleport_until_quiet(
     *,
     log_tag: str,
     idle_s: float = SIT_IDLE_BEFORE_SIT_S,
-    force_first: bool = False,
 ) -> bool:
     """Clear area, idle, then re-scan; repeat if mobs appeared during idle.
 
     A single clear snapshot is not enough: mobs can walk into ROI (or first
     become detectable) during the post-clear idle before sit/storage UI.
 
-    ``force_first``: always teleport once before the clear loop (sit danger —
-    hits from undiscovered mobs).
+    Danger escape is handled separately by
+    :meth:`MobBehavior.execute_danger_teleport` — this function only
+    scans for a quiet area.
     """
-    if force_first:
-        if not force_teleport(
-            ctx, input_backend, hunt_mode, log_tag=log_tag
-        ):
-            return False
     while not ctx.is_stopped():
         if not teleport_until_clear(
             ctx, input_backend, hunt_mode, log_tag=log_tag

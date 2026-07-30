@@ -44,47 +44,6 @@ class TeleportUntilQuietTests(unittest.TestCase):
         self.assertEqual(scan.call_count, 2)
 
 
-    @patch("pybot.runtime.clear_area.scan_living_count")
-    @patch("pybot.runtime.clear_area.teleport_until_clear", return_value=True)
-    @patch("pybot.runtime.clear_area.force_teleport", return_value=True)
-    def test_force_first_teleports_before_clear(
-        self, force: MagicMock, clear: MagicMock, scan: MagicMock
-    ) -> None:
-        from pybot.runtime.clear_area import teleport_until_quiet
-
-        scan.return_value = 0
-        ok = teleport_until_quiet(
-            self.ctx,
-            self.input,
-            self.hunt_mode,
-            log_tag="SIT",
-            idle_s=1.0,
-            force_first=True,
-        )
-        self.assertTrue(ok)
-        force.assert_called_once()
-        clear.assert_called_once()
-
-    @patch("pybot.runtime.clear_area.scan_living_count")
-    @patch("pybot.runtime.clear_area.teleport_until_clear", return_value=True)
-    @patch("pybot.runtime.clear_area.force_teleport", return_value=True)
-    def test_without_force_first_skips_forced_tp(
-        self, force: MagicMock, clear: MagicMock, scan: MagicMock
-    ) -> None:
-        from pybot.runtime.clear_area import teleport_until_quiet
-
-        scan.return_value = 0
-        ok = teleport_until_quiet(
-            self.ctx,
-            self.input,
-            self.hunt_mode,
-            log_tag="SIT",
-            idle_s=1.0,
-            force_first=False,
-        )
-        self.assertTrue(ok)
-        force.assert_not_called()
-        clear.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -150,7 +150,7 @@ class SitOnLowSpWorker:
                     self._input,
                     self._hunt_mode,
                     log_tag="SIT",
-                    force_first=False,
+
                 ):
                     return
                 outcome = self._sit_session()
