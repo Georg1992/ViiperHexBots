@@ -1,6 +1,6 @@
 """UI recognition helpers (status panel, inventory, character pose)."""
 
-from pybot.recognition.ui.character_pose import CharacterPose, measure_center_pose
+from pybot.recognition.ui.character_pose import measure_center_pose
 from pybot.recognition.ui.inventory import (
     InventoryPanelHit,
     InventoryUiError,
@@ -21,7 +21,6 @@ from pybot.recognition.ui.status_panel import (
 )
 
 __all__ = [
-    "CharacterPose",
     "InventoryPanelHit",
     "InventoryUiError",
     "StatusPanelValues",
