@@ -46,6 +46,7 @@ from pybot.runtime.constants import (
 from pybot.runtime.workers.items_to_storage_worker import ItemsToStorageWorker
 from pybot.runtime.workers.sit_on_low_sp_worker import SitOnLowSpWorker
 from pybot.runtime.workers.hp_restore_worker import HpRestoreWorker
+from pybot.runtime.workers.status_monitor import StatusMonitor
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -185,6 +186,7 @@ def create_runtime_deps(
     player_vitals = vitals or PlayerVitals()
     mob_behavior = get_mob_behavior(config.mob_name)
     danger = DangerDetector(ctx, input_backend, mob_behavior)
+    status_monitor = StatusMonitor(ctx, player_vitals, danger)
     attack = AttackLoop(
         ctx, hunt_mode, input_backend,
         danger=danger,
@@ -193,6 +195,7 @@ def create_runtime_deps(
         char_x=char_x, char_y=char_y,
     )
     workers: list[tuple[str, Callable[[], None]]] = [
+        ("status_monitor", status_monitor.run),
         ("coord", tracking.run),
         ("discovery", discovery.run),
         ("attack", attack.run),

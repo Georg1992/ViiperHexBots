@@ -1143,7 +1143,10 @@ class MainWindow:
         )
         # HP is vision-only — always mirror into the bot UI from panel OCR.
         self.memory_hp.configure(text=self._format_pair(values.hp, values.hp_max))
-        # Publish final SP every successful OCR tick when vision owns SP/Weight.
+        # Publish HP and SP to vitals every successful OCR tick.
+        # HP goes to vitals unconditionally (hunt workers need it for danger).
+        self.vitals.publish_hp(values.hp, values.hp_max)
+        # SP goes to vitals only when vision owns it (Generic profile).
         # When SP drops dramatically from the previous reading (e.g. 200→1), the
         # OCR is seeing an artifact — keep the previous value for hunt workers.
         if self._panel_owns_sp_weight():

@@ -1,4 +1,4 @@
-"""Shared final player vitals (SP) for UI publishers and hunt workers.
+"""Shared final player vitals for UI publishers and hunt workers.
 
 UI polls (memory or status-panel OCR) publish into this store. Workers only
 read the final values — they must not re-OCR or re-read process memory.
@@ -11,16 +11,36 @@ import time
 
 
 class PlayerVitals:
-    """Thread-safe holder for the latest known SP / SP max."""
+    """Thread-safe holder for the latest known HP and SP values."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._hp: int | None = None
+        self._hp_max: int | None = None
         self._sp: int | None = None
         self._sp_max: int | None = None
         # Last UI observation (bumped on every publish, including same values).
         self._observed_ms: int = 0
-        # Last time SP or SP max actually changed.
+        # Last time any value actually changed.
         self._changed_ms: int = 0
+
+    # ── HP ────────────────────────────────────────────────────────
+
+    def publish_hp(self, hp: int | None, hp_max: int | None) -> None:
+        with self._lock:
+            now = int(time.monotonic() * 1000)
+            self._observed_ms = now
+            if hp != self._hp or hp_max != self._hp_max:
+                self._hp = hp
+                self._hp_max = hp_max
+                self._changed_ms = now
+
+    def hp_pair(self) -> tuple[int | None, int | None]:
+        """Atomic ``(hp, hp_max)`` for danger checks."""
+        with self._lock:
+            return self._hp, self._hp_max
+
+    # ── SP ────────────────────────────────────────────────────────
 
     def publish_sp(self, sp: int | None, sp_max: int | None) -> None:
         with self._lock:
