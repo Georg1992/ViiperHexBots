@@ -10,10 +10,8 @@ never re-OCR or re-read process memory.
 
 from __future__ import annotations
 
-import ctypes
 import time
 import traceback
-from ctypes import wintypes
 
 from pybot.game_state import PlayerVitals
 from pybot.recognition.ui.inventory import (
@@ -22,15 +20,13 @@ from pybot.recognition.ui.inventory import (
     find_template,
     find_wings_in_use_grid,
     is_inventory_open,
-    is_storage_open,
     require_inventory_panel,
-    require_template,
-    slot_contains_template,
+    slot_contains_template as _slot_contains_template,
     slot_looks_empty,
 )
+from pybot.recognition.ui.inventory_automation import InventoryAutomation
 from pybot.runtime.constants import (
     FLY_WING_WEIGHT,
-    STORAGE_CURSOR_CLEAR_S,
     STORAGE_INV_COLS,
     STORAGE_INV_ROWS,
     STORAGE_MENU_POLL_S,
@@ -44,15 +40,6 @@ from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.input.scan_codes import key_name_to_scan_code
 from pybot.runtime.teleport import TeleportController
 from pybot.runtime.workers.worker_contexts import ItemsToStorageWorkerContext
-
-user32 = ctypes.windll.user32
-
-
-def _cursor_pos() -> tuple[int, int]:
-    pt = wintypes.POINT()
-    if not user32.GetCursorPos(ctypes.byref(pt)):
-        raise RuntimeError("GetCursorPos failed")
-    return int(pt.x), int(pt.y)
 
 
 class ItemsToStorageWorker:
@@ -70,6 +57,7 @@ class ItemsToStorageWorker:
         self._input = input_backend
         self._teleport = teleport
         self._vitals = vitals or PlayerVitals()
+        self._ui = InventoryAutomation(ctx, input_backend)
 
     def run(self) -> None:
         ctx = self._ctx
@@ -166,280 +154,15 @@ class ItemsToStorageWorker:
         projected = weight + amount * FLY_WING_WEIGHT
         return projected >= self._weight_threshold(weight_max)
 
-    # ── Capture / cursor helpers ──────────────────────────────────────
+    # ── Scan helpers (use inventory_automation for low-level UI) ────
 
-    def _capture_client(self):
-        frame = self._ctx.capture.capture_client()
-        if frame is None or frame.size == 0:
-            raise InventoryUiError("client capture failed")
-        return frame
+    def _scan_use_grid_wings(self) -> list[tuple[int, int, int, int]]:
+        def scan() -> list[tuple[int, int, int, int]]:
+            frame = self._ui.capture_client()
+            panel = require_inventory_panel(frame)
+            return find_wings_in_use_grid(frame, panel)
 
-    def _client_origin(self) -> tuple[int, int]:
-        client = self._ctx.capture.get_client_rect_screen()
-        if client is None:
-            raise InventoryUiError("client rect unavailable")
-        return int(client[0]), int(client[1])
-
-    def _cursor_in_client(self) -> tuple[int, int]:
-        sx, sy = _cursor_pos()
-        ox, oy = self._client_origin()
-        return sx - ox, sy - oy
-
-    def _move_to_template(
-        self,
-        name: str,
-        x_offset: int = 0,
-        y_offset: int = 0,
-        *,
-        frame=None,
-        clear_cursor: bool = True,
-    ) -> None:
-        """AHK ``MoveCursorToImage``: find template, move, sleep 200ms.
-
-        ``clear_cursor`` (default True) moves off UI before matching so the
-        cursor cannot cover the template. Set False while LMB is held (drag).
-        """
-        if clear_cursor:
-            def find() -> tuple[int, int]:
-                return require_template(self._capture_client(), name)
-
-            loc = self._recognize(f"template {name}", find)
-        else:
-            if frame is None:
-                frame = self._capture_client()
-            loc = require_template(frame, name)
-        ox, oy = self._client_origin()
-        self._input.move_mouse(ox + loc[0] + x_offset, oy + loc[1] + y_offset)
-        time.sleep(0.2)
-
-    def _wait_for_inventory_panel(self):
-        """Poll until inventory is open; return ``(panel, frame)``."""
-        frame = self._wait_menu_state(
-            menu="inventory",
-            want_open=True,
-            label="inventory open",
-        )
-        return require_inventory_panel(frame), frame
-
-    def _wait_menu_state(
-        self,
-        *,
-        menu: str,
-        want_open: bool,
-        label: str,
-        timeout_s: float = STORAGE_MENU_TIMEOUT_S,
-    ):
-        """Poll until inventory/storage matches *want_open*; return last frame."""
-        if menu == "inventory":
-            checker = is_inventory_open
-        elif menu == "storage":
-            checker = is_storage_open
-        else:
-            raise InventoryUiError(f"unknown menu: {menu}")
-
-        self._cursor_off_screen()
-        deadline = time.monotonic() + timeout_s
-        last_frame = None
-        while time.monotonic() < deadline:
-            if self._ctx.is_stopped():
-                raise InventoryUiError(f"stopped while waiting for {label}")
-            last_frame = self._capture_client()
-            if checker(last_frame) is want_open:
-                self._ctx.logger.behavior(
-                    f"[STORAGE] menu ok {label} "
-                    f"inventory={is_inventory_open(last_frame)} "
-                    f"storage={is_storage_open(last_frame)}"
-                )
-                return last_frame
-            time.sleep(STORAGE_MENU_POLL_S)
-        inv = is_inventory_open(last_frame) if last_frame is not None else False
-        stor = is_storage_open(last_frame) if last_frame is not None else False
-        raise InventoryUiError(
-            f"menu validation failed: expected {label} "
-            f"(inventory_open={inv} storage_open={stor})"
-        )
-
-    def _ensure_inventory_open(self):
-        """Open inventory if closed; validate open. Return panel hit."""
-        self._cursor_off_screen()
-        frame = self._capture_client()
-        if is_inventory_open(frame):
-            self._ctx.logger.behavior("[STORAGE] inventory already open")
-            return require_inventory_panel(frame)
-        self._ctx.logger.behavior("[STORAGE] Alt+E open inventory")
-        self._input.toggle_inventory()
-        time.sleep(STORAGE_UI_SETTLE_S)
-        panel, _frame = self._wait_for_inventory_panel()
-        return panel
-
-    def _ensure_storage_open(self) -> None:
-        """Play Open Storage chain; validate storage is open."""
-        steps = self._ctx.config.open_storage_steps
-        if not steps:
-            raise InventoryUiError("Open Storage keychain is not assigned")
-        self._cursor_off_screen()
-        frame = self._capture_client()
-        if is_storage_open(frame):
-            self._ctx.logger.behavior("[STORAGE] storage already open")
-            return
-        self._ctx.logger.behavior(
-            "[STORAGE] open storage chain "
-            + " → ".join(f"{k}/{d}ms" for k, _sc, d in steps)
-        )
-        if not self._input.play_key_chain(steps):
-            raise InventoryUiError("Open Storage keychain failed")
-        time.sleep(STORAGE_UI_SETTLE_S)
-        self._wait_menu_state(
-            menu="storage",
-            want_open=True,
-            label="storage open",
-        )
-
-    def _click_storage_close(self) -> None:
-        """Click the storage window close control (no validation).
-        To close the storage we need to double click (lmcx2).
-        """
-        self._ctx.logger.behavior("[STORAGE] double click storage close")
-        self._move_to_template("close")
-        time.sleep(0.2)
-        # First click
-        self._input.set_left_button(True)
-        time.sleep(0.05)
-        self._input.set_left_button(False)
-        time.sleep(0.05)
-        # Second click
-        self._input.set_left_button(True)
-        time.sleep(0.05)
-        self._input.set_left_button(False)
-        self._cursor_off_screen()
-        time.sleep(STORAGE_UI_SETTLE_S)
-
-    def _menus_are_open(self) -> bool:
-        """True when inventory and/or storage is visible (cursor cleared first)."""
-        self._cursor_off_screen()
-        frame = self._capture_client()
-        return is_inventory_open(frame) or is_storage_open(frame)
-
-    def _close_menus_best_effort(self) -> None:
-        """Force-close panels. Never raise."""
-        try:
-            if not self._menus_are_open():
-                return
-            self._ctx.logger.behavior("[STORAGE] force-closing menus")
-            self._close_menus()
-        except InventoryUiError as exc:
-            self._ctx.logger.behavior(f"[STORAGE] force close: {exc}")
-        except Exception as exc:
-            self._ctx.logger.behavior(f"[STORAGE] force close error: {exc}")
-
-
-    def _select_use_tab(self) -> None:
-        """Click Use when ``use_img`` (unselected) is visible; else already on Use.
-
-        ``use_img`` matches the inactive tab only. Raising on miss aborts the
-        session after Use is already selected (common after a failed prior run).
-        """
-        log = self._ctx.logger.behavior
-
-        def find() -> tuple[int, int] | None:
-            return find_template(self._capture_client(), "use")
-
-        self._cursor_off_screen()
-        loc = find()
-        if loc is None:
-            self._cursor_off_screen()
-            loc = find()
-        if loc is None:
-            log("[STORAGE] Use tab already active (use_img not visible)")
-            return
-        log("[STORAGE] click Use tab (use_img)")
-        ox, oy = self._client_origin()
-        self._input.move_mouse(ox + loc[0], oy + loc[1])
-        time.sleep(0.2)
-        time.sleep(0.1)
-        self._input.left_click()
-        self._cursor_off_screen()
-        time.sleep(STORAGE_UI_SETTLE_S)
-
-    def _close_menus(self) -> None:
-        """Close storage and/or inventory until both are gone.
-
-        Order does not matter: each pass closes whichever menu is still open.
-        One off-screen retry if validation still fails.
-        """
-
-        def attempt() -> None:
-            deadline = time.monotonic() + STORAGE_MENU_TIMEOUT_S
-            while time.monotonic() < deadline:
-                if self._ctx.is_stopped():
-                    raise InventoryUiError("stopped while closing menus")
-                self._cursor_off_screen()
-                frame = self._capture_client()
-                stor = is_storage_open(frame)
-                inv = is_inventory_open(frame)
-                if not stor and not inv:
-                    self._ctx.logger.behavior(
-                        "[STORAGE] menu ok both closed "
-                        f"inventory={inv} storage={stor}"
-                    )
-                    return
-                if stor:
-                    try:
-                        self._click_storage_close()
-                    except InventoryUiError as exc:
-                        self._ctx.logger.behavior(
-                            f"[STORAGE] storage close click miss: {exc}"
-                        )
-                        self._cursor_off_screen()
-                elif inv:
-                    self._ctx.logger.behavior("[STORAGE] Alt+E close inventory")
-                    self._input.toggle_inventory()
-                    time.sleep(STORAGE_UI_SETTLE_S)
-                time.sleep(STORAGE_MENU_POLL_S)
-            self._cursor_off_screen()
-            frame = self._capture_client()
-            raise InventoryUiError(
-                "menu validation failed: expected both closed "
-                f"(inventory_open={is_inventory_open(frame)} "
-                f"storage_open={is_storage_open(frame)})"
-            )
-
-        self._recognize("close menus", attempt)
-
-    # ── AHK flows ─────────────────────────────────────────────────────
-
-    def _open_storage(self) -> None:
-        self._ensure_storage_open()
-
-    def _cursor_off_screen(self) -> None:
-        """Move cursor just outside the client so it cannot cover UI."""
-        client = self._ctx.capture.get_client_rect_screen()
-        if client is None:
-            raise InventoryUiError("client rect unavailable")
-        left, top, _w, _h = client
-        x = max(0, int(left) - 2)
-        y = max(0, int(top) - 2)
-        self._ctx.logger.behavior(
-            f"[STORAGE] cursor off-screen at ({x},{y})"
-        )
-        self._input.move_mouse(x, y)
-        time.sleep(STORAGE_CURSOR_CLEAR_S)
-
-    def _recognize(self, label: str, fn):
-        """Run recognition with cursor off UI; one off-screen retry on miss."""
-        self._cursor_off_screen()
-        try:
-            return fn()
-        except InventoryUiError as exc:
-            self._ctx.logger.behavior(
-                f"[STORAGE] {label} failed ({exc}); off-screen retry"
-            )
-            self._cursor_off_screen()
-            return fn()
-
-    def _alt_rmb_deposit(self) -> None:
-        """Deposit item under cursor via Alt+RMB (includes mandatory 100ms delay)."""
-        self._input.alt_right_click()
+        return self._ui.recognize("Use-grid wing scan", scan)
 
     def _scan_use_grid_wings(self) -> list[tuple[int, int, int, int]]:
         def scan() -> list[tuple[int, int, int, int]]:
@@ -452,7 +175,7 @@ class ItemsToStorageWorker:
     def _deposit_wings_from_use_grid(self) -> int:
         """Find each Use-tab fly wing, aim bottom-left, Alt+RMB into storage."""
         log = self._ctx.logger.behavior
-        ox, oy = self._client_origin()
+        ox, oy = self._ui.client_origin()
         deposited = 0
         max_passes = STORAGE_INV_COLS * STORAGE_INV_ROWS
         for pass_i in range(max_passes):
@@ -474,7 +197,7 @@ class ItemsToStorageWorker:
                 f"[STORAGE] GetFlyWings Alt+RMB deposit "
                 f"col={col} row={row}"
             )
-            self._alt_rmb_deposit()
+            self._ui.alt_rmb_deposit()
             deposited += 1
         raise InventoryUiError(
             f"Use-tab wing deposit did not clear after {max_passes} passes"
@@ -487,11 +210,11 @@ class ItemsToStorageWorker:
         Otherwise, keep sending Alt+Right Click until the slot clears.
         """
         log = self._ctx.logger.behavior
-        ox, oy = self._client_origin()
+        ox, oy = self._ui.client_origin()
         guard = STORAGE_INV_COLS * STORAGE_INV_ROWS
 
         # Determine the first slot's center and aim position
-        frame_init = self._capture_client()
+        frame_init = self._ui.capture_client()
         panel_init = require_inventory_panel(frame_init)
         first_col, first_row = 0, 0
         first_cx, first_cy = panel_init.slot_center(first_col, first_row)
@@ -502,14 +225,14 @@ class ItemsToStorageWorker:
         time.sleep(STORAGE_WING_AIM_SETTLE_S)
 
         for pass_i in range(guard):
-            frame = self._capture_client()
+            frame = self._ui.capture_client()
 
             if slot_looks_empty(frame, first_cx, first_cy):
                 log(f"[STORAGE] ItemsToStorage {tab_label} tab first slot empty — done")
                 return
 
             log(f"[STORAGE] ItemsToStorage deposit {tab_label} item from first slot")
-            self._alt_rmb_deposit()
+            self._ui.alt_rmb_deposit()
             # Let the slot clear/next item move into the first slot before next loop
             time.sleep(STORAGE_UI_SETTLE_S)
 
@@ -526,22 +249,22 @@ class ItemsToStorageWorker:
         log = self._ctx.logger.behavior
 
         def find() -> tuple[int, int] | None:
-            return find_template(self._capture_client(), name)
+            return find_template(self._ui.capture_client(), name)
 
-        self._cursor_off_screen()
+        self._ui.cursor_off_screen()
         loc = find()
         if loc is None:
-            self._cursor_off_screen()
+            self._ui.cursor_off_screen()
             loc = find()
         if loc is None:
             log(f"[STORAGE] {name} tab already active ({name}_img not visible)")
             return
         log(f"[STORAGE] click {name} tab")
-        ox, oy = self._client_origin()
+        ox, oy = self._ui.client_origin()
         self._input.move_mouse(ox + loc[0], oy + loc[1])
         time.sleep(0.2)
         self._input.left_click()
-        self._cursor_off_screen()
+        self._ui.cursor_off_screen()
         time.sleep(STORAGE_UI_SETTLE_S)
 
     def _deposit_inventory_to_storage(self) -> None:
@@ -583,7 +306,7 @@ class ItemsToStorageWorker:
 
         if ensure_use_tab:
             log("[STORAGE] GetFlyWings select Use tab before restock")
-            self._select_use_tab()
+            self._ui.select_use_tab()
         else:
             log("[STORAGE] GetFlyWings Use tab already selected")
 
@@ -599,7 +322,7 @@ class ItemsToStorageWorker:
         time.sleep(0.5)
 
         def find_storage() -> tuple[int, int]:
-            frame = self._capture_client()
+            frame = self._ui.capture_client()
             panel = require_inventory_panel(frame)
             storage_wing = find_storage_wing(frame, panel)
             if storage_wing is None:
@@ -607,7 +330,7 @@ class ItemsToStorageWorker:
             return storage_wing
 
         try:
-            storage_wing = self._recognize("storage wing", find_storage)
+            storage_wing = self._ui.recognize("storage wing", find_storage)
         except InventoryUiError:
             self._abandon_fly_wings("no fly wings in storage")
             return False
@@ -616,7 +339,7 @@ class ItemsToStorageWorker:
             f"[STORAGE] GetFlyWings move storage wing at {storage_wing} "
             "(sleep 200ms)"
         )
-        ox, oy = self._client_origin()
+        ox, oy = self._ui.client_origin()
         self._input.move_mouse(ox + storage_wing[0], oy + storage_wing[1])
         time.sleep(0.2)
         log("[STORAGE] GetFlyWings sleep 100ms before LMB down")
@@ -627,7 +350,7 @@ class ItemsToStorageWorker:
         time.sleep(0.1)
         log("[STORAGE] GetFlyWings drag to etc +100,+20 (sleep 200ms)")
         # LMB held — do not clear cursor (would drag the stack off-screen).
-        self._move_to_template("etc", 100, 20, clear_cursor=False)
+        self._ui.move_to_template("etc", 100, 20, clear_cursor=False)
         log("[STORAGE] GetFlyWings LMB up")
         inp.set_left_button(False)
         log("[STORAGE] GetFlyWings sleep 200ms before type")
@@ -655,11 +378,11 @@ class ItemsToStorageWorker:
         log = self._ctx.logger.behavior
         try:
             time.sleep(0.5)
-            self._ensure_inventory_open()
+            self._ui.ensure_inventory_open()
             time.sleep(0.5)
 
-            self._select_use_tab()
-            self._open_storage()
+            self._ui.select_use_tab()
+            self._ui.ensure_storage_open()
 
             if dump:
                 log("[STORAGE] deposit inventory tabs")
@@ -670,11 +393,11 @@ class ItemsToStorageWorker:
                 self._restock_fly_wings_from_open_storage(ensure_use_tab=dump)
 
             time.sleep(0.1)
-            self._close_menus()
+            self._ui.close_menus()
             time.sleep(0.5)
         except InventoryUiError:
             try:
-                self._close_menus()
+                self._ui.close_menus()
             except InventoryUiError as exc:
                 log(f"[STORAGE] menu close after session: {exc}")
             time.sleep(0.5)
@@ -704,7 +427,7 @@ class ItemsToStorageWorker:
             f"teleport key → {alt}"
         )
         try:
-            self._close_menus()
+            self._ui.close_menus()
         except InventoryUiError as exc:
             log(f"[STORAGE] menu close after wing abandon: {exc}")
         ctx.mark_fly_wings_exhausted()

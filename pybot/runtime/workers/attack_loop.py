@@ -77,6 +77,74 @@ class AttackLoop:
             return self._char_x, self._char_y
         return int(pos[0]), int(pos[1])
 
+    def _classify_idle(
+        self,
+        target_id: int,
+        ctx,
+        pre_sp: int | None,
+        post_sp: int | None,
+        pre_obs_ms: int,
+        post_obs_ms: int,
+        pre_chg_ms: int,
+        post_chg_ms: int,
+        sample_now: int,
+        now_tick: int,
+    ) -> bool | None:
+        """Classify whether the last skill press was an idle (SP unchanged)
+        or a hit (SP dropped), or unknown.
+
+        Returns:
+            True — SP unchanged (idle attack, likely miss).
+            False — SP dropped (skill hit the target).
+            None — Sp not readable or inconclusive; freeze counters.
+
+        Side-effect: logs each unique unknown reason at most every
+        LOG_REPEAT_INTERVAL_MS so the log is not flooded.
+        """
+        if pre_sp is None or post_sp is None or post_obs_ms <= pre_obs_ms:
+            if now_tick - self._last_sp_unknown_log_ms >= LOG_REPEAT_INTERVAL_MS:
+                self._last_sp_unknown_log_ms = now_tick
+                reason = (
+                    "sp-unread"
+                    if pre_sp is None or post_sp is None
+                    else "vitals-stale"
+                )
+                ctx.logger.behavior(
+                    f"[IDLE] path=sp-unknown id={target_id} reason={reason} "
+                    f"pre_sp={pre_sp} post_sp={post_sp} — idle/death counters frozen"
+                )
+            return None
+
+        if post_sp < pre_sp:
+            return False  # SP dropped — skill hit
+
+        if post_sp > pre_sp:
+            if now_tick - self._last_sp_unknown_log_ms >= LOG_REPEAT_INTERVAL_MS:
+                self._last_sp_unknown_log_ms = now_tick
+                ctx.logger.behavior(
+                    f"[IDLE] path=sp-unknown id={target_id} reason=sp-increased "
+                    f"pre_sp={pre_sp} post_sp={post_sp} — idle/death counters frozen"
+                )
+            return None
+
+        # pre_sp == post_sp — same value before and after skill delay.
+        if post_chg_ms > pre_chg_ms:
+            # Value changed away and back within the window — inconclusive.
+            return None
+
+        if sample_now - post_obs_ms > SP_IDLE_MAX_OBSERVATION_AGE_MS:
+            if now_tick - self._last_sp_unknown_log_ms >= LOG_REPEAT_INTERVAL_MS:
+                self._last_sp_unknown_log_ms = now_tick
+                ctx.logger.behavior(
+                    f"[IDLE] path=sp-unknown id={target_id} reason=obs-stale "
+                    f"age_ms={sample_now - post_obs_ms} "
+                    f"pre_sp={pre_sp} post_sp={post_sp} — idle/death counters frozen"
+                )
+            return None
+
+        # Same SP, fresh observation, no value change, recent — not hitting.
+        return True
+
     def _attack_one(self, target_id: int, now_tick: int) -> None:
         ctx = self._ctx
 
@@ -118,48 +186,13 @@ class AttackLoop:
         post_sp, post_obs_ms, post_chg_ms = self._vitals.sp_sample()
         sample_now = monotonic_ms()
 
-        # Hit: SP dropped after a fresh observation.
-        # Idle: same SP, fresh observation, no value change since pre, and the
-        # observation is recent (rejects early mid-wait republish of pre-cost SP).
-        # Otherwise unknown — freeze idle/death counters.
-        was_idle: bool | None
-        if pre_sp is None or post_sp is None or post_obs_ms <= pre_obs_ms:
-            was_idle = None
-            if now_tick - self._last_sp_unknown_log_ms >= LOG_REPEAT_INTERVAL_MS:
-                self._last_sp_unknown_log_ms = now_tick
-                reason = (
-                    "sp-unread"
-                    if pre_sp is None or post_sp is None
-                    else "vitals-stale"
-                )
-                ctx.logger.behavior(
-                    f"[IDLE] path=sp-unknown id={target_id} reason={reason} "
-                    f"pre_sp={pre_sp} post_sp={post_sp} — idle/death counters frozen"
-                )
-        elif post_sp < pre_sp:
-            was_idle = False
-        elif post_sp > pre_sp:
-            was_idle = None
-            if now_tick - self._last_sp_unknown_log_ms >= LOG_REPEAT_INTERVAL_MS:
-                self._last_sp_unknown_log_ms = now_tick
-                ctx.logger.behavior(
-                    f"[IDLE] path=sp-unknown id={target_id} reason=sp-increased "
-                    f"pre_sp={pre_sp} post_sp={post_sp} — idle/death counters frozen"
-                )
-        elif post_chg_ms > pre_chg_ms:
-            # Value changed away and back within the window — inconclusive.
-            was_idle = None
-        elif sample_now - post_obs_ms > SP_IDLE_MAX_OBSERVATION_AGE_MS:
-            was_idle = None
-            if now_tick - self._last_sp_unknown_log_ms >= LOG_REPEAT_INTERVAL_MS:
-                self._last_sp_unknown_log_ms = now_tick
-                ctx.logger.behavior(
-                    f"[IDLE] path=sp-unknown id={target_id} reason=obs-stale "
-                    f"age_ms={sample_now - post_obs_ms} "
-                    f"pre_sp={pre_sp} post_sp={post_sp} — idle/death counters frozen"
-                )
-        else:
-            was_idle = True
+        was_idle = self._classify_idle(
+            target_id, ctx,
+            pre_sp, post_sp,
+            pre_obs_ms, post_obs_ms,
+            pre_chg_ms, post_chg_ms,
+            sample_now, now_tick,
+        )
 
         accessible = snap.was_accessible
         blob_stationary = snap.discovery_stationary

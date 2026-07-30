@@ -100,24 +100,12 @@ class RuntimeDependencies:
     workers: list[tuple[str, Callable[[], None]]]
 
 
-def create_runtime_deps(
+def _build_logger(
     config,
-    session_id: str | None = None,
-    *,
-    behavior_callback: Callable[[str], None] | None = None,
-    overlay: HuntOverlay | None = None,
-    vitals: PlayerVitals | None = None,
-) -> RuntimeDependencies:
-    """Construct all hunt runtime dependencies.
-    Builds every component the runtime needs (tracks, capture, detector,
-    validation logger, input backend, hunt mode controller, etc.) and
-    returns them packaged in a RuntimeDependencies container.
-    Args:
-        config: A HuntRuntimeConfig instance.
-        session_id: Optional session identifier (auto-generated if omitted).
-        behavior_callback: Optional callback for behavior log messages.
-        vitals: Shared final SP store published by the UI poll (memory/OCR).
-    """
+    session_id: str | None,
+    behavior_callback: Callable[[str], None] | None,
+) -> HuntLogger:
+    """Create the hunt logger with optional behavior callback."""
     sid = session_id or time.strftime("%Y%m%d_%H%M%S")
     logger = HuntLogger(
         session_id=sid,
@@ -125,12 +113,12 @@ def create_runtime_deps(
     )
     if behavior_callback:
         logger.set_behavior_callback(behavior_callback)
+    return logger
+
+
+def _build_detectors(config) -> tuple[DetectorSession, DetectorSession]:
+    """Create two independent detector sessions (discovery + tracking)."""
     detector_config = load_detector_config()
-    tracks = HuntTracks(detector_config)
-    policy = HuntPolicy()
-    capture = HuntWindowCapture(config)
-    # Two independent detectors: discovery's full scan and tracking's local
-    # follow run on separate threads and must never contend on one detector lock.
     detector = DetectorSession(
         config.mob_name,
         detector_config=detector_config,
@@ -141,13 +129,27 @@ def create_runtime_deps(
         detector_config=detector_config,
         use_sprite_grf=config.use_sprite_grf,
     )
+    return detector, tracker
+
+
+def _build_context(
+    config,
+    logger: HuntLogger,
+    detector: DetectorSession,
+    tracker: DetectorSession,
+    overlay: HuntOverlay | None,
+) -> HuntRuntimeContext:
+    """Build the shared runtime context with all core services."""
+    detector_config = load_detector_config()
+    tracks = HuntTracks(detector_config)
+    policy = HuntPolicy()
+    capture = HuntWindowCapture(config)
     validation = HuntValidationLogger(
-        logger,
-        tracks,
+        logger, tracks,
         enabled=config.validation_enabled,
     )
     control = RuntimeControl(config.control_file)
-    ctx = HuntRuntimeContext(
+    return HuntRuntimeContext(
         config=config,
         logger=logger,
         tracks=tracks,
@@ -159,34 +161,73 @@ def create_runtime_deps(
         control=control,
         overlay=overlay or NullOverlay(),
     )
-    input_backend: InputBackend = (
-        ViiperBackend()
-    )
 
-    # Create TeleportController early — every teleport concern lives here.
-    tport = TeleportController(ctx, input_backend, None)
 
-    # Teleport mode requires at least one configured teleport key (wing or creamy).
-    if ctx.config.hunt_mode == "teleport":
-        if tport.active_scan_code() <= 0:
-            tp_button = ctx.config.teleport_button or "(unset)"
-            creamy = ctx.config.creamy_tp_button or "(unset)"
-            raise ValueError(
-                f"Teleport hunt mode requires a teleport key. "
-                f"Set at least one of Teleport Key={tp_button!r} "
-                f"or Creamy TP Key={creamy!r} in the Keybindings tab."
-            )
+def _validate_teleport_mode(config, tport: TeleportController) -> None:
+    """Fail early if teleport mode has no configured key."""
+    if config.hunt_mode == "teleport" and tport.active_scan_code() <= 0:
+        tp_button = config.teleport_button or "(unset)"
+        creamy = config.creamy_tp_button or "(unset)"
+        raise ValueError(
+            f"Teleport hunt mode requires a teleport key. "
+            f"Set at least one of Teleport Key={tp_button!r} "
+            f"or Creamy TP Key={creamy!r} in the Keybindings tab."
+        )
 
-    hunt_mode = create_hunt_mode(ctx, input_backend, teleport_controller=tport)
-    tracking = CoordTrackingWorker(ctx)
-    profile = load_client_profile(ctx.config.client_profile)
+
+def _validate_sp_memory(config) -> None:
+    """Fail early if sit-on-low-sp is on but SP memory addresses are missing."""
+    if not config.sit_on_low_sp:
+        return
+    if config.sit_on_low_sp_scan_code <= 0:
+        raise ValueError(
+            "Sit On Low Sp is On but the sit key is invalid "
+            f"(button={config.sit_on_low_sp_button!r})."
+        )
+    profile = load_client_profile(config.client_profile)
     memory = MemoryAddresses() if profile is None else profile.memory
+    has_sp_memory = memory.current_sp > 0 and memory.max_sp > 0
+    if not has_sp_memory and memory_reading_enabled(config.client_profile):
+        raise ValueError(
+            "Sit On Low Sp requires a client profile with currentSpAddress "
+            f"and maxSpAddress (profile={config.client_profile!r})."
+        )
+
+
+def _validate_weight_memory(config) -> None:
+    """Fail early if storage is on but weight memory addresses are missing."""
+    if not config.open_storage_steps:
+        return
+    if config.weight_modifier < STORAGE_WEIGHT_MODIFIER_MIN:
+        return
+    profile = load_client_profile(config.client_profile)
+    memory = MemoryAddresses() if profile is None else profile.memory
+    has_weight_memory = memory.current_weight > 0 and memory.max_weight > 0
+    if not has_weight_memory and memory_reading_enabled(config.client_profile):
+        raise ValueError(
+            "Open Storage requires a client profile with currentWeightAddress "
+            f"and totalWeightAddress (profile={config.client_profile!r})."
+        )
+
+
+def _build_core_workers(
+    ctx: HuntRuntimeContext,
+    hunt_mode: HuntModeController,
+    input_backend: InputBackend,
+    tport: TeleportController,
+    player_vitals: PlayerVitals,
+    mob_behavior,
+) -> tuple[list[tuple[str, Callable[[], None]]], DangerDetector]:
+    """Build always-running workers: danger, coord, discovery, attack.
+
+    Returns ``(workers, danger_detector)`` so callers can reuse the
+    DangerDetector instance for sit-worker injection.
+    """
+    tracking = CoordTrackingWorker(ctx)
     discovery = DiscoveryWorker(ctx, hunt_mode)
     roi = ctx.capture.get_hunt_roi()
     char_x = roi.x + roi.w // 2 if roi else 0
     char_y = roi.y + roi.h // 2 if roi else 0
-    player_vitals = vitals or PlayerVitals()
-    mob_behavior = get_mob_behavior(config.mob_name)
     danger = DangerDetector(ctx, tport, mob_behavior, vitals=player_vitals)
     attack = AttackLoop(
         ctx, hunt_mode, input_backend,
@@ -195,57 +236,83 @@ def create_runtime_deps(
         vitals=player_vitals,
         char_x=char_x, char_y=char_y,
     )
-    workers: list[tuple[str, Callable[[], None]]] = [
+    workers = [
         ("danger", danger.run),
         ("coord", tracking.run),
         ("discovery", discovery.run),
         ("attack", attack.run),
     ]
+    return workers, danger
+
+
+def _build_conditional_workers(
+    ctx: HuntRuntimeContext,
+    input_backend: InputBackend,
+    tport: TeleportController,
+    player_vitals: PlayerVitals,
+    danger: DangerDetector | None = None,
+    mob_behavior=None,
+) -> list[tuple[str, Callable[[], None]]]:
+    """Build optional workers: skill timer, hp restore, sit, storage."""
+    workers: list[tuple[str, Callable[[], None]]] = []
+
     if any(t.scan_code and t.interval_ms > 0 for t in ctx.config.skill_timers):
-        skill_timer = SkillTimerWorker(ctx, input_backend)
-        workers.append(("skill_timer", skill_timer.run))
+        workers.append(("skill_timer", SkillTimerWorker(ctx, input_backend).run))
     if ctx.config.hp_scan_code > 0:
         workers.append(
             ("hp_restore", HpRestoreWorker(ctx, input_backend, player_vitals).run)
         )
     if ctx.config.sit_on_low_sp:
-        if ctx.config.sit_on_low_sp_scan_code <= 0:
-            raise ValueError(
-                "Sit On Low Sp is On but the sit key is invalid "
-                f"(button={ctx.config.sit_on_low_sp_button!r})."
-            )
-        profile = load_client_profile(ctx.config.client_profile)
-        memory = MemoryAddresses() if profile is None else profile.memory
-        has_sp_memory = memory.current_sp > 0 and memory.max_sp > 0
-        # Server profiles need SP memory addresses so the UI can publish SP.
-        # Generic publishes SP from Basic Info OCR into the same PlayerVitals.
-        if not has_sp_memory and memory_reading_enabled(ctx.config.client_profile):
-            raise ValueError(
-                "Sit On Low Sp requires a client profile with currentSpAddress "
-                f"and maxSpAddress (profile={ctx.config.client_profile!r})."
-            )
         sit_worker = SitOnLowSpWorker(
             ctx, input_backend, tport,
             danger=danger, mob_behavior=mob_behavior, vitals=player_vitals,
         )
         workers.append(("sit_sp", sit_worker.run))
-    # Storage deposit + GetFlyWings only when Open Storage keychain is assigned.
     if ctx.config.open_storage_steps:
-        profile = load_client_profile(ctx.config.client_profile)
-        memory = MemoryAddresses() if profile is None else profile.memory
-        if ctx.config.weight_modifier >= STORAGE_WEIGHT_MODIFIER_MIN:
-            has_weight_memory = memory.current_weight > 0 and memory.max_weight > 0
-            if not has_weight_memory and memory_reading_enabled(
-                ctx.config.client_profile
-            ):
-                raise ValueError(
-                    "Open Storage requires a client profile with currentWeightAddress "
-                    f"and totalWeightAddress (profile={ctx.config.client_profile!r})."
-                )
         storage_worker = ItemsToStorageWorker(
-            ctx, input_backend, tport, vitals=player_vitals
+            ctx, input_backend, tport, vitals=player_vitals,
         )
         workers.append(("storage", storage_worker.run))
+
+    return workers
+
+
+def create_runtime_deps(
+    config,
+    session_id: str | None = None,
+    *,
+    behavior_callback: Callable[[str], None] | None = None,
+    overlay: HuntOverlay | None = None,
+    vitals: PlayerVitals | None = None,
+) -> RuntimeDependencies:
+    """Construct all hunt runtime dependencies.
+
+    Delegates to focused factory functions so each dependency's
+    construction is independently readable and testable.
+    """
+    logger = _build_logger(config, session_id, behavior_callback)
+    detector, tracker = _build_detectors(config)
+    ctx = _build_context(config, logger, detector, tracker, overlay)
+
+    input_backend: InputBackend = ViiperBackend()
+    player_vitals = vitals or PlayerVitals()
+    mob_behavior = get_mob_behavior(config.mob_name)
+
+    # Create TeleportController early — every teleport concern lives here.
+    tport = TeleportController(ctx, input_backend, None)
+    _validate_teleport_mode(config, tport)
+
+    hunt_mode = create_hunt_mode(ctx, input_backend, teleport_controller=tport)
+    _validate_sp_memory(config)
+    _validate_weight_memory(config)
+
+    core_workers, danger = _build_core_workers(
+        ctx, hunt_mode, input_backend, tport, player_vitals, mob_behavior,
+    )
+    conditional_workers = _build_conditional_workers(
+        ctx, input_backend, tport, player_vitals,
+        danger=danger, mob_behavior=mob_behavior,
+    )
 
     # Wire TeleportController's hunt_mode now that it's created.
     tport._hunt_mode = hunt_mode
@@ -256,7 +323,7 @@ def create_runtime_deps(
         hunt_mode=hunt_mode,
         logger=logger,
         teleport_controller=tport,
-        workers=workers,
+        workers=core_workers + conditional_workers,
     )
 
 

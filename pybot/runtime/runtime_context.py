@@ -1,5 +1,10 @@
 """Shared hunt runtime state for all workers.
 
+This dataclass holds references to all runtime services. Event gate logic,
+wing management, and other behaviours are delegated to specialised classes
+(:class:`GateController`, :class:`WingTracker`) so the dataclass does not
+accumulate unrelated business logic.
+
 Pause / session matrix
 ----------------------
 Who may run while a signal is held:
@@ -13,34 +18,35 @@ sit     no        no          no     no
 storage no        no          no     yes
 ======= ========= =========== ====== ======
 
-Sit and storage are mutually exclusive (``_sit_storage_lock``).
-``should_run_workers`` gates discovery, tracking, and skill timers
-(false while stopped, user-paused, or sitting).
-``should_run_combat`` additionally requires storage not held — attack only.
-Discovery/tracking also idle while ``storage_event`` is set so storage UI
-is not disturbed by hunt scans.
+Sit and storage are mutually exclusive.
 """
 
 from __future__ import annotations
 
 import threading
-import time
 from dataclasses import dataclass, field
 
 from pybot.runtime.capture.hunt_capture import HuntWindowCapture
 from pybot.runtime.config import HuntRuntimeConfig
 from pybot.runtime.control import RuntimeControl
+from pybot.runtime.gate_controller import GateController
 from pybot.runtime.hunt_policy import HuntPolicy
 from pybot.runtime.hunt_tracks import HuntTracks
 from pybot.runtime.logging import HuntLogger
 from pybot.runtime.validation_log import HuntValidationLogger
 from pybot.runtime.detection.detector_session import DetectorSession
-from pybot.runtime.constants import WORKER_POLL_INTERVAL_S
 from pybot.runtime.overlay_ports import HuntOverlay, NullOverlay
+from pybot.runtime.wing_tracker import WingTracker
 
 
 @dataclass
 class HuntRuntimeContext:
+    """Shared runtime state and service references for all workers.
+
+    Event gate logic (should_run_*, begin/end sit/storage, wait helpers)
+    is delegated to :attr:`gates`.
+    Wing counter management is delegated to :attr:`wings`.
+    """
     config: HuntRuntimeConfig
     logger: HuntLogger
     tracks: HuntTracks
@@ -51,45 +57,162 @@ class HuntRuntimeContext:
     validation: HuntValidationLogger
     control: RuntimeControl
     overlay: HuntOverlay = field(default_factory=NullOverlay)
-    stop_event: threading.Event = field(default_factory=threading.Event)
-    pause_event: threading.Event = field(default_factory=threading.Event)
-    resume_gate: threading.Event = field(default_factory=threading.Event)
-    discovery_wake: threading.Event = field(default_factory=threading.Event)
-    # Set for the whole claim → teleport key → settle delay window so the
-    # 1s discovery cadence cannot scan mid-teleport and falsely confirm clear.
-    discovery_suspend: threading.Event = field(default_factory=threading.Event)
-    # Set while regenerating SP (sit) — hunt + skill timers idle.
-    sitting_event: threading.Event = field(default_factory=threading.Event)
-    # Set while ItemsToStorage / GetFlyWings runs — combat idles; timers keep going.
-    storage_event: threading.Event = field(default_factory=threading.Event)
-    _sit_storage_lock: threading.Lock = field(default_factory=threading.Lock)
-    # AHK ``wingcount``: remaining fly wings; restocked by GetFlyWings.
-    wingcount: int = 0
-    # Set when storage has no wings left — stop GetFlyWings for this hunt.
-    fly_wings_exhausted: bool = False
+    # Event gate + worker lifecycle (not a field — always created fresh).
+    gates: GateController = field(default_factory=GateController)
+    # Fly-wing count and restock state.
+    wings: WingTracker = field(default_factory=WingTracker)
+
+    # ── Event gate convenience properties (delegate to gates) ────
+
+    @property
+    def stop_event(self) -> threading.Event:
+        return self.gates.stop_event
+
+    @stop_event.setter
+    def stop_event(self, event: threading.Event) -> None:
+        self.gates.stop_event = event
+
+    @property
+    def pause_event(self) -> threading.Event:
+        return self.gates.pause_event
+
+    @pause_event.setter
+    def pause_event(self, event: threading.Event) -> None:
+        self.gates.pause_event = event
+
+    @property
+    def resume_gate(self) -> threading.Event:
+        return self.gates.resume_gate
+
+    @resume_gate.setter
+    def resume_gate(self, event: threading.Event) -> None:
+        self.gates.resume_gate = event
+
+    @property
+    def discovery_wake(self) -> threading.Event:
+        return self.gates.discovery_wake
+
+    @discovery_wake.setter
+    def discovery_wake(self, event: threading.Event) -> None:
+        self.gates.discovery_wake = event
+
+    @property
+    def discovery_suspend(self) -> threading.Event:
+        return self.gates.discovery_suspend
+
+    @discovery_suspend.setter
+    def discovery_suspend(self, event: threading.Event) -> None:
+        self.gates.discovery_suspend = event
+
+    @property
+    def sitting_event(self) -> threading.Event:
+        return self.gates.sitting_event
+
+    @sitting_event.setter
+    def sitting_event(self, event: threading.Event) -> None:
+        self.gates.sitting_event = event
+
+    @property
+    def storage_event(self) -> threading.Event:
+        return self.gates.storage_event
+
+    @storage_event.setter
+    def storage_event(self, event: threading.Event) -> None:
+        self.gates.storage_event = event
+
+    # ── Wing convenience properties (delegate to wings) ──────────
+
+    @property
+    def wingcount(self) -> int:
+        return self.wings.wingcount
+
+    @wingcount.setter
+    def wingcount(self, value: int) -> None:
+        self.wings.wingcount = value
+
+    @property
+    def fly_wings_exhausted(self) -> bool:
+        return self.wings.fly_wings_exhausted
+
+    @fly_wings_exhausted.setter
+    def fly_wings_exhausted(self, value: bool) -> None:
+        self.wings.fly_wings_exhausted = value
+
+    # ── Gate convenience methods (delegate to gates) ─────────────
 
     def should_run_workers(self) -> bool:
-        """True when discovery, tracking, and skill timers may run.
-
-        False while stopped, user-paused, or sitting. Storage does not clear this.
-        """
-        return (
-            not self.stop_event.is_set()
-            and not self.pause_event.is_set()
-            and not self.sitting_event.is_set()
-        )
+        return self.gates.should_run_workers()
 
     def should_run_combat(self) -> bool:
-        """True when attack may run (``should_run_workers`` and not in storage)."""
-        return self.should_run_workers() and not self.storage_event.is_set()
+        return self.gates.should_run_combat()
 
     def should_run_discovery(self) -> bool:
-        """True when discovery may scan (workers running and not in storage UI)."""
-        return self.should_run_workers() and not self.storage_event.is_set()
+        return self.gates.should_run_discovery()
 
     def should_run_tracking(self) -> bool:
-        """True when tracking may tick (workers running and not in storage UI)."""
-        return self.should_run_workers() and not self.storage_event.is_set()
+        return self.gates.should_run_tracking()
+
+    def is_stopped(self) -> bool:
+        return self.gates.is_stopped()
+
+    def mark_running(self) -> None:
+        self.gates.mark_running()
+
+    def mark_paused(self) -> None:
+        self.gates.mark_paused()
+
+    def try_begin_sit_ops(self) -> bool:
+        return self.gates.try_begin_sit_ops()
+
+    def begin_sit_ops(self) -> bool:
+        return self.gates.begin_sit_ops()
+
+    def end_sit_ops(self) -> None:
+        self.gates.end_sit_ops()
+
+    def try_begin_storage_ops(self) -> bool:
+        return self.gates.try_begin_storage_ops()
+
+    def begin_storage_ops(self) -> bool:
+        return self.gates.begin_storage_ops()
+
+    def end_storage_ops(self) -> None:
+        self.gates.end_storage_ops()
+
+    def begin_sit_regen(self) -> bool:
+        return self.gates.begin_sit_ops()
+
+    def end_sit_regen(self) -> None:
+        self.gates.end_sit_ops()
+
+    def wait_while_stopped_or_paused(self, timeout_s: float) -> bool:
+        return self.gates.wait_while_stopped_or_paused(timeout_s)
+
+    def wait_while_combat_blocked(self, timeout_s: float) -> bool:
+        return self.gates.wait_while_combat_blocked(timeout_s)
+
+    def wait_unless_stopped(self, timeout_s: float) -> bool:
+        return self.gates.wait_unless_stopped(timeout_s)
+
+    # ── Wing convenience methods (delegate to wings) ─────────────
+
+    def note_teleport_for_wings(self) -> None:
+        self.wings.note_teleport(
+            open_storage_steps=bool(self.config.open_storage_steps),
+            take_fly_wings=self.config.take_fly_wings,
+        )
+
+    def should_restock_fly_wings(self) -> bool:
+        return self.wings.should_restock(
+            open_storage_steps=bool(self.config.open_storage_steps),
+            take_fly_wings=self.config.take_fly_wings,
+            fly_wings_amount=int(self.config.fly_wings_amount),
+        )
+
+    def mark_fly_wings_exhausted(self) -> None:
+        self.wings.mark_exhausted()
+
+    # ── Own methods (not delegated) ──────────────────────────────
 
     def character_screen_pos(self) -> tuple[int, int] | None:
         """Hunt ROI center — character is always at the middle of the hunt view."""
@@ -97,147 +220,6 @@ class HuntRuntimeContext:
         if roi is None:
             return None
         return roi.x + roi.w // 2, roi.y + roi.h // 2
-
-    def mark_running(self) -> None:
-        """Workers may run; wake any thread blocked in ``wait_while_stopped_or_paused``."""
-        self.pause_event.clear()
-        if not self.sitting_event.is_set():
-            self.resume_gate.set()
-
-    def mark_paused(self) -> None:
-        """Workers must idle until ``mark_running``."""
-        self.pause_event.set()
-        self.resume_gate.clear()
-
-    def try_begin_sit_ops(self) -> bool:
-        """Acquire sit pause (hunt + timers). False if sit or storage already held."""
-        with self._sit_storage_lock:
-            if self.sitting_event.is_set() or self.storage_event.is_set():
-                return False
-            self.sitting_event.set()
-            self.resume_gate.clear()
-            return True
-
-    def begin_sit_ops(self) -> bool:
-        """Wait until sit ops can start. False if stopped first."""
-        while not self.stop_event.is_set():
-            if self.try_begin_sit_ops():
-                return True
-            self.stop_event.wait(WORKER_POLL_INTERVAL_S)
-        return False
-
-    def end_sit_ops(self) -> None:
-        """Release sit pause; restore resume_gate unless user-paused/stopped."""
-        with self._sit_storage_lock:
-            self.sitting_event.clear()
-            if not self.pause_event.is_set() and not self.stop_event.is_set():
-                self.resume_gate.set()
-
-    def try_begin_storage_ops(self) -> bool:
-        """Acquire storage session (combat only). False if sit/storage held."""
-        with self._sit_storage_lock:
-            if self.sitting_event.is_set() or self.storage_event.is_set():
-                return False
-            self.storage_event.set()
-            return True
-
-    def begin_storage_ops(self) -> bool:
-        """Wait until storage can start. False if stopped first."""
-        while not self.stop_event.is_set():
-            if self.try_begin_storage_ops():
-                return True
-            self.stop_event.wait(WORKER_POLL_INTERVAL_S)
-        return False
-
-    def end_storage_ops(self) -> None:
-        """Release storage session; combat may resume."""
-        with self._sit_storage_lock:
-            self.storage_event.clear()
-        # Wake combat (wait_while_combat_blocked polls resume_gate),
-        # and discovery/tracking (blocked by storage_event in should_run_*).
-        self.resume_gate.set()
-        self.discovery_wake.set()
-
-    def begin_sit_regen(self) -> bool:
-        """Pause hunting/timers for SP regeneration (independent of user pause)."""
-        return self.begin_sit_ops()
-
-    def end_sit_regen(self) -> None:
-        """Resume hunting/timers after sit regen completes."""
-        self.end_sit_ops()
-
-    def note_teleport_for_wings(self) -> None:
-        """AHK Teleport: decrement wing counter when Take Fly Wings is on."""
-        with self._sit_storage_lock:
-            if (
-                self.config.open_storage_steps
-                and self.config.take_fly_wings
-                and not self.fly_wings_exhausted
-                and self.wingcount > 0
-            ):
-                self.wingcount -= 1
-
-    def should_restock_fly_wings(self) -> bool:
-        """True when GetFlyWings should run (enabled, amount set, count 0)."""
-        return (
-            bool(self.config.open_storage_steps)
-            and self.config.take_fly_wings
-            and int(self.config.fly_wings_amount) > 0
-            and not self.fly_wings_exhausted
-            and self.wingcount <= 0
-        )
-
-    def mark_fly_wings_exhausted(self) -> None:
-        """Stop fly-wing restock for this hunt."""
-        self.fly_wings_exhausted = True
-        self.wingcount = 0
-
-    def is_stopped(self) -> bool:
-        return self.stop_event.is_set()
-
-    def wait_while_stopped_or_paused(self, timeout_s: float) -> bool:
-        """Block up to *timeout_s*. Returns True if workers may run."""
-        deadline = time.monotonic() + timeout_s
-        while not self.stop_event.is_set():
-            if self.should_run_workers():
-                return True
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return self.should_run_workers()
-            self.resume_gate.wait(min(WORKER_POLL_INTERVAL_S, remaining))
-        return False
-
-    def wait_while_combat_blocked(self, timeout_s: float) -> bool:
-        """Block while sit/pause/storage holds combat. True if combat may run."""
-        deadline = time.monotonic() + timeout_s
-        while not self.stop_event.is_set():
-            if self.should_run_combat():
-                return True
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return self.should_run_combat()
-            # Storage does not clear resume_gate; poll stop/sit wake.
-            if self.sitting_event.is_set() or self.pause_event.is_set():
-                self.resume_gate.wait(min(WORKER_POLL_INTERVAL_S, remaining))
-            else:
-                self.stop_event.wait(min(WORKER_POLL_INTERVAL_S, remaining))
-        return False
-
-    def wait_unless_stopped(self, timeout_s: float) -> bool:
-        """Wait up to *timeout_s* unless stop/pause is requested.
-
-        Returns True only when the full duration elapsed without interruption.
-        """
-        deadline = time.monotonic() + timeout_s
-        while not self.stop_event.is_set():
-            if self.pause_event.is_set():
-                return False
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return True
-            if self.stop_event.wait(min(WORKER_POLL_INTERVAL_S, remaining)):
-                return False
-        return False
 
     def area_reset(self, reason: str = "area_reset") -> None:
         self.tracks.area_reset()
