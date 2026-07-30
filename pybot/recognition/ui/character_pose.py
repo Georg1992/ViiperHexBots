@@ -5,7 +5,7 @@ the Hunter falcon floats above and is ignored by taking the largest contiguous
 vertical occupancy run in a narrow center strip (bird sits in a separate run
 when there is a gap above the body).
 
-Sit interrupt / combat threat uses ``pybot.recognition.danger``, not this module.
+Danger detection is handled by :class:`DangerDetector`, not this module.
 """
 
 from __future__ import annotations
