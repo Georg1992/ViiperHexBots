@@ -222,13 +222,11 @@ class SpriteGrf:
         # Preserve the entire post-magic header region byte-for-byte.
         self._orig_header_tail = raw[16:self._header_size]
 
-        # Locate the file table.
-        # The table_offset in the header is an absolute byte position.
-        # For legacy GRFs the stored value may be wrong, so we pass it as
-        # a hint and fall back to scanning if the hint doesn't land on
-        # valid zlib table data.
-        table_hint = struct.unpack_from("<I", raw, 31)[0]
-        table_hdr_off = self._find_table_header(raw, table_hint)
+        # The table_offset in the header is the absolute byte position
+        # of the file table.
+        table_off_pos = 30 if self._header_size == _GRF_HEADER_SIZE_LEGACY else 31
+        table_hint = struct.unpack_from("<I", raw, table_off_pos)[0]
+        table_hdr_off = self._find_table_header(table_hint)
         if table_hdr_off < self._header_size:
             raise ValueError("GRF table header not found")
 
@@ -294,24 +292,8 @@ class SpriteGrf:
             self._data_section += raw_data
 
     @staticmethod
-    def _find_table_header(data: bytes) -> int:
-        """Find the table header near the end of the file.
-
-        The table HEADER (2 x uint32) is the 8 bytes immediately before
-        the zlib-compressed table data.  We return that position.
-        """
-        # Scan backwards for the zlib magic byte (0x78)
-        for off in range(len(data) - 8, max(0, len(data) - 512), -1):
-            if data[off] != 0x78:
-                continue
-            if off < 8:
-                continue
-            u1 = struct.unpack_from("<I", data, off - 8)[0]
-            u2 = struct.unpack_from("<I", data, off - 4)[0]
-            # Both should be reasonable (a file table is typically < 100 KB).
-            if 0 < u1 < 100_000 and 0 <= u2 < 100_000:
-                return off - 8
-        return -1
+    def _find_table_header(table_hint: int) -> int:
+        return table_hint
 
     # ------------------------------------------------------------------
     #  Query
@@ -456,9 +438,8 @@ class SpriteGrf:
         header = bytearray()
         header += _GRF_MAGIC
 
-        rel_table_offset = len(container)
-        
         if self._orig_header_tail:
+            rel_table_offset = self._header_size + len(container)
             # Modify the existing header tail to update the table offset.
             # In legacy GRFs (46-byte header), the tail is 30 bytes and offset is at 14:18.
             # In standard GRFs (47-byte header), the tail is 31 bytes and offset is at 15:19.
@@ -467,11 +448,12 @@ class SpriteGrf:
             tail[off_start:off_start+4] = struct.pack("<I", rel_table_offset)
             header += bytes(tail)
         else:
-            # New GRF: write the real offset, and use the legacy 46-byte header format.
+            # New GRF: legacy 46-byte header format.
             # Legacy key is 14 bytes: 0x01 .. 0x0E
             legacy_key = bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
             header += legacy_key
-            
+
+            rel_table_offset = _GRF_HEADER_SIZE_LEGACY + len(container)
             header += struct.pack("<I", rel_table_offset)
             
             # skip (0), count1 (len+7), version (0x200)

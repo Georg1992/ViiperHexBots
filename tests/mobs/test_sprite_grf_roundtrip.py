@@ -56,15 +56,20 @@ def _build_grf(
 
     header = bytearray()
     header += _GRF_MAGIC
-    header += _GRF_KEY
-    header += struct.pack("<I", len(comp_table))
+
+    if header_size == _GRF_HEADER_SIZE:
+        header += _GRF_KEY  # 15-byte key -> table_offset at byte 31
+    else:
+        header += bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])  # 14-byte legacy key -> table_offset at byte 30
+
+    header += struct.pack("<I", header_size + len(comp_data))  # absolute offset
     header += struct.pack("<I", seed)
 
     if header_size == _GRF_HEADER_SIZE:
         header += struct.pack("<I", len(entries))
         header += struct.pack("<I", _GRF_VERSION)
     else:
-        header += reserved if reserved is not None else b"\x00" * 7
+        header += reserved if reserved is not None else b"\x00" * 8
 
     table_hdr = struct.pack("<I", len(comp_table))
     table_hdr += struct.pack("<I", len(table_raw))
@@ -103,7 +108,7 @@ class SpriteGrfRoundtripTests(unittest.TestCase):
             path,
             header_size=_GRF_HEADER_SIZE_LEGACY,
             seed=0x0B000000,
-            reserved=bytes([0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00]),
+            reserved=bytes([0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00]),
         )
 
     @staticmethod
@@ -165,7 +170,7 @@ class SpriteGrfRoundtripTests(unittest.TestCase):
 
         g2 = SpriteGrf(out_path)
         self.assertTrue(g2._orig_header_tail, "_orig_header_tail must not be empty")
-        seed = struct.unpack_from("<I", g2._orig_header_tail, 19)[0]
+        seed = struct.unpack_from("<I", g2._orig_header_tail, 18)[0]
         self.assertEqual(seed, 0x0B000000, f"Seed should be 0x0B000000, got 0x{seed:08X}")
 
     def test_nonzero_reserved_preserved(self) -> None:
@@ -177,19 +182,18 @@ class SpriteGrfRoundtripTests(unittest.TestCase):
 
         g2 = SpriteGrf(out_path)
         self.assertTrue(g2._orig_header_tail, "_orig_header_tail must not be empty")
-        reserved = g2._orig_header_tail[23:30]
-        expected = bytes([0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00])
+        reserved = g2._orig_header_tail[22:30]
+        expected = bytes([0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00])
         self.assertEqual(reserved, expected, f"Reserved: {reserved.hex()}, expected: {expected.hex()}")
 
     def test_roundtrip_new_grf_defaults(self) -> None:
         g = SpriteGrf(self.tmp / "nonexistent.grf")
         g._path = self.tmp / "new.grf"
-        g._header_size = _GRF_HEADER_SIZE
         g.add_file("data\\\\sprite\\\\test.spr", b"test-data")
         g.save()
 
         g2 = SpriteGrf(g._path)
-        self.assertEqual(g2._header_size, _GRF_HEADER_SIZE)
+        self.assertEqual(g2._header_size, _GRF_HEADER_SIZE_LEGACY)
         self.assertTrue(g2._table_compressed_first)
         self.assertEqual(len(g2.files()), 1)
 
