@@ -53,6 +53,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.config.open_storage_steps = ()
         self.config.active_teleport_scan_code.return_value = 16
         self.config.active_teleport_button.return_value = "q"
+        self.config.danger_teleport_scan_code.return_value = 0
+        self.config.danger_teleport_button.return_value = ""
         self.ctx = HuntRuntimeContext(
             config=self.config,
             logger=MagicMock(),

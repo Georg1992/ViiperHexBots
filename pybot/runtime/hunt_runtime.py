@@ -218,7 +218,9 @@ def create_runtime_deps(
                 f"and maxSpAddress (profile={ctx.config.client_profile!r})."
             )
         sit_worker = SitOnLowSpWorker(
-            ctx, input_backend, hunt_mode=hunt_mode, vitals=player_vitals
+            ctx, input_backend, hunt_mode=hunt_mode,
+            mob_behavior=mob_behavior,
+            vitals=player_vitals,
         )
         workers.append(("sit_sp", sit_worker.run))
     # Storage deposit + GetFlyWings only when Open Storage keychain is assigned.
