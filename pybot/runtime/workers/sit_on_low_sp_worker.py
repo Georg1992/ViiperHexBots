@@ -207,18 +207,11 @@ class SitOnLowSpWorker:
                 elif now - last_progress >= SIT_SP_STALL_S:
                     sp_stalled = True
 
-                # HP check: read from shared vitals (UI publishes every 200ms).
+                # Check for near objects on SP stall (danger source).
                 if now - last_hp_poll >= SIT_HP_POLL_S:
                     frame = self._capture_client()
                     last_hp_poll = now
                     if frame is not None:
-                        hp, hp_max = self._vitals.hp_pair()
-                        if hp is not None and self._danger.feed_hp(hp, hp_max):
-                            ctx.logger.behavior(
-                                f"[SIT] danger while sitting sp={sp} "
-                                "(hp dropped, danger tp executed)"
-                            )
-                            return "danger"
                         danger = self._assess_danger(frame)
                         if (
                             sp_stalled

@@ -230,38 +230,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertEqual(outcome, "danger")
         self.assertGreaterEqual(self.input.teleport_key.call_count, 1)
 
-    def test_sit_session_returns_danger_on_hp_drop(self) -> None:
-        # Steady SP mid-regen; danger comes from HP drop only.
-        # Enough mid ratios so scripted vitals never fall through to 98% resume.
-        vitals = _ScriptedVitals([0.40] * 20)
-        worker = SitOnLowSpWorker(
-            self.ctx,
-            self.input,
-            hunt_mode=self.hunt_mode,
-            vitals=vitals,
-        )
-        self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-
-        # Script hp_pair to return 1000→900 so the detector sees the drop
-        # happen between successive poll ticks.
-        hp_values = [(1000, 5000), (900, 5000)] + [(900, 5000)] * 100
-
-        with patch(
-            "pybot.runtime.workers.sit_on_low_sp_worker.SIT_HP_POLL_S",
-            0.0,
-        ):
-            with patch.object(worker, "_capture_client", return_value=object()):
-                with patch.object(
-                    worker, "_assess_danger",
-                    return_value=DangerReport(
-                        in_danger=False, reasons=(), near_object_count=0,
-                    ),
-                ):
-                    with patch.object(vitals, "hp_pair", side_effect=hp_values):
-                        outcome = worker._sit_session()
-
-        self.assertEqual(outcome, "danger")
-
     def test_ensure_sitting_presses_once(self) -> None:
         worker = SitOnLowSpWorker(
             self.ctx,
