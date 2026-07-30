@@ -31,7 +31,6 @@ from pybot.recognition.ui.inventory import (
 from pybot.runtime.clear_area import HuntModeAreaReset, teleport_until_quiet
 from pybot.runtime.constants import (
     FLY_WING_WEIGHT,
-    STORAGE_CRITICAL_HP_RATIO,
     STORAGE_CURSOR_CLEAR_S,
     STORAGE_INV_COLS,
     STORAGE_INV_ROWS,
@@ -47,10 +46,6 @@ from pybot.runtime.input.scan_codes import key_name_to_scan_code
 from pybot.runtime.workers.worker_contexts import ItemsToStorageWorkerContext
 
 user32 = ctypes.windll.user32
-
-
-class StorageCriticalHpError(RuntimeError):
-    """HP fell below the critical restock threshold — force-close UI."""
 
 
 def _cursor_pos() -> tuple[int, int]:
@@ -132,11 +127,6 @@ class ItemsToStorageWorker:
                         )
                         continue
                     self.storage_session(dump=dump, restock=need_wings)
-                except StorageCriticalHpError as exc:
-                    ctx.logger.behavior(
-                        f"[STORAGE] critical danger: {exc} — force close menus"
-                    )
-                    self._close_menus_best_effort()
                 except InventoryUiError as exc:
                     ctx.logger.behavior(f"[STORAGE] UI miss: {exc}")
                 except Exception:
@@ -331,7 +321,7 @@ class ItemsToStorageWorker:
         return is_inventory_open(frame) or is_storage_open(frame)
 
     def _close_menus_best_effort(self) -> None:
-        """Force-close panels (critical HP only). Never raise."""
+        """Force-close panels. Never raise."""
         try:
             if not self._menus_are_open():
                 return
@@ -342,16 +332,6 @@ class ItemsToStorageWorker:
         except Exception as exc:
             self._ctx.logger.behavior(f"[STORAGE] force close error: {exc}")
 
-    def _abort_if_critical_hp(self) -> None:
-        """Raise when HP (from PlayerVitals) is below the critical restock threshold."""
-        hp, hp_max = self._vitals.hp_pair()
-        if hp is None or hp_max is None or hp_max <= 0:
-            return
-        ratio = hp / float(hp_max)
-        if ratio < STORAGE_CRITICAL_HP_RATIO:
-            raise StorageCriticalHpError(
-                f"HP {ratio:.0%} < {STORAGE_CRITICAL_HP_RATIO:.0%}"
-            )
 
     def _select_use_tab(self) -> None:
         """Click Use when ``use_img`` (unselected) is visible; else already on Use.
@@ -476,7 +456,6 @@ class ItemsToStorageWorker:
         deposited = 0
         max_passes = STORAGE_INV_COLS * STORAGE_INV_ROWS
         for pass_i in range(max_passes):
-            self._abort_if_critical_hp()
             wings = self._scan_use_grid_wings()
             log(
                 f"[STORAGE] GetFlyWings Use grid scan "
@@ -523,8 +502,6 @@ class ItemsToStorageWorker:
         time.sleep(STORAGE_WING_AIM_SETTLE_S)
 
         for pass_i in range(guard):
-            self._abort_if_critical_hp()
-
             frame = self._capture_client()
 
             if slot_looks_empty(frame, first_cx, first_cy):
@@ -572,11 +549,9 @@ class ItemsToStorageWorker:
         self._deposit_tab_grid(tab_label="Use")
 
         time.sleep(STORAGE_UI_SETTLE_S)
-        self._abort_if_critical_hp()
         self._select_inventory_tab("eqp")
         self._deposit_tab_grid(tab_label="Eqp")
 
-        self._abort_if_critical_hp()
         self._select_inventory_tab("etc")
         self._deposit_tab_grid(tab_label="Etc")
 
@@ -605,7 +580,6 @@ class ItemsToStorageWorker:
 
         log = ctx.logger.behavior
         log(f"[STORAGE] GetFlyWings restock amount={wings}")
-        self._abort_if_critical_hp()
 
         if ensure_use_tab:
             log("[STORAGE] GetFlyWings select Use tab before restock")
@@ -615,8 +589,6 @@ class ItemsToStorageWorker:
 
         log("[STORAGE] GetFlyWings sleep 800ms")
         time.sleep(0.8)
-        self._abort_if_critical_hp()
-
         log(
             f"[STORAGE] GetFlyWings scan Use grid "
             f"{STORAGE_INV_COLS}x{STORAGE_INV_ROWS} for wings"
@@ -625,7 +597,6 @@ class ItemsToStorageWorker:
 
         log("[STORAGE] GetFlyWings sleep 500ms")
         time.sleep(0.5)
-        self._abort_if_critical_hp()
 
         def find_storage() -> tuple[int, int]:
             frame = self._capture_client()
@@ -641,7 +612,6 @@ class ItemsToStorageWorker:
             self._abandon_fly_wings("no fly wings in storage")
             return False
 
-        self._abort_if_critical_hp()
         log(
             f"[STORAGE] GetFlyWings move storage wing at {storage_wing} "
             "(sleep 200ms)"
@@ -678,10 +648,7 @@ class ItemsToStorageWorker:
 
     def storage_session(self, *, dump: bool, restock: bool) -> None:
         """One inventory/storage open: optional dump, optional wing restock, close.
-
-        On success (or non-critical UI failure) menus are closed after the
-        session. Forced close mid-restock happens only on critical HP
-        (``StorageCriticalHpError``) via the worker cycle handler.
+        On success (or non-critical UI failure) menus are closed after the session.
         """
         if not dump and not restock:
             return
@@ -705,9 +672,6 @@ class ItemsToStorageWorker:
             time.sleep(0.1)
             self._close_menus()
             time.sleep(0.5)
-        except StorageCriticalHpError:
-            # Do not finish restock; caller force-closes menus.
-            raise
         except InventoryUiError:
             try:
                 self._close_menus()

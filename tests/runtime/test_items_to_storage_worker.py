@@ -18,7 +18,6 @@ from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.workers.items_to_storage_worker import (
     ItemsToStorageWorker,
-    StorageCriticalHpError,
 )
 from pybot.viiper.keyboard import MOD_LEFT_ALT, vk_to_modifier
 
@@ -376,19 +375,6 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             with self.assertRaises(InventoryUiError):
                 worker.storage_session(dump=False, restock=True)
             m["ItemsToStorageWorker._close_menus"].assert_called()
-
-    def test_restock_force_closes_only_on_critical_hp(self) -> None:
-        stack, m = _enter_worker_patches(
-            find_template=DEFAULT,
-        )
-        with stack:
-            m["find_template"].return_value = None
-
-            self.vitals.publish_hp(40, 100)
-            worker = self._worker()
-            with self.assertRaises(StorageCriticalHpError):
-                worker.storage_session(dump=False, restock=True)
-            m["ItemsToStorageWorker._close_menus"].assert_not_called()
 
     def test_menu_validation_open_closed(self) -> None:
         stack, m = _enter_worker_patches(

@@ -71,9 +71,6 @@ STORAGE_MENU_POLL_S = 0.1
 STORAGE_UI_SETTLE_S = 0.1
 # After moving the cursor off UI before a template capture.
 STORAGE_CURSOR_CLEAR_S = 0.05
-# Abort restock and force-close menus when vision HP falls below this ratio.
-STORAGE_CRITICAL_HP_RATIO = HP_RESTORE_RATIO
-
 __all__ = [
     "HUNT_DISCOVERY_INTERVAL_MS",
     "HUNT_OBJECT_RADIUS",
@@ -117,5 +114,4 @@ __all__ = [
     "STORAGE_MENU_POLL_S",
     "STORAGE_UI_SETTLE_S",
     "STORAGE_CURSOR_CLEAR_S",
-    "STORAGE_CRITICAL_HP_RATIO",
 ]
