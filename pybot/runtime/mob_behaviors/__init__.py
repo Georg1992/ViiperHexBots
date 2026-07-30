@@ -76,8 +76,6 @@ class MobBehavior:
         ctx.logger.behavior(
             f"[DANGER] {prefix}teleport_scan={tp_scan} — teleporting"
         )
-        if tp_scan <= 0:
-            return False
         ctx.tracks.area_reset()
         hunt_mode.on_area_reset()
         try:
