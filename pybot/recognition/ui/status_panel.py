@@ -62,6 +62,18 @@ SP_ROI = (50, 66, 110, 16)
 # so trailing Zeny crumbs still stay below threshold and strip.
 WEIGHT_ROI = (75, 116, 84, 14)
 
+# ── Dynamic scan zones ─────────────────────────────────────────────
+# These are wide enough to *always* contain the "/" separator regardless
+# of digit length or Zeny shift.  Once "/" is located a tighter ROI is
+# built around it with generous horizontal expansion so no digit is cropped.
+HP_SCAN_ZONE   = (42, 45, 138, 18)   # x=42..180
+SP_SCAN_ZONE   = (42, 66, 138, 16)   # x=42..180
+WEIGHT_SCAN_ZONE = (70, 116, 110, 14) # x=70..180
+
+# Pixels to expand left/right from "/" center — enough for 5 digits + gaps
+_SLASH_LEFT_EXPAND = 52
+_SLASH_RIGHT_EXPAND = 52
+
 
 @dataclass(frozen=True)
 class StatusPanelValues:
@@ -128,6 +140,9 @@ def read_status_panel(
 ) -> StatusPanelValues | None:
     """Parse HP/SP/Weight from the Basic Info panel.
 
+    Uses dynamic ROI anchoring on the ``/`` separator so digits are never
+    cropped regardless of horizontal shift (Zeny length, digit count, etc.).
+
     Parameters
     ----------
     frame_bgr : np.ndarray
@@ -149,10 +164,10 @@ def read_status_panel(
     if skip_hp:
         if previous is None:
             raise ValueError("previous must be provided when skip_hp=True")
-        sp = _parse_current(frame_bgr, origin, SP_ROI, min_width=2)
+        sp = _parse_anchored(frame_bgr, origin, SP_SCAN_ZONE, min_width=2, stop_at_slash=True)
         if sp is None:
             return None
-        weight = _parse_current(frame_bgr, origin, WEIGHT_ROI, min_width=3)
+        weight = _parse_anchored(frame_bgr, origin, WEIGHT_SCAN_ZONE, min_width=3, stop_at_slash=True)
         return StatusPanelValues(
             hp=previous.hp,
             hp_max=previous.hp_max,
@@ -164,13 +179,13 @@ def read_status_panel(
         )
 
     # Full read — parse current+max for all three bands.
-    hp = _parse_pair(frame_bgr, origin, HP_ROI, min_width=2)
+    hp = _parse_anchored(frame_bgr, origin, HP_SCAN_ZONE, min_width=2, stop_at_slash=False)
     if hp is None:
         return None
-    sp = _parse_pair(frame_bgr, origin, SP_ROI, min_width=2)
+    sp = _parse_anchored(frame_bgr, origin, SP_SCAN_ZONE, min_width=2, stop_at_slash=False)
     if sp is None:
         return None
-    weight = _parse_pair(frame_bgr, origin, WEIGHT_ROI, min_width=3)
+    weight = _parse_anchored(frame_bgr, origin, WEIGHT_SCAN_ZONE, min_width=3, stop_at_slash=False)
     return StatusPanelValues(
         hp=hp[0],
         hp_max=hp[1],
@@ -182,18 +197,97 @@ def read_status_panel(
     )
 
 
-def _parse_pair(
+# ── /-anchored dynamic parsing (single unified path, no fallbacks) ──
+
+def _find_slash_x_in_scan(
     frame_bgr: np.ndarray,
     origin: tuple[int, int],
-    roi: tuple[int, int, int, int],
-    *,
+    scan_roi: tuple[int, int, int, int],
     min_width: int,
-) -> tuple[int, int] | None:
-    crop = _crop_roi(frame_bgr, origin, roi)
+) -> int | None:
+    """Find the x-offset of ``/`` within *scan_roi* (relative to crop origin).
+
+    Returns the **rightmost** ``/`` match to avoid label-colon artifacts
+    (e.g. the colon of ``Weight:`` can be misclassified as ``/`` at x≈0).
+    """
+    crop = _crop_roi(frame_bgr, origin, scan_roi)
     if crop is None:
         return None
-    text = _read_digits(crop, min_width=min_width, stop_at_slash=False)
-    if text is None or text.count("/") != 1:
+    mask = _to_ink_mask(crop)
+    cleaned = _strip_bar_chrome(mask)
+    count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        cleaned, connectivity=8
+    )
+    rightmost: int | None = None
+    for index in range(1, count):
+        x, y, w, h, area = stats[index]
+        if area < 3 or h < 5 or w < min_width:
+            continue
+        blob = cleaned[y : y + h, x : x + w].copy()
+        parts = _split_wide_glyph(blob) if w > MAX_GLYPH_WIDTH else [blob]
+        for part in parts:
+            trimmed = _trim_empty(part)
+            if trimmed is None or trimmed.shape[0] < 5 or trimmed.shape[1] < min_width:
+                continue
+            ch, score = _classify_glyph(trimmed)
+            if ch == "/" and score >= DIGIT_MATCH_THRESHOLD:
+                cx = x + trimmed.shape[1] // 2
+                if rightmost is None or cx > rightmost:
+                    rightmost = cx
+    return rightmost
+
+
+def _build_dynamic_roi(
+    slash_x: int,
+    scan_roi: tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    """Build a tighter ROI around ``/`` with generous horizontal expansion.
+
+    Returns ``(x, y, w, h)`` in origin-relative coordinates.
+    """
+    sx, sy, sw, sh = scan_roi
+    left = max(0, slash_x - _SLASH_LEFT_EXPAND)
+    right = min(sw, slash_x + _SLASH_RIGHT_EXPAND)
+    return (sx + left, sy, right - left, sh)
+
+
+def _parse_anchored(
+    frame_bgr: np.ndarray,
+    origin: tuple[int, int],
+    scan_roi: tuple[int, int, int, int],
+    *,
+    min_width: int,
+    stop_at_slash: bool,
+) -> int | tuple[int, int] | None:
+    """Parse OCR values using ``/``-anchored dynamic ROI.
+
+    Finds the ``/`` separator inside *scan_roi*, builds a bounded ROI
+    around it with ``_SLASH_LEFT_EXPAND`` / ``_SLASH_RIGHT_EXPAND``, then
+    reads digits.
+
+    When *stop_at_slash* is ``True`` returns only the current value (``int``).
+    Otherwise returns ``(current, max)`` pair.
+
+    Returns ``None`` when ``/`` is not found or any digit validation fails.
+    """
+    slash_x = _find_slash_x_in_scan(frame_bgr, origin, scan_roi, min_width)
+    if slash_x is None:
+        return None
+
+    crop = _crop_roi(frame_bgr, origin, _build_dynamic_roi(slash_x, scan_roi))
+    if crop is None:
+        return None
+
+    text = _read_digits(crop, min_width=min_width, stop_at_slash=stop_at_slash)
+    if text is None:
+        return None
+
+    if stop_at_slash:
+        if not text.isdigit():
+            return None
+        return int(text)
+
+    if text.count("/") != 1:
         return None
     left, right = text.split("/", 1)
     if not left.isdigit() or not right.isdigit():
@@ -202,22 +296,6 @@ def _parse_pair(
     if not _valid_pair(current, maximum):
         return None
     return current, maximum
-
-
-def _parse_current(
-    frame_bgr: np.ndarray,
-    origin: tuple[int, int],
-    roi: tuple[int, int, int, int],
-    *,
-    min_width: int,
-) -> int | None:
-    crop = _crop_roi(frame_bgr, origin, roi)
-    if crop is None:
-        return None
-    text = _read_digits(crop, min_width=min_width, stop_at_slash=True)
-    if text is None or not text.isdigit():
-        return None
-    return int(text)
 
 
 def _valid_pair(current: int, maximum: int) -> bool:

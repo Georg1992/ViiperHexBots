@@ -37,6 +37,23 @@ from pybot.recognition.detector.discovery_pipeline import (
     format_discovery_pipeline_text,
 )
 from pybot.recognition.fixtures import MOB_FIXTURE_SUITES, fixture_search_frame
+from pybot.recognition.ui.character_pose import measure_center_pose, detect_nearby_any_mobs
+from pybot.recognition.ui.status_panel import (
+    HP_ROI,
+    SP_ROI,
+    WEIGHT_ROI,
+    HP_SCAN_ZONE,
+    SP_SCAN_ZONE,
+    WEIGHT_SCAN_ZONE,
+    find_status_panel,
+    read_status_panel,
+)
+
+# Player ROI constants (mirroring character_pose.py)
+_PLAYER_ROI_CENTER_HALF_W = 64
+_PLAYER_ROI_CENTER_HALF_H = 96
+_PLAYER_ROI_CENTER_DY = 8
+_PLAYER_ROI_SCALE = 3
 
 OUT_DIR = Path("_debug_vis")
 
@@ -590,6 +607,421 @@ def render_descriptor_info(
     return np.vstack(padded)
 
 
+_NEARBY_CROP_HALF = 125  # 250x250 crop for generic nearby-mob detection
+
+
+def render_nearby_mobs_viz(frame: np.ndarray) -> np.ndarray:
+    """Visualize the 250x250 center ROI used for generic nearby-mob detection.
+
+    Shows the full frame with both ROIs marked (128x192 pose + 250x250 nearby)
+    and the 250x250 crop with detected blobs highlighted.
+    """
+    h, w = frame.shape[:2]
+    cx, cy = w // 2, h // 2 + _PLAYER_ROI_CENTER_DY
+
+    # ── Left panel: full frame with both ROIs ────────────────────
+    full = frame.copy()
+    # 128x192 pose ROI (blue)
+    x1 = cx - _PLAYER_ROI_CENTER_HALF_W
+    y1 = cy - _PLAYER_ROI_CENTER_HALF_H
+    x2 = cx + _PLAYER_ROI_CENTER_HALF_W
+    y2 = cy + _PLAYER_ROI_CENTER_HALF_H
+    cv2.rectangle(full, (x1, y1), (x2, y2), (255, 0, 0), 2)
+    cv2.putText(full, "Pose ROI", (x1, max(y1 - 8, 12)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 0, 0), 1)
+    # 250x250 nearby-mob ROI (green)
+    nx1 = cx - _NEARBY_CROP_HALF
+    ny1 = cy - _NEARBY_CROP_HALF
+    nx2 = cx + _NEARBY_CROP_HALF
+    ny2 = cy + _NEARBY_CROP_HALF
+    cv2.rectangle(full, (nx1, ny1), (nx2, ny2), (0, 220, 0), 2)
+    cv2.putText(full, "Nearby Mob ROI", (nx1, min(ny2 + 20, full.shape[0] - 4)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 220, 0), 1)
+    cv2.putText(
+        full, f"ROIs: 128x192  |  250x250",
+        (8, full.shape[0] - 10),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.40, (220, 220, 220), 1,
+    )
+
+    # ── Right panel: scaled 250x250 crop with blob overlay ───────
+    nx1_c = max(0, nx1)
+    ny1_c = max(0, ny1)
+    nx2_c = min(w, nx2)
+    ny2_c = min(h, ny2)
+    crop = frame[ny1_c:ny2_c, nx1_c:nx2_c]
+    if crop.size == 0:
+        crop = np.full((250, 250, 3), 40, dtype=np.uint8)
+
+    # Run detection and draw blob outlines
+    nearby_count = detect_nearby_any_mobs(frame)
+    viz_crop = crop.copy()
+    # Draw center exclusion zone (80px radius = character + falcon)
+    ccx, ccy = viz_crop.shape[1] // 2, viz_crop.shape[0] // 2
+    cv2.circle(viz_crop, (ccx, ccy), 80, (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.putText(viz_crop, "CHAR", (ccx - 20, ccy + 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+
+    # Scale for visibility
+    scale = 2
+    crop_big = cv2.resize(viz_crop, (250 * scale, 250 * scale), interpolation=cv2.INTER_NEAREST)
+
+    title = np.full((28, crop_big.shape[1], 3), 36, dtype=np.uint8)
+    cv2.putText(
+        title, f"250x250 Nearby Mob ROI  —  detected blobs: {nearby_count}",
+        (8, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+        (0, 220, 0) if nearby_count > 0 else (180, 180, 180),
+        1, cv2.LINE_AA,
+    )
+    right_panel = np.vstack([title, crop_big])
+
+    # ── Composite ────────────────────────────────────────────────
+    full_h = full.shape[0]
+    right_h = right_panel.shape[0]
+    if full_h < right_h:
+        pad = np.full((right_h - full_h, full.shape[1], 3), 28, dtype=np.uint8)
+        full = np.vstack([full, pad])
+    elif right_h < full_h:
+        pad = np.full((full_h - right_h, right_panel.shape[1], 3), 28, dtype=np.uint8)
+        right_panel = np.vstack([right_panel, pad])
+    gap = np.full((full_h, 4, 3), 48, dtype=np.uint8)
+
+    return np.hstack([full, gap, right_panel])
+
+
+def render_player_roi(frame: np.ndarray) -> np.ndarray:
+    """Visualize the center player ROI used by CharacterStateMonitor.
+
+    Returns a composite image showing the full frame with the ROI marked
+    and a scaled crop of the player region.
+    """
+    h, w = frame.shape[:2]
+    cx, cy = w // 2, h // 2 + _PLAYER_ROI_CENTER_DY
+
+    # ROI bounds
+    x1 = cx - _PLAYER_ROI_CENTER_HALF_W
+    y1 = cy - _PLAYER_ROI_CENTER_HALF_H
+    x2 = cx + _PLAYER_ROI_CENTER_HALF_W
+    y2 = cy + _PLAYER_ROI_CENTER_HALF_H
+
+    roi_w = x2 - x1
+    roi_h = y2 - y1
+
+    # ── Left panel: full frame with ROI overlay ──────────────────
+    full = frame.copy()
+    cv2.rectangle(full, (x1, y1), (x2, y2), (0, 0, 255), 2)
+    # Crosshair at center
+    cv2.line(full, (cx - 6, cy), (cx + 6, cy), (0, 0, 255), 1)
+    cv2.line(full, (cx, cy - 6), (cx, cy + 6), (0, 0, 255), 1)
+    cv2.putText(
+        full, "Player ROI", (x1, max(y1 - 8, 12)),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2,
+    )
+    cv2.putText(
+        full,
+        f"center=({cx},{cy})  size={roi_w}x{roi_h}",
+        (8, full.shape[0] - 10),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1,
+    )
+
+    # ── Right panel: scaled ROI crop ────────────────────────────
+    y1_clamped = max(0, y1)
+    y2_clamped = min(h, y2)
+    x1_clamped = max(0, x1)
+    x2_clamped = min(w, x2)
+    crop = frame[y1_clamped:y2_clamped, x1_clamped:x2_clamped]
+    if crop.size == 0:
+        crop = np.full((roi_h, roi_w, 3), 40, dtype=np.uint8)
+
+    scale = _PLAYER_ROI_SCALE
+    crop_big = cv2.resize(crop, (roi_w * scale, roi_h * scale), interpolation=cv2.INTER_NEAREST)
+
+    # ── Title bar ────────────────────────────────────────────────
+    title = np.full((28, crop_big.shape[1], 3), 36, dtype=np.uint8)
+    cv2.putText(
+        title, f"Player ROI crop  ({roi_w}x{roi_h}  x{scale})",
+        (8, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 220, 255), 1, cv2.LINE_AA,
+    )
+
+    # ── Composite ────────────────────────────────────────────────
+    right_panel = np.vstack([title, crop_big])
+
+    # Pad left panel height to match right
+    full_h = full.shape[0]
+    right_h = right_panel.shape[0]
+    if full_h < right_h:
+        pad = np.full((right_h - full_h, full.shape[1], 3), 28, dtype=np.uint8)
+        full = np.vstack([full, pad])
+    elif right_h < full_h:
+        pad = np.full((full_h - right_h, right_panel.shape[1], 3), 28, dtype=np.uint8)
+        right_panel = np.vstack([right_panel, pad])
+
+    # Separator line
+    gap = np.full((full_h, 4, 3), 48, dtype=np.uint8)
+
+    return np.hstack([full, gap, right_panel])
+
+
+def render_pose_evaluation() -> np.ndarray:
+    """Evaluate sit/stand detection on all 8 pose test fixtures.
+
+    Returns a composite grid showing each fixture's ROI crop with
+    body_height, classification, and pass/fail status.
+    """
+    tests_dir = Path(__file__).resolve().parent.parent / "tests"
+    sit_paths = [tests_dir / f"{s}.png"
+                 for s in ["sit", "sit2", "sit3", "sit4"]]
+    stand_paths = [tests_dir / f"{s}.png"
+                   for s in ["stand", "stand2", "stand3", "stand4"]]
+
+    tiles: list[np.ndarray] = []
+    all_correct = True
+    sit_heights: list[int] = []
+    stand_heights: list[int] = []
+
+    def _make_tile(
+        path: Path,
+        label: str,
+        expected_sit: bool,
+    ) -> np.ndarray | None:
+        nonlocal all_correct
+        frame = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if frame is None:
+            return None
+
+        pose = measure_center_pose(frame)
+        body_h = pose.body_height if pose is not None else -1
+        is_sit = body_h < 80 if body_h >= 0 else None
+
+        if expected_sit:
+            sit_heights.append(body_h)
+        else:
+            stand_heights.append(body_h)
+
+        # Extract the player ROI crop
+        h, w = frame.shape[:2]
+        cx, cy = w // 2, h // 2 + _PLAYER_ROI_CENTER_DY
+        x1 = max(0, cx - _PLAYER_ROI_CENTER_HALF_W)
+        y1 = max(0, cy - _PLAYER_ROI_CENTER_HALF_H)
+        x2 = min(w, cx + _PLAYER_ROI_CENTER_HALF_W)
+        y2 = min(h, cy + _PLAYER_ROI_CENTER_HALF_H)
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            return None
+
+        # Scale crop for visibility
+        crop_big = cv2.resize(
+            crop, (250 * 2, 250 * 2), interpolation=cv2.INTER_NEAREST,
+        )
+
+        # Label the tile
+        correct = is_sit == expected_sit if is_sit is not None else False
+        if not correct:
+            all_correct = False
+
+        status_color = (0, 220, 0) if correct else (0, 0, 220)
+        status_text = "OK" if correct else "FAIL"
+        sit_str = "sit" if is_sit else ("stand" if is_sit is False else "?")
+
+        tile = crop_big.copy()
+        cv2.rectangle(tile, (0, 0), (tile.shape[1] - 1, tile.shape[0] - 1),
+                      status_color, 4)
+        cv2.putText(tile, path.name, (8, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+        cv2.putText(tile, f"{label}", (8, 46),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, (220, 220, 220), 1)
+        cv2.putText(tile, f"h={body_h}  {sit_str}  {status_text}",
+                    (8, tile.shape[0] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, status_color, 2)
+        return tile
+
+    for i, path in enumerate(sit_paths):
+        tile = _make_tile(path, "SIT", expected_sit=True)
+        if tile is not None:
+            tiles.append(tile)
+
+    for i, path in enumerate(stand_paths):
+        tile = _make_tile(path, "STAND", expected_sit=False)
+        if tile is not None:
+            tiles.append(tile)
+
+    grid = _pack_tiles(tiles, cols=4, gap=8)
+
+    # ── Summary header ├──
+    sit_ok = all_correct
+    gap_min = min(stand_heights) - max(sit_heights) if sit_heights and stand_heights else 0
+    summary = (
+        f"{'ALL PASS' if sit_ok else 'SOME FAILED'}"
+        f"  |  sit h range: {min(sit_heights)}-{max(sit_heights)}"
+        f"  |  stand h range: {min(stand_heights)}-{max(stand_heights)}"
+        f"  |  gap: {gap_min}px"
+    )
+    header = np.full((42, grid.shape[1], 3), 36, dtype=np.uint8)
+    color = (0, 220, 0) if sit_ok else (0, 0, 220)
+    cv2.putText(header, "POSE EVALUATION — sit/stand detection on test fixtures",
+                (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.putText(header, summary,
+                (8, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.40, color, 1, cv2.LINE_AA)
+
+    return np.vstack([header, grid])
+
+
+# ── All status panel test fixtures from test_status_panel.py ──
+_STATUS_PANEL_FIXTURES: list[tuple[str, int, int, int, int, int, int]] = [
+    ("StatusPanel.png",  850, 3187, 1229, 1229,  587, 2630),
+    ("StatusPanel2.png", 2260, 3348,  430,  430,  280, 2730),
+    ("StatusPanel3.png", 1387, 3348,  430,  430,  280, 2730),
+    ("StatusPanel4.png", 3348, 3348,  360,  430,  305, 2730),
+    ("StatusPanel5.png", 3348, 3348,  365,  430,  305, 2730),
+    ("W9.png",           3348, 3348,  430,  430,  297, 2730),
+    ("W4.png",           3348, 3348,  430,  430,  294, 2730),
+    ("W1.png",           3348, 3348,  430,  430,  291, 2730),
+    ("RedWeight.png",    3424, 3424,  107,  435, 2457, 2730),
+    ("FalseWeight.png",   874, 3424,  249,  485,  427, 2730),
+    ("WeightIssue.png",  3501, 3501,  370,  457,  464, 2730),
+    ("StatusPanel6.png",    40,   40,   11,   11,   50, 2030),
+]
+
+
+def render_status_panel_rois(fixture_name: str) -> np.ndarray:
+    """Visualize the HP / SP / Weight OCR ROIs for one status panel fixture.
+
+    Loads ``tests/{fixture_name}``, locates the Basic Info panel, and
+    shows each ROI crop with the OCR-parsed values side by side.
+    """
+    tests_dir = Path(__file__).resolve().parent.parent / "tests"
+    fixture_path = tests_dir / fixture_name
+
+    frame = cv2.imread(str(fixture_path))
+    if frame is None:
+        return _text_block([f"Status panel fixture not found:", str(fixture_path)])
+
+    origin = find_status_panel(frame)
+    if origin is None:
+        return _text_block(["Could not locate status panel header", f"in {fixture_name}"])
+
+    values = read_status_panel(frame, origin=origin)
+    ox, oy = origin
+
+    # ── Left panel: full frame with ROIs overlaid ────────────────
+    full = frame.copy()
+    scan_defs = [
+        ("HP", HP_SCAN_ZONE, HP_ROI, (0, 0, 255)),
+        ("SP", SP_SCAN_ZONE, SP_ROI, (0, 220, 0)),
+        ("WEIGHT", WEIGHT_SCAN_ZONE, WEIGHT_ROI, (255, 180, 0)),
+    ]
+    for name, scan_roi, old_roi, color in scan_defs:
+        # Scan zone — dashed, larger, shows where the "/" search happens
+        sx, sy, sw, sh = scan_roi
+        sx1, sy1 = ox + sx, oy + sy
+        sx2, sy2 = sx1 + sw, sy1 + sh
+        for dx in range(sx1, sx2, 6):
+            cv2.line(full, (dx, sy1), (min(dx + 3, sx2), sy1), color, 1)
+            cv2.line(full, (dx, sy2 - 1), (min(dx + 3, sx2), sy2 - 1), color, 1)
+        for dy in range(sy1, sy2, 6):
+            cv2.line(full, (sx1, dy), (sx1, min(dy + 3, sy2)), color, 1)
+            cv2.line(full, (sx2 - 1, dy), (sx2 - 1, min(dy + 3, sy2)), color, 1)
+        cv2.putText(full, f"{name} SCAN", (sx1, max(sy1 - 8, 12)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
+
+        # Old fixed ROI — solid rectangle
+        rx, ry, rw, rh = old_roi
+        rx1, ry1 = ox + rx, oy + ry
+        rx2, ry2 = rx1 + rw, ry1 + rh
+        cv2.rectangle(full, (rx1, ry1), (rx2, ry2), color, 1, cv2.LINE_AA)
+        label = f"{name} ROI ({rw}x{rh})"
+        cv2.putText(full, label, (rx1, max(ry1 - 6, 12)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
+
+    # ── Info bar ─────────────────────────────────────────────────
+    info_bg = np.full((42, full.shape[1], 3), 36, dtype=np.uint8)
+    # Expected values from fixture definition
+    expected = next(
+        (e for e in _STATUS_PANEL_FIXTURES if e[0] == fixture_name), None
+    )
+    if expected and values is not None:
+        _, e_hp, e_hp_max, e_sp, e_sp_max, e_w, e_w_max = expected
+        hp_ok = values.hp == e_hp and values.hp_max == e_hp_max
+        sp_ok = values.sp == e_sp and values.sp_max == e_sp_max
+        wt_ok = values.weight == e_w and values.weight_max == e_w_max
+        status_color = (0, 220, 0) if hp_ok and sp_ok and wt_ok else (0, 0, 220)
+        status_text = "PASS" if hp_ok and sp_ok and wt_ok else "FAIL"
+        ocr_line = (
+            f"HP {values.hp}/{values.hp_max} {'✔' if hp_ok else '✗'}  "
+            f"SP {values.sp}/{values.sp_max} {'✔' if sp_ok else '✗'}  "
+            f"Weight {values.weight}/{values.weight_max} {'✔' if wt_ok else '✗'}"
+        )
+    elif values is not None:
+        status_color = (180, 180, 180)
+        status_text = "CHECK"
+        ocr_line = (
+            f"HP {values.hp}/{values.hp_max}  "
+            f"SP {values.sp}/{values.sp_max}  "
+            f"Weight {values.weight}/{values.weight_max}"
+        )
+    else:
+        status_color = (0, 0, 220)
+        status_text = "FAIL"
+        ocr_line = "OCR FAILED"
+
+    cv2.putText(info_bg, f"{fixture_name}  —  {status_text}",
+                (8, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, status_color, 1, cv2.LINE_AA)
+    cv2.putText(info_bg, ocr_line,
+                (8, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (220, 220, 220), 1, cv2.LINE_AA)
+    full = np.vstack([info_bg, full])
+
+    # ── Right panel: extracted ROI crops stacked ────────────────
+    crop_scale = 4
+    right_parts: list[np.ndarray] = []
+
+    for name, _scan_roi, old_roi, color in scan_defs:
+        rx, ry, rw, rh = old_roi
+        crop = frame[oy + ry : oy + ry + rh, ox + rx : ox + rx + rw]
+        crop_big = cv2.resize(crop, (rw * crop_scale, rh * crop_scale),
+                              interpolation=cv2.INTER_NEAREST)
+        # Border to match the color
+        cv2.rectangle(crop_big, (0, 0), (crop_big.shape[1] - 1, crop_big.shape[0] - 1),
+                      color, 3)
+        # Label with parsed value
+        val_str = "?"
+        if values is not None:
+            if name == "HP":
+                val_str = f"{values.hp}/{values.hp_max}"
+            elif name == "SP":
+                val_str = f"{values.sp}/{values.sp_max}"
+            else:
+                val_str = f"{values.weight}/{values.weight_max}" if values.weight else "?/?"
+        label = np.full((24, crop_big.shape[1], 3), 28, dtype=np.uint8)
+        cv2.putText(label, f"{name}: {val_str}", (4, 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, color, 1, cv2.LINE_AA)
+        right_parts.append(np.vstack([label, crop_big]))
+
+    # Compute uniform width (widest crop) for stacking
+    max_w = max(r.shape[1] for r in right_parts)
+    title_bar = np.full((28, max_w, 3), 36, dtype=np.uint8)
+    cv2.putText(title_bar, f"Extracted ROI crops  ({fixture_name})",
+                (8, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 220, 255), 1, cv2.LINE_AA)
+    padded_rows: list[np.ndarray] = [title_bar]
+    for row in right_parts:
+        if row.shape[1] < max_w:
+            pad = np.full((row.shape[0], max_w - row.shape[1], 3), 28, dtype=np.uint8)
+            row = np.hstack([row, pad])
+        padded_rows.append(row)
+    right_panel = np.vstack(padded_rows)
+
+    # ── Composite ────────────────────────────────────────────────
+    full_h = full.shape[0]
+    right_h = right_panel.shape[0]
+    if full_h < right_h:
+        pad = np.full((right_h - full_h, full.shape[1], 3), 28, dtype=np.uint8)
+        full = np.vstack([full, pad])
+    elif right_h < full_h:
+        pad = np.full((full_h - right_h, right_panel.shape[1], 3), 28, dtype=np.uint8)
+        right_panel = np.vstack([right_panel, pad])
+    gap = np.full((full_h, 4, 3), 48, dtype=np.uint8)
+
+    return np.hstack([full, gap, right_panel])
+
+
 def write_pipeline_structure(path: Path) -> None:
     assert_discovery_pipeline_matches_source()
     path.write_text(format_discovery_pipeline_text(), encoding="utf-8")
@@ -612,6 +1044,41 @@ def main() -> None:
     pipeline_path = OUT_DIR / "pipeline.txt"
     write_pipeline_structure(pipeline_path)
     print(f"  wrote {pipeline_path}")
+
+    # ── Player ROI visualization ─────────────────────────────────
+    first_suite = MOB_FIXTURE_SUITES[0]
+    first_images = first_suite.images()
+    if first_images:
+        img = first_images[0]
+        frame = cv2.imread(str(img.path))
+        if frame is not None:
+            frame = fixture_search_frame(frame)
+            roi_viz = render_player_roi(frame)
+            roi_path = OUT_DIR / "player_roi.png"
+            cv2.imwrite(str(roi_path), roi_viz)
+            print(f"  wrote {roi_path}  ({first_suite.mob_name}: {img.file_name})")
+
+            # 250x250 nearby-mob ROI viz
+            nearby_viz = render_nearby_mobs_viz(frame)
+            nearby_path = OUT_DIR / "nearby_mob_roi.png"
+            cv2.imwrite(str(nearby_path), nearby_viz)
+            print(f"  wrote {nearby_path}  (blobs: {detect_nearby_any_mobs(frame)})")
+
+    # ── Status panel ROI visualization (all 11 test fixtures) ────
+    panel_roi_dir = OUT_DIR / "status_panel_rois"
+    panel_roi_dir.mkdir(parents=True, exist_ok=True)
+    for fixture_name, *_ in _STATUS_PANEL_FIXTURES:
+        panel_viz = render_status_panel_rois(fixture_name)
+        stem = fixture_name.replace(".png", "")
+        panel_path = panel_roi_dir / f"{stem}_roi.png"
+        cv2.imwrite(str(panel_path), panel_viz)
+        print(f"  wrote {panel_path}  ({fixture_name})")
+
+    # ── Pose evaluation visualization ────────────────────────────
+    pose_viz = render_pose_evaluation()
+    pose_path = OUT_DIR / "pose_evaluation.png"
+    cv2.imwrite(str(pose_path), pose_viz)
+    print(f"  wrote {pose_path}")
 
     viz_count = 0
     descriptor_count = 0

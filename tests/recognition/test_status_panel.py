@@ -33,6 +33,8 @@ FIXTURE_CASES: tuple[tuple[str, int, int, int, int, int, int], ...] = (
     ("FalseWeight.png", 874, 3424, 249, 485, 427, 2730),
     # Short Zeny right-shifts ``464 / 2730``; ROI must still capture the max.
     ("WeightIssue.png", 3501, 3501, 370, 457, 464, 2730),
+    # Full bar values — HP=40/40, SP=11/11, Weight=50/2030.
+    ("StatusPanel6.png", 40, 40, 11, 11, 50, 2030),
 )
 
 
