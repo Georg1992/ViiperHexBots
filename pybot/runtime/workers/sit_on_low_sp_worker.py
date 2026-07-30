@@ -162,8 +162,7 @@ class SitOnLowSpWorker:
                     return
                 if outcome == "stopped":
                     return
-                # Danger was handled by the detector (HP drop → danger tp).
-                # teleport_until_quiet now finds a safe spot to re-sit.
+
                 ctx.logger.behavior(
                     f"[SIT] {outcome} while regenerating — "
                     "finding another sit spot"
@@ -235,16 +234,6 @@ class SitOnLowSpWorker:
                         danger = self._assess_danger(
                             frame, hp=hp, previous_hp=last_hp
                         )
-                        # Fallback: detector couldn't tp (no key), but HP
-                        # still dropped — return danger so teleport_until_quiet
-                        # handles escape with the normal creamy-first key.
-                        if danger.hp_dropped:
-                            ctx.logger.behavior(
-                                f"[SIT] danger while sitting sp={sp} "
-                                f"reasons={','.join(danger.reasons)} "
-                                "(hp dropped, character auto-stood)"
-                            )
-                            return "danger"
                         if (
                             sp_stalled
                             and danger.has_near_objects

@@ -242,38 +242,26 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             vitals=vitals,
         )
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-        poses = [_STAND, _SIT]
         hp_values = iter([1000, 900])
 
-        def fake_assess(frame, *, hp=None, previous_hp=None):
-            del frame
-            if (
-                hp is not None
-                and previous_hp is not None
-                and hp < previous_hp
-            ):
-                return DangerReport(
-                    in_danger=True,
-                    reasons=(f"hp_drop:{previous_hp}->{hp}",),
-                    near_object_count=0,
-                )
-            return DangerReport(in_danger=False, reasons=(), near_object_count=0)
+        # Detector needs a valid danger tp key to fire.
+        self.config.danger_teleport_scan_code.return_value = 16
 
         with patch(
             "pybot.runtime.workers.sit_on_low_sp_worker.SIT_HP_POLL_S",
             0.0,
         ):
-            with patch.object(
-                worker, "_measure_pose", side_effect=self._pose_side_effect(poses)
-            ):
-                with patch.object(worker, "_capture_client", return_value=object()):
+            with patch.object(worker, "_capture_client", return_value=object()):
+                with patch.object(
+                    worker, "_read_hp", side_effect=lambda _f: next(hp_values, 900)
+                ):
                     with patch.object(
-                        worker, "_read_hp", side_effect=lambda _f: next(hp_values, 900)
+                        worker, "_assess_danger",
+                        return_value=DangerReport(
+                            in_danger=False, reasons=(), near_object_count=0,
+                        ),
                     ):
-                        with patch.object(
-                            worker, "_assess_danger", side_effect=fake_assess
-                        ):
-                            outcome = worker._sit_session()
+                        outcome = worker._sit_session()
 
         self.assertEqual(outcome, "danger")
 
