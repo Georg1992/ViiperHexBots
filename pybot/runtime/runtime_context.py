@@ -153,6 +153,10 @@ class HuntRuntimeContext:
         """Release storage session; combat may resume."""
         with self._sit_storage_lock:
             self.storage_event.clear()
+        # Wake combat (wait_while_combat_blocked polls resume_gate),
+        # and discovery/tracking (blocked by storage_event in should_run_*).
+        self.resume_gate.set()
+        self.discovery_wake.set()
 
     def begin_sit_regen(self) -> bool:
         """Pause hunting/timers for SP regeneration (independent of user pause)."""
@@ -164,13 +168,14 @@ class HuntRuntimeContext:
 
     def note_teleport_for_wings(self) -> None:
         """AHK Teleport: decrement wing counter when Take Fly Wings is on."""
-        if (
-            self.config.open_storage_steps
-            and self.config.take_fly_wings
-            and not self.fly_wings_exhausted
-            and self.wingcount > 0
-        ):
-            self.wingcount -= 1
+        with self._sit_storage_lock:
+            if (
+                self.config.open_storage_steps
+                and self.config.take_fly_wings
+                and not self.fly_wings_exhausted
+                and self.wingcount > 0
+            ):
+                self.wingcount -= 1
 
     def should_restock_fly_wings(self) -> bool:
         """True when GetFlyWings should run (enabled, amount set, count 0)."""

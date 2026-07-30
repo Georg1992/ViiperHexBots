@@ -57,11 +57,14 @@ class DiscoveryWorker:
         while not ctx.stop_event.is_set():
             try:
                 if not ctx.should_run_discovery():
-                    # Sit/pause: wait on resume gate. Storage: poll until UI done.
+                    # Sit/pause: wait on resume gate. Storage: wait on
+                    # discovery_wake so end_storage_ops can wake us immediately.
+                    # After continue, the normal path's _wait_for_discovery_wake
+                    # picks up the still-set wake signal and clears it.
                     if not ctx.should_run_workers():
                         ctx.wait_while_stopped_or_paused(interval_s)
                     else:
-                        ctx.stop_event.wait(interval_s)
+                        ctx.discovery_wake.wait(interval_s)
                     continue
                 if ctx.discovery_suspend.is_set():
                     # Teleport in flight: ignore the 1s cadence; wait for wake.

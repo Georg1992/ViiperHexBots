@@ -165,26 +165,26 @@ class TeleportController:
         ctx.discovery_suspend.set()
         ctx.discovery_wake.clear()
 
-        # Claim under the tracks lock before input so a concurrent discovery
-        # reconcile cannot spawn tracks into the area we are leaving.
-        if not ctx.tracks.try_claim_clear_for_teleport():
+        try:
+            # Claim under the tracks lock before input so a concurrent discovery
+            # reconcile cannot spawn tracks into the area we are leaving.
+            if not ctx.tracks.try_claim_clear_for_teleport():
+                return False
+
+            ctx.policy.reset()
+            ctx.validation.log_area_reset("pre_teleport")
+            self._hunt_mode.on_area_reset()
+
+            tp_button = self.active_button()
+            ctx.logger.behavior(
+                f"[MODE] teleport key={tp_button!r} "
+                f"wingsExhausted={ctx.fly_wings_exhausted}"
+            )
+            ok = self.teleport_once()
+            return ok
+        finally:
             ctx.discovery_suspend.clear()
-            return False
-
-        ctx.policy.reset()
-        ctx.validation.log_area_reset("pre_teleport")
-        self._hunt_mode.on_area_reset()
-
-        tp_button = self.active_button()
-        ctx.logger.behavior(
-            f"[MODE] teleport key={tp_button!r} "
-            f"wingsExhausted={ctx.fly_wings_exhausted}"
-        )
-        ok = self.teleport_once()
-
-        ctx.discovery_suspend.clear()
-        ctx.discovery_wake.set()
-        return ok
+            ctx.discovery_wake.set()
 
     # ── Internal helpers ─────────────────────────────────────────
 
