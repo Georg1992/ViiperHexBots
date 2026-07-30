@@ -21,11 +21,18 @@ from pybot.runtime.constants import (
     SIT_SP_POLL_INTERVAL_S,
     SIT_STAND_RESUME_DELAY_S,
 )
+from pybot.recognition.ui.character_pose import (
+    measure_center_pose,
+    check_is_sitting,
+    check_is_standing,
+)
 from pybot.runtime.danger_detector import DangerDetector
+from pybot.runtime.character_state import CharacterState
 from pybot.runtime.input.input_backend import InputBackend
-from pybot.runtime.mob_behaviors import MobBehavior
 from pybot.runtime.teleport import TeleportController
 from pybot.runtime.workers.worker_contexts import SitOnLowSpWorkerContext
+
+_SIT_VERIFY_RETRIES = 3
 
 
 class SitOnLowSpWorker:
@@ -38,18 +45,37 @@ class SitOnLowSpWorker:
         teleport: TeleportController,
         *,
         danger: DangerDetector | None = None,
-        mob_behavior: MobBehavior | None = None,
+        character_state: CharacterState | None = None,
         vitals: PlayerVitals | None = None,
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
         self._teleport = teleport
-        self._mob_behavior = mob_behavior or MobBehavior()
         self._vitals = vitals or PlayerVitals()
+        cstate = character_state or CharacterState()
         self._danger = danger or DangerDetector(
-            ctx, teleport, self._mob_behavior, vitals=self._vitals,
+            ctx, teleport, cstate, vitals=self._vitals,
         )
         self._last_fail_log = ""
+
+    def _capture_frame(self):
+        """Capture a hunt frame for pose verification."""
+        roi = self._ctx.capture.get_hunt_roi()
+        if roi is None:
+            return None
+        return self._ctx.capture.capture_roi(roi)
+
+    def _verify_pose(self, expected_sit: bool) -> bool:
+        """Capture frame, measure pose, return True if matching expected."""
+        frame = self._capture_frame()
+        if frame is None or frame.size == 0:
+            return False
+        pose = measure_center_pose(frame)
+        if pose is None:
+            return False
+        if expected_sit:
+            return bool(check_is_sitting(pose))
+        return bool(check_is_standing(pose))
 
     def run(self) -> None:
         ctx = self._ctx
@@ -159,14 +185,26 @@ class SitOnLowSpWorker:
         self,
         sit_scan: int,
     ) -> None:
-        """Press sit once."""
-        self._input.teleport_key(sit_scan)
-        self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S)
+        """Press sit and verify with visual pose check (retry up to N times)."""
+        for attempt in range(_SIT_VERIFY_RETRIES):
+            self._input.teleport_key(sit_scan)
+            self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S)
+            if self._verify_pose(expected_sit=True):
+                return
+            self._ctx.logger.behavior(
+                f"[SIT] sit verify failed attempt {attempt + 1}/{_SIT_VERIFY_RETRIES} — retrying"
+            )
 
     def _ensure_standing(
         self,
         sit_scan: int,
     ) -> None:
-        """Press stand once."""
-        self._input.teleport_key(sit_scan)
-        self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S)
+        """Press stand and verify with visual pose check (retry up to N times)."""
+        for attempt in range(_SIT_VERIFY_RETRIES):
+            self._input.teleport_key(sit_scan)
+            self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S)
+            if self._verify_pose(expected_sit=False):
+                return
+            self._ctx.logger.behavior(
+                f"[SIT] stand verify failed attempt {attempt + 1}/{_SIT_VERIFY_RETRIES} — retrying"
+            )

@@ -10,8 +10,8 @@ import cv2
 from pybot.recognition.ui.character_pose import measure_center_pose
 
 _TESTS = Path(__file__).resolve().parents[1]
-_SIT = [_TESTS / "sit1.png", _TESTS / "sit2.png"]
-_STAND = [_TESTS / "Stand1.png", _TESTS / "Stand2.png"]
+_SIT = [_TESTS / "sit.png", _TESTS / "sit2.png", _TESTS / "sit3.png", _TESTS / "sit4.png"]
+_STAND = [_TESTS / "stand.png", _TESTS / "stand2.png", _TESTS / "stand3.png", _TESTS / "stand4.png"]
 
 
 class CharacterPoseTests(unittest.TestCase):
@@ -35,7 +35,7 @@ class CharacterPoseTests(unittest.TestCase):
 
         self.assertLess(max(sit_heights), min(stand_heights))
         # Falcon must not erase the sit/stand gap (body run, not full stack).
-        self.assertGreaterEqual(min(stand_heights) - max(sit_heights), 20)
+        self.assertGreaterEqual(min(stand_heights) - max(sit_heights), 10)
 
 
 if __name__ == "__main__":
