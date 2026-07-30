@@ -186,60 +186,11 @@ def read_snapshot(
         kernel32.CloseHandle(handle)
 
 
-def _client_rect_screen(hwnd: int) -> tuple[int, int, int, int] | None:
-    """``(left, top, width, height)`` of *hwnd*'s client area in screen coords."""
-    if not hwnd or not user32.IsWindow(hwnd):
-        return None
-    client_rect = wintypes.RECT()
-    if not user32.GetClientRect(hwnd, ctypes.byref(client_rect)):
-        return None
-    origin = wintypes.POINT(0, 0)
-    if not user32.ClientToScreen(hwnd, ctypes.byref(origin)):
-        return None
-    width = client_rect.right - client_rect.left
-    height = client_rect.bottom - client_rect.top
-    if width <= 0 or height <= 0:
-        return None
-    return int(origin.x), int(origin.y), int(width), int(height)
-
-
-def read_vision_snapshot(hwnd: int) -> MemorySnapshot:
-    """Read HP/SP/Weight from the open Basic Info panel into a ``MemorySnapshot``.
-
-    HP is vision-only (never filled from process memory). ``char_name`` is
-    not available from vision.
-    """
-    from pybot.recognition.capture import capture_region
-    from pybot.recognition.ui.status_panel import read_status_panel
-
-    if not hwnd:
-        return MemorySnapshot(error="select a game window")
-    client = _client_rect_screen(hwnd)
-    if client is None:
-        return MemorySnapshot(error="no client rect")
-    left, top, width, height = client
-    frame = capture_region(left, top, width, height)
-    if frame is None or frame.size == 0:
-        return MemorySnapshot(error="capture_empty")
-    values = read_status_panel(frame)
-    if values is None:
-        return MemorySnapshot(error="status_panel_unreadable")
-    return MemorySnapshot(
-        hp=values.hp,
-        hp_max=values.hp_max,
-        sp=values.sp,
-        sp_max=values.sp_max,
-        weight=values.weight,
-        weight_max=values.weight_max,
-        ok=True,
-    )
-
-
 class GameMemoryPoller:
-    """Produces ``MemorySnapshot`` from process memory or status-panel vision.
+    """Produces ``MemorySnapshot`` from process memory.
 
-    When *addresses* include SP offsets, reads memory. Otherwise (Generic)
-    OCR's the Basic Info panel into the same snapshot fields.
+    Requires a profile with SP offsets — the only caller (UI memory polling)
+    validates this before calling ``read()``.
     """
 
     def __init__(self) -> None:
@@ -251,9 +202,9 @@ class GameMemoryPoller:
         self._base = 0
 
     def read(self, hwnd: int, addresses: MemoryAddresses) -> MemorySnapshot:
-        if addresses.current_sp > 0 and addresses.max_sp > 0:
-            return self._read_memory(hwnd, addresses)
-        return read_vision_snapshot(hwnd)
+        if not (addresses.current_sp > 0 and addresses.max_sp > 0):
+            return MemorySnapshot(error="no sp addresses")
+        return self._read_memory(hwnd, addresses)
 
     def _read_memory(self, hwnd: int, addresses: MemoryAddresses) -> MemorySnapshot:
         pid = pid_from_hwnd(hwnd)

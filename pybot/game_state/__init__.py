@@ -7,7 +7,6 @@ from pybot.game_state.process_memory import (
     module_base_address,
     pid_from_hwnd,
     read_snapshot,
-    read_vision_snapshot,
 )
 
 __all__ = [
@@ -17,5 +16,4 @@ __all__ = [
     "module_base_address",
     "pid_from_hwnd",
     "read_snapshot",
-    "read_vision_snapshot",
 ]
