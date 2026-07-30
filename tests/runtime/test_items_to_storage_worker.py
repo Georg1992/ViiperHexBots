@@ -11,6 +11,7 @@ import numpy as np
 from pybot.game_state import MemorySnapshot
 from pybot.config.clients import MemoryAddresses
 from pybot.recognition.ui.inventory import InventoryPanelHit, InventoryUiError
+from pybot.recognition.ui.status_panel import StatusPanelValues
 from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.workers.items_to_storage_worker import (
@@ -379,8 +380,6 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             m["ItemsToStorageWorker._close_menus"].assert_called()
 
     def test_restock_force_closes_only_on_critical_hp(self) -> None:
-        from pybot.recognition.ui.status_panel import StatusPanelValues
-
         stack, m = _enter_worker_patches(
             find_template=DEFAULT,
             read_status_panel=DEFAULT,
@@ -573,8 +572,6 @@ class ItemsToStorageWorkerReadWeightTests(unittest.TestCase):
 
     def test_ocr_mode_falls_through_when_no_memory_addresses(self) -> None:
         """current_weight=0 → uses OCR path"""
-        from pybot.recognition.ui.status_panel import StatusPanelValues
-
         # Memory addresses all zero → OCR path
         memory = MemoryAddresses(current_weight=0, max_weight=0)
         worker = self._worker(_FakePoller(450, 500), memory=memory)
@@ -626,8 +623,6 @@ class ItemsToStorageWorkerReadWeightTests(unittest.TestCase):
 
     def test_ocr_mode_returns_none_when_weight_none(self) -> None:
         """StatusPanelValues.weight=None → None"""
-        from pybot.recognition.ui.status_panel import StatusPanelValues
-
         memory = MemoryAddresses(current_weight=0, max_weight=0)
         worker = self._worker(_FakePoller(450, 500), memory=memory)
 
@@ -649,8 +644,6 @@ class ItemsToStorageWorkerReadWeightTests(unittest.TestCase):
 
     def test_ocr_mode_returns_none_when_max_weight_none(self) -> None:
         """StatusPanelValues.weight_max=None → None"""
-        from pybot.recognition.ui.status_panel import StatusPanelValues
-
         memory = MemoryAddresses(current_weight=0, max_weight=0)
         worker = self._worker(_FakePoller(450, 500), memory=memory)
 
@@ -672,8 +665,6 @@ class ItemsToStorageWorkerReadWeightTests(unittest.TestCase):
 
     def test_ocr_mode_returns_none_when_max_weight_zero(self) -> None:
         """StatusPanelValues.weight_max=0 → None"""
-        from pybot.recognition.ui.status_panel import StatusPanelValues
-
         memory = MemoryAddresses(current_weight=0, max_weight=0)
         worker = self._worker(_FakePoller(450, 500), memory=memory)
 
@@ -695,8 +686,6 @@ class ItemsToStorageWorkerReadWeightTests(unittest.TestCase):
 
     def test_ocr_mode_returns_weight_on_success(self) -> None:
         """Valid StatusPanelValues → (weight, weight_max)"""
-        from pybot.recognition.ui.status_panel import StatusPanelValues
-
         memory = MemoryAddresses(current_weight=0, max_weight=0)
         worker = self._worker(_FakePoller(450, 500), memory=memory)
 
@@ -745,8 +734,6 @@ class ItemsToStorageWorkerReadWeightTests(unittest.TestCase):
 
     def test_success_clears_fail_log_so_next_failure_relogs(self) -> None:
         """Success resets last_fail_log → next failure logs again"""
-        from pybot.recognition.ui.status_panel import StatusPanelValues
-
         memory = MemoryAddresses(current_weight=0, max_weight=0)
         worker = self._worker(_FakePoller(450, 500), memory=memory)
 
