@@ -4,7 +4,8 @@ Callers feed data in; the detector decides danger and teleports.
 Nothing comes back out.  No other module knows danger exists.
 
 Inputs:
-* ``feed_hp(hp)`` — HP drop triggers teleport (universal)
+* ``feed_hp(hp, hp_max=None)`` — HP drop triggers teleport;
+  drops below 50% of max are logged as critical
 * ``feed_tracks(char_x, char_y, all_mobs)`` — surrounded triggers
   teleport (only for mobs with custom behavior — Anubis for now)
 """
@@ -16,6 +17,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pybot.runtime.input.input_backend import InputBackend
     from pybot.runtime.mob_behaviors import MobBehavior
+
+CRITICAL_HP_RATIO = 0.5
 
 
 class DangerDetector:
@@ -34,15 +37,30 @@ class DangerDetector:
 
     # ── Data-in methods ──────────────────────────────────────────
 
-    def feed_hp(self, hp: int | None) -> bool:
-        """Observe current HP.  Teleports on drop.
+    def feed_hp(self, hp: int | None, hp_max: int | None = None) -> bool:
+        """Observe current HP.  Teleports on any HP drop.
+
+        Drops below 50% of max are logged as ``critical_hp`` — the
+        action is the same (teleport).  Callers that know max HP pass
+        it along for richer logging.
 
         Returns ``True`` when the detector teleported.
         """
         if hp is not None and self._prev_hp is not None and hp < self._prev_hp:
-            self._mob_behavior.execute_danger_teleport(
-                self._ctx, self._input, reason="hp_drop",
+            # Check if this is a critical drop (below 50% of max)
+            is_critical = (
+                hp_max is not None
+                and hp_max > 0
+                and hp / hp_max < CRITICAL_HP_RATIO
             )
+            if is_critical:
+                self._mob_behavior.execute_danger_teleport(
+                    self._ctx, self._input, reason="critical_hp",
+                )
+            else:
+                self._mob_behavior.execute_danger_teleport(
+                    self._ctx, self._input, reason="hp_drop",
+                )
             self._prev_hp = hp
             return True
         self._prev_hp = hp
