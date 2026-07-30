@@ -29,6 +29,7 @@ from pybot.runtime.detection.detector_session import DetectorSession
 from pybot.runtime.workers.attack_loop import AttackLoop
 from pybot.runtime.workers.coord_tracking_worker import CoordTrackingWorker
 from pybot.runtime.mob_behaviors import get_mob_behavior
+from pybot.runtime.danger_detector import DangerDetector
 from pybot.game_state import PlayerVitals
 
 from pybot.runtime.workers.discovery_worker import DiscoveryWorker
@@ -183,8 +184,10 @@ def create_runtime_deps(
     char_y = roi.y + roi.h // 2 if roi else 0
     player_vitals = vitals or PlayerVitals()
     mob_behavior = get_mob_behavior(config.mob_name)
+    danger = DangerDetector()
     attack = AttackLoop(
         ctx, hunt_mode, input_backend,
+        danger=danger,
         mob_behavior=mob_behavior,
         vitals=player_vitals,
         char_x=char_x, char_y=char_y,
@@ -219,7 +222,7 @@ def create_runtime_deps(
             )
         sit_worker = SitOnLowSpWorker(
             ctx, input_backend, hunt_mode=hunt_mode,
-            mob_behavior=mob_behavior, vitals=player_vitals,
+            danger=danger, mob_behavior=mob_behavior, vitals=player_vitals,
         )
         workers.append(("sit_sp", sit_worker.run))
     # Storage deposit + GetFlyWings only when Open Storage keychain is assigned.

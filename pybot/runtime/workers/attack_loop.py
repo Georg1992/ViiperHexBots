@@ -14,6 +14,7 @@ from pybot.runtime.constants import (
 from pybot.runtime.hunt_mode import HuntModeController
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.input.input_backend import InputBackend
+from pybot.runtime.danger_detector import DangerDetector
 from pybot.runtime.mob_behaviors import MobBehavior
 from pybot.runtime.workers.worker_contexts import AttackLoopContext
 
@@ -25,6 +26,7 @@ class AttackLoop:
         hunt_mode: HuntModeController,
         input_backend: InputBackend,
         *,
+        danger: DangerDetector | None = None,
         mob_behavior: MobBehavior | None = None,
         vitals: PlayerVitals | None = None,
         char_x: int = 0,
@@ -33,6 +35,7 @@ class AttackLoop:
         self._ctx = ctx
         self._hunt_mode = hunt_mode
         self._input = input_backend
+        self._danger = danger or DangerDetector()
         self._mob_behavior = mob_behavior or MobBehavior()
         self._vitals = vitals or PlayerVitals()
         self._char_x = char_x
@@ -90,8 +93,8 @@ class AttackLoop:
             char_x, char_y, all_mobs,
         )
         if is_surrounded:
-            self._mob_behavior.execute_danger_teleport(
-                ctx, self._hunt_mode, self._input,
+            self._danger.trigger(
+                ctx, self._hunt_mode, self._input, self._mob_behavior,
                 reason=f"surrounded {reason} mobs={len(all_mobs)}",
             )
             return

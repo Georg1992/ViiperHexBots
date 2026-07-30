@@ -35,6 +35,7 @@ from pybot.runtime.constants import (
     SIT_SP_STALL_S,
     SIT_STAND_RESUME_DELAY_S,
 )
+from pybot.runtime.danger_detector import DangerDetector
 from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.mob_behaviors import MobBehavior
 from pybot.runtime.workers.worker_contexts import SitOnLowSpWorkerContext
@@ -49,12 +50,14 @@ class SitOnLowSpWorker:
         input_backend: InputBackend,
         hunt_mode: HuntModeAreaReset,
         *,
+        danger: DangerDetector | None = None,
         mob_behavior: MobBehavior | None = None,
         vitals: PlayerVitals | None = None,
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
         self._hunt_mode = hunt_mode
+        self._danger = danger or DangerDetector()
         self._mob_behavior = mob_behavior or MobBehavior()
         self._vitals = vitals or PlayerVitals()
         self._last_fail_log = ""
@@ -159,8 +162,8 @@ class SitOnLowSpWorker:
                     return
                 # Danger: escape with wing-first key, then find a quiet spot.
                 if outcome == "danger":
-                    self._mob_behavior.execute_danger_teleport(
-                        ctx, self._hunt_mode, self._input,
+                    self._danger.trigger(
+                        ctx, self._hunt_mode, self._input, self._mob_behavior,
                         reason="sit_danger",
                     )
                 ctx.logger.behavior(
