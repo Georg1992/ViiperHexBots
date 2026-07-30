@@ -57,8 +57,10 @@ class SitOnLowSpWorker:
         self._ctx = ctx
         self._input = input_backend
         self._hunt_mode = hunt_mode
-        self._danger = danger or DangerDetector()
         self._mob_behavior = mob_behavior or MobBehavior()
+        self._danger = danger or DangerDetector(
+            ctx, hunt_mode, input_backend, self._mob_behavior,
+        )
         self._vitals = vitals or PlayerVitals()
         self._last_fail_log = ""
 
@@ -160,12 +162,8 @@ class SitOnLowSpWorker:
                     return
                 if outcome == "stopped":
                     return
-                # Danger: escape with wing-first key, then find a quiet spot.
-                if outcome == "danger":
-                    self._danger.trigger(
-                        ctx, self._hunt_mode, self._input, self._mob_behavior,
-                        reason="sit_danger",
-                    )
+                # Danger was handled by the detector (HP drop → danger tp).
+                # teleport_until_quiet now finds a safe spot to re-sit.
                 ctx.logger.behavior(
                     f"[SIT] {outcome} while regenerating — "
                     "finding another sit spot"
@@ -226,9 +224,20 @@ class SitOnLowSpWorker:
                     last_hp_poll = now
                     if frame is not None:
                         hp = self._read_hp(frame)
+                        # Feed every HP reading to the detector — it tracks
+                        # previous HP internally and fires danger tp on drops.
+                        if self._danger.feed_hp(hp):
+                            ctx.logger.behavior(
+                                f"[SIT] danger while sitting sp={sp} "
+                                "(hp dropped, danger tp triggered)"
+                            )
+                            return "danger"
                         danger = self._assess_danger(
                             frame, hp=hp, previous_hp=last_hp
                         )
+                        # Fallback: detector couldn't tp (no key), but HP
+                        # still dropped — return danger so teleport_until_quiet
+                        # handles escape with the normal creamy-first key.
                         if danger.hp_dropped:
                             ctx.logger.behavior(
                                 f"[SIT] danger while sitting sp={sp} "

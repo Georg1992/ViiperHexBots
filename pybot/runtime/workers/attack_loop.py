@@ -35,8 +35,10 @@ class AttackLoop:
         self._ctx = ctx
         self._hunt_mode = hunt_mode
         self._input = input_backend
-        self._danger = danger or DangerDetector()
         self._mob_behavior = mob_behavior or MobBehavior()
+        self._danger = danger or DangerDetector(
+            ctx, hunt_mode, input_backend, self._mob_behavior,
+        )
         self._vitals = vitals or PlayerVitals()
         self._char_x = char_x
         self._char_y = char_y
@@ -86,18 +88,11 @@ class AttackLoop:
         click_x, click_y = snap.x, snap.y
         char_x, char_y = self._character_pos()
 
-        # Danger: if surrounded by mobs on opposite sides, teleport away
-        # instead of attacking — no safe kite direction exists.
+        # Danger detector observes track positions — triggers teleport
+        # automatically if surrounded (Anubis only for now).
         all_mobs = ctx.tracks.positions_snapshot()
-        is_surrounded, reason = self._mob_behavior.is_surrounded(
-            char_x, char_y, all_mobs,
-        )
-        if is_surrounded:
-            self._danger.trigger(
-                ctx, self._hunt_mode, self._input, self._mob_behavior,
-                reason=f"surrounded {reason} mobs={len(all_mobs)}",
-            )
-            return
+        if self._danger.feed_tracks(char_x, char_y, all_mobs):
+            return  # danger handled — teleported away
 
         # Idle death: cheap cache samples around the configured skill delay.
         # Pacing is exactly skill_delay_ms (plus click) — no OCR / capture here.
