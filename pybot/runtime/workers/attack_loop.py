@@ -98,9 +98,10 @@ class AttackLoop:
         # Sole inter-skill wait — game applies SP cost; UI may refresh vitals.
         self._ctx.stop_event.wait(ctx.config.skill_delay_ms / 1000.0)
 
-        # Kite: move away from the mob after attacking (Anubis, etc.)
+        # Kite: move away from ALL tracked mobs after attacking (Anubis, etc.)
+        all_mobs = ctx.tracks.positions_snapshot()
         self._mob_behavior.kite_after_attack(
-            click_x, click_y, char_x, char_y, self._input,
+            char_x, char_y, self._input, all_mobs=all_mobs,
         )
 
         post_sp, post_obs_ms, post_chg_ms = self._vitals.sp_sample()

@@ -26,15 +26,18 @@ class MobBehavior:
 
     def kite_after_attack(
         self,
-        mob_x: int,
-        mob_y: int,
         char_x: int,
         char_y: int,
         input_backend: InputBackend,
+        *,
+        all_mobs: list[tuple[int, int]],
     ) -> bool:
-        """Move the character away from the mob after attacking.
+        """Move the character away from nearby mobs after attacking.
 
-        Called *after* the skill delay wait.  Default is a no-op.
+        Called *after* the skill delay wait.  *all_mobs* contains the
+        screen positions of every currently tracked mob.
+
+        Default is a no-op.
         Return ``True`` when the backend was instructed to click away.
         """
         return False
@@ -48,15 +51,22 @@ class AnubisBehavior(MobBehavior):
 
     def kite_after_attack(
         self,
-        mob_x: int,
-        mob_y: int,
         char_x: int,
         char_y: int,
         input_backend: InputBackend,
+        *,
+        all_mobs: list[tuple[int, int]],
     ) -> bool:
-        # Vector from mob → character; continue past character to move away.
-        dx = char_x - mob_x
-        dy = char_y - mob_y
+        if not all_mobs:
+            return False
+
+        # Average position of all mobs → vector away from their center.
+        n = len(all_mobs)
+        center_x = sum(mx for mx, _my in all_mobs) // n
+        center_y = sum(_my for _mx, my in all_mobs) // n
+
+        dx = char_x - center_x
+        dy = char_y - center_y
         kite_x = char_x + dx
         kite_y = char_y + dy
         input_backend.move_mouse(kite_x, kite_y)
