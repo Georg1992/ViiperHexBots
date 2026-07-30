@@ -36,10 +36,10 @@ class AttackLoop:
         self._hunt_mode = hunt_mode
         self._input = input_backend
         self._mob_behavior = mob_behavior or MobBehavior()
-        self._danger = danger or DangerDetector(
-            ctx, input_backend, self._mob_behavior,
-        )
         self._vitals = vitals or PlayerVitals()
+        self._danger = danger or DangerDetector(
+            ctx, input_backend, self._mob_behavior, vitals=self._vitals,
+        )
         self._char_x = char_x
         self._char_y = char_y
         self._last_sp_unknown_log_ms = 0

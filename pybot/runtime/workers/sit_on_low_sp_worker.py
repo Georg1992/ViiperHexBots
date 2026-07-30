@@ -12,7 +12,7 @@ Each sit teleport clears tracking (same as hunt-mode teleport) so workers
 resume against the new screen only.
 
 SP comes from shared ``PlayerVitals``. Danger detection (HP, critical,
-surrounded) is handled by ``DangerDetector`` / ``StatusMonitor`` — the sit
+surrounded) is handled by ``DangerDetector`` — the sit
 worker only needs to know it was interrupted.
 """
 
@@ -58,10 +58,10 @@ class SitOnLowSpWorker:
         self._input = input_backend
         self._hunt_mode = hunt_mode
         self._mob_behavior = mob_behavior or MobBehavior()
-        self._danger = danger or DangerDetector(
-            ctx, input_backend, self._mob_behavior,
-        )
         self._vitals = vitals or PlayerVitals()
+        self._danger = danger or DangerDetector(
+            ctx, input_backend, self._mob_behavior, vitals=self._vitals,
+        )
         self._last_fail_log = ""
 
     def run(self) -> None:
