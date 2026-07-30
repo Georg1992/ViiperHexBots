@@ -156,9 +156,8 @@ class ItemsToStorageWorker:
     def _read_weight(self) -> tuple[int, int] | None:
         """Return ``(weight, weight_max)`` or None when unavailable.
 
-        Prefers process memory when valid addresses are configured
-        (HoneyRO / Revenant profiles).  Falls back to Basic Info OCR for
-        Generic and other non-memory profiles.
+        Memory mode (HoneyRO / Revenant): process memory only, no OCR.
+        OCR mode (Generic): Basic Info panel only.
         """
         ctx = self._ctx
         use_memory = (
@@ -170,8 +169,13 @@ class ItemsToStorageWorker:
             if snap.ok and snap.weight is not None and snap.weight_max is not None and snap.weight_max > 0:
                 self._last_fail_log = ""
                 return int(snap.weight), int(snap.weight_max)
+            reason = "memory_weight_unavailable"
+            if reason != self._last_fail_log:
+                self._last_fail_log = reason
+                ctx.logger.behavior(f"[STORAGE] weight read failed: {reason}")
+            return None
 
-        # Memory unavailable or failed — OCR the Basic Info panel.
+        # OCR mode.
         try:
             frame = self._capture_client()
         except InventoryUiError:
