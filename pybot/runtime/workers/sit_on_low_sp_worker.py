@@ -2,18 +2,17 @@
 
 Before sitting: teleport until a discovery scan sees no living mobs, idle 1s,
 measure standing pose, sit and confirm the shorter sitting pose (retry on
-failure), then regenerate. While regenerating: if the DangerDetector
-teleports the character away (HP drop), the pose changes — detected and
-returned as ``"danger"`` so ``_recover_sp`` loops to find a new quiet spot.
+failure), then regenerate. While regenerating: if something makes the character stand up (e.g.
+DangerDetector teleport), the pose changes — detected and the sit session
+returns ``"interrupted"`` so ``_recover_sp`` loops to find a new quiet spot.
 On SP recover: stand and confirm standing pose before resume (retry on
 failure).
 
 Each sit teleport clears tracking (same as hunt-mode teleport) so workers
 resume against the new screen only.
 
-SP comes from shared ``PlayerVitals``. Danger detection (HP, critical,
-surrounded) is handled by ``DangerDetector`` — the sit
-worker only needs to know it was interrupted.
+SP comes from shared ``PlayerVitals``. Danger detection (HP, critical, surrounded) is handled by
+``DangerDetector`` — the sit worker only detects interruptions.
 """
 
 from __future__ import annotations
@@ -157,7 +156,7 @@ class SitOnLowSpWorker:
 
         Returns:
             ``"recovered"`` — stood after SP ≥ resume threshold.
-            ``"danger"`` — sitting interrupted (DangerDetector teleported).
+            ``"interrupted"`` — no longer sitting (teleported, stood up, etc.).
             ``"stopped"`` — stop/pause ended the session (stood if needed).
         """
         ctx = self._ctx
@@ -189,7 +188,7 @@ class SitOnLowSpWorker:
                     last_sp = sp
 
                 # Periodic pose check: if standing when we should be sitting,
-                # the DangerDetector teleported us away — return "danger".
+                # something interrupted us (teleport, manual, etc.) — retry.
                 if now - last_pose_check >= SIT_POSE_CHECK_S:
                     last_pose_check = now
                     pose = self._measure_pose()
@@ -198,7 +197,7 @@ class SitOnLowSpWorker:
                             f"[SIT] interrupted while sitting sp={sp} — "
                             "standing pose detected"
                         )
-                        return "danger"
+                        return "interrupted"
 
             ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
 

@@ -193,8 +193,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.overlay.set_track_positions.assert_called_with([])
         self.ctx.overlay.set_track_stats.assert_any_call(track_count=0, alive_count=0)
 
-    def test_sit_session_returns_danger_on_interruption(self) -> None:
-        """Sitting interrupted by DangerDetector → standing pose → return danger."""
+    def test_sit_session_returns_interrupted_on_standing_pose(self) -> None:
+        """Standing pose while sitting → returns "interrupted", not "danger"."""
         vitals = _ScriptedVitals([0.40] * 20)
         worker = SitOnLowSpWorker(
             self.ctx,
@@ -211,7 +211,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             with patch.object(worker, "_measure_pose", return_value=_STAND):
                 outcome = worker._sit_session()
 
-        self.assertEqual(outcome, "danger")
+        self.assertEqual(outcome, "interrupted")
 
     def test_ensure_sitting_presses_once(self) -> None:
         worker = SitOnLowSpWorker(
