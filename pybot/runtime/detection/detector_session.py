@@ -124,7 +124,7 @@ class DetectorSession:
         frame: np.ndarray | None,
         roi: HuntRoi,
     ) -> DiscoveryScanResult:
-        """Discovery scan: living silhouette gate only.
+        """Discovery scan: silhouette gate or simple palette (sprite.grf).
 
         All blobs go through every gate. Dedup against existing tracks is
         handled by TrackReconciler after detection — discovery just produces
@@ -142,10 +142,16 @@ class DetectorSession:
             )
         start = time.perf_counter()
         with self._lock:
-            result = self._detector.detect(
-                frame,
-                self._mob_name,
-            )
+            if self._detector.use_sprite_grf:
+                result = self._detector.detect_simple_palette(
+                    frame,
+                    self._mob_name,
+                )
+            else:
+                result = self._detector.detect(
+                    frame,
+                    self._mob_name,
+                )
         elapsed_s = time.perf_counter() - start
         duration_ms = int(elapsed_s * 1000)
 
@@ -199,48 +205,51 @@ class DetectorSession:
                 found_count=0,
                 coord_updates=0,
             )
-        # Collect all track positions (ROI-relative) so each track's peak search
-        # can suppress heat near other tracks — prevents track swapping when mobs
-        # are close together.
-        all_roi_positions: list[tuple[int, int]] = [
-            (snapshot.x - roi.x, snapshot.y - roi.y)
-            for snapshot in track_snapshots
-        ]
         start = time.perf_counter()
         results: list[LocalTrackResult] = []
         with self._lock:
-            for i, snapshot in enumerate(track_snapshots):
-                track = {
-                    "trackId": snapshot.track_id,
-                    "x": snapshot.x - roi.x,
-                    "y": snapshot.y - roi.y,
-                }
-                if snapshot.scale > 0:
-                    track["scale"] = snapshot.scale
-                track["opacityBaseline"] = snapshot.opacity_baseline
-                track["opacityBaselineSamples"] = snapshot.opacity_baseline_samples
-                track["opacityDecayStreak"] = snapshot.opacity_decay_streak
-                track["moving"] = snapshot.moving
-                track["velX"] = snapshot.vel_x
-                track["velY"] = snapshot.vel_y
-                track["lostCount"] = snapshot.lost_count
-                track["attackCount"] = snapshot.attack_count
-                track["createdTick"] = snapshot.created_tick
-                track["nowTick"] = snapshot.now_tick
-                # Other tracks' positions for heatmap suppression
-                other_positions = [
-                    pos for j, pos in enumerate(all_roi_positions) if j != i
+            if self._detector.use_sprite_grf:
+                results = self._track_locals_simple(frame, roi, track_snapshots)
+            else:
+                # Collect all track positions (ROI-relative) so each track's peak search
+                # can suppress heat near other tracks — prevents track swapping when mobs
+                # are close together.
+                all_roi_positions: list[tuple[int, int]] = [
+                    (snapshot.x - roi.x, snapshot.y - roi.y)
+                    for snapshot in track_snapshots
                 ]
-                results.append(
-                    self._detector.track_local(
-                        frame,
-                        self._mob_name,
-                        track,
-                        offset_x=roi.x,
-                        offset_y=roi.y,
-                        suppress_positions=other_positions if other_positions else None,
+                for i, snapshot in enumerate(track_snapshots):
+                    track = {
+                        "trackId": snapshot.track_id,
+                        "x": snapshot.x - roi.x,
+                        "y": snapshot.y - roi.y,
+                    }
+                    if snapshot.scale > 0:
+                        track["scale"] = snapshot.scale
+                    track["opacityBaseline"] = snapshot.opacity_baseline
+                    track["opacityBaselineSamples"] = snapshot.opacity_baseline_samples
+                    track["opacityDecayStreak"] = snapshot.opacity_decay_streak
+                    track["moving"] = snapshot.moving
+                    track["velX"] = snapshot.vel_x
+                    track["velY"] = snapshot.vel_y
+                    track["lostCount"] = snapshot.lost_count
+                    track["attackCount"] = snapshot.attack_count
+                    track["createdTick"] = snapshot.created_tick
+                    track["nowTick"] = snapshot.now_tick
+                    # Other tracks' positions for heatmap suppression
+                    other_positions = [
+                        pos for j, pos in enumerate(all_roi_positions) if j != i
+                    ]
+                    results.append(
+                        self._detector.track_local(
+                            frame,
+                            self._mob_name,
+                            track,
+                            offset_x=roi.x,
+                            offset_y=roi.y,
+                            suppress_positions=other_positions if other_positions else None,
+                        )
                     )
-                )
         duration_ms = int((time.perf_counter() - start) * 1000)
         found_count = sum(1 for result in results if result.found)
         coord_updates = sum(
@@ -256,3 +265,46 @@ class DetectorSession:
             found_count=found_count,
             coord_updates=coord_updates,
         )
+
+    def _track_locals_simple(
+        self,
+        frame: np.ndarray,
+        roi: HuntRoi,
+        track_snapshots: list[StateTrackSnapshot],
+    ) -> list[LocalTrackResult]:
+        """Simplified tracking for sprite.grf mode — exact palette search.
+
+        Uses ``score_at_simple`` instead of the full local tracker.  No opacity
+        scoring — sprite.grf removes death animations so opacity decay is unused.
+        """
+        descriptor = self._detector.ensure_descriptor(self._mob_name)
+        results: list[LocalTrackResult] = []
+        for snapshot in track_snapshots:
+            roi_x = snapshot.x - roi.x
+            roi_y = snapshot.y - roi.y
+            scale = snapshot.scale if snapshot.scale > 0 else 1.0
+            accepted, bbox, similarity = self._detector.score_at_simple(
+                frame, descriptor, roi_x, roi_y, scale=scale,
+            )
+            if accepted and bbox is not None:
+                bx, by, bw, bh = bbox
+                results.append(LocalTrackResult(
+                    track_id=snapshot.track_id,
+                    found=True,
+                    x=bx + bw // 2 + roi.x,
+                    y=by + bh // 2 + roi.y,
+                    confidence=similarity,
+                    miss_reason="",
+                    opacity_score=0.0,
+                ))
+            else:
+                results.append(LocalTrackResult(
+                    track_id=snapshot.track_id,
+                    found=False,
+                    x=snapshot.x,
+                    y=snapshot.y,
+                    confidence=0.0,
+                    miss_reason="palette_miss",
+                    opacity_score=0.0,
+                ))
+        return results

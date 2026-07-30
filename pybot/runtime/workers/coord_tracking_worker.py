@@ -151,19 +151,21 @@ class CoordTrackingWorker:
             area_epoch=area_epoch,
         )
 
-        for event in opacity_deaths:
-            ratio = (
-                event.opacity_score / event.baseline
-                if event.baseline > 0
-                else 0.0
-            )
-            ctx.logger.behavior(
-                f"[DEATH] path=opacity id={event.track_id} "
-                f"@{event.x},{event.y} "
-                f"score={event.opacity_score:.3f} baseline={event.baseline:.3f} "
-                f"ratio={ratio:.2f} streak={event.streak} "
-                f"— track removed, death-site recorded"
-            )
+        # sprite.grf removes death animations — opacity death is meaningless.
+        if not ctx.config.use_sprite_grf:
+            for event in opacity_deaths:
+                ratio = (
+                    event.opacity_score / event.baseline
+                    if event.baseline > 0
+                    else 0.0
+                )
+                ctx.logger.behavior(
+                    f"[DEATH] path=opacity id={event.track_id} "
+                    f"@{event.x},{event.y} "
+                    f"score={event.opacity_score:.3f} baseline={event.baseline:.3f} "
+                    f"ratio={ratio:.2f} streak={event.streak} "
+                    f"— track removed, death-site recorded"
+                )
 
         # Local miss → wake discovery so it can confirm removal.
         if missed_ids and not ctx.discovery_suspend.is_set():

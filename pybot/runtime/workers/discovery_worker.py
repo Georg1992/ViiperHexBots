@@ -200,7 +200,8 @@ class DiscoveryWorker:
             )
         # Detections seen but nothing new created while death sites are active —
         # likely corpse heat matched a death site.
-        if (
+        # sprite.grf removes death animations — no corpse heat to block.
+        if not ctx.config.use_sprite_grf and (
             len(filtered) > 0
             and summary.added_count == 0
             and summary.alive_after == 0
