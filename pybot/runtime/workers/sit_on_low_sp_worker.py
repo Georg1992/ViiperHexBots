@@ -36,7 +36,6 @@ from pybot.runtime.constants import (
     SIT_STAND_RESUME_DELAY_S,
 )
 from pybot.runtime.input.input_backend import InputBackend
-from pybot.runtime.mob_behaviors import MobBehavior
 from pybot.runtime.workers.worker_contexts import SitOnLowSpWorkerContext
 
 
@@ -49,13 +48,11 @@ class SitOnLowSpWorker:
         input_backend: InputBackend,
         hunt_mode: HuntModeAreaReset,
         *,
-        mob_behavior: MobBehavior | None = None,
         vitals: PlayerVitals | None = None,
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
         self._hunt_mode = hunt_mode
-        self._mob_behavior = mob_behavior or MobBehavior()
         self._vitals = vitals or PlayerVitals()
         self._last_fail_log = ""
 
@@ -142,9 +139,8 @@ class SitOnLowSpWorker:
                 "teleport until clear before sit"
             )
             while not ctx.is_stopped():
-                # teleport_until_quiet scans the screen for a safe place.
-                # Danger teleport (wing-first) is handled inside _sit_session
-                # by execute_danger_teleport — this function only finds quiet.
+                # teleport_until_quiet scans the screen for a safe place
+                # using the normal (creamy-first) teleport key.
                 if not teleport_until_quiet(
                     ctx,
                     self._input,
@@ -225,13 +221,9 @@ class SitOnLowSpWorker:
                             ctx.logger.behavior(
                                 f"[SIT] danger while sitting sp={sp} "
                                 f"reasons={','.join(danger.reasons)} "
-                                "(hp dropped, standing → danger teleport)"
+                                "(hp dropped, ensuring standing)"
                             )
                             self._ensure_standing(sit_scan)
-                            self._mob_behavior.execute_danger_teleport(
-                                ctx, self._hunt_mode, self._input,
-                                reason=f"sit hp_drop sp={sp}",
-                            )
                             return "danger"
                         if (
                             sp_stalled
@@ -239,14 +231,9 @@ class SitOnLowSpWorker:
                         ):
                             ctx.logger.behavior(
                                 f"[SIT] danger while sitting sp={sp} "
-                                f"reasons={','.join(danger.reasons)} "
-                                "(sp stalled + near objects, standing → danger teleport)"
+                                f"reasons={','.join(danger.reasons)}"
                             )
                             self._ensure_standing(sit_scan)
-                            self._mob_behavior.execute_danger_teleport(
-                                ctx, self._hunt_mode, self._input,
-                                reason=f"sit sp_stall+near sp={sp}",
-                            )
                             return "danger"
                         if hp is not None:
                             last_hp = hp
@@ -260,14 +247,9 @@ class SitOnLowSpWorker:
                         if danger.has_near_objects:
                             ctx.logger.behavior(
                                 f"[SIT] danger while sitting sp={sp} "
-                                f"reasons={','.join(danger.reasons)} "
-                                "(sp stalled, standing → danger teleport)"
+                                f"reasons={','.join(danger.reasons)}"
                             )
                             self._ensure_standing(sit_scan)
-                            self._mob_behavior.execute_danger_teleport(
-                                ctx, self._hunt_mode, self._input,
-                                reason=f"sit sp_stall sp={sp}",
-                            )
                             return "danger"
                     last_progress = now
 
