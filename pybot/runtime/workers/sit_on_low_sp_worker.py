@@ -140,7 +140,7 @@ class SitOnLowSpWorker:
                 outcome = self._sit_session()
                 if outcome == "recovered":
                     return
-                if outcome == "stopped":
+                if outcome is None:
                     return
 
                 ctx.logger.behavior(
@@ -152,12 +152,9 @@ class SitOnLowSpWorker:
             ctx.discovery_wake.set()
 
     def _sit_session(self) -> str:
-        """Sit and wait for SP recovery.
-
-        Returns:
-            ``"recovered"`` — stood after SP ≥ resume threshold.
-            ``"interrupted"`` — no longer sitting (teleported, stood up, etc.).
-            ``"stopped"`` — stop/pause ended the session (stood if needed).
+        """Sit and wait for SP recovery.            Returns:
+                ``"recovered"`` — stood after SP ≥ resume threshold.
+                ``"interrupted"`` — no longer sitting (teleported, stood up, etc.).
         """
         ctx = self._ctx
         sit_scan = ctx.config.sit_on_low_sp_scan_code
@@ -200,10 +197,6 @@ class SitOnLowSpWorker:
                         return "interrupted"
 
             ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
-
-        self._ensure_standing(sit_scan)
-        ctx.logger.behavior("[SIT] stopped while sitting — stood up")
-        return "stopped"
 
     def _ensure_sitting(
         self,
