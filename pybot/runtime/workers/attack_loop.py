@@ -83,6 +83,29 @@ class AttackLoop:
         click_x, click_y = snap.x, snap.y
         char_x, char_y = self._character_pos()
 
+        # Danger: if surrounded by mobs on opposite sides, teleport away
+        # instead of attacking — no safe kite direction exists.
+        all_mobs = ctx.tracks.positions_snapshot()
+        is_surrounded, reason = self._mob_behavior.is_surrounded(
+            char_x, char_y, all_mobs,
+        )
+        if is_surrounded:
+            tp_scan = ctx.config.active_teleport_scan_code()
+            ctx.logger.behavior(
+                f"[DANGER] surrounded reason={reason} mobs={len(all_mobs)} "
+                f"teleport_scan={tp_scan} — teleporting"
+            )
+            if tp_scan > 0:
+                ctx.tracks.area_reset()
+                self._hunt_mode.on_area_reset()
+                try:
+                    self._input.teleport_key(tp_scan)
+                except Exception as exc:
+                    ctx.logger.behavior(f"[DANGER] teleport input error: {exc}")
+                ctx.overlay.increment_teleports()
+                ctx.stop_event.wait(ctx.config.teleport_duration_ms / 1000.0)
+            return
+
         # Idle death: cheap cache samples around the configured skill delay.
         # Pacing is exactly skill_delay_ms (plus click) — no OCR / capture here.
         pre_sp, pre_obs_ms, pre_chg_ms = self._vitals.sp_sample()
