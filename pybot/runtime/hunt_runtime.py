@@ -96,6 +96,7 @@ class RuntimeDependencies:
     input_backend: InputBackend
     hunt_mode: HuntModeController
     logger: HuntLogger
+    teleport_controller: TeleportController
     workers: list[tuple[str, Callable[[], None]]]
 
 
@@ -254,6 +255,7 @@ def create_runtime_deps(
         input_backend=input_backend,
         hunt_mode=hunt_mode,
         logger=logger,
+        teleport_controller=tport,
         workers=workers,
     )
 
@@ -268,6 +270,7 @@ class HuntRuntime:
         self._ctx = deps.ctx
         self._workers = deps.workers
         self._input_backend = deps.input_backend
+        self._teleport = deps.teleport_controller
         self._worker_threads: list[threading.Thread] = []
 
 
@@ -340,7 +343,7 @@ class HuntRuntime:
         ctx.logger.behavior(
             f"[MODE] active={ctx.config.hunt_mode} "
             f"skill={ctx.config.skill_button} "
-            f"teleport={tport.active_button()!r}"
+            f"teleport={self._teleport.active_button()!r}"
         )
 
         threads = [
