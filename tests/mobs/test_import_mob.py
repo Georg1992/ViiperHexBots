@@ -32,15 +32,14 @@ class MobImportTests(unittest.TestCase):
             self.assertEqual(got_spr, spr.resolve())
             self.assertEqual(got_act, act.resolve())
 
-    def test_resolve_pair_from_folder(self) -> None:
+    def test_resolve_rejects_folder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             folder = tmp_path / "horn"
-            spr = _touch(folder / "horn.spr")
-            act = _touch(folder / "horn.act")
-            got_spr, got_act = resolve_spr_act_paths([folder])
-            self.assertEqual(got_spr, spr.resolve())
-            self.assertEqual(got_act, act.resolve())
+            _touch(folder / "horn.spr")
+            _touch(folder / "horn.act")
+            with self.assertRaisesRegex(MobImportError, "folders are not supported"):
+                resolve_spr_act_paths([folder])
 
     def test_resolve_rejects_mismatched_stems(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -49,14 +48,6 @@ class MobImportTests(unittest.TestCase):
             act = _touch(tmp_path / "poring.act")
             with self.assertRaisesRegex(MobImportError, "stems must match"):
                 resolve_spr_act_paths([spr, act])
-
-    def test_resolve_rejects_missing_act_in_folder(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            folder = tmp_path / "horn"
-            _touch(folder / "horn.spr")
-            with self.assertRaisesRegex(MobImportError, "missing matching ACT"):
-                resolve_spr_act_paths([folder])
 
     def test_resolve_rejects_only_spr(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

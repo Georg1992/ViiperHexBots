@@ -12,28 +12,24 @@ from pybot.recognition.detector.descriptors.descriptor_builder import Descriptor
 
 
 class MobImportError(ValueError):
-    """Raised when dropped/browsed paths cannot form a valid SPR+ACT pair."""
+    """Raised when browsed paths cannot form a valid SPR+ACT pair."""
 
 
 def resolve_spr_act_paths(paths: list[Path]) -> tuple[Path, Path]:
-    """Resolve a matching ``.spr`` + ``.act`` pair from dropped/browsed paths.
+    """Resolve a matching ``.spr`` + ``.act`` pair from browsed paths.
 
-    Accepts:
-    - two files with the same stem (``.spr`` and ``.act``), or
-    - one directory containing exactly one such pair (or a clear stem match).
+    Requires exactly one ``.spr`` file and one ``.act`` file with the
+    same stem.
     """
     if not paths:
         raise MobImportError("no files provided")
     resolved = [Path(p).expanduser().resolve() for p in paths]
 
-    if len(resolved) == 1 and resolved[0].is_dir():
-        return _pair_from_directory(resolved[0])
-
-    files = []
+    files: list[Path] = []
     for path in resolved:
         if path.is_dir():
             raise MobImportError(
-                "drop either one folder or the .spr and .act files, not both"
+                "folders are not supported — select the .spr and .act files directly"
             )
         if not path.is_file():
             raise MobImportError(f"path not found: {path}")
@@ -57,41 +53,6 @@ def resolve_spr_act_paths(paths: list[Path]) -> tuple[Path, Path]:
         raise MobImportError(
             f"SPR/ACT stems must match ({spr.name} vs {act.name})"
         )
-    return spr, act
-
-
-def _pair_from_directory(folder: Path) -> tuple[Path, Path]:
-    spr_files = sorted(folder.glob("*.spr")) + sorted(folder.glob("*.SPR"))
-    # glob is case-sensitive on some platforms; dedupe by resolved path.
-    seen: set[Path] = set()
-    unique_spr: list[Path] = []
-    for path in spr_files:
-        key = path.resolve()
-        if key in seen:
-            continue
-        seen.add(key)
-        unique_spr.append(path)
-    if not unique_spr:
-        raise MobImportError(f"no .spr file in folder: {folder}")
-    if len(unique_spr) > 1:
-        # Prefer a file whose stem matches the folder name.
-        folder_key = folder.name.lower()
-        matched = [p for p in unique_spr if p.stem.lower() == folder_key]
-        if len(matched) == 1:
-            unique_spr = matched
-        else:
-            raise MobImportError(
-                f"multiple .spr files in folder: {folder} "
-                f"({', '.join(p.name for p in unique_spr)})"
-            )
-    spr = unique_spr[0]
-    act = spr.with_suffix(".act")
-    if not act.is_file():
-        act_upper = spr.with_suffix(".ACT")
-        if act_upper.is_file():
-            act = act_upper
-        else:
-            raise MobImportError(f"missing matching ACT for {spr.name} in {folder}")
     return spr, act
 
 

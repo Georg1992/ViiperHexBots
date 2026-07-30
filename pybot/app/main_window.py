@@ -129,7 +129,6 @@ class MainWindow:
         # Build UI (widgets created here, references shared to managers)
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_exit)
-        self._hook_mob_drop_zone()
         self._fit_window_to_content()
 
         # Wire log pipe UI references after widgets exist
@@ -215,39 +214,11 @@ class MainWindow:
             self._apply_ui_settings()
         self._fit_window_to_content()
 
-    def _hook_mob_drop_zone(self) -> None:
-        try:
-            import windnd
-        except ImportError:
-            self._mob_drop_status.configure(
-                text="Install windnd for drag-drop (Browse still works)"
-            )
-            return
-
-        def _decode_drop_path(item: object) -> Path:
-            if isinstance(item, bytes):
-                text = item.split(b"\0", 1)[0].decode("utf-8", errors="surrogateescape")
-            else:
-                text = str(item).split("\0", 1)[0]
-            return Path(text)
-
-        def _on_drop(files) -> None:
-            paths = [_decode_drop_path(f) for f in files]
-            if not paths:
-                return
-            self.root.after(0, lambda p=paths: self._begin_mob_import(p))
-
-        # Keep a reference so the closure is not collected while hooked.
-        self._mob_drop_handler = _on_drop
-        self.root.update_idletasks()
-        # Child Label HWNDs often never receive WM_DROPFILES; hook the root.
-        windnd.hook_dropfiles(self.root, func=_on_drop, force_unicode=True)
-
     def _browse_mob_assets(self) -> None:
         if not self._can_import_mob():
             return
         paths = filedialog.askopenfilenames(
-            title="Select .spr and .act (or cancel and pick a folder)",
+            title="Select exactly one .spr and one .act file (both with same name)",
             filetypes=[
                 ("SPR/ACT", "*.spr *.act"),
                 ("SPR", "*.spr"),
@@ -257,10 +228,6 @@ class MainWindow:
         )
         if paths:
             self._begin_mob_import([Path(p) for p in paths])
-            return
-        folder = filedialog.askdirectory(title="Select folder containing .spr + .act")
-        if folder:
-            self._begin_mob_import([Path(folder)])
 
     def _can_import_mob(self) -> bool:
         if self._mob_import_busy:
@@ -281,7 +248,7 @@ class MainWindow:
             spr, act = resolve_spr_act_paths(paths)
         except MobImportError as exc:
             messagebox.showerror("Import mob", str(exc))
-            self._mob_drop_status.configure(text=str(exc))
+            self._mob_import_status.configure(text=str(exc))
             return
 
         stem = spr.stem.lower()
@@ -297,7 +264,7 @@ class MainWindow:
 
         self._mob_import_busy = True
         self._mob_browse_button.configure(state=tk.DISABLED)
-        self._mob_drop_status.configure(text=f"Building {stem}…")
+        self._mob_import_status.configure(text=f"Building {stem}…")
         self.log_pipe.log(f"[MOB] importing {spr.name} + {act.name}")
 
         def _worker() -> None:
@@ -316,7 +283,7 @@ class MainWindow:
         self._mob_import_busy = False
         if self.lifecycle.state == BotState.OFF:
             self._mob_browse_button.configure(state=tk.NORMAL)
-        self._mob_drop_status.configure(text=f"Failed: {exc}")
+        self._mob_import_status.configure(text=f"Failed: {exc}")
         self.log_pipe.log(f"[MOB] import failed: {exc}")
         messagebox.showerror("Import mob", f"Failed to build descriptor:\n\n{exc}")
 
@@ -325,7 +292,7 @@ class MainWindow:
         if self.lifecycle.state == BotState.OFF:
             self._mob_browse_button.configure(state=tk.NORMAL)
         self._refresh_mob_radios(select_stem=stem)
-        self._mob_drop_status.configure(text=f"Ready: {stem}")
+        self._mob_import_status.configure(text=f"Ready: {stem}")
         self.log_pipe.log(f"[MOB] descriptor ready: {stem}")
         messagebox.showinfo("Import mob", f"Descriptor built for '{stem}'.")
 
@@ -438,11 +405,11 @@ class MainWindow:
         self._mob_radio_frame.grid(row=1, column=0, sticky="nw")
         self._rebuild_mob_radio_buttons()
 
-        drop_frame = ttk.LabelFrame(mob_col, text="Add mob (SPR + ACT)", padding=6)
-        drop_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
-        self._mob_drop_label = tk.Label(
-            drop_frame,
-            text="Drop .spr + .act here\n(or a folder with both)",
+        import_frame = ttk.LabelFrame(mob_col, text="Add mob (SPR + ACT)", padding=6)
+        import_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self._mob_browse_label = tk.Label(
+            import_frame,
+            text="Select one .spr + one .act file\n(both must have the same name)",
             relief=tk.GROOVE,
             borderwidth=2,
             width=28,
@@ -450,17 +417,17 @@ class MainWindow:
             justify=tk.CENTER,
             background="#f0f0f0",
         )
-        self._mob_drop_label.grid(row=0, column=0, sticky="ew")
-        drop_btns = ttk.Frame(drop_frame)
-        drop_btns.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self._mob_browse_label.grid(row=0, column=0, sticky="ew")
+        browse_btns = ttk.Frame(import_frame)
+        browse_btns.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         self._mob_browse_button = ttk.Button(
-            drop_btns,
+            browse_btns,
             text="Browse…",
             command=self._browse_mob_assets,
         )
         self._mob_browse_button.pack(side=tk.LEFT)
-        self._mob_drop_status = ttk.Label(drop_frame, text="", wraplength=200)
-        self._mob_drop_status.grid(row=2, column=0, sticky="w", pady=(4, 0))
+        self._mob_import_status = ttk.Label(import_frame, text="", wraplength=200)
+        self._mob_import_status.grid(row=2, column=0, sticky="w", pady=(4, 0))
 
         mode_col = ttk.Frame(setup_frame)
         mode_col.grid(row=0, column=1, sticky="nw", padx=(16, 0))
