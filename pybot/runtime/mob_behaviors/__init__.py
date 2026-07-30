@@ -62,13 +62,14 @@ class MobBehavior:
         *,
         reason: str = "",
     ) -> None:
-        """Press teleport key (wing-first, creamy-fallback) and wait.
+        """Press teleport key, wait, then clear tracks immediately.
 
         Called by :class:`DangerDetector` only — no other module touches
-        teleport for danger.  No tracks reset, no overlay counters — the
-        hunt loop handles those naturally.
+        teleport for danger.  Tracks are cleared right after the teleport
+        settles so stale mob positions are never used post-teleport.
 
-        *ctx* must provide ``config``, ``logger``, and ``stop_event``.
+        *ctx* must provide ``config``, ``logger``, ``stop_event``, and
+        ``area_reset``.
         """
         tp_scan = ctx.config.teleport_scan_code or ctx.config.creamy_tp_scan_code
         prefix = f"{reason} " if reason else ""
@@ -80,6 +81,7 @@ class MobBehavior:
         except Exception as exc:
             ctx.logger.behavior(f"[DANGER] teleport input error: {exc}")
         ctx.stop_event.wait(ctx.config.teleport_duration_ms / 1000.0)
+        ctx.area_reset(reason="danger_teleport")
 
 
 class AnubisBehavior(MobBehavior):
