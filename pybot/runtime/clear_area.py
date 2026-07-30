@@ -134,9 +134,9 @@ def teleport_until_quiet(
     A single clear snapshot is not enough: mobs can walk into ROI (or first
     become detectable) during the post-clear idle before sit/storage UI.
 
-    Danger escape is handled separately by
-    :meth:`MobBehavior.execute_danger_teleport` — this function only
-    scans for a quiet area.
+    Danger escape is handled separately by :class:`DangerDetector`
+    (which calls :meth:`MobBehavior.execute_danger_teleport`) — this
+    function only scans for a quiet area.
     """
     while not ctx.is_stopped():
         if not teleport_until_clear(

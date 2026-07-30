@@ -64,9 +64,9 @@ class MobBehavior:
     ) -> None:
         """Press teleport key, wait, then clear tracks immediately.
 
-        Called by :class:`DangerDetector` only — no other module touches
-        teleport for danger.  Tracks are cleared right after the teleport
-        settles so stale mob positions are never used post-teleport.
+Called by :class:`DangerDetector` only — no other module calls this
+method.  Tracks are cleared right after the teleport settles so stale
+mob positions are never used post-teleport.
 
         *ctx* must provide ``config``, ``logger``, ``stop_event``, and
         ``area_reset``.
