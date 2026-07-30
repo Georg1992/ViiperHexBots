@@ -64,15 +64,26 @@ class HuntRuntimeConfig:
     client_profile: str = "Generic"
 
     def active_teleport_scan_code(self) -> int:
-        """Teleport key: fall back to Creamy TP only when Teleport Key is unset."""
-        if self.teleport_scan_code <= 0 and self.creamy_tp_scan_code > 0:
+        """Normal teleport key: Creamy TP first, fall back to wing key."""
+        if self.creamy_tp_scan_code > 0:
             return self.creamy_tp_scan_code
         return self.teleport_scan_code
 
     def active_teleport_button(self) -> str:
-        if self.teleport_scan_code <= 0 and self.creamy_tp_scan_code > 0:
+        if self.creamy_tp_scan_code > 0:
             return self.creamy_tp_button
         return self.teleport_button
+
+    def danger_teleport_scan_code(self) -> int:
+        """Danger teleport: wing key first (reliable escape), fall back to Creamy."""
+        if self.teleport_scan_code > 0:
+            return self.teleport_scan_code
+        return self.creamy_tp_scan_code
+
+    def danger_teleport_button(self) -> str:
+        if self.teleport_scan_code > 0:
+            return self.teleport_button
+        return self.creamy_tp_button
 
 
 def resolve_mob_name(

@@ -90,7 +90,7 @@ class AttackLoop:
             char_x, char_y, all_mobs,
         )
         if is_surrounded:
-            tp_scan = ctx.config.active_teleport_scan_code()
+            tp_scan = ctx.config.danger_teleport_scan_code()
             ctx.logger.behavior(
                 f"[DANGER] surrounded reason={reason} mobs={len(all_mobs)} "
                 f"teleport_scan={tp_scan} — teleporting"
