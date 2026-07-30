@@ -50,7 +50,6 @@ from pybot.recognition.ui.status_panel import (
     StatusPanelValues,
     find_status_panel,
     read_status_panel,
-    read_status_panel_currents,
 )
 
 MEMORY_POLL_MS = 500
@@ -1211,13 +1210,8 @@ class MainWindow:
         if refresh_max:
             values = read_status_panel(frame, origin=origin)
         else:
-            values = read_status_panel_currents(
-                frame,
-                origin,
-                hp=confirmed.hp,
-                hp_max=confirmed.hp_max,
-                sp_max=confirmed.sp_max,
-                weight_max=confirmed.weight_max,
+            values = read_status_panel(
+                frame, origin=origin, skip_hp=True, previous=confirmed
             )
         if values is None:
             self._show_panel_missing(client_left=left, client_top=top)

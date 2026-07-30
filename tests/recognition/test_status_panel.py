@@ -11,10 +11,10 @@ from pybot.paths import PROJECT_ROOT
 from pybot.recognition.ui.status_panel import (
     BINARIZE_THRESHOLD,
     SP_ROI,
+    StatusPanelValues,
     clear_template_cache,
     find_status_panel,
     read_status_panel,
-    read_status_panel_currents,
 )
 
 FIXTURES_DIR = PROJECT_ROOT / "tests"
@@ -105,13 +105,14 @@ class StatusPanelTests(unittest.TestCase):
                 origin = find_status_panel(frame)
                 self.assertIsNotNone(origin)
                 assert origin is not None
-                values = read_status_panel_currents(
-                    frame,
-                    origin,
-                    hp=hp,
-                    hp_max=hp_max,
-                    sp_max=sp_max,
-                    weight_max=weight_max,
+                previous = StatusPanelValues(
+                    hp=hp, hp_max=hp_max,
+                    sp=0, sp_max=sp_max,
+                    weight=0, weight_max=weight_max,
+                    panel_origin=origin,
+                )
+                values = read_status_panel(
+                    frame, origin=origin, skip_hp=True, previous=previous
                 )
                 self.assertIsNotNone(values)
                 assert values is not None
@@ -188,13 +189,14 @@ class StatusPanelTests(unittest.TestCase):
                     region[:, :split] = (fill_gray, fill_gray, fill_gray)
                     region[:, split:] = (220, 220, 220)
                     region[ink] = (0, 0, 0)
-                    values = read_status_panel_currents(
-                        altered,
-                        origin,
-                        hp=2260,
-                        hp_max=3348,
-                        sp_max=430,
-                        weight_max=2730,
+                    previous = StatusPanelValues(
+                        hp=2260, hp_max=3348,
+                        sp=0, sp_max=430,
+                        weight=0, weight_max=2730,
+                        panel_origin=origin,
+                    )
+                    values = read_status_panel(
+                        altered, origin=origin, skip_hp=True, previous=previous
                     )
                     self.assertIsNotNone(values)
                     assert values is not None

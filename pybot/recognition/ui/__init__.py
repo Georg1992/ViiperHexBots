@@ -18,7 +18,6 @@ from pybot.recognition.ui.status_panel import (
     StatusPanelValues,
     find_status_panel,
     read_status_panel,
-    read_status_panel_currents,
 )
 
 __all__ = [
@@ -36,7 +35,6 @@ __all__ = [
     "is_storage_open",
     "measure_center_pose",
     "read_status_panel",
-    "read_status_panel_currents",
     "require_inventory_panel",
     "require_template",
 ]

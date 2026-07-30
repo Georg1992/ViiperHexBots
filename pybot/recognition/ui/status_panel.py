@@ -3,11 +3,19 @@
 Uses OpenCV template matching for the panel header, fixed relative ROIs for
 value bands, and RO digit-glyph templates under ``assets/UI/digits/``.
 
-HP is vision-only (never memory): full reads parse it; currents-only reuse
-the last HP so OCR of the HP band stays sparse (Gepard-sensitive).
+Two polling cadences share the same function ``read_status_panel``:
+
+* **Full read** (no flags) — parses HP + SP + Weight current+max.
+  Called every ``STATUS_PANEL_MAX_REFRESH_S`` (1 s) to refresh all maxima.
+
+* **Fast poll** (``skip_hp=True, previous=<last full>``) — reuses HP/HP_max
+  and max values from the previous full read, only OCRs current SP/Weight.
+  Called every ``STATUS_PANEL_VALUE_MS`` (200 ms).  Avoiding the HP-band
+  OCR on every tick prevents Gepard-sensitivity artifacts (bar fill at low
+  HP being misread as digit "1").
 
 Callers should treat ``find_status_panel`` as the source of truth for whether
-Basic Info is open. Currents-only reads reuse a previously parsed max.
+Basic Info is open.
 """
 
 from __future__ import annotations
@@ -115,12 +123,47 @@ def read_status_panel(
     frame_bgr: np.ndarray,
     *,
     origin: tuple[int, int] | None = None,
+    skip_hp: bool = False,
+    previous: StatusPanelValues | None = None,
 ) -> StatusPanelValues | None:
-    """Find (unless *origin* given) and parse current+max HP/SP/Weight."""
+    """Parse HP/SP/Weight from the Basic Info panel.
+
+    Parameters
+    ----------
+    frame_bgr : np.ndarray
+        Full client-area frame in BGR.
+    origin : tuple[int, int] | None
+        Known panel origin (skip header search).
+    skip_hp : bool
+        When *True*, skip the HP-band OCR and reuse HP/HP max / SP max /
+        Weight max from *previous*.  ``previous`` must not be None.
+    previous : StatusPanelValues | None
+        Last full-read result providing max values for the fast poll.
+        Required when ``skip_hp=True``.
+    """
     if origin is None:
         origin = find_status_panel(frame_bgr)
     if origin is None:
         return None
+
+    if skip_hp:
+        if previous is None:
+            raise ValueError("previous must be provided when skip_hp=True")
+        sp = _parse_current(frame_bgr, origin, SP_ROI, min_width=2)
+        if sp is None:
+            return None
+        weight = _parse_current(frame_bgr, origin, WEIGHT_ROI, min_width=3)
+        return StatusPanelValues(
+            hp=previous.hp,
+            hp_max=previous.hp_max,
+            sp=sp,
+            sp_max=previous.sp_max,
+            weight=weight,
+            weight_max=previous.weight_max if weight is not None else None,
+            panel_origin=origin,
+        )
+
+    # Full read — parse current+max for all three bands.
     hp = _parse_pair(frame_bgr, origin, HP_ROI, min_width=2)
     if hp is None:
         return None
@@ -135,36 +178,6 @@ def read_status_panel(
         sp_max=sp[1],
         weight=None if weight is None else weight[0],
         weight_max=None if weight is None else weight[1],
-        panel_origin=origin,
-    )
-
-
-def read_status_panel_currents(
-    frame_bgr: np.ndarray,
-    origin: tuple[int, int],
-    *,
-    hp: int,
-    hp_max: int,
-    sp_max: int,
-    weight_max: int | None,
-) -> StatusPanelValues | None:
-    """Parse current SP / Weight; reuse last HP (no HP-band OCR).
-
-    Digits after ``/`` are ignored for SP/Weight. *hp* / *hp_max* /
-    *sp_max* / *weight_max* come from a previous full read so the HP
-    ROI is not sampled on the fast poll (Gepard-sensitive).
-    """
-    sp = _parse_current(frame_bgr, origin, SP_ROI, min_width=2)
-    if sp is None:
-        return None
-    weight = _parse_current(frame_bgr, origin, WEIGHT_ROI, min_width=3)
-    return StatusPanelValues(
-        hp=hp,
-        hp_max=hp_max,
-        sp=sp,
-        sp_max=sp_max,
-        weight=weight,
-        weight_max=weight_max if weight is not None else None,
         panel_origin=origin,
     )
 
