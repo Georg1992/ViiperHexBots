@@ -248,7 +248,12 @@ class SpriteGrf:
             self._table_compressed_first = False
             comp_table_size, uncomp_table_size = u2, u1
             comp_table = raw[table_hdr_off + 8 : table_hdr_off + 8 + comp_table_size]
-            table_data = zlib.decompress(comp_table)
+            try:
+                table_data = zlib.decompress(comp_table)
+            except zlib.error as e:
+                raise ValueError(
+                    f"Failed to decompress GRF table (both layouts): {e}"
+                ) from e
             if len(table_data) != uncomp_table_size:
                 raise ValueError(
                     f"Table size mismatch: got {len(table_data)}, "
