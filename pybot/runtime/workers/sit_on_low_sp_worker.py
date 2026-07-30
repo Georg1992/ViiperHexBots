@@ -36,6 +36,7 @@ from pybot.runtime.constants import (
     SIT_STAND_RESUME_DELAY_S,
 )
 from pybot.runtime.input.input_backend import InputBackend
+from pybot.runtime.mob_behaviors import MobBehavior
 from pybot.runtime.workers.worker_contexts import SitOnLowSpWorkerContext
 
 
@@ -48,11 +49,13 @@ class SitOnLowSpWorker:
         input_backend: InputBackend,
         hunt_mode: HuntModeAreaReset,
         *,
+        mob_behavior: MobBehavior | None = None,
         vitals: PlayerVitals | None = None,
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
         self._hunt_mode = hunt_mode
+        self._mob_behavior = mob_behavior or MobBehavior()
         self._vitals = vitals or PlayerVitals()
         self._last_fail_log = ""
 
@@ -154,6 +157,12 @@ class SitOnLowSpWorker:
                     return
                 if outcome == "stopped":
                     return
+                # Danger: escape with wing-first key, then find a quiet spot.
+                if outcome == "danger":
+                    self._mob_behavior.execute_danger_teleport(
+                        ctx, self._hunt_mode, self._input,
+                        reason="sit_danger",
+                    )
                 ctx.logger.behavior(
                     f"[SIT] {outcome} while regenerating — "
                     "finding another sit spot"
@@ -221,9 +230,8 @@ class SitOnLowSpWorker:
                             ctx.logger.behavior(
                                 f"[SIT] danger while sitting sp={sp} "
                                 f"reasons={','.join(danger.reasons)} "
-                                "(hp dropped, ensuring standing)"
+                                "(hp dropped, character auto-stood)"
                             )
-                            self._ensure_standing(sit_scan)
                             return "danger"
                         if (
                             sp_stalled
