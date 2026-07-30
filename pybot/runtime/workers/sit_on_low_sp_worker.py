@@ -165,6 +165,7 @@ class SitOnLowSpWorker:
         sp_state = self._sp_snapshot()
         last_sp = sp_state[0] if sp_state is not None else None
         last_pose_check = 0.0
+        none_pose_count = 0
 
         while not ctx.is_stopped():
             sp_state = self._sp_snapshot()
@@ -189,12 +190,23 @@ class SitOnLowSpWorker:
                 if now - last_pose_check >= SIT_POSE_CHECK_S:
                     last_pose_check = now
                     pose = self._measure_pose()
-                    if pose is not None and pose.body_height >= _STAND_HEIGHT:
+                    if pose is None:
+                        none_pose_count += 1
+                        if none_pose_count >= 3:
+                            ctx.logger.behavior(
+                                f"[SIT] interrupted while sitting sp={sp} — "
+                                "pose detection failed 3x, assuming standing"
+                            )
+                            return "interrupted"
+                    elif pose.body_height >= _STAND_HEIGHT:
+                        none_pose_count = 0
                         ctx.logger.behavior(
                             f"[SIT] interrupted while sitting sp={sp} — "
                             "standing pose detected"
                         )
                         return "interrupted"
+                    else:
+                        none_pose_count = 0
 
             ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
 
