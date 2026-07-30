@@ -55,7 +55,7 @@ FLY_WING_WEIGHT = 5
 # AHK ItemsToStorage OK-dialog Enter (extended scan code).
 STORAGE_ENTER_SCAN_CODE = 284
 # Always wait this long after Alt+mouse click (deposit).
-ALT_MOUSE_CLICK_DELAY_S = 0.1
+ALT_MOUSE_CLICK_DELAY_S = 0.15
 # Settle after moving onto a Use-tab fly wing before Alt+RMB deposit.
 STORAGE_WING_AIM_SETTLE_S = 0.25
 # Use-tab grid from assets/UI/InventoryPanel.png (8×6, 32px pitch).
