@@ -222,13 +222,11 @@ class SpriteGrf:
         # Preserve the entire post-magic header region byte-for-byte.
         self._orig_header_tail = raw[16:self._header_size]
 
-        # Locate the file table.
-        # The table_offset in the header is an absolute byte position.
-        # For legacy GRFs the stored value may be wrong, so we pass it as
-        # a hint and fall back to scanning if the hint doesn't land on
-        # valid zlib table data.
-        table_hint = struct.unpack_from("<I", raw, 31)[0]
-        table_hdr_off = self._find_table_header(raw, table_hint)
+        # The table_offset in the header is relative to the end of the
+        # header; _find_table_header adds header_size for absolute position.
+        table_off_pos = 30 if self._header_size == _GRF_HEADER_SIZE_LEGACY else 31
+        table_hint = struct.unpack_from("<I", raw, table_off_pos)[0]
+        table_hdr_off = self._find_table_header(table_hint)
         if table_hdr_off < self._header_size:
             raise ValueError("GRF table header not found")
 
@@ -293,25 +291,9 @@ class SpriteGrf:
             entry.aligned_size = entry.uncomp_size
             self._data_section += raw_data
 
-    @staticmethod
-    def _find_table_header(data: bytes) -> int:
-        """Find the table header near the end of the file.
-
-        The table HEADER (2 x uint32) is the 8 bytes immediately before
-        the zlib-compressed table data.  We return that position.
-        """
-        # Scan backwards for the zlib magic byte (0x78)
-        for off in range(len(data) - 8, max(0, len(data) - 512), -1):
-            if data[off] != 0x78:
-                continue
-            if off < 8:
-                continue
-            u1 = struct.unpack_from("<I", data, off - 8)[0]
-            u2 = struct.unpack_from("<I", data, off - 4)[0]
-            # Both should be reasonable (a file table is typically < 100 KB).
-            if 0 < u1 < 100_000 and 0 <= u2 < 100_000:
-                return off - 8
-        return -1
+    def _find_table_header(self, table_hint: int) -> int:
+        """Convert relative table_offset from header to absolute file position."""
+        return self._header_size + table_hint
 
     # ------------------------------------------------------------------
     #  Query
@@ -483,9 +465,7 @@ class SpriteGrf:
         table_hdr += struct.pack("<I", len(table_raw))
 
         # Anti-hint padding: 112 zero bytes after the compressed table
-        # guarantee that data[file_size - 112] is never 0x78, which
-        # prevents the RO viewer's hint check from returning a wrong
-        # table-header position (the scanner's fallback works correctly).
+        # prevent the RO viewer's hint check from misreading the table position.
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._path, "wb") as f:
             f.write(bytes(header))
@@ -522,7 +502,11 @@ def sync_sprite_grf(
     grf_path = root / "sprite.grf"
 
     if grf_path.is_file():
-        grf = SpriteGrf(grf_path)
+        try:
+            grf = SpriteGrf(grf_path)
+        except (ValueError, zlib.error, struct.error):
+            grf = SpriteGrf()
+            grf._path = grf_path
     else:
         grf = SpriteGrf()
         grf._path = grf_path
