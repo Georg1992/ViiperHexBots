@@ -287,6 +287,9 @@ class MobDetector:
         Order: heatmap → blobs → geometry → color structure → silhouette.
         All blobs go through every gate — dedup against existing tracks is
         handled by TrackReconciler after detection.
+
+        When ``use_sprite_grf`` is True, forces 4× heatmap downscale for
+        speed (sprite.grf sprites are pixel-perfect with no death anims).
         """
         start = time.perf_counter()
         descriptor = self.ensure_descriptor(mob_name)
@@ -294,9 +297,14 @@ class MobDetector:
         # --- heatmap --------------------------------------------------
         heatmap_start = time.perf_counter()
         fh, fw = frame_bgr.shape[:2]
-        downscale = 1
-        if self.discovery_heatmap_downscale > 1 and min(fw, fh) >= self.discovery_heatmap_downscale_min_side:
+        if self.use_sprite_grf:
+            # sprite.grf: force 4× downscale for speed — no death
+            # animations to worry about, mobs are pixel-perfect.
+            downscale = 4
+        elif self.discovery_heatmap_downscale > 1 and min(fw, fh) >= self.discovery_heatmap_downscale_min_side:
             downscale = self.discovery_heatmap_downscale
+        else:
+            downscale = 1
         # Very small sprites lose too much signal at 2× downscale —
         # GaussianBlur smears heat into area-gate-rejected speckles.
         # FPs from native-resolution heatmaps are caught by geometry /
@@ -1249,188 +1257,6 @@ class MobDetector:
             )
         )
         return passed, extract_bbox if extract_bbox is not None else bbox, float(sim)
-
-    # ------------------------------------------------------------------
-    #  Simple palette detection (sprite.grf mode — distance-based match)
-    # ------------------------------------------------------------------
-
-    _SIMPLE_PALETTE_TOP_COLORS = 3
-    _SIMPLE_PALETTE_MAX_DISTANCE = 10.0
-    _SIMPLE_PALETTE_MATCH_THRESHOLD = 0.6
-    _SIMPLE_PALETTE_MIN_COMPONENT_AREA = 4
-
-    def _top_main_colors(self, descriptor: MobDescriptor) -> list[tuple[int, int, int]]:
-        """Top ``_SIMPLE_PALETTE_TOP_COLORS`` palette entries by weight."""
-        if not descriptor.match_palette_bgr or not descriptor.match_palette_weights:
-            return []
-        indexed = list(enumerate(descriptor.match_palette_weights))
-        indexed.sort(key=lambda x: x[1], reverse=True)
-        top_n = min(self._SIMPLE_PALETTE_TOP_COLORS, len(descriptor.match_palette_bgr))
-        return [descriptor.match_palette_bgr[i] for i, _w in indexed[:top_n]]
-
-    @staticmethod
-    def _simple_palette_mask(
-        frame_bgr: np.ndarray,
-        palette: list[tuple[int, int, int]],
-    ) -> np.ndarray:
-        """Binary mask: pixels within ``_SIMPLE_PALETTE_MAX_DISTANCE`` of any
-        palette color, thresholded at ``_SIMPLE_PALETTE_MATCH_THRESHOLD``.
-
-        Uses ``sprite_palette_heatmap`` with a tight distance so only pixels
-        genuinely close to the top 3 main colors pass.  JPEG compression
-        artefacts (1-3 per channel) fall within this budget.
-        """
-        heat = sprite_palette_heatmap(
-            frame_bgr, palette,
-            max_distance=MobDetector._SIMPLE_PALETTE_MAX_DISTANCE,
-        )
-        return (heat >= MobDetector._SIMPLE_PALETTE_MATCH_THRESHOLD).astype(np.uint8)
-
-    def detect_simple_palette(
-        self,
-        frame_bgr: np.ndarray,
-        mob_name: str,
-    ) -> DetectionResult:
-        """Simplified discovery for sprite.grf mode — distance-based palette search.
-
-        Finds pixels close to any of the top 3 main palette colors (within
-        ``_SIMPLE_PALETTE_MAX_DISTANCE`` Euclidean BGR distance), clusters them
-        into connected components, and returns centroids as detection candidates.
-        No heatmaps, silhouette gates, or death checks.
-        """
-        start = time.perf_counter()
-        descriptor = self.ensure_descriptor(mob_name)
-
-        top_colors = self._top_main_colors(descriptor)
-        if not top_colors:
-            elapsed = time.perf_counter() - start
-            return DetectionResult(
-                mob_name=mob_name.lower(),
-                descriptor=descriptor,
-                candidates=[],
-                accepted=[],
-                elapsed_s=elapsed,
-                timing={"total": elapsed},
-                sprite_heatmap=np.zeros((1, 1), dtype=np.float32),
-                silhouette_checks=[],
-            )
-
-        mask = self._simple_palette_mask(frame_bgr, top_colors) * 255
-
-        # Connected components.
-        _nl, labels, stats, centroids = cv2.connectedComponentsWithStats(
-            mask, connectivity=8,
-        )
-
-        candidates: list[DetectionCandidate] = []
-        for lbl in range(1, _nl):
-            area = int(stats[lbl, cv2.CC_STAT_AREA])
-            if area < self._SIMPLE_PALETTE_MIN_COMPONENT_AREA:
-                continue
-            cx = int(centroids[lbl, 0])
-            cy = int(centroids[lbl, 1])
-            left = int(stats[lbl, cv2.CC_STAT_LEFT])
-            top = int(stats[lbl, cv2.CC_STAT_TOP])
-            width = int(stats[lbl, cv2.CC_STAT_WIDTH])
-            height = int(stats[lbl, cv2.CC_STAT_HEIGHT])
-            candidates.append(DetectionCandidate(
-                mob_name=descriptor.mob_name,
-                center_x=cx,
-                center_y=cy,
-                bbox=(left, top, width, height),
-                final_score=float(area),
-                heatmap_score=float(area),
-                accepted=True,
-                rejection_reason="",
-            ))
-
-        max_candidates = int(self.config["maxCandidates"])
-        candidates.sort(key=lambda c: c.final_score, reverse=True)
-        accepted = candidates[:max_candidates]
-
-        elapsed = time.perf_counter() - start
-        return DetectionResult(
-            mob_name=mob_name.lower(),
-            descriptor=descriptor,
-            candidates=accepted,
-            accepted=accepted,
-            elapsed_s=elapsed,
-            timing={"total": elapsed},
-            sprite_heatmap=np.zeros((1, 1), dtype=np.float32),
-            silhouette_checks=[],
-        )
-
-    def score_at_simple(
-        self,
-        frame_bgr: np.ndarray,
-        descriptor: MobDescriptor,
-        cx: int,
-        cy: int,
-        scale: float = 1.0,
-    ) -> tuple[bool, tuple[int, int, int, int] | None, float]:
-        """Simplified tracking score for sprite.grf mode — distance-based palette
-        search in a window around the expected position.
-
-        Returns the closest CC or (False, None, 0.0).
-        """
-        top_colors = self._top_main_colors(descriptor)
-        if not top_colors:
-            return False, None, 0.0
-
-        fh, fw = frame_bgr.shape[:2]
-        search_r = int(self.local_track_search_radius_px * scale)
-        if search_r < 8:
-            search_r = 8
-
-        x0 = max(0, cx - search_r)
-        y0 = max(0, cy - search_r)
-        x1 = min(fw, cx + search_r)
-        y1 = min(fh, cy + search_r)
-        if x1 <= x0 or y1 <= y0:
-            return False, None, 0.0
-
-        crop = frame_bgr[y0:y1, x0:x1]
-        ch, cw = crop.shape[:2]
-
-        # Distance-based mask within the search window.
-        mask = self._simple_palette_mask(crop, top_colors) * 255
-
-        if not np.any(mask):
-            return False, None, 0.0
-
-        _nl, labels, stats, centroids = cv2.connectedComponentsWithStats(
-            mask, connectivity=8,
-        )
-
-        # Find the CC whose centroid is closest to the expected position.
-        exp_lx = cx - x0
-        exp_ly = cy - y0
-        best_lbl = 0
-        best_dist2 = float("inf")
-        best_area = 0
-        for lbl in range(1, _nl):
-            area = int(stats[lbl, cv2.CC_STAT_AREA])
-            if area < self._SIMPLE_PALETTE_MIN_COMPONENT_AREA:
-                continue
-            ccx = centroids[lbl, 0]
-            ccy = centroids[lbl, 1]
-            d2 = (ccx - exp_lx) ** 2 + (ccy - exp_ly) ** 2
-            if d2 < best_dist2 or (d2 == best_dist2 and area > best_area):
-                best_dist2 = d2
-                best_lbl = lbl
-                best_area = area
-
-        if best_lbl == 0:
-            return False, None, 0.0
-
-        left = int(stats[best_lbl, cv2.CC_STAT_LEFT]) + x0
-        top = int(stats[best_lbl, cv2.CC_STAT_TOP]) + y0
-        width = int(stats[best_lbl, cv2.CC_STAT_WIDTH])
-        height = int(stats[best_lbl, cv2.CC_STAT_HEIGHT])
-        bbox = (left, top, width, height)
-
-        # Similarity: 1.0 when found (exact match by definition).
-        return True, bbox, 1.0
 
     # ------------------------------------------------------------------
     #  Tracking — delegates to local_tracker
