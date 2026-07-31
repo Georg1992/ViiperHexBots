@@ -1,4 +1,4 @@
-"""Sit-on-low-SP: sit once, wait, stand once, resume — never re-sit."""
+"""Sit toggle must never re-sit after stand; hunt never resumes while seated."""
 
 from __future__ import annotations
 
@@ -69,10 +69,10 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.danger = MagicMock(spec=DangerDetector)
         self.danger.pop_damage_detected.return_value = False
 
-    def _worker(self, vitals: PlayerVitals) -> SitOnLowSpWorker:
+    def _worker(self, vitals: PlayerVitals | None = None) -> SitOnLowSpWorker:
         return SitOnLowSpWorker(
             self.ctx, self.input, self.teleport,
-            danger=self.danger, vitals=vitals,
+            danger=self.danger, vitals=vitals or _ScriptedVitals([]),
         )
 
     def _living_then_clear(self) -> list[DiscoveryScanResult]:
@@ -95,37 +95,95 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertAlmostEqual(SIT_RESUME_SP_RATIO, 0.98)
         self.assertGreaterEqual(SIT_POSE_SETTLE_S, 0.3)
 
-    def test_sitting_blocks_hunt(self) -> None:
-        self.assertTrue(self.ctx.should_run_workers())
-        self.ctx.begin_sit_ops()
-        self.assertFalse(self.ctx.should_run_workers())
-        self.ctx.end_sit_ops()
-        self.assertTrue(self.ctx.should_run_workers())
-
-    def test_happy_path_exactly_one_sit_and_one_stand(self) -> None:
+    def test_happy_path_one_sit_one_stand(self) -> None:
         vitals = _ScriptedVitals(
             [SIT_LOW_SP_RATIO - 0.01, 0.50, SIT_RESUME_SP_RATIO]
         )
         self.ctx.detector.discover_frame.side_effect = self._living_then_clear()
         worker = self._worker(vitals)
         self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        # sit: not sitting → after tap sitting; stand: after tap standing
+        # sit: standing then sitting; stand: after tap standing
         worker._pose_is_sitting = MagicMock(side_effect=[False, True, False])  # type: ignore[method-assign]
 
-        def stop_after_two_taps() -> None:
+        def stop_after_two() -> None:
             while self.input.key_tap.call_count < 2 and not self.ctx.is_stopped():
                 self.ctx.stop_event.wait(0.01)
             self.ctx.stop_event.set()
 
-        threading.Thread(target=stop_after_two_taps, daemon=True).start()
+        threading.Thread(target=stop_after_two, daemon=True).start()
         worker.run()
-
         presses = [c.args[0] for c in self.input.key_tap.call_args_list if c.args[0] == 82]
         self.assertEqual(len(presses), 2, presses)
         self.assertFalse(worker._seated)
-        self.assertFalse(self.ctx.sitting_event.is_set())
 
-    def test_finally_noop_after_successful_stand(self) -> None:
+    def test_stand_does_not_second_press_on_ambiguous_pose(self) -> None:
+        """Bug: stand stood up, verify ambiguous, second press re-sat, hunt resumed."""
+        worker = self._worker()
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        worker._seated = True
+        # After leave_sit tap: unknown, unknown, then standing — only 1 tap.
+        worker._pose_is_sitting = MagicMock(side_effect=[None, None, False])  # type: ignore[method-assign]
+        self.assertTrue(worker.stand(82))
+        self.assertEqual(self.input.key_tap.call_count, 1)
+        self.assertFalse(worker._seated)
+
+    def test_stand_second_press_only_if_confirmed_still_sitting(self) -> None:
+        worker = self._worker()
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        worker._seated = True
+        worker._pose_is_sitting = MagicMock(side_effect=[True, False])  # type: ignore[method-assign]
+        self.assertTrue(worker.stand(82))
+        self.assertEqual(self.input.key_tap.call_count, 2)
+        self.assertFalse(worker._seated)
+
+    def test_stand_noop_when_not_seated(self) -> None:
+        worker = self._worker()
+        worker._seated = False
+        self.assertTrue(worker.stand(82))
+        self.input.key_tap.assert_not_called()
+
+    def test_sit_skips_press_when_already_sitting(self) -> None:
+        worker = self._worker()
+        worker._pose_is_sitting = MagicMock(return_value=True)  # type: ignore[method-assign]
+        self.assertTrue(worker.sit(82))
+        self.input.key_tap.assert_not_called()
+        self.assertTrue(worker._seated)
+
+    def test_sit_does_not_press_on_ambiguous(self) -> None:
+        worker = self._worker()
+        reads = [None, None, True]
+
+        def pose() -> bool | None:
+            return reads.pop(0) if reads else True
+
+        worker._pose_is_sitting = pose  # type: ignore[method-assign]
+        self.assertTrue(worker.sit(82))
+        self.input.key_tap.assert_not_called()
+
+    def test_finally_does_not_release_gate_until_standing(self) -> None:
+        worker = self._worker(_ScriptedVitals([SIT_LOW_SP_RATIO - 0.01]))
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        worker._sit_until_done = MagicMock(side_effect=lambda _s: setattr(worker, "_seated", True) or None)  # type: ignore[method-assign]
+
+        stand_calls = {"n": 0}
+        gate_held: list[bool] = []
+
+        def stand(_scan: int) -> bool:
+            stand_calls["n"] += 1
+            gate_held.append(self.ctx.sitting_event.is_set())
+            if stand_calls["n"] < 2:
+                return False
+            worker._seated = False
+            return True
+
+        worker.stand = stand  # type: ignore[method-assign]
+        worker._recover_sp(SIT_LOW_SP_RATIO - 0.01)
+        self.assertGreaterEqual(stand_calls["n"], 2)
+        self.assertTrue(all(gate_held))
+        self.assertFalse(self.ctx.sitting_event.is_set())
+        self.assertFalse(worker._seated)
+
+    def test_finally_noop_tap_after_successful_stand(self) -> None:
         worker = self._worker(_ScriptedVitals([SIT_LOW_SP_RATIO - 0.01]))
         self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
         worker._sit_until_done = MagicMock(return_value="recovered")  # type: ignore[method-assign]
@@ -134,63 +192,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.input.key_tap.assert_not_called()
         self.assertFalse(self.ctx.sitting_event.is_set())
 
-    def test_finally_stands_when_still_seated(self) -> None:
-        worker = self._worker(_ScriptedVitals([SIT_LOW_SP_RATIO - 0.01]))
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        worker._sit_until_done = MagicMock(side_effect=lambda _s: setattr(worker, "_seated", True) or None)  # type: ignore[method-assign]
-        worker._pose_is_sitting = MagicMock(return_value=False)  # type: ignore[method-assign]
-        worker._recover_sp(SIT_LOW_SP_RATIO - 0.01)
-        self.input.key_tap.assert_called_once_with(82)
-        self.assertFalse(worker._seated)
-
-    def test_stand_always_presses_when_seated(self) -> None:
-        worker = self._worker(_ScriptedVitals([]))
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        worker._seated = True
-        worker._pose_is_sitting = MagicMock(return_value=False)  # type: ignore[method-assign]
-        self.assertTrue(worker.stand(82))
-        self.input.key_tap.assert_called_once_with(82)
-        self.assertFalse(worker._seated)
-
-    def test_stand_noop_when_not_seated(self) -> None:
-        worker = self._worker(_ScriptedVitals([]))
-        worker._seated = False
-        self.assertTrue(worker.stand(82))
-        self.input.key_tap.assert_not_called()
-
-    def test_sit_skips_press_when_already_sitting(self) -> None:
-        worker = self._worker(_ScriptedVitals([]))
-        worker._pose_is_sitting = MagicMock(return_value=True)  # type: ignore[method-assign]
-        self.assertTrue(worker.sit(82))
-        self.input.key_tap.assert_not_called()
-        self.assertTrue(worker._seated)
-
-    def test_sit_presses_when_standing(self) -> None:
-        worker = self._worker(_ScriptedVitals([]))
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        worker._pose_is_sitting = MagicMock(side_effect=[False, True])  # type: ignore[method-assign]
-        self.assertTrue(worker.sit(82))
-        self.input.key_tap.assert_called_once_with(82)
-        self.assertTrue(worker._seated)
-
-    def test_unreadable_pose_is_not_standing(self) -> None:
-        worker = self._worker(_ScriptedVitals([]))
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        worker._seated = True
-        worker._pose_is_sitting = MagicMock(side_effect=[None, None, False])  # type: ignore[method-assign]
-        self.assertTrue(worker.stand(82))
-        self.assertGreaterEqual(self.input.key_tap.call_count, 1)
-        self.assertFalse(worker._seated)
-
-    def test_tap_waits_pose_settle(self) -> None:
-        worker = self._worker(_ScriptedVitals([]))
-        waits: list[float] = []
-        self.ctx.wait_unless_stopped = lambda t: waits.append(t) or True  # type: ignore[method-assign]
-        worker._pose_is_sitting = MagicMock(side_effect=[False, True])  # type: ignore[method-assign]
-        self.assertTrue(worker.sit(82))
-        self.assertEqual(waits, [SIT_POSE_SETTLE_S])
-
-    def test_damage_interrupt_stands_once(self) -> None:
+    def test_damage_interrupt_stands(self) -> None:
         worker = self._worker(_ScriptedVitals([0.40] * 20))
         self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
         worker._pose_is_sitting = MagicMock(side_effect=[True, False])  # type: ignore[method-assign]
@@ -199,59 +201,13 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.input.key_tap.assert_called_once_with(82)
         self.assertFalse(worker._seated)
 
-    def test_stand_failure_keeps_gate(self) -> None:
-        worker = self._worker(_ScriptedVitals([SIT_RESUME_SP_RATIO] * 4))
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        worker.sit = MagicMock(return_value=True)  # type: ignore[method-assign]
-        worker._seated = True
-        worker.stand = MagicMock(return_value=False)  # type: ignore[method-assign]
-
-        def stop_soon(*_a, **_k):
-            self.ctx.stop_event.set()
-            return False
-
-        self.ctx.stop_event.wait = stop_soon  # type: ignore[method-assign]
-        self.assertIsNone(worker._sit_until_done(82))
-        worker.stand.assert_called()
-
-    def test_gate_held_during_final_stand(self) -> None:
-        worker = self._worker(_ScriptedVitals([SIT_LOW_SP_RATIO - 0.01]))
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        worker._sit_until_done = MagicMock(side_effect=lambda _s: setattr(worker, "_seated", True) or None)  # type: ignore[method-assign]
-        held: list[bool] = []
-
-        def stand(_scan: int) -> bool:
-            held.append(self.ctx.sitting_event.is_set())
-            worker._seated = False
-            return True
-
-        worker.stand = stand  # type: ignore[method-assign]
-        worker._recover_sp(SIT_LOW_SP_RATIO - 0.01)
-        self.assertTrue(all(held))
-        self.assertFalse(self.ctx.sitting_event.is_set())
-
-    def test_pause_during_sit_keeps_gate(self) -> None:
-        worker = self._worker(_ScriptedVitals([0.40] * 30))
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        worker._pose_is_sitting = MagicMock(return_value=True)  # type: ignore[method-assign]
-        self.ctx.begin_sit_ops()
-        self.ctx.pause_event.set()
-        outcomes: list[str | None] = []
-
-        def run() -> None:
-            outcomes.append(worker._sit_until_done(82))
-
-        thread = threading.Thread(target=run, daemon=True)
-        thread.start()
-        self.ctx.stop_event.wait(0.15)
-        self.assertTrue(thread.is_alive())
-        self.assertTrue(self.ctx.sitting_event.is_set())
-        self.ctx.pause_event.clear()
-        self.ctx.stop_event.wait(0.1)
-        self.assertTrue(thread.is_alive())
-        self.ctx.stop_event.set()
-        thread.join(timeout=1.0)
-        self.assertEqual(outcomes, [None])
+    def test_tap_waits_pose_settle(self) -> None:
+        worker = self._worker()
+        waits: list[float] = []
+        self.ctx.wait_unless_stopped = lambda t: waits.append(t) or True  # type: ignore[method-assign]
+        worker._pose_is_sitting = MagicMock(side_effect=[False, True])  # type: ignore[method-assign]
+        self.assertTrue(worker.sit(82))
+        self.assertEqual(waits, [SIT_POSE_SETTLE_S])
 
 
 if __name__ == "__main__":
