@@ -1,8 +1,8 @@
 """Sit when SP is low; pause hunting (and timers) until SP recovers.
 
 Before sitting: teleport until discovery sees no mobs, then sit.
-While sitting: if DangerDetector detects damage (HP drop), the sit session
-returns ``"interrupted"`` so ``_recover_sp`` finds a new spot and sits again.
+While sitting: if DangerDetector detects damage (HP drop), stand and
+return ``"interrupted"`` so ``_recover_sp`` finds a new spot and sits again.
 On SP recover: stand and resume.
 
 SP comes from shared ``PlayerVitals``. Danger detection is handled by
@@ -11,7 +11,6 @@ SP comes from shared ``PlayerVitals``. Danger detection is handled by
 
 from __future__ import annotations
 
-import time
 import traceback
 
 from pybot.game_state import PlayerVitals
@@ -28,7 +27,6 @@ from pybot.recognition.ui.character_pose import (
     check_is_standing,
 )
 from pybot.runtime.danger_detector import DangerDetector
-from pybot.runtime.character_state import CharacterState
 from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.teleport import TeleportController
 from pybot.runtime.workers.worker_contexts import SitOnLowSpWorkerContext
@@ -45,18 +43,14 @@ class SitOnLowSpWorker:
         input_backend: InputBackend,
         teleport: TeleportController,
         *,
-        danger: DangerDetector | None = None,
-        character_state: CharacterState | None = None,
-        vitals: PlayerVitals | None = None,
+        danger: DangerDetector,
+        vitals: PlayerVitals,
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
         self._teleport = teleport
-        self._vitals = vitals or PlayerVitals()
-        cstate = character_state or CharacterState()
-        self._danger = danger or DangerDetector(
-            ctx, teleport, cstate, vitals=self._vitals,
-        )
+        self._vitals = vitals
+        self._danger = danger
         self._last_fail_log = ""
 
     def _capture_frame(self):
@@ -87,7 +81,7 @@ class SitOnLowSpWorker:
         )
         while not ctx.is_stopped():
             try:
-                if ctx.pause_event.is_set():
+                if not ctx.should_run_workers():
                     ctx.wait_while_stopped_or_paused(SIT_SP_POLL_INTERVAL_S)
                     continue
                 ratio = self._sp_ratio()
@@ -120,7 +114,7 @@ class SitOnLowSpWorker:
 
     def _recover_sp(self, low_ratio: float) -> None:
         ctx = self._ctx
-        if not ctx.begin_sit_regen():
+        if not ctx.begin_sit_ops():
             return
         try:
             ctx.logger.behavior(
@@ -128,30 +122,32 @@ class SitOnLowSpWorker:
                 "teleport until clear before sit"
             )
             while not ctx.is_stopped():
-                if not self._teleport.teleport_until_quiet(
-                    log_tag="SIT",
-                ):
+                if ctx.pause_event.is_set():
+                    if not ctx.wait_while_stopped_or_paused(SIT_SP_POLL_INTERVAL_S):
+                        return
+                    continue
+                if not self._teleport.teleport_until_quiet(log_tag="SIT"):
                     return
                 outcome = self._sit_session()
                 if outcome == "recovered":
                     return
                 if outcome is None:
                     return
-
                 ctx.logger.behavior(
                     f"[SIT] {outcome} while regenerating — "
                     "finding another sit spot"
                 )
         finally:
-            ctx.end_sit_regen()
+            ctx.end_sit_ops()
             ctx.discovery_wake.set()
 
-    def _sit_session(self) -> str:
+    def _sit_session(self) -> str | None:
         """Sit until SP recovers.
 
         Returns:
             ``"recovered"`` — stood after SP ≥ resume threshold.
-            ``"interrupted"`` — DangerDetector detected damage (HP drop while sitting).
+            ``"interrupted"`` — damage while sitting; stood before return.
+            ``None`` — stop/abort (could not sit, or stopped).
         """
         ctx = self._ctx
         sit_scan = ctx.config.sit_on_low_sp_scan_code
@@ -164,56 +160,71 @@ class SitOnLowSpWorker:
                 "[SIT] could not confirm sitting — aborting session"
             )
             return None
-        ctx.logger.behavior("[SIT] Pressed sit button, waiting for regen")
+        ctx.logger.behavior("[SIT] sitting confirmed — waiting for regen")
 
         while not ctx.is_stopped():
+            if ctx.pause_event.is_set():
+                if not ctx.wait_while_stopped_or_paused(SIT_SP_POLL_INTERVAL_S):
+                    return None
+                continue
+
             if self._danger.pop_damage_detected():
-                ctx.logger.behavior("[SIT] interrupted by damage — finding new spot")
+                ctx.logger.behavior(
+                    "[SIT] interrupted by damage — standing before new spot"
+                )
+                self._ensure_standing(sit_scan)
                 return "interrupted"
 
             sp_state = self._sp_snapshot()
             if sp_state is not None:
-                sp, ratio = sp_state
+                _sp, ratio = sp_state
                 if ratio >= SIT_RESUME_SP_RATIO:
                     ctx.logger.behavior(
                         f"[SIT] SP recovered ratio={ratio:.1%} — standing"
                     )
                     if not self._ensure_standing(sit_scan):
+                        # Keep the sit gate held; retry stand without resuming hunt.
                         ctx.logger.behavior(
-                            "[SIT] could not confirm standing — aborting session"
+                            "[SIT] could not confirm standing — retrying"
                         )
+                        ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
+                        continue
+                    if not ctx.wait_unless_stopped(SIT_STAND_RESUME_DELAY_S):
                         return None
-                    ctx.wait_unless_stopped(SIT_STAND_RESUME_DELAY_S)
                     return "recovered"
 
             ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
+        return None
 
-    def _ensure_sitting(
-        self,
-        sit_scan: int,
-    ) -> bool:
-        """Press sit and verify with visual pose check (retry up to N times)."""
+    def _ensure_sitting(self, sit_scan: int) -> bool:
+        """Reach sitting pose; press the toggle only when not already sitting."""
+        return self._ensure_pose(sit_scan, want_sit=True)
+
+    def _ensure_standing(self, sit_scan: int) -> bool:
+        """Reach standing pose; press the toggle only when not already standing."""
+        return self._ensure_pose(sit_scan, want_sit=False)
+
+    def _ensure_pose(self, sit_scan: int, *, want_sit: bool) -> bool:
+        """Toggle-safe sit/stand: verify first, press only on mismatch."""
+        label = "sit" if want_sit else "stand"
         for attempt in range(_SIT_VERIFY_RETRIES):
-            self._input.teleport_key(sit_scan)
-            self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S)
-            if self._verify_pose(expected_sit=True):
+            if self._ctx.is_stopped():
+                return False
+            if self._ctx.pause_event.is_set():
+                if not self._ctx.wait_while_stopped_or_paused(SIT_SP_POLL_INTERVAL_S):
+                    return False
+                continue
+            if self._verify_pose(expected_sit=want_sit):
+                return True
+            self._input.key_tap(sit_scan)
+            if not self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S):
+                if self._ctx.is_stopped():
+                    return False
+                continue
+            if self._verify_pose(expected_sit=want_sit):
                 return True
             self._ctx.logger.behavior(
-                f"[SIT] sit verify failed attempt {attempt + 1}/{_SIT_VERIFY_RETRIES} — retrying"
-            )
-        return False
-
-    def _ensure_standing(
-        self,
-        sit_scan: int,
-    ) -> bool:
-        """Press stand and verify with visual pose check (retry up to N times)."""
-        for attempt in range(_SIT_VERIFY_RETRIES):
-            self._input.teleport_key(sit_scan)
-            self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S)
-            if self._verify_pose(expected_sit=False):
-                return True
-            self._ctx.logger.behavior(
-                f"[SIT] stand verify failed attempt {attempt + 1}/{_SIT_VERIFY_RETRIES} — retrying"
+                f"[SIT] {label} verify failed "
+                f"attempt {attempt + 1}/{_SIT_VERIFY_RETRIES} — retrying"
             )
         return False

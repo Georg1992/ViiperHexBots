@@ -267,10 +267,11 @@ def _build_conditional_workers(
             ("hp_restore", HpRestoreWorker(ctx, input_backend, player_vitals).run)
         )
     if ctx.config.sit_on_low_sp:
+        if danger is None:
+            raise RuntimeError("Sit-on-low-SP requires a shared DangerDetector")
         sit_worker = SitOnLowSpWorker(
             ctx, input_backend, tport,
-            danger=danger, character_state=character_state,
-            vitals=player_vitals,
+            danger=danger, vitals=player_vitals,
         )
         workers.append(("sit_sp", sit_worker.run))
     if ctx.config.open_storage_steps:

@@ -200,12 +200,6 @@ class HuntRuntimeContext:
     def end_heal_ops(self) -> None:
         self.gates.end_heal_ops()
 
-    def begin_sit_regen(self) -> bool:
-        return self.gates.begin_sit_ops()
-
-    def end_sit_regen(self) -> None:
-        self.gates.end_sit_ops()
-
     def wait_while_stopped_or_paused(self, timeout_s: float) -> bool:
         return self.gates.wait_while_stopped_or_paused(timeout_s)
 

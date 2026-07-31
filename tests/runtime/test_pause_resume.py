@@ -27,9 +27,9 @@ class HuntRuntimeContextPauseTests(unittest.TestCase):
             control=MagicMock(),
         )
         self.assertTrue(ctx.should_run_workers())
-        ctx.begin_sit_regen()
+        ctx.begin_sit_ops()
         self.assertFalse(ctx.should_run_workers())
-        ctx.end_sit_regen()
+        ctx.end_sit_ops()
         self.assertTrue(ctx.should_run_workers())
 
     def test_should_run_workers_respects_pause(self) -> None:

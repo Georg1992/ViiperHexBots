@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import SIT_LOW_SP_RATIO, SIT_RESUME_SP_RATIO
+from pybot.runtime.danger_detector import DangerDetector
 from pybot.runtime.detection.detector_session import DiscoveryScanResult, RawDetection
 from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.runtime_context import HuntRuntimeContext
@@ -63,23 +64,20 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.capture.capture_roi.return_value = MagicMock(size=1)
         self.ctx.capture.capture_client.return_value = object()
         self.input = MagicMock(spec=ShadowInputBackend)
-        # Wire the controller so teleport_until_quiet calls succeed.
         from pybot.runtime.teleport import TeleportController
         self.teleport = TeleportController(self.ctx, self.input, MagicMock())
-        # Speed tests: make teleport a no-op (already clear).
         self.teleport.teleport_until_quiet = MagicMock(return_value=True)  # type: ignore[method-assign]
+        self.danger = MagicMock(spec=DangerDetector)
+        self.danger.pop_damage_detected.return_value = False
 
-    def _empty_scans(self, n: int = 5) -> list[DiscoveryScanResult]:
-        empty = DiscoveryScanResult(
-            ok=True,
-            fail_reason="",
-            raw_count=0,
-            accepted_count=0,
-            detections=[],
-            duration_ms=1,
-            elapsed_s=0.001,
+    def _worker(self, vitals: PlayerVitals) -> SitOnLowSpWorker:
+        return SitOnLowSpWorker(
+            self.ctx,
+            self.input,
+            self.teleport,
+            danger=self.danger,
+            vitals=vitals,
         )
-        return [empty] * n
 
     def _living_then_clear(self) -> list[DiscoveryScanResult]:
         living = RawDetection(
@@ -108,9 +106,9 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
 
     def test_sitting_blocks_should_run_workers(self) -> None:
         self.assertTrue(self.ctx.should_run_workers())
-        self.ctx.begin_sit_regen()
+        self.ctx.begin_sit_ops()
         self.assertFalse(self.ctx.should_run_workers())
-        self.ctx.end_sit_regen()
+        self.ctx.end_sit_ops()
         self.assertTrue(self.ctx.should_run_workers())
 
     def test_recover_teleports_until_clear_then_sits(self) -> None:
@@ -122,26 +120,24 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             ]
         )
         self.ctx.detector.discover_frame.side_effect = self._living_then_clear()
-        worker = SitOnLowSpWorker(
-            self.ctx,
-            self.input,
-            self.teleport,
-            vitals=vitals,
-        )
+        worker = self._worker(vitals)
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-        worker._verify_pose = MagicMock(return_value=True)  # type: ignore[method-assign]
+        # Pose-first: mismatch then confirm for sit, then again for stand.
+        worker._verify_pose = MagicMock(  # type: ignore[method-assign]
+            side_effect=[False, True, False, True]
+        )
 
         def stop_after_recover() -> None:
-            while self.input.teleport_key.call_count < 2 and not self.ctx.is_stopped():
+            while self.input.key_tap.call_count < 2 and not self.ctx.is_stopped():
                 self.ctx.stop_event.wait(0.01)
             self.ctx.stop_event.set()
 
         threading.Thread(target=stop_after_recover, daemon=True).start()
         worker.run()
 
-        self.assertGreaterEqual(self.input.teleport_key.call_count, 2)
+        self.assertGreaterEqual(self.input.key_tap.call_count, 2)
         sit_presses = [
-            c.args[0] for c in self.input.teleport_key.call_args_list if c.args[0] == 82
+            c.args[0] for c in self.input.key_tap.call_args_list if c.args[0] == 82
         ]
         self.assertGreaterEqual(len(sit_presses), 1)
         self.assertFalse(self.ctx.sitting_event.is_set())
@@ -154,83 +150,68 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
     def test_sit_teleport_clears_overlay_tracks(self) -> None:
         vitals = _ScriptedVitals([SIT_LOW_SP_RATIO - 0.01, SIT_RESUME_SP_RATIO])
         self.ctx.detector.discover_frame.side_effect = self._living_then_clear()
-        worker = SitOnLowSpWorker(
-            self.ctx,
-            self.input,
-            self.teleport,
-            vitals=vitals,
-        )
+        worker = self._worker(vitals)
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-        worker._verify_pose = MagicMock(return_value=True)  # type: ignore[method-assign]
+        worker._verify_pose = MagicMock(  # type: ignore[method-assign]
+            side_effect=[False, True, False, True]
+        )
 
         def stop_after_recover() -> None:
-            while self.input.teleport_key.call_count < 2 and not self.ctx.is_stopped():
+            while self.input.key_tap.call_count < 2 and not self.ctx.is_stopped():
                 self.ctx.stop_event.wait(0.01)
             self.ctx.stop_event.set()
 
         threading.Thread(target=stop_after_recover, daemon=True).start()
         worker.run()
 
-        # Teleport is mocked to succeed without side effects.
         self.teleport.teleport_until_quiet.assert_called_once()
 
-    def test_sit_session_interrupted_on_danger_teleport(self) -> None:
-        """DangerDetector detects damage → pop_damage_detected True → returns "interrupted"."""
+    def test_sit_session_interrupted_stands_then_returns(self) -> None:
         vitals = _ScriptedVitals([0.40] * 20)
-        worker = SitOnLowSpWorker(
-            self.ctx,
-            self.input,
-            self.teleport,
-            vitals=vitals,
-        )
+        worker = self._worker(vitals)
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-
-        # Mock pose verification so _ensure_sitting succeeds in 1 press (not 3 retries).
         worker._verify_pose = MagicMock(return_value=True)  # type: ignore[method-assign]
-        # Mock pop_damage_detected: first call (reset) returns False, second (loop check) returns True.
-        worker._danger.pop_damage_detected = MagicMock(side_effect=[False, True])
+        # reset → False; loop check → True; then ensure_standing verifies True without press.
+        self.danger.pop_damage_detected.side_effect = [False, True]
         outcome = worker._sit_session()
 
         self.assertEqual(outcome, "interrupted")
+        # Pose-first: already "standing" via verify mock → no key press after interrupt.
+        self.assertEqual(self.input.key_tap.call_count, 0)
 
-    def test_ensure_sitting_presses_once(self) -> None:
-        worker = SitOnLowSpWorker(
-            self.ctx,
-            self.input,
-            self.teleport,
-            vitals=_ScriptedVitals([]),
-        )
+    def test_ensure_pose_skips_press_when_already_correct(self) -> None:
+        worker = self._worker(_ScriptedVitals([]))
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
         worker._verify_pose = MagicMock(return_value=True)  # type: ignore[method-assign]
-        worker._ensure_sitting(82)
-        self.assertEqual(self.input.teleport_key.call_count, 1)
-        self.assertEqual(self.input.teleport_key.call_args.args[0], 82)
+        self.assertTrue(worker._ensure_sitting(82))
+        self.assertTrue(worker._ensure_standing(82))
+        self.input.key_tap.assert_not_called()
 
-    def test_ensure_standing_presses_once(self) -> None:
-        worker = SitOnLowSpWorker(
-            self.ctx,
-            self.input,
-            self.teleport,
-            vitals=_ScriptedVitals([]),
-        )
+    def test_ensure_sitting_presses_when_not_sitting(self) -> None:
+        worker = self._worker(_ScriptedVitals([]))
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-        worker._verify_pose = MagicMock(return_value=True)  # type: ignore[method-assign]
-        worker._ensure_standing(82)
-        self.assertEqual(self.input.teleport_key.call_count, 1)
-        self.assertEqual(self.input.teleport_key.call_args.args[0], 82)
+        # First look: not sitting; after press: sitting.
+        worker._verify_pose = MagicMock(side_effect=[False, True])  # type: ignore[method-assign]
+        self.assertTrue(worker._ensure_sitting(82))
+        self.input.key_tap.assert_called_once_with(82)
 
-    def test_ensure_sitting_presses_key(self) -> None:
-        worker = SitOnLowSpWorker(
-            self.ctx,
-            self.input,
-            self.teleport,
-            vitals=_ScriptedVitals([]),
-        )
+    def test_stand_failure_keeps_sit_gate_and_retries(self) -> None:
+        vitals = _ScriptedVitals([SIT_RESUME_SP_RATIO, SIT_RESUME_SP_RATIO])
+        worker = self._worker(vitals)
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-        worker._verify_pose = MagicMock(return_value=True)  # type: ignore[method-assign]
-        worker._ensure_sitting(82)
-        self.assertEqual(self.input.teleport_key.call_count, 1)
-        self.assertEqual(self.input.teleport_key.call_args.args[0], 82)
+        # Sit succeeds without press; stand never verifies → stay in session.
+        worker._ensure_sitting = MagicMock(return_value=True)  # type: ignore[method-assign]
+        worker._ensure_standing = MagicMock(return_value=False)  # type: ignore[method-assign]
+        self.danger.pop_damage_detected.return_value = False
+
+        def stop_soon(*_a, **_k):
+            self.ctx.stop_event.set()
+            return False
+
+        self.ctx.stop_event.wait = stop_soon  # type: ignore[method-assign]
+        outcome = worker._sit_session()
+        self.assertIsNone(outcome)
+        worker._ensure_standing.assert_called()
 
 
 if __name__ == "__main__":
