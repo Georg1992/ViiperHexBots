@@ -1132,29 +1132,8 @@ class MainWindow:
         client_left: int,
         client_top: int,
     ) -> None:
-        """Store a successful read; UI stats update only when numbers change.
-
-        When the reader has doubts (SP dropped suspiciously from the
-        previous tick), the previous SP is kept in the confirmed snapshot
-        and vitals so a persistent artifact cannot win on the next tick.
-        """
+        """Store a successful read; UI stats update only when numbers change."""
         previous = self._status_panel_confirmed
-        # When SP drops dramatically from the previous reading (e.g. 200→1),
-        # the OCR is seeing an artifact — keep the previous SP everywhere.
-        if (
-            self._panel_owns_sp_weight()
-            and previous is not None
-            and values.sp < previous.sp // 2
-        ):
-            values = StatusPanelValues(
-                hp=values.hp,
-                hp_max=values.hp_max,
-                sp=previous.sp,
-                sp_max=previous.sp_max,
-                weight=values.weight,
-                weight_max=values.weight_max,
-                panel_origin=values.panel_origin,
-            )
         self._status_panel_confirmed = values
         self._status_panel_anchor = values.panel_origin
         self._status_panel_overlay.update(

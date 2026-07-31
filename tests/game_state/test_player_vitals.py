@@ -70,6 +70,19 @@ class PlayerVitalsTests(unittest.TestCase):
         self.assertGreater(chg4, chg1)
         self.assertEqual(chg4, obs4)
 
+    def test_hp_and_weight_publish_do_not_bump_sp_clocks(self) -> None:
+        import time
+
+        vitals = PlayerVitals()
+        vitals.publish_sp(100, 200)
+        _sp, obs1, chg1 = vitals.sp_sample()
+        time.sleep(0.002)
+        vitals.publish_hp(50, 100)
+        vitals.publish_weight(10, 100)
+        _sp, obs2, chg2 = vitals.sp_sample()
+        self.assertEqual(obs2, obs1)
+        self.assertEqual(chg2, chg1)
+
 
 if __name__ == "__main__":
     unittest.main()

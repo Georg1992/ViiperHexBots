@@ -164,14 +164,6 @@ class ItemsToStorageWorker:
 
         return self._ui.recognize("Use-grid wing scan", scan)
 
-    def _scan_use_grid_wings(self) -> list[tuple[int, int, int, int]]:
-        def scan() -> list[tuple[int, int, int, int]]:
-            frame = self._capture_client()
-            panel = require_inventory_panel(frame)
-            return find_wings_in_use_grid(frame, panel)
-
-        return self._recognize("Use-grid wing scan", scan)
-
     def _deposit_wings_from_use_grid(self) -> int:
         """Find each Use-tab fly wing, aim bottom-left, Alt+RMB into storage."""
         log = self._ctx.logger.behavior

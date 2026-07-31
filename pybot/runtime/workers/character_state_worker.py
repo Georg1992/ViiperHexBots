@@ -14,7 +14,11 @@ from __future__ import annotations
 import traceback
 
 from pybot.recognition.ui.character_pose import detect_nearby_any_mobs
-from pybot.runtime.character_state import CharacterState, is_surrounded_by_tracks
+from pybot.runtime.character_state import (
+    SURROUND_RADIUS_PX,
+    CharacterState,
+    is_surrounded_by_tracks,
+)
 from pybot.runtime.constants import (
     HUNT_DISCOVERY_INTERVAL_MS,
     WORKER_POLL_INTERVAL_S,
@@ -76,7 +80,13 @@ class CharacterStateMonitor:
         is_surrounded, surround_reason = is_surrounded_by_tracks(
             char_x, char_y, all_mobs,
         )
-        nearby_count = len(all_mobs)
+        nearby_count = 0
+        radius_sq = SURROUND_RADIUS_PX * SURROUND_RADIUS_PX
+        for mx, my in all_mobs:
+            dx = mx - char_x
+            dy = my - char_y
+            if (dx * dx + dy * dy) <= radius_sq:
+                nearby_count += 1
 
         # ── Generic nearby-mob detection (250x250 center ROI) ─────
         # Detects ANY sprite blobs near the character regardless of type.

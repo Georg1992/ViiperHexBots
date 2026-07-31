@@ -135,13 +135,18 @@ class HuntTracks:
             return any(is_alive(track) for track in self._tracks)
 
     def get_area_clear_candidate(self, now_tick: int | None = None) -> AreaClearStatus:
+        """Return whether the area has no alive tracks.
+
+        Read-only: must not clear pending discovery candidates. Attack's
+        no-target path polls this while discovery may have published
+        candidates that tracking has not ingested yet.
+        """
         with self._lock:
             alive = sum(1 for track in self._tracks if is_alive(track))
             if len(self._tracks) == 0:
                 # No tracks at all — reset ID counter to prevent unbounded
                 # growth across many create/remove cycles.
                 self._next_id = 1
-                self._discovery_candidates = []
         return AreaClearStatus(
             clear=alive == 0,
             reason="" if alive == 0 else "alive_tracks",
