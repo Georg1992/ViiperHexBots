@@ -3,6 +3,9 @@
 Each mob can have a :class:`MobBehavior` subclass that hooks into key
 points of the attack cycle without modifying the core workers.
 
+Only mobs listed in ``_BEHAVIOR_REGISTRY`` have custom behavior. Today
+that is Anubis alone (kiting).
+
 Kiting
 ------
 After each attack, move the cursor in the opposite direction from the
@@ -19,10 +22,6 @@ if TYPE_CHECKING:
 
 class MobBehavior:
     """Default no-op behavior for mobs without custom logic."""
-
-    def has_custom_behavior(self) -> bool:
-        """Whether this mob has any non-default hooks (used by the GUI)."""
-        return False
 
     def kite_after_attack(
         self,
@@ -45,9 +44,6 @@ class MobBehavior:
 
 class AnubisBehavior(MobBehavior):
     """Anubis kites: walk away from the mob after each attack."""
-
-    def has_custom_behavior(self) -> bool:
-        return True
 
     def kite_after_attack(
         self,
@@ -74,8 +70,8 @@ class AnubisBehavior(MobBehavior):
 
 
 # ── Registry ──────────────────────────────────────────────────────
-# Map lower-case descriptor names to behavior instances.
-# Add new mobs here as their custom behaviors are implemented.
+# Only Anubis has custom hunt behavior. Do not register other mobs
+# here unless they intentionally get custom hooks + UI marking.
 
 _BEHAVIOR_REGISTRY: dict[str, MobBehavior] = {
     "anubis": AnubisBehavior(),
@@ -86,3 +82,8 @@ def get_mob_behavior(mob_name: str) -> MobBehavior:
     """Return the :class:`MobBehavior` for *mob_name*, or the default no-op."""
     key = mob_name.strip().lower()
     return _BEHAVIOR_REGISTRY.get(key, MobBehavior())
+
+
+def mob_has_custom_behavior(mob_name: str) -> bool:
+    """True only for mobs with a registered custom hunt behavior."""
+    return mob_name.strip().lower() in _BEHAVIOR_REGISTRY
