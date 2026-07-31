@@ -15,8 +15,10 @@ One discovery pass (same frame):
         Removal factors run in ``HuntTracks.process_discovery_scan()``:
 - Factor 1: Tracks outside the hunt ROI → removed immediately (bookkeeping).
 - Factor 2: Tracks missed for 2+ consecutive discovery scans → removed.
-  If the track was already opacity-fading, a death site is recorded so
-  corpse heat cannot be rediscovered; otherwise bookkeeping only.
+  Misses inside the character melee disk (ROI center) do not count — the
+  player sprite occludes silhouette there. If the track was already
+  opacity-fading, a death site is recorded so corpse heat cannot be
+  rediscovered; otherwise bookkeeping only.
 - First miss: ``discovery_miss_count`` increments; track stays alive for one
   more scan cycle.
 

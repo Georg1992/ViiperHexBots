@@ -37,6 +37,15 @@ def monotonic_ms() -> int:
     return int(time.monotonic() * 1000)
 
 
+def _within_melee_guard(mx: int, my: int, char_x: int, char_y: int) -> bool:
+    """True when a mob is within the character melee occlusion disk."""
+    dx = mx - char_x
+    dy = my - char_y
+    return (dx * dx + dy * dy) <= (
+        MELEE_IDLE_GUARD_RADIUS_PX * MELEE_IDLE_GUARD_RADIUS_PX
+    )
+
+
 @dataclass(frozen=True)
 class OpacityDeathEvent:
     """One track removed by opacity-decay death detection."""
@@ -263,6 +272,8 @@ class HuntTracks:
         1. Outside hunt ROI → removed immediately (no death site).
         2. Two missed discovery scans → removed. If the track was already
            opacity-fading, records a death site; otherwise bookkeeping only.
+           Misses inside the melee occlusion disk around the character (ROI
+           center) do **not** count — player+mob silhouette merge is not "gone".
         3. First miss → ``discovery_miss_count`` += 1 (stays alive one more scan).
 
         Confirmed death (opacity / idle-dead) uses ``_remove_dead_tracks_locked``
@@ -348,6 +359,7 @@ class HuntTracks:
             remaining_ids = unmatched_ids - out_of_range
             miss_remove, _first_miss = self._evaluate_discovery_miss_removal(
                 remaining_ids,
+                hunt_roi=hunt_roi,
             )
             remove_ids.update(miss_remove)
 
@@ -411,27 +423,42 @@ class HuntTracks:
     def _evaluate_discovery_miss_removal(
         self,
         unmatched_ids: set[int],
+        *,
+        hunt_roi: HuntRoi | None = None,
     ) -> tuple[set[int], list[int]]:
         """Factor 2: Remove tracks missed by 2+ consecutive discovery scans.
 
         Only receives in-range tracks (out-of-range handled by Factor 1).
 
-        Side-effect: increments ``discovery_miss_count``.
+        Side-effect: increments ``discovery_miss_count`` (except in the
+        character melee occlusion disk — see below).
 
         Returns ``(remove_ids, first_miss_ids)`` where:
         - ``remove_ids``: tracks with miss_count >= 2.
         - ``first_miss_ids``: tracks on their first miss (still alive).
 
         Caller records a death site when the removed track was opacity-fading.
+
+        Near the character (ROI center), discovery silhouette often fails
+        because the player sprite merges into the extract. That is occlusion,
+        not absence — do not count those misses toward removal.
         """
         remove_ids: set[int] = set()
         first_miss_ids: list[int] = []
+        char_x = hunt_roi.center_x if hunt_roi is not None else None
+        char_y = hunt_roi.center_y if hunt_roi is not None else None
         for track_id in unmatched_ids:
             track = self._get_track_by_id_locked(track_id)
             if track is None:
                 continue
-            track.discovery_miss_count += 1
             clear_discovery_blob_observation(track)
+            if (
+                char_x is not None
+                and char_y is not None
+                and _within_melee_guard(track.x, track.y, char_x, char_y)
+            ):
+                continue
+            track.discovery_miss_count += 1
             if track.discovery_miss_count >= DISCOVERY_MISS_REMOVE_COUNT:
                 remove_ids.add(track_id)
             else:
