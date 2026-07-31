@@ -2,9 +2,10 @@
 
 Responsibilities
 ----------------
-* **Key selection** — creamy TP first, wing key fallback.
+* **Key selection** — mode/area: creamy TP first, wing key next.
+  Danger/critical: wing key first when assigned, creamy next.
 * **Execution** — press teleport key, wait for settle, track wings/overlay.
-* **Danger teleport** — for DangerDetector (HP drop / surround).
+* **Danger teleport** — for DangerDetector (HP drop / surround / critical).
 * **Area clear** — scan-loop that teleports until discovery sees zero mobs.
 * **Quiet area** — clear + idle + re-scan (for sit/storage workers).
 * **Mode teleport** — discovery-gated teleport with suspend/release (for TeleportStrategy).
@@ -33,25 +34,45 @@ class TeleportController:
     # ── Key selection ────────────────────────────────────────────
 
     def active_scan_code(self) -> int:
-        """Creamy TP first, wing key fallback."""
+        """Creamy TP first, wing key next (mode / area-clear teleports)."""
         cfg = self._ctx.config
         return cfg.creamy_tp_scan_code or cfg.teleport_scan_code
 
     def active_button(self) -> str:
-        """Creamy TP first, wing key fallback."""
+        """Creamy TP first, wing key next (mode / area-clear teleports)."""
         cfg = self._ctx.config
         if cfg.creamy_tp_scan_code > 0 and cfg.creamy_tp_button:
             return cfg.creamy_tp_button
         return cfg.teleport_button
 
+    def danger_scan_code(self) -> int:
+        """Wing (Teleport) key first when assigned; creamy next.
+
+        Critical / danger teleports must consume fly wings when the wing key
+        is configured, not the creamy card.
+        """
+        cfg = self._ctx.config
+        return cfg.teleport_scan_code or cfg.creamy_tp_scan_code
+
+    def danger_button(self) -> str:
+        """Wing (Teleport) key first when assigned; creamy next."""
+        cfg = self._ctx.config
+        if cfg.teleport_scan_code > 0 and cfg.teleport_button:
+            return cfg.teleport_button
+        return cfg.creamy_tp_button
+
     # ── Press + settle ───────────────────────────────────────────
 
-    def teleport_once(self) -> bool:
-        """Press the teleport key, wait for settle, track wings/overlay.
+    def teleport_once(self, scan_code: int | None = None) -> bool:
+        """Press a teleport key, wait for settle, track wings/overlay.
+
+        Args:
+            scan_code: Key to press. Defaults to :meth:`active_scan_code`.
 
         Returns ``False`` if no key is configured or the wait was interrupted.
         """
-        tp = self.active_scan_code()
+        cfg = self._ctx.config
+        tp = int(scan_code) if scan_code is not None else self.active_scan_code()
         if tp <= 0:
             return False
         try:
@@ -59,31 +80,34 @@ class TeleportController:
         except Exception as exc:
             self._ctx.logger.behavior(f"[TP] input error: {exc}")
             return False
-        self._ctx.note_teleport_for_wings()
+        # Only decrement the fly-wing counter when the wing key was used.
+        if tp == cfg.teleport_scan_code and cfg.teleport_scan_code > 0:
+            self._ctx.note_teleport_for_wings()
         self._ctx.overlay.increment_teleports()
         return self._ctx.wait_unless_stopped(
-            self._ctx.config.teleport_duration_ms / 1000.0
+            cfg.teleport_duration_ms / 1000.0
         )
 
     # ── Danger teleport ──────────────────────────────────────────
 
     def danger_teleport(self, reason: str = "") -> None:
-        """Teleport for danger (HP drop, surround). Clears tracks after.
+        """Teleport for danger (HP drop, surround, critical). Clears tracks after.
 
-        Suspends discovery for the same reason as ``mode_teleport``: a
-        concurrent scan during settle must not confirm clear or recreate
-        tracks on a loading frame.
+        Uses the wing (Teleport) key when assigned. Suspends discovery for the
+        same reason as ``mode_teleport``: a concurrent scan during settle must
+        not confirm clear or recreate tracks on a loading frame.
         """
         ctx = self._ctx
         prefix = f"{reason} " if reason else ""
-        tp = self.active_scan_code()
+        tp = self.danger_scan_code()
+        key_name = self.danger_button() or "(unset)"
         ctx.logger.behavior(
-            f"[DANGER] {prefix}teleport_scan={tp} — teleporting"
+            f"[DANGER] {prefix}key={key_name!r} scan={tp} — teleporting"
         )
         ctx.discovery_suspend.set()
         ctx.discovery_wake.clear()
         try:
-            self.teleport_once()
+            self.teleport_once(scan_code=tp)
             ctx.area_reset(reason="danger_teleport")
         finally:
             ctx.discovery_suspend.clear()
