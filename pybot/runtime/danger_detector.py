@@ -1,8 +1,7 @@
 """DangerDetector — isolated danger observer.
 
 Runs in its own worker thread.  Polls ``PlayerVitals`` for HP and
-reads ``CharacterState`` for surround detection.  Nothing comes back
-out.  No other module knows danger exists.
+reads ``CharacterState`` for surround detection.
 
 Inputs:
 * ``run()`` — polls ``hp_pair()`` from PlayerVitals; HP drops trigger
@@ -10,13 +9,15 @@ Inputs:
 * ``run()`` (continued) — polls ``CharacterState.is_surrounded`` and
   teleports when the character is boxed in by mobs
 
-Teleport execution delegated to :class:`TeleportController`.
+Heal-skill reads ``is_surrounded`` / ``has_recent_damage`` to heal only
+when safe. Teleport execution delegated to :class:`TeleportController`.
 Danger teleport has priority over healing (allowed while heal ops are held).
 """
 
 from __future__ import annotations
 
 import threading
+import time
 from typing import TYPE_CHECKING
 
 from pybot.runtime.constants import WORKER_POLL_INTERVAL_S
@@ -46,6 +47,7 @@ class DangerDetector:
         self._prev_hp: int | None = None
         self._damage_lock = threading.Lock()
         self._damage_detected: bool = False
+        self._last_damage_mono: float | None = None
 
     # ── Worker loop ───────────────────────────────────────────────
 
@@ -73,6 +75,7 @@ class DangerDetector:
             )
             with self._damage_lock:
                 self._damage_detected = True
+                self._last_damage_mono = time.monotonic()
             # Always record the drop (sit worker reads the flag). Danger TP
             # is allowed during heal; sit/storage/pause still block it.
             if self._ctx.should_allow_danger_teleport():
@@ -80,6 +83,8 @@ class DangerDetector:
                     self._teleport.danger_teleport(reason="critical_hp")
                 else:
                     self._teleport.danger_teleport(reason="hp_drop")
+                # Fresh map after TP — do not block post-TP heal on that hit.
+                self._clear_damage_after_teleport()
         self._prev_hp = hp
 
     def _poll_surround(self) -> None:
@@ -87,6 +92,24 @@ class DangerDetector:
         if self._character_state.is_surrounded:
             reason = self._character_state.surrounded_reason
             self._teleport.danger_teleport(reason=f"surrounded {reason}")
+            self._clear_damage_after_teleport()
+
+    def _clear_damage_after_teleport(self) -> None:
+        """Allow heal-skill to start after danger TP settle."""
+        with self._damage_lock:
+            self._last_damage_mono = None
+            self._damage_detected = False
+
+    def is_surrounded(self) -> bool:
+        """True when CharacterState reports the character is boxed in."""
+        return bool(self._character_state.is_surrounded)
+
+    def has_recent_damage(self, within_s: float) -> bool:
+        """True if an HP drop was observed within the last ``within_s`` seconds."""
+        with self._damage_lock:
+            if self._last_damage_mono is None:
+                return False
+            return (time.monotonic() - self._last_damage_mono) < within_s
 
     def pop_damage_detected(self) -> bool:
         """Return and clear the damage-detected flag for consumers (sit worker)."""

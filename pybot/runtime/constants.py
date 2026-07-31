@@ -29,11 +29,15 @@ SIT_IDLE_BEFORE_SIT_S = 1.0
 SIT_STAND_RESUME_DELAY_S = 0.5
 # Wait for sit/stand animation (~300ms) before visual pose verification.
 SIT_POSE_SETTLE_S = 0.35
-# Press HP Restore Key when vision HP/max is below this (item path).
+# Press HP Restore Key when vision HP/max is below this (item path only).
 HP_RESTORE_RATIO = 0.5
-# Vision HP poll / min gap between HP Restore Key presses.
+# Vision HP poll / min gap between HP Restore Key presses (item path).
 HP_RESTORE_POLL_S = 1.0
 HP_RESTORE_COOLDOWN_S = 1.0
+# Heal-skill path: poll fast so heal↔hunt handoff after TP/clear is seamless.
+HP_HEAL_SKILL_POLL_S = WORKER_POLL_INTERVAL_S
+# No HP drop for this long before heal-skill may start/continue.
+HP_HEAL_DAMAGE_QUIET_S = 0.25
 
 # Minimum gap between distinct skill-timer key presses when several are due.
 SKILL_TIMER_STAGGER_MS = 500
@@ -84,6 +88,8 @@ __all__ = [
     "HP_RESTORE_RATIO",
     "HP_RESTORE_POLL_S",
     "HP_RESTORE_COOLDOWN_S",
+    "HP_HEAL_SKILL_POLL_S",
+    "HP_HEAL_DAMAGE_QUIET_S",
     "SKILL_TIMER_STAGGER_MS",
     "STORAGE_WEIGHT_POLL_INTERVAL_S",
     "STORAGE_WEIGHT_MODIFIER_MIN",

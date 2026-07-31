@@ -37,16 +37,24 @@ class HpRestoreWorkerTests(unittest.TestCase):
         )
         self.input = MagicMock()
         self.vitals = PlayerVitals()
+        self.danger = MagicMock(spec=DangerDetector)
+        self.danger.is_surrounded.return_value = False
+        self.danger.has_recent_damage.return_value = False
+
+    def _worker(self) -> HpRestoreWorker:
+        return HpRestoreWorker(
+            self.ctx, self.input, self.vitals, danger=self.danger,
+        )
 
     def test_skips_when_no_hp_key(self) -> None:
         self.config.hp_scan_code = 0
-        worker = HpRestoreWorker(self.ctx, self.input, self.vitals)
+        worker = self._worker()
         worker.run()
         self.input.teleport_key.assert_not_called()
 
     def test_presses_when_hp_below_threshold(self) -> None:
         self.vitals.publish_hp(40, 100)
-        worker = HpRestoreWorker(self.ctx, self.input, self.vitals)
+        worker = self._worker()
 
         def stop_after_press(*_a, **_k):
             self.ctx.stop_event.set()
@@ -57,9 +65,9 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self.input.teleport_key.assert_called_with(59)
         self.assertLess(40 / 100, HP_RESTORE_RATIO)
 
-    def test_no_press_when_hp_ok(self) -> None:
+    def test_item_no_press_when_hp_above_threshold(self) -> None:
         self.vitals.publish_hp(80, 100)
-        worker = HpRestoreWorker(self.ctx, self.input, self.vitals)
+        worker = self._worker()
 
         def stop_soon(*_a, **_k):
             self.ctx.stop_event.set()
@@ -69,7 +77,7 @@ class HpRestoreWorkerTests(unittest.TestCase):
         worker.run()
         self.input.teleport_key.assert_not_called()
 
-    def test_heal_skill_casts_until_full_when_below_threshold(self) -> None:
+    def test_heal_skill_casts_until_full_when_not_full(self) -> None:
         self.config.heal_skill = True
         self.vitals.publish_hp(40, 100)
         cast_count = {"n": 0}
@@ -92,7 +100,7 @@ class HpRestoreWorkerTests(unittest.TestCase):
 
         self.ctx.wait_unless_paused_or_suspended = gap_ok  # type: ignore[method-assign]
         self.ctx.wait_unless_stopped = gap_ok  # type: ignore[method-assign]
-        worker = HpRestoreWorker(self.ctx, self.input, self.vitals)
+        worker = self._worker()
         worker.run()
 
         self.assertGreaterEqual(cast_count["n"], 2)
@@ -100,19 +108,84 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self.input.teleport_key.assert_not_called()
         self.assertFalse(self.ctx.healing_event.is_set())
 
-    def test_heal_skill_idle_when_hp_above_threshold(self) -> None:
+    def test_heal_skill_casts_when_hp_above_old_threshold(self) -> None:
+        """Heal skill no longer uses the 50% item threshold — 80% still heals."""
         self.config.heal_skill = True
         self.vitals.publish_hp(80, 100)
+        casts = {"n": 0}
+
+        def cast_heal(*_a, **_k):
+            casts["n"] += 1
+            self.vitals.publish_hp(100, 100)
+            return True
+
+        self.input.skill_click_at.side_effect = cast_heal
+        self.ctx.wait_unless_paused_or_suspended = (  # type: ignore[method-assign]
+            lambda *_a, **_k: True
+        )
+
+        def stop_when_full(*_a, **_k):
+            hp, hp_max = self.vitals.hp_pair()
+            if hp is not None and hp_max is not None and hp >= hp_max:
+                self.ctx.stop_event.set()
+            return True
+
+        self.ctx.wait_unless_stopped = stop_when_full  # type: ignore[method-assign]
+        self.ctx.stop_event.wait = (  # type: ignore[method-assign]
+            lambda *_a, **_k: self.ctx.stop_event.set() or False
+        )
+        worker = self._worker()
+        worker.run()
+        self.assertGreaterEqual(casts["n"], 1)
+
+    def test_heal_skill_idle_when_hp_full(self) -> None:
+        self.config.heal_skill = True
+        self.vitals.publish_hp(100, 100)
 
         def stop_soon(*_a, **_k):
             self.ctx.stop_event.set()
             return False
 
         self.ctx.stop_event.wait = stop_soon  # type: ignore[method-assign]
-        worker = HpRestoreWorker(self.ctx, self.input, self.vitals)
+        worker = self._worker()
         worker.run()
         self.input.skill_click_at.assert_not_called()
         self.input.teleport_key.assert_not_called()
+
+    def test_heal_skill_waits_while_not_safe(self) -> None:
+        self.config.heal_skill = True
+        self.vitals.publish_hp(40, 100)
+        self.danger.has_recent_damage.return_value = True
+        polls = {"n": 0}
+
+        def stop_after_yield(*_a, **_k):
+            polls["n"] += 1
+            if polls["n"] >= 2:
+                self.ctx.stop_event.set()
+            return False
+
+        self.ctx.wait_unless_stopped = stop_after_yield  # type: ignore[method-assign]
+        worker = self._worker()
+        worker.run()
+        self.input.skill_click_at.assert_not_called()
+        self.assertFalse(self.ctx.healing_event.is_set())
+
+    def test_heal_skill_waits_while_surrounded(self) -> None:
+        self.config.heal_skill = True
+        self.vitals.publish_hp(40, 100)
+        self.danger.is_surrounded.return_value = True
+        polls = {"n": 0}
+
+        def stop_after_yield(*_a, **_k):
+            polls["n"] += 1
+            if polls["n"] >= 2:
+                self.ctx.stop_event.set()
+            return False
+
+        self.ctx.wait_unless_stopped = stop_after_yield  # type: ignore[method-assign]
+        worker = self._worker()
+        worker.run()
+        self.input.skill_click_at.assert_not_called()
 
     def test_heal_skill_waits_while_teleport_suspended(self) -> None:
         self.config.heal_skill = True
@@ -127,7 +200,7 @@ class HpRestoreWorkerTests(unittest.TestCase):
             return False
 
         self.ctx.wait_unless_stopped = stop_after_yield  # type: ignore[method-assign]
-        worker = HpRestoreWorker(self.ctx, self.input, self.vitals)
+        worker = self._worker()
         worker.run()
         self.input.skill_click_at.assert_not_called()
         self.assertFalse(self.ctx.healing_event.is_set())
@@ -144,12 +217,12 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self.ctx.wait_unless_paused_or_suspended = (  # type: ignore[method-assign]
             lambda *_a, **_k: False
         )
-        worker = HpRestoreWorker(self.ctx, self.input, self.vitals)
+        worker = self._worker()
         worker._heal_until_full(59)
         self.assertEqual(self.input.skill_click_at.call_count, 1)
         self.assertFalse(self.ctx.healing_event.is_set())
 
-    def test_heal_cast_gap_yields_to_danger_suspend(self) -> None:
+    def test_heal_aborts_on_danger_during_cast_gap(self) -> None:
         self.config.heal_skill = True
         self.vitals.publish_hp(40, 100)
         casts = {"n": 0}
@@ -160,22 +233,21 @@ class HpRestoreWorkerTests(unittest.TestCase):
             return True
 
         self.input.skill_click_at.side_effect = cast_once
-
-        def gap_interrupted(*_a, **_k):
-            # Suspend interrupts cast gap; next loop yields then we stop.
-            return False
-
-        def stop_after_suspend_yield(*_a, **_k):
-            self.ctx.stop_event.set()
-            return False
-
         self.ctx.wait_unless_paused_or_suspended = (  # type: ignore[method-assign]
-            gap_interrupted
+            lambda *_a, **_k: False
         )
-        self.ctx.wait_unless_stopped = stop_after_suspend_yield  # type: ignore[method-assign]
-        worker = HpRestoreWorker(self.ctx, self.input, self.vitals)
+        worker = self._worker()
         worker._heal_until_full(59)
         self.assertEqual(casts["n"], 1)
+        self.assertFalse(self.ctx.healing_event.is_set())
+
+    def test_heal_aborts_when_damage_appears(self) -> None:
+        self.config.heal_skill = True
+        self.vitals.publish_hp(40, 100)
+        self.danger.has_recent_damage.return_value = True
+        worker = self._worker()
+        worker._heal_until_full(59)
+        self.input.skill_click_at.assert_not_called()
         self.assertFalse(self.ctx.healing_event.is_set())
 
 
@@ -214,6 +286,23 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.teleport.danger_teleport.assert_called_with(reason="critical_hp")
         self.assertFalse(hasattr(self.danger, "pop_heal_until_full_requested"))
 
+    def test_danger_teleport_clears_damage_so_heal_can_start(self) -> None:
+        self.vitals.publish_hp(80, 100)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(40, 100)
+        self.danger._poll_hp()
+        self.assertFalse(self.danger.has_recent_damage(1.0))
+        self.assertFalse(self.danger.pop_damage_detected())
+
+    def test_recent_damage_blocks_until_quiet(self) -> None:
+        self.ctx.mark_paused()  # block danger TP so latch is kept
+        self.vitals.publish_hp(80, 100)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(70, 100)
+        self.danger._poll_hp()
+        self.assertTrue(self.danger.has_recent_damage(1.0))
+        self.teleport.danger_teleport.assert_not_called()
+
     def test_danger_teleport_allowed_during_heal_ops(self) -> None:
         self.assertTrue(self.ctx.begin_heal_ops())
         self.assertFalse(self.ctx.should_run_combat())
@@ -224,6 +313,14 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.danger._poll_hp()
         self.teleport.danger_teleport.assert_called_with(reason="critical_hp")
         self.ctx.end_heal_ops()
+
+    def test_combat_blocked_during_discovery_suspend(self) -> None:
+        self.ctx.mark_running()
+        self.assertTrue(self.ctx.should_run_combat())
+        self.ctx.discovery_suspend.set()
+        self.assertFalse(self.ctx.should_run_combat())
+        self.ctx.discovery_suspend.clear()
+        self.assertTrue(self.ctx.should_run_combat())
 
     def test_danger_teleport_blocked_during_storage(self) -> None:
         self.assertTrue(self.ctx.begin_storage_ops())
