@@ -32,7 +32,7 @@ CHARACTER_STATE_POLL_INTERVAL_S = HUNT_DISCOVERY_INTERVAL_MS / 1000.0
 
 
 class CharacterStateMonitor:
-    """Captures character ROI, measures pose, checks surround, publishes state."""
+    """Captures character ROI, checks surround/nearby mobs, publishes state."""
 
     def __init__(
         self,

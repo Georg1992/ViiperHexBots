@@ -7,7 +7,11 @@ from pathlib import Path
 
 import cv2
 
-from pybot.recognition.ui.character_pose import measure_center_pose
+from pybot.recognition.ui.character_pose import (
+    check_is_sitting,
+    check_is_standing,
+    measure_center_pose,
+)
 
 _TESTS = Path(__file__).resolve().parents[1]
 _SIT = [_TESTS / "sit.png", _TESTS / "sit2.png", _TESTS / "sit3.png", _TESTS / "sit4.png"]
@@ -25,6 +29,8 @@ class CharacterPoseTests(unittest.TestCase):
             self.assertIsNotNone(pose, msg=str(path))
             assert pose is not None
             sit_heights.append(pose.body_height)
+            self.assertTrue(check_is_sitting(pose), msg=str(path))
+            self.assertFalse(check_is_standing(pose), msg=str(path))
         for path in _STAND:
             img = cv2.imread(str(path), cv2.IMREAD_COLOR)
             self.assertIsNotNone(img, msg=str(path))
@@ -32,6 +38,8 @@ class CharacterPoseTests(unittest.TestCase):
             self.assertIsNotNone(pose, msg=str(path))
             assert pose is not None
             stand_heights.append(pose.body_height)
+            self.assertTrue(check_is_standing(pose), msg=str(path))
+            self.assertFalse(check_is_sitting(pose), msg=str(path))
 
         self.assertLess(max(sit_heights), min(stand_heights))
         # Falcon must not erase the sit/stand gap (body run, not full stack).
