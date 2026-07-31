@@ -114,7 +114,7 @@ class HpRestoreWorker:
             ctx.logger.behavior(
                 f"[HP] heal-until-full start key={cfg.hp_button!r}"
             )
-            delay_s = max(0.2, float(cfg.skill_delay_ms) / 1000.0)
+            delay_s = float(cfg.skill_delay_ms) / 1000.0
             while not ctx.is_stopped():
                 if not ctx.should_run_workers():
                     if not ctx.wait_while_stopped_or_paused(HP_RESTORE_POLL_S):
