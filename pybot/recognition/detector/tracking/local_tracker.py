@@ -34,6 +34,11 @@ _LOCAL_FOLLOW_BODY_W = 0.55
 _LOCAL_FOLLOW_ACCENT_W = 0.45
 _LOCAL_FOLLOW_SPRITE_W = 0.75
 _LOCAL_FOLLOW_COLOR_W = 0.55
+# Residual velocity (px/tick) worth coasting after a miss cleared ``moving``.
+_FOLLOW_COAST_VEL_SQ = 1.0
+# Extra silhouette peak tries while catching up (center miss path only).
+_CATCH_UP_PEAK_ATTEMPTS = 2
+
 
 @dataclass(frozen=True)
 class LocalTrackResult:
@@ -78,17 +83,23 @@ def track_local(
     vel_x = float(track.get("velX", 0.0))
     vel_y = float(track.get("velY", 0.0))
     lost_count = int(track.get("lostCount", 0))
+    speed_sq = vel_x * vel_x + vel_y * vel_y
+    # After a miss, ``moving`` is cleared for opacity death — still coast on
+    # residual velocity so the next tick can catch a runner ahead of last-seen.
+    use_prediction = moving or (
+        lost_count > 0 and speed_sq >= _FOLLOW_COAST_VEL_SQ
+    )
+    catch_up = moving or lost_count > 0 or use_prediction
 
     if search_radius_px is not None:
         radius = int(search_radius_px)
-    elif moving or lost_count > 0:
+    elif catch_up:
         radius = int(detector.local_track_moving_search_radius_px)
     else:
         radius = int(detector.local_track_search_radius_px)
 
-    # Predicted position: coast velocity when moving
-    predicted_x = int(round(cx + vel_x)) if moving else cx
-    predicted_y = int(round(cy + vel_y)) if moving else cy
+    predicted_x = int(round(cx + vel_x)) if use_prediction else cx
+    predicted_y = int(round(cy + vel_y)) if use_prediction else cy
     search_x, search_y = predicted_x, predicted_y
 
     descriptor = detector.ensure_descriptor(mob_name)
@@ -113,14 +124,15 @@ def track_local(
             offset_y=offset_y,
         )
 
-    # Center miss → search local heatmap peaks.
-    # Use the LAST known position (cx, cy) as the search center, not the
-    # predicted position (search_x, search_y). When velocity prediction is
-    # wrong (e.g. direction change), the mob is closest to where it was
-    # last seen, not where we predicted it to be.
+    # Center miss → local heatmap peaks. Cover both last-known and predicted
+    # so a straight-line runner ahead of last-seen is still in the disk, while
+    # a wrong prediction / turn still keeps last-seen in range.
     peak = _find_local_peak(
         detector, frame_bgr, descriptor, cx, cy, scale,
         search_radius_px=radius,
+        cover_x=search_x,
+        cover_y=search_y,
+        peak_attempts=_CATCH_UP_PEAK_ATTEMPTS if catch_up else 1,
         suppress_positions=suppress_positions,
     )
     if peak is not None:
@@ -190,16 +202,25 @@ def _find_local_peak(
     scale: float,
     *,
     search_radius_px: int,
+    cover_x: int | None = None,
+    cover_y: int | None = None,
+    peak_attempts: int = 1,
     suppress_positions: list[tuple[int, int]] | None = None,
 ) -> tuple[int, int, float, float, tuple[int, int, int, int]] | None:
+    cover_x = cx if cover_x is None else int(cover_x)
+    cover_y = cy if cover_y is None else int(cover_y)
     frame_h, frame_w = frame_bgr.shape[:2]
     margin_x = int(round(descriptor.avg_width * scale * _COVERAGE_SIZE_FRAC))
     margin_y = int(round(descriptor.avg_height * scale * _COVERAGE_SIZE_FRAC))
-    pad = search_radius_px + max(margin_x, margin_y)
-    x0 = max(0, cx - pad)
-    y0 = max(0, cy - pad)
-    x1 = min(frame_w, cx + pad + 1)
-    y1 = min(frame_h, cy + pad + 1)
+    # Crop around the midpoint of last-known and predicted so both disks fit.
+    mid_x = (cx + cover_x) // 2
+    mid_y = (cy + cover_y) // 2
+    sep = max(abs(cover_x - cx), abs(cover_y - cy))
+    pad = search_radius_px + (sep + 1) // 2 + max(margin_x, margin_y)
+    x0 = max(0, mid_x - pad)
+    y0 = max(0, mid_y - pad)
+    x1 = min(frame_w, mid_x + pad + 1)
+    y1 = min(frame_h, mid_y + pad + 1)
     if x1 <= x0 or y1 <= y0:
         return None
 
@@ -228,11 +249,15 @@ def _find_local_peak(
                     thickness=-1,
                 )
 
-    anchor_x = cx - x0
-    anchor_y = cy - y0
     yy, xx = np.ogrid[: local_final.shape[0], : local_final.shape[1]]
-    dist_sq = (xx - anchor_x) ** 2 + (yy - anchor_y) ** 2
-    mask = dist_sq <= (search_radius_px * search_radius_px)
+    r2 = search_radius_px * search_radius_px
+    last_dx = xx - (cx - x0)
+    last_dy = yy - (cy - y0)
+    pred_dx = xx - (cover_x - x0)
+    pred_dy = yy - (cover_y - y0)
+    mask = (last_dx * last_dx + last_dy * last_dy <= r2) | (
+        pred_dx * pred_dx + pred_dy * pred_dy <= r2
+    )
     masked = np.where(mask, local_final, 0.0)
     min_heat = detector.heatmap_detector.min_center_heat * _LOCAL_FOLLOW_MIN_HEAT_FRAC
 
@@ -243,10 +268,8 @@ def _find_local_peak(
         _LOCAL_SUPPRESS_RADIUS_FLOOR_PX,
         search_radius_px // _LOCAL_PEAK_SUPPRESS_DIV,
     )
-    # Check the single strongest heatmap peak. The center fast path handles
-    # the normal case; only the top heatmap candidate is worth the expensive
-    # score_at() silhouette gate call. A 2nd iteration would rarely differ.
-    for _ in range(1):
+    attempts = max(1, int(peak_attempts))
+    for _ in range(attempts):
         peak_val = float(work.max())
         if peak_val < min_heat:
             break
@@ -259,6 +282,8 @@ def _find_local_peak(
         if accepted and sim > best_living_sim and bbox is not None:
             best_living_sim = sim
             best_peak = (peak_x, peak_y, peak_val, sim, bbox)
+            # First accepted peak is enough — do not pay for more score_at.
+            break
         cv2.circle(work, (peak_x_local, peak_y_local), suppress_radius, 0.0, thickness=-1)
 
     return best_peak

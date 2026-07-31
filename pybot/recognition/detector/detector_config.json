@@ -13,7 +13,7 @@
   "discoveryHeatmapDownscale": 2,
   "discoveryHeatmapDownscaleMinSide": 800,
   "localTrackSearchRadiusPx": 120,
-  "localTrackMovingSearchRadiusPx": 180,
+  "localTrackMovingSearchRadiusPx": 220,
   "topCandidateCenters": 32,
   "minCenterHeat": 0.015,
   "peakRelativeThreshold": 0.25,
