@@ -876,6 +876,7 @@ _STATUS_PANEL_FIXTURES: list[tuple[str, int, int, int, int, int, int]] = [
     ("FalseWeight.png",   874, 3424,  249,  485,  427, 2730),
     ("WeightIssue.png",  3501, 3501,  370,  457,  464, 2730),
     ("StatusPanel6.png",    40,   40,   11,   11,   50, 2030),
+    ("FalseWeight2.png",  543,  615,  124,  124,  466, 5000),
 ]
 
 

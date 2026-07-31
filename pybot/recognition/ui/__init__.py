@@ -18,6 +18,7 @@ from pybot.recognition.ui.status_panel import (
     StatusPanelValues,
     find_status_panel,
     read_status_panel,
+    verify_status_panel_at,
 )
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "read_status_panel",
     "require_inventory_panel",
     "require_template",
+    "verify_status_panel_at",
 ]

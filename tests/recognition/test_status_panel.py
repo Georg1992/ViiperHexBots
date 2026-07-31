@@ -15,6 +15,7 @@ from pybot.recognition.ui.status_panel import (
     clear_template_cache,
     find_status_panel,
     read_status_panel,
+    verify_status_panel_at,
 )
 
 FIXTURES_DIR = PROJECT_ROOT / "tests"
@@ -35,6 +36,8 @@ FIXTURE_CASES: tuple[tuple[str, int, int, int, int, int, int], ...] = (
     ("WeightIssue.png", 3501, 3501, 370, 457, 464, 2730),
     # Full bar values — HP=40/40, SP=11/11, Weight=50/2030.
     ("StatusPanel6.png", 40, 40, 11, 11, 50, 2030),
+    # Wide Zeny + Weight max 5000; panel at client origin.
+    ("FalseWeight2.png", 543, 615, 124, 124, 466, 5000),
 )
 
 
@@ -84,6 +87,18 @@ class StatusPanelTests(unittest.TestCase):
         blanked = frame.copy()
         blanked[:30, :] = (40, 40, 40)
         self.assertIsNone(find_status_panel(blanked))
+
+    def test_verify_status_panel_at_locked_origin(self) -> None:
+        frame = self._load("FalseWeight2.png")
+        origin = find_status_panel(frame)
+        self.assertIsNotNone(origin)
+        assert origin is not None
+        self.assertTrue(verify_status_panel_at(frame, origin))
+        self.assertFalse(verify_status_panel_at(frame, (origin[0] + 40, origin[1])))
+        blanked = frame.copy()
+        ox, oy = origin
+        blanked[oy : oy + 20, ox : ox + 120] = (40, 40, 40)
+        self.assertFalse(verify_status_panel_at(blanked, origin))
 
     def test_reads_hp_sp_weight_from_fixtures(self) -> None:
         for name, hp, hp_max, sp, sp_max, weight, weight_max in FIXTURE_CASES:

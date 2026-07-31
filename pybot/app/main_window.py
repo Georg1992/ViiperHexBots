@@ -47,9 +47,12 @@ from pybot.runtime.mob_behaviors import get_mob_behavior
 from pybot.runtime.input.scan_codes import keysym_to_key_name
 from pybot.recognition.capture import capture_region
 from pybot.recognition.ui.status_panel import (
+    PANEL_HEIGHT,
+    PANEL_WIDTH,
     StatusPanelValues,
     find_status_panel,
     read_status_panel,
+    verify_status_panel_at,
 )
 
 MEMORY_POLL_MS = 500
@@ -1132,10 +1135,26 @@ class MainWindow:
         """Store a successful read; UI stats update only when numbers change.
 
         When the reader has doubts (SP dropped suspiciously from the
-        previous tick), the previous SP value is kept for vitals so
-        transient OCR noise never reaches the hunt workers.
+        previous tick), the previous SP is kept in the confirmed snapshot
+        and vitals so a persistent artifact cannot win on the next tick.
         """
         previous = self._status_panel_confirmed
+        # When SP drops dramatically from the previous reading (e.g. 200→1),
+        # the OCR is seeing an artifact — keep the previous SP everywhere.
+        if (
+            self._panel_owns_sp_weight()
+            and previous is not None
+            and values.sp < previous.sp // 2
+        ):
+            values = StatusPanelValues(
+                hp=values.hp,
+                hp_max=values.hp_max,
+                sp=previous.sp,
+                sp_max=previous.sp_max,
+                weight=values.weight,
+                weight_max=values.weight_max,
+                panel_origin=values.panel_origin,
+            )
         self._status_panel_confirmed = values
         self._status_panel_anchor = values.panel_origin
         self._status_panel_overlay.update(
@@ -1146,19 +1165,8 @@ class MainWindow:
         # Publish HP and SP to vitals every successful OCR tick.
         # HP goes to vitals unconditionally (hunt workers need it for danger).
         self.vitals.publish_hp(values.hp, values.hp_max)
-        # SP goes to vitals only when vision owns it (Generic profile).
-        # When SP drops dramatically from the previous reading (e.g. 200→1), the
-        # OCR is seeing an artifact — keep the previous value for hunt workers.
         if self._panel_owns_sp_weight():
-            if (
-                previous is not None
-                and values.sp < previous.sp // 2
-            ):
-                # Reader has doubts — keep previous SP, publish stale value.
-                self.vitals.publish_sp(previous.sp, previous.sp_max)
-            else:
-                self.vitals.publish_sp(values.sp, values.sp_max)
-            # Weight is published from the panel when vision owns it.
+            self.vitals.publish_sp(values.sp, values.sp_max)
             self.vitals.publish_weight(values.weight, values.weight_max)
         if previous is not None and self._status_panel_numbers(
             previous
@@ -1176,6 +1184,10 @@ class MainWindow:
         - Header missing → clear vision-backed labels, show open-panel prompt
         - Header found → read values and show under the panel
         - Full current+max (incl. HP OCR) every ``STATUS_PANEL_MAX_REFRESH_S``
+        - Fast poll reuses the locked origin with a local header verify and a
+          panel-sized capture (avoids full-client template match every 200 ms)
+        - Digit read failure while the header is still present keeps the last
+          good values (transient OCR noise ≠ panel closed)
 
         Overlay stays visible (no hide/show flash). Both states use the same
         slot under the panel so header/digit ROIs stay uncovered.
@@ -1193,6 +1205,51 @@ class MainWindow:
             return STATUS_PANEL_SEARCH_MS
 
         left, top, width, height = client
+        confirmed = self._status_panel_confirmed
+        now = time.monotonic()
+        refresh_max = (
+            confirmed is None
+            or now - self._status_panel_max_read_at >= STATUS_PANEL_MAX_REFRESH_S
+        )
+
+        if not refresh_max:
+            assert confirmed is not None
+            ox, oy = confirmed.panel_origin
+            panel_in_client = (
+                ox >= 0
+                and oy >= 0
+                and ox + PANEL_WIDTH <= width
+                and oy + PANEL_HEIGHT <= height
+            )
+            if panel_in_client:
+                panel_frame = capture_region(
+                    left + ox, top + oy, PANEL_WIDTH, PANEL_HEIGHT
+                )
+                if panel_frame is not None and panel_frame.size > 0:
+                    if verify_status_panel_at(panel_frame, (0, 0)):
+                        values = read_status_panel(
+                            panel_frame,
+                            origin=(0, 0),
+                            skip_hp=True,
+                            previous=confirmed,
+                        )
+                        if values is None:
+                            # Panel still open; keep last good vitals.
+                            return STATUS_PANEL_VALUE_MS
+                        values = StatusPanelValues(
+                            hp=values.hp,
+                            hp_max=values.hp_max,
+                            sp=values.sp,
+                            sp_max=values.sp_max,
+                            weight=values.weight,
+                            weight_max=values.weight_max,
+                            panel_origin=(ox, oy),
+                        )
+                        self._commit_status_panel(
+                            values, client_left=left, client_top=top
+                        )
+                        return STATUS_PANEL_VALUE_MS
+            # Locked origin stale/moved — fall through to a full-client locate.
 
         frame = capture_region(left, top, width, height)
         if frame is None or frame.size == 0:
@@ -1204,24 +1261,15 @@ class MainWindow:
             self._show_panel_missing(client_left=left, client_top=top)
             return STATUS_PANEL_SEARCH_MS
 
-        confirmed = self._status_panel_confirmed
-        now = time.monotonic()
-        refresh_max = (
-            confirmed is None
-            or now - self._status_panel_max_read_at >= STATUS_PANEL_MAX_REFRESH_S
-        )
-        if refresh_max:
-            values = read_status_panel(frame, origin=origin)
-        else:
-            values = read_status_panel(
-                frame, origin=origin, skip_hp=True, previous=confirmed
-            )
+        values = read_status_panel(frame, origin=origin)
         if values is None:
+            if confirmed is not None:
+                # Header matched but digits failed — do not clear locked vitals.
+                return STATUS_PANEL_VALUE_MS
             self._show_panel_missing(client_left=left, client_top=top)
             return STATUS_PANEL_SEARCH_MS
 
-        if refresh_max:
-            self._status_panel_max_read_at = now
+        self._status_panel_max_read_at = now
         self._commit_status_panel(values, client_left=left, client_top=top)
         return STATUS_PANEL_VALUE_MS
 

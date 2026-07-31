@@ -1,8 +1,8 @@
 """Locate the Basic Info status panel and parse HP / SP / Weight.
 
 Uses OpenCV template matching for the panel header, ``/``-anchored dynamic
-ROIs (finds the ``/`` separator first, builds a bounded scanning window
-around it), and RO digit-glyph templates under ``assets/UI/digits/``.
+windows (finds the ``/`` separator, keeps glyphs within a bounded horizontal
+range around it), and RO digit-glyph templates under ``assets/UI/digits/``.
 
 Two polling cadences share the same function ``read_status_panel``:
 
@@ -16,7 +16,8 @@ Two polling cadences share the same function ``read_status_panel``:
   HP being misread as digit "1").
 
 Callers should treat ``find_status_panel`` as the source of truth for whether
-Basic Info is open.
+Basic Info is open.  When a prior origin is known, ``verify_status_panel_at``
+is a cheap local header check for the fast poll path.
 """
 
 from __future__ import annotations
@@ -38,6 +39,8 @@ DIGITS_DIR = UI_DIR / "digits"
 HEADER_OFFSET_X = 5
 HEADER_MATCH_THRESHOLD = 0.85
 DIGIT_MATCH_THRESHOLD = 0.85
+# Stop scoring remaining templates once a match is this strong.
+DIGIT_EARLY_EXIT_SCORE = 0.97
 # RO digit cores are pure black (gray 0). SP bar fill/empty are mid-bright and
 # change with SP%% — keep this well below the darkest real bar pixels (~47+).
 BINARIZE_THRESHOLD = 45
@@ -53,8 +56,9 @@ PANEL_HEIGHT = 143
 
 # ── Scan zones (wide enough to always contain "/" separator) ───────
 # These are wide enough to *always* contain the "/" separator regardless
-# of digit length or Zeny shift.  Once "/" is located a tighter ROI is
-# built around it with generous horizontal expansion so no digit is cropped.
+# of digit length or Zeny shift.  Once "/" is located, glyphs outside a
+# tight horizontal window around it are dropped so percent digits and
+# Zeny chrome cannot append to the max value.
 HP_SCAN_ZONE   = (42, 45, 138, 18)   # x=42..180
 SP_SCAN_ZONE   = (42, 66, 138, 16)   # x=42..180
 WEIGHT_SCAN_ZONE = (70, 116, 110, 14) # x=70..180
@@ -62,6 +66,8 @@ WEIGHT_SCAN_ZONE = (70, 116, 110, 14) # x=70..180
 # Pixels to expand left/right from "/" center — enough for 5 digits + gaps
 _SLASH_LEFT_EXPAND = 52
 _SLASH_RIGHT_EXPAND = 52
+
+_INK_CLOSE_KERNEL = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 9))
 
 
 @dataclass(frozen=True)
@@ -77,7 +83,8 @@ class StatusPanelValues:
 
 @lru_cache(maxsize=1)
 def _load_header_template() -> np.ndarray:
-    tpl = cv2.imread(str(HEADER_TEMPLATE_PATH), cv2.IMREAD_COLOR)
+    """Grayscale header template (full-frame BGR match is ~5× slower)."""
+    tpl = cv2.imread(str(HEADER_TEMPLATE_PATH), cv2.IMREAD_GRAYSCALE)
     if tpl is None or tpl.size == 0:
         raise FileNotFoundError(f"missing status panel header: {HEADER_TEMPLATE_PATH}")
     return tpl
@@ -112,12 +119,40 @@ def find_status_panel(frame_bgr: np.ndarray) -> tuple[int, int] | None:
         or frame_bgr.shape[1] < header.shape[1]
     ):
         return None
-    result = cv2.matchTemplate(frame_bgr, header, cv2.TM_CCOEFF_NORMED)
+    gray = (
+        frame_bgr
+        if frame_bgr.ndim == 2
+        else cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    )
+    result = cv2.matchTemplate(gray, header, cv2.TM_CCOEFF_NORMED)
     _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(result)
     if max_val < HEADER_MATCH_THRESHOLD:
         return None
     hx, hy = int(max_loc[0]), int(max_loc[1])
     return hx - HEADER_OFFSET_X, hy
+
+
+def verify_status_panel_at(
+    frame_bgr: np.ndarray,
+    origin: tuple[int, int],
+) -> bool:
+    """Cheap local check that the Basic Info header is still at *origin*."""
+    if frame_bgr is None or frame_bgr.size == 0:
+        return False
+    header = _load_header_template()
+    hx = origin[0] + HEADER_OFFSET_X
+    hy = origin[1]
+    hh, hw = header.shape[:2]
+    if hx < 0 or hy < 0:
+        return False
+    if hy + hh > frame_bgr.shape[0] or hx + hw > frame_bgr.shape[1]:
+        return False
+    crop = frame_bgr[hy : hy + hh, hx : hx + hw]
+    if crop.ndim == 3:
+        crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    # Exact-size match → single correlation coefficient.
+    score = float(cv2.matchTemplate(crop, header, cv2.TM_CCOEFF_NORMED)[0, 0])
+    return score >= HEADER_MATCH_THRESHOLD
 
 
 def read_status_panel(
@@ -129,8 +164,8 @@ def read_status_panel(
 ) -> StatusPanelValues | None:
     """Parse HP/SP/Weight from the Basic Info panel.
 
-    Uses dynamic ROI anchoring on the ``/`` separator so digits are never
-    cropped regardless of horizontal shift (Zeny length, digit count, etc.).
+    Uses dynamic ``/``-anchored windows so digits are never cropped and
+    trailing percent / Zeny chrome cannot append to max values.
 
     Parameters
     ----------
@@ -186,59 +221,7 @@ def read_status_panel(
     )
 
 
-# ── /-anchored dynamic parsing (single unified path, no fallbacks) ──
-
-def _find_slash_x_in_scan(
-    frame_bgr: np.ndarray,
-    origin: tuple[int, int],
-    scan_roi: tuple[int, int, int, int],
-    min_width: int,
-) -> int | None:
-    """Find the x-offset of ``/`` within *scan_roi* (relative to crop origin).
-
-    Returns the **rightmost** ``/`` match to avoid label-colon artifacts
-    (e.g. the colon of ``Weight:`` can be misclassified as ``/`` at x≈0).
-    """
-    crop = _crop_roi(frame_bgr, origin, scan_roi)
-    if crop is None:
-        return None
-    mask = _to_ink_mask(crop)
-    cleaned = _strip_bar_chrome(mask)
-    count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
-        cleaned, connectivity=8
-    )
-    rightmost: int | None = None
-    for index in range(1, count):
-        x, y, w, h, area = stats[index]
-        if area < 3 or h < 5 or w < min_width:
-            continue
-        blob = cleaned[y : y + h, x : x + w].copy()
-        parts = _split_wide_glyph(blob) if w > MAX_GLYPH_WIDTH else [blob]
-        for part in parts:
-            trimmed = _trim_empty(part)
-            if trimmed is None or trimmed.shape[0] < 5 or trimmed.shape[1] < min_width:
-                continue
-            ch, score = _classify_glyph(trimmed)
-            if ch == "/" and score >= DIGIT_MATCH_THRESHOLD:
-                cx = x + trimmed.shape[1] // 2
-                if rightmost is None or cx > rightmost:
-                    rightmost = cx
-    return rightmost
-
-
-def _build_dynamic_roi(
-    slash_x: int,
-    scan_roi: tuple[int, int, int, int],
-) -> tuple[int, int, int, int]:
-    """Build a tighter ROI around ``/`` with generous horizontal expansion.
-
-    Returns ``(x, y, w, h)`` in origin-relative coordinates.
-    """
-    sx, sy, sw, sh = scan_roi
-    left = max(0, slash_x - _SLASH_LEFT_EXPAND)
-    right = min(sw, slash_x + _SLASH_RIGHT_EXPAND)
-    return (sx + left, sy, right - left, sh)
-
+# ── /-anchored dynamic parsing (single pass over each scan zone) ──
 
 def _parse_anchored(
     frame_bgr: np.ndarray,
@@ -248,28 +231,67 @@ def _parse_anchored(
     min_width: int,
     stop_at_slash: bool,
 ) -> int | tuple[int, int] | None:
-    """Parse OCR values using ``/``-anchored dynamic ROI.
+    """Parse OCR values using a single classify pass over *scan_roi*.
 
-    Finds the ``/`` separator inside *scan_roi*, builds a bounded ROI
-    around it with ``_SLASH_LEFT_EXPAND`` / ``_SLASH_RIGHT_EXPAND``, then
-    reads digits.
+    Finds the rightmost ``/``, keeps glyphs whose centers fall within
+    ``_SLASH_LEFT_EXPAND`` / ``_SLASH_RIGHT_EXPAND`` of that slash, drops
+    leading label orphans, then reads digits.
 
     When *stop_at_slash* is ``True`` returns only the current value (``int``).
     Otherwise returns ``(current, max)`` pair.
 
     Returns ``None`` when ``/`` is not found or any digit validation fails.
     """
-    slash_x = _find_slash_x_in_scan(frame_bgr, origin, scan_roi, min_width)
-    if slash_x is None:
-        return None
-
-    crop = _crop_roi(frame_bgr, origin, _build_dynamic_roi(slash_x, scan_roi))
+    crop = _crop_roi(frame_bgr, origin, scan_roi)
     if crop is None:
         return None
 
-    text = _read_digits(crop, min_width=min_width, stop_at_slash=stop_at_slash)
-    if text is None:
+    mask = _to_ink_mask(crop)
+    comps = _glyph_components(mask, min_width=min_width)
+    if not comps:
         return None
+
+    classified: list[tuple[int, str | None, float, np.ndarray]] = [
+        (x, *_classify_glyph(glyph), glyph) for x, glyph in comps
+    ]
+
+    slash_x: int | None = None
+    for x, ch, score, glyph in classified:
+        if ch == "/" and score >= DIGIT_MATCH_THRESHOLD:
+            cx = x + glyph.shape[1] // 2
+            if slash_x is None or cx > slash_x:
+                slash_x = cx
+    if slash_x is None:
+        return None
+
+    left = slash_x - _SLASH_LEFT_EXPAND
+    right = slash_x + _SLASH_RIGHT_EXPAND
+    windowed = [
+        item
+        for item in classified
+        if left <= item[0] + item[3].shape[1] // 2 <= right
+    ]
+    windowed = _drop_leading_orphan_classified(windowed)
+
+    # Drop trailing edge chrome that fails the digit threshold.
+    while windowed and (
+        windowed[-1][1] is None or windowed[-1][2] < DIGIT_MATCH_THRESHOLD
+    ):
+        windowed.pop()
+
+    chars: list[str] = []
+    for _x, ch, score, _glyph in windowed:
+        if ch is None or score < DIGIT_MATCH_THRESHOLD:
+            return None
+        if ch == "/":
+            if stop_at_slash:
+                break
+            chars.append(ch)
+            continue
+        chars.append(ch)
+    if not chars:
+        return None
+    text = "".join(chars)
 
     if stop_at_slash:
         if not text.isdigit():
@@ -278,10 +300,10 @@ def _parse_anchored(
 
     if text.count("/") != 1:
         return None
-    left, right = text.split("/", 1)
-    if not left.isdigit() or not right.isdigit():
+    left_text, right_text = text.split("/", 1)
+    if not left_text.isdigit() or not right_text.isdigit():
         return None
-    current, maximum = int(left), int(right)
+    current, maximum = int(left_text), int(right_text)
     if not _valid_pair(current, maximum):
         return None
     return current, maximum
@@ -314,8 +336,7 @@ def _to_ink_mask(bgr: np.ndarray) -> np.ndarray:
     Overweight weight text is saturated red on the same light panel.
     """
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 9))
-    background = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+    background = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, _INK_CLOSE_KERNEL)
     darker = cv2.subtract(background, gray)
     near_black = gray <= BINARIZE_THRESHOLD
     strong_contrast = darker >= 28
@@ -338,12 +359,19 @@ def _trim_empty(glyph: np.ndarray) -> np.ndarray | None:
     return glyph[rows[0] : rows[-1] + 1, cols[0] : cols[-1] + 1].copy()
 
 
-def _split_wide_glyph(glyph: np.ndarray) -> list[np.ndarray]:
-    """Split touching digits on vertical ink valleys (e.g. SP ``43`` blobs)."""
+def _split_wide_glyph(
+    glyph: np.ndarray,
+    base_x: int = 0,
+) -> list[tuple[int, np.ndarray]]:
+    """Split touching digits on vertical ink valleys; preserve absolute x."""
     h, w = glyph.shape
     if w <= MAX_GLYPH_WIDTH:
-        trimmed = _trim_empty(glyph)
-        return [trimmed] if trimmed is not None else []
+        cols = np.where(glyph.any(axis=0))[0]
+        rows = np.where(glyph.any(axis=1))[0]
+        if cols.size == 0 or rows.size == 0:
+            return []
+        trimmed = glyph[rows[0] : rows[-1] + 1, cols[0] : cols[-1] + 1].copy()
+        return [(base_x + int(cols[0]), trimmed)]
     col_ink = (glyph > 0).sum(axis=0)
     cuts: list[int] = []
     x = 1
@@ -356,14 +384,11 @@ def _split_wide_glyph(glyph: np.ndarray) -> list[np.ndarray]:
     if not cuts:
         cuts = [w // 2]
     bounds = [0, *cuts, w]
-    parts: list[np.ndarray] = []
+    parts: list[tuple[int, np.ndarray]] = []
     for left, right in zip(bounds, bounds[1:]):
         if right - left < 2:
             continue
-        trimmed = _trim_empty(glyph[:, left:right])
-        if trimmed is None:
-            continue
-        parts.extend(_split_wide_glyph(trimmed))
+        parts.extend(_split_wide_glyph(glyph[:, left:right], base_x + left))
     return parts
 
 
@@ -379,27 +404,21 @@ def _strip_bar_chrome(mask: np.ndarray) -> np.ndarray:
     return cleaned
 
 
-def _drop_leading_orphan_glyphs(
-    comps: list[tuple[int, np.ndarray]],
-) -> list[tuple[int, np.ndarray]]:
-    """Drop left-side label fragments separated from the digit cluster by a gap.
-
-    Label crumbs can pack tightly (colon / ``t`` fragments) and sit before a
-    large gap into the real digits. Cut at large gaps that appear *before* the
-    last current-value glyph — never at the current-to-``/`` spacing (7–12px).
-    """
+def _drop_leading_orphan_classified(
+    comps: list[tuple[int, str | None, float, np.ndarray]],
+) -> list[tuple[int, str | None, float, np.ndarray]]:
+    """Drop left-side label fragments using already-classified slash scores."""
     if len(comps) < 2:
         return comps
     slash_i: int | None = None
-    for index, (_x, glyph) in enumerate(comps):
-        ch, score = _classify_glyph(glyph)
+    for index, (_x, ch, score, _glyph) in enumerate(comps):
         if ch == "/" and score >= DIGIT_MATCH_THRESHOLD:
             slash_i = index
             break
     if slash_i is None:
         while len(comps) >= 2:
-            x0, glyph0 = comps[0]
-            x1, _glyph1 = comps[1]
+            x0, _ch0, _s0, glyph0 = comps[0]
+            x1 = comps[1][0]
             gap = x1 - (x0 + glyph0.shape[1])
             if gap <= MAX_LEADING_ORPHAN_GAP_PX:
                 break
@@ -407,15 +426,17 @@ def _drop_leading_orphan_glyphs(
         return comps
     cut = 0
     for index in range(max(0, slash_i - 1)):
-        x0, glyph0 = comps[index]
-        x1, _glyph1 = comps[index + 1]
+        x0, _ch0, _s0, glyph0 = comps[index]
+        x1 = comps[index + 1][0]
         gap = x1 - (x0 + glyph0.shape[1])
         if gap > MAX_LEADING_ORPHAN_GAP_PX:
             cut = index + 1
     return comps[cut:]
 
 
-def _glyph_components(mask: np.ndarray, *, min_width: int) -> list[np.ndarray]:
+def _glyph_components(
+    mask: np.ndarray, *, min_width: int
+) -> list[tuple[int, np.ndarray]]:
     cleaned = _strip_bar_chrome(mask)
     count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
         cleaned, connectivity=8
@@ -426,18 +447,12 @@ def _glyph_components(mask: np.ndarray, *, min_width: int) -> list[np.ndarray]:
         if area < 3 or h < 5 or w < min_width:
             continue
         blob = cleaned[y : y + h, x : x + w].copy()
-        if w > MAX_GLYPH_WIDTH:
-            parts = _split_wide_glyph(blob)
-        else:
-            trimmed = _trim_empty(blob)
-            parts = [trimmed] if trimmed is not None else []
-        for part in parts:
+        for px, part in _split_wide_glyph(blob, int(x)):
             if part.shape[0] < 5 or part.shape[1] < min_width:
                 continue
-            comps.append((int(x), part))
+            comps.append((px, part))
     comps.sort(key=lambda item: item[0])
-    comps = _drop_leading_orphan_glyphs(comps)
-    return [glyph for _x, glyph in comps]
+    return comps
 
 
 def _classify_glyph(glyph: np.ndarray) -> tuple[str | None, float]:
@@ -451,10 +466,10 @@ def _classify_glyph(glyph: np.ndarray) -> tuple[str | None, float]:
             # Belarus statusui: skip wildly different scales (dot vs digit).
             if gw * 2 < tw or tw * 2 < gw or gh * 2 < th or th * 2 < gh:
                 continue
-            pad_h = glyph.shape[0] + tpl.shape[0] + 4
-            pad_w = glyph.shape[1] + tpl.shape[1] + 4
+            pad_h = gh + th + 4
+            pad_w = gw + tw + 4
             pad = np.zeros((pad_h, pad_w), dtype=np.uint8)
-            pad[2 : 2 + glyph.shape[0], 2 : 2 + glyph.shape[1]] = glyph
+            pad[2 : 2 + gh, 2 : 2 + gw] = glyph
             score = float(
                 cv2.minMaxLoc(
                     cv2.matchTemplate(pad, tpl, cv2.TM_CCOEFF_NORMED)
@@ -463,38 +478,9 @@ def _classify_glyph(glyph: np.ndarray) -> tuple[str | None, float]:
             if score > best_score:
                 best_score = score
                 best_ch = ch
+                if best_score >= DIGIT_EARLY_EXIT_SCORE:
+                    return best_ch, best_score
     return best_ch, best_score
-
-
-def _read_digits(
-    bgr: np.ndarray,
-    *,
-    min_width: int,
-    stop_at_slash: bool,
-) -> str | None:
-    mask = _to_ink_mask(bgr)
-    classified: list[tuple[str | None, float]] = [
-        _classify_glyph(glyph)
-        for glyph in _glyph_components(mask, min_width=min_width)
-    ]
-    # Drop trailing edge chrome that fails the digit threshold (wider ROI / jitter).
-    while classified and (
-        classified[-1][0] is None or classified[-1][1] < DIGIT_MATCH_THRESHOLD
-    ):
-        classified.pop()
-    chars: list[str] = []
-    for ch, score in classified:
-        if ch is None or score < DIGIT_MATCH_THRESHOLD:
-            return None
-        if ch == "/":
-            if stop_at_slash:
-                break
-            chars.append(ch)
-            continue
-        chars.append(ch)
-    if not chars:
-        return None
-    return "".join(chars)
 
 
 def clear_template_cache() -> None:
