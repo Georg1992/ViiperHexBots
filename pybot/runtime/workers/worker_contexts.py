@@ -165,14 +165,14 @@ class SitOnLowSpWorkerContext(
     CanStop,
     CanLog,
     HasConfig,
-    CanCapture,
-    CanDetect,
-    CanOverlay,
     CanWakeDiscovery,
-    CanAreaReset,
     Protocol,
 ):
-    """Hunt runtime subset consumed by SitOnLowSpWorker."""
+    """Hunt runtime subset consumed by SitOnLowSpWorker.
+
+    Capture/detect for area-clear live on ``TeleportController``'s ctx, not
+    here. Pose OCR is unused — sit/stand is press-once with a seated flag.
+    """
 
     @property
     def discovery_wake(self) -> object: ...

@@ -27,8 +27,8 @@ SIT_SP_POLL_INTERVAL_S = 0.25
 SIT_IDLE_BEFORE_SIT_S = 1.0
 # After stand keypress, delay before hunt/timers resume.
 SIT_STAND_RESUME_DELAY_S = 0.5
-# Wait for sit/stand animation (~300ms) before visual pose verification.
-SIT_POSE_SETTLE_S = 0.35
+# Wait after sit/stand key tap for the toggle animation to finish.
+SIT_KEY_SETTLE_S = 0.35
 # Press HP Restore Key when vision HP/max is below this (item path only).
 HP_RESTORE_RATIO = 0.5
 # Vision HP poll / min gap between HP Restore Key presses (item path).
@@ -86,7 +86,7 @@ __all__ = [
     "SIT_SP_POLL_INTERVAL_S",
     "SIT_IDLE_BEFORE_SIT_S",
     "SIT_STAND_RESUME_DELAY_S",
-    "SIT_POSE_SETTLE_S",
+    "SIT_KEY_SETTLE_S",
     "HP_RESTORE_RATIO",
     "HP_RESTORE_POLL_S",
     "HP_RESTORE_COOLDOWN_S",

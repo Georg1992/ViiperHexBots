@@ -18,8 +18,8 @@ import traceback
 
 from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import (
+    SIT_KEY_SETTLE_S,
     SIT_LOW_SP_RATIO,
-    SIT_POSE_SETTLE_S,
     SIT_RESUME_SP_RATIO,
     SIT_SP_POLL_INTERVAL_S,
     SIT_STAND_RESUME_DELAY_S,
@@ -53,7 +53,7 @@ class SitOnLowSpWorker:
     def _tap(self, sit_scan: int, *, why: str) -> bool:
         self._ctx.logger.behavior(f"[SIT] tap sit-key reason={why}")
         self._input.key_tap(sit_scan)
-        return self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S)
+        return self._ctx.wait_unless_stopped(SIT_KEY_SETTLE_S)
 
     def _ok_to_act(self) -> bool:
         ctx = self._ctx
