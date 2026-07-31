@@ -10,7 +10,7 @@ depends on the full god object.
 Pause matrix (see ``runtime_context`` module docstring):
   sit     → discovery, tracking, attack, timers idle
   storage → discovery, tracking, attack idle; timers keep running
-  heal    → discovery, tracking, attack, timers idle; HP restore keeps running
+  heal    → attack, timers idle; discovery/tracking keep running
   sit ↔ storage ↔ heal mutually exclusive
 """
 
