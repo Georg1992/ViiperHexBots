@@ -35,13 +35,21 @@ class TeleportKeySelectionTests(unittest.TestCase):
         self.assertEqual(self.tport.danger_scan_code(), 17)
         self.assertEqual(self.tport.danger_button(), "w")
 
+    def test_danger_uses_creamy_when_wing_button_blank_even_if_scan_set(self) -> None:
+        """Blank Teleport Key must not count as assigned."""
+        self.ctx.config.teleport_scan_code = 16
+        self.ctx.config.teleport_button = "   "
+        self.assertEqual(self.tport.danger_scan_code(), 17)
+        self.assertEqual(self.tport.danger_button(), "w")
+
     def test_danger_teleport_presses_wing_key(self) -> None:
         self.tport.danger_teleport(reason="critical_hp")
         self.input.teleport_key.assert_called_once_with(16)
         self.ctx.note_teleport_for_wings.assert_called_once()
 
-    def test_danger_teleport_creamy_does_not_count_wing(self) -> None:
+    def test_danger_teleport_creamy_when_wing_unassigned(self) -> None:
         self.ctx.config.teleport_scan_code = 0
+        self.ctx.config.teleport_button = ""
         self.tport.danger_teleport(reason="critical_hp")
         self.input.teleport_key.assert_called_once_with(17)
         self.ctx.note_teleport_for_wings.assert_not_called()

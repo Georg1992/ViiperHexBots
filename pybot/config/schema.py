@@ -59,7 +59,7 @@ class AppSettings:
 
     skill_button: str = "e"
     skill_delay: int = 500
-    teleport_button: str = "q"
+    teleport_button: str = ""
     creamy_tp_button: str = ""
     teleport_delay: int = 800
     save_point_button: str = ""
