@@ -24,10 +24,6 @@ class MobBehavior:
         """Whether this mob has any non-default hooks (used by the GUI)."""
         return False
 
-    def special_behavior_label(self) -> str | None:
-        """Short UI note when this mob has special hunt behavior, else None."""
-        return None
-
     def kite_after_attack(
         self,
         char_x: int,
@@ -52,9 +48,6 @@ class AnubisBehavior(MobBehavior):
 
     def has_custom_behavior(self) -> bool:
         return True
-
-    def special_behavior_label(self) -> str | None:
-        return "kiting"
 
     def kite_after_attack(
         self,

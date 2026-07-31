@@ -190,9 +190,8 @@ class MainWindow:
         self._mob_radios.clear()
         for index, mob in enumerate(self.mob_catalog, start=1):
             label = mob.display_name
-            note = get_mob_behavior(mob.descriptor_name).special_behavior_label()
-            if note:
-                label = f"{mob.display_name}  (special: {note})"
+            if get_mob_behavior(mob.descriptor_name).has_custom_behavior():
+                label = f"{mob.display_name}  (custom behavior)"
             radio = ttk.Radiobutton(
                 frame,
                 text=label,
