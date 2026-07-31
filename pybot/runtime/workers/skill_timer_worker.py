@@ -8,6 +8,8 @@ Storage sessions do not pause timers (combat only), so keys are not re-armed.
 
 from __future__ import annotations
 
+import traceback
+
 from pybot.runtime.constants import SKILL_TIMER_STAGGER_MS
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.input.input_backend import InputBackend
@@ -88,8 +90,6 @@ class SkillTimerWorker:
 
                 ctx.stop_event.wait(max(0.05, next_wait_ms / 1000.0))
             except Exception:
-                import traceback
-
                 ctx.logger.behavior(f"[TIMER] tick error:\n{traceback.format_exc()}")
 
     def _arm_timers(self, timers) -> None:

@@ -42,19 +42,6 @@ class MobBehavior:
         """
         return False
 
-    def is_surrounded(
-        self,
-        char_x: int,
-        char_y: int,
-        all_mobs: list[tuple[int, int]],
-    ) -> tuple[bool, str]:
-        """Check whether mobs box the character in from opposite sides.
-
-        Called before each attack.  Returns ``(in_danger, reason)``.
-        Default: never surrounded.
-        """
-        return False, ""
-
 
 class AnubisBehavior(MobBehavior):
     """Anubis kites: walk away from the mob after each attack."""
@@ -84,28 +71,6 @@ class AnubisBehavior(MobBehavior):
         kite_y = char_y + dy
         input_backend.move_mouse(kite_x, kite_y)
         return input_backend.left_click()
-
-    def is_surrounded(
-        self,
-        char_x: int,
-        char_y: int,
-        all_mobs: list[tuple[int, int]],
-    ) -> tuple[bool, str]:
-        """Anubis is surrounded when mobs exist on opposite sides.
-
-        Left+Right or Above+Below — no safe kite direction exists.
-        """
-        if len(all_mobs) < 2:
-            return False, ""
-        left = any(mx < char_x for mx, _my in all_mobs)
-        right = any(mx > char_x for mx, _my in all_mobs)
-        above = any(my < char_y for _mx, my in all_mobs)
-        below = any(my > char_y for _mx, my in all_mobs)
-        if left and right:
-            return True, "left+right"
-        if above and below:
-            return True, "above+below"
-        return False, ""
 
 
 # ── Registry ──────────────────────────────────────────────────────

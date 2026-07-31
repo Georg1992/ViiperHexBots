@@ -7,6 +7,7 @@ rather than doing its own OCR — clean architecture, one source of truth.
 from __future__ import annotations
 
 import time
+import traceback
 
 from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import (
@@ -66,8 +67,6 @@ class HpRestoreWorker:
                 self._last_press_mono = time.monotonic()
                 ctx.stop_event.wait(HP_RESTORE_COOLDOWN_S)
             except Exception:
-                import traceback
-
                 ctx.logger.behavior(f"[HP] tick error:\n{traceback.format_exc()}")
 
     def _hp_ratio(self) -> float | None:

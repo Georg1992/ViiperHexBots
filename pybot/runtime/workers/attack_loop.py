@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import traceback
+
 from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import (
     ATTACK_IDLE_SPIN_S,
@@ -14,7 +16,6 @@ from pybot.runtime.constants import (
 from pybot.runtime.hunt_mode import HuntModeController
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.input.input_backend import InputBackend
-from pybot.runtime.danger_detector import DangerDetector
 from pybot.runtime.mob_behaviors import MobBehavior
 from pybot.runtime.workers.worker_contexts import AttackLoopContext
 
@@ -26,7 +27,6 @@ class AttackLoop:
         hunt_mode: HuntModeController,
         input_backend: InputBackend,
         *,
-        danger: DangerDetector | None = None,
         mob_behavior: MobBehavior | None = None,
         vitals: PlayerVitals | None = None,
         char_x: int = 0,
@@ -37,9 +37,6 @@ class AttackLoop:
         self._input = input_backend
         self._mob_behavior = mob_behavior or MobBehavior()
         self._vitals = vitals or PlayerVitals()
-        self._danger = danger or DangerDetector(
-            ctx, input_backend, self._mob_behavior, vitals=self._vitals,
-        )
         self._char_x = char_x
         self._char_y = char_y
         self._last_sp_unknown_log_ms = 0
@@ -64,7 +61,6 @@ class AttackLoop:
                 self._hunt_mode.on_no_attackable_targets()
                 self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
             except Exception:
-                import traceback
                 self._ctx.logger.behavior(
                     f"[ATTACK] CRASH:\n{traceback.format_exc()}"
                 )
@@ -156,21 +152,15 @@ class AttackLoop:
         click_x, click_y = snap.x, snap.y
         char_x, char_y = self._character_pos()
 
-        # Danger detector observes track positions — teleports if surrounded
-        # (Anubis only for now).  Synchronous: returns after teleport completes.
-        all_mobs = ctx.tracks.positions_snapshot()
-        if self._danger.feed_tracks(char_x, char_y, all_mobs):
-            return  # character elsewhere — abandon this target
-
         # Idle death: cheap cache samples around the configured skill delay.
         # Pacing is exactly skill_delay_ms (plus click) — no OCR / capture here.
         pre_sp, pre_obs_ms, pre_chg_ms = self._vitals.sp_sample()
         try:
             self._input.move_mouse(click_x, click_y)
             self._input.skill_click(ctx.config.skill_scan_code)
-        except Exception as exc:
+        except Exception:
             ctx.logger.behavior(
-                f"[ATTACK] input error id={target_id}: {exc}"
+                f"[ATTACK] input error id={target_id}:\n{traceback.format_exc()}"
             )
             return
 

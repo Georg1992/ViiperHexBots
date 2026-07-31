@@ -31,6 +31,8 @@ from pybot.runtime.workers.coord_tracking_worker import CoordTrackingWorker
 from pybot.runtime.mob_behaviors import get_mob_behavior
 from pybot.runtime.danger_detector import DangerDetector
 from pybot.runtime.teleport import TeleportController
+from pybot.runtime.character_state import CharacterState
+from pybot.runtime.workers.character_state_worker import CharacterStateMonitor
 from pybot.game_state import PlayerVitals
 
 from pybot.runtime.workers.discovery_worker import DiscoveryWorker
@@ -217,6 +219,7 @@ def _build_core_workers(
     tport: TeleportController,
     player_vitals: PlayerVitals,
     mob_behavior,
+    character_state: CharacterState,
 ) -> tuple[list[tuple[str, Callable[[], None]]], DangerDetector]:
     """Build always-running workers: danger, coord, discovery, attack.
 
@@ -228,10 +231,11 @@ def _build_core_workers(
     roi = ctx.capture.get_hunt_roi()
     char_x = roi.x + roi.w // 2 if roi else 0
     char_y = roi.y + roi.h // 2 if roi else 0
-    danger = DangerDetector(ctx, tport, mob_behavior, vitals=player_vitals)
+    danger = DangerDetector(
+        ctx, tport, character_state, vitals=player_vitals,
+    )
     attack = AttackLoop(
         ctx, hunt_mode, input_backend,
-        danger=danger,
         mob_behavior=mob_behavior,
         vitals=player_vitals,
         char_x=char_x, char_y=char_y,
@@ -250,8 +254,8 @@ def _build_conditional_workers(
     input_backend: InputBackend,
     tport: TeleportController,
     player_vitals: PlayerVitals,
+    character_state: CharacterState,
     danger: DangerDetector | None = None,
-    mob_behavior=None,
 ) -> list[tuple[str, Callable[[], None]]]:
     """Build optional workers: skill timer, hp restore, sit, storage."""
     workers: list[tuple[str, Callable[[], None]]] = []
@@ -265,7 +269,8 @@ def _build_conditional_workers(
     if ctx.config.sit_on_low_sp:
         sit_worker = SitOnLowSpWorker(
             ctx, input_backend, tport,
-            danger=danger, mob_behavior=mob_behavior, vitals=player_vitals,
+            danger=danger, character_state=character_state,
+            vitals=player_vitals,
         )
         workers.append(("sit_sp", sit_worker.run))
     if ctx.config.open_storage_steps:
@@ -306,12 +311,19 @@ def create_runtime_deps(
     _validate_sp_memory(config)
     _validate_weight_memory(config)
 
+    # Character state monitor — always runs alongside core workers.
+    char_state = CharacterState()
+    char_monitor = CharacterStateMonitor(ctx, char_state)
+
     core_workers, danger = _build_core_workers(
         ctx, hunt_mode, input_backend, tport, player_vitals, mob_behavior,
+        character_state=char_state,
     )
+    core_workers.append(("charstate", char_monitor.run))
+
     conditional_workers = _build_conditional_workers(
         ctx, input_backend, tport, player_vitals,
-        danger=danger, mob_behavior=mob_behavior,
+        character_state=char_state, danger=danger,
     )
 
     # Wire TeleportController's hunt_mode now that it's created.

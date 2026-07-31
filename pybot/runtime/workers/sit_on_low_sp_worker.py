@@ -12,6 +12,7 @@ SP comes from shared ``PlayerVitals``. Danger detection is handled by
 from __future__ import annotations
 
 import time
+import traceback
 
 from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import (
@@ -98,8 +99,6 @@ class SitOnLowSpWorker:
                 else:
                     ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
             except Exception:
-                import traceback
-
                 ctx.logger.behavior(f"[SIT] tick error:\n{traceback.format_exc()}")
 
     def _sp_snapshot(self) -> tuple[int, float] | None:

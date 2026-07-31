@@ -125,6 +125,20 @@ class HpRestoreWorkerContext(CanStop, CanLog, HasConfig, CanCapture, Protocol):
     pass
 
 
+class CharacterStateWorkerContext(
+    CanStop,
+    CanLog,
+    CanCapture,
+    CanTrack,
+    Protocol,
+):
+    """Hunt runtime subset consumed by CharacterStateMonitor.
+
+    Runs detection while workers are running (``should_run_workers``).
+    """
+    pass
+
+
 class SitOnLowSpWorkerContext(
     CanStop,
     CanLog,
