@@ -1,10 +1,13 @@
 """Local coordinate follower for already-discovered tracks.
 
-Heatmap-based tracking: scores at the predicted center first; on miss,
-searches nearby heatmap peaks (same silhouette gate). Uses the descriptor's
-sprite and body palettes with a distance threshold. Tracking is pure follow
-for position; discovery handles 2-miss removal. Tracking also measures
-opacity on successful hits so the store can confirm in-place death fade.
+Deterministic follow around the last known position:
+1. Silhouette-score at last known center (fast path).
+2. On miss, take the strongest local heatmap peak(s) in a fixed-radius
+   disk around that same point and silhouette-score them.
+
+No velocity prediction — runners stay inside a wide enough search disk.
+Tracking is pure follow for position; discovery owns 2-miss removal.
+Opacity is measured on hits for in-place death fade.
 """
 
 from __future__ import annotations
@@ -34,10 +37,8 @@ _LOCAL_FOLLOW_BODY_W = 0.55
 _LOCAL_FOLLOW_ACCENT_W = 0.45
 _LOCAL_FOLLOW_SPRITE_W = 0.75
 _LOCAL_FOLLOW_COLOR_W = 0.55
-# Residual velocity (px/tick) worth coasting after a miss cleared ``moving``.
-_FOLLOW_COAST_VEL_SQ = 1.0
-# Extra silhouette peak tries while catching up (center miss path only).
-_CATCH_UP_PEAK_ATTEMPTS = 2
+# Center-miss path: try top peaks until one passes silhouette.
+_LOCAL_PEAK_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,7 @@ def track_local(
     search_radius_px: int | None = None,
     suppress_positions: list[tuple[int, int]] | None = None,
 ) -> LocalTrackResult:
-    """Follow one known track near its last / predicted center.
+    """Follow one known track near its last known center.
 
     ``suppress_positions``: ROI-relative (x, y) of other tracks whose heat
     signature should be suppressed in the peak search. Prevents track A from
@@ -79,40 +80,21 @@ def track_local(
             y=cy + offset_y,
             reason="invalid_scale",
         )
-    moving = bool(track.get("moving", False))
-    vel_x = float(track.get("velX", 0.0))
-    vel_y = float(track.get("velY", 0.0))
-    lost_count = int(track.get("lostCount", 0))
-    speed_sq = vel_x * vel_x + vel_y * vel_y
-    # After a miss, ``moving`` is cleared for opacity death — still coast on
-    # residual velocity so the next tick can catch a runner ahead of last-seen.
-    use_prediction = moving or (
-        lost_count > 0 and speed_sq >= _FOLLOW_COAST_VEL_SQ
-    )
-    catch_up = moving or lost_count > 0 or use_prediction
 
+    # One fixed wide radius — enough for runners without velocity coast.
     if search_radius_px is not None:
         radius = int(search_radius_px)
-    elif catch_up:
-        radius = int(detector.local_track_moving_search_radius_px)
     else:
-        radius = int(detector.local_track_search_radius_px)
-
-    predicted_x = int(round(cx + vel_x)) if use_prediction else cx
-    predicted_y = int(round(cy + vel_y)) if use_prediction else cy
-    search_x, search_y = predicted_x, predicted_y
+        radius = int(detector.local_track_moving_search_radius_px)
 
     descriptor = detector.ensure_descriptor(mob_name)
     screen_cx = cx + offset_x
     screen_cy = cy + offset_y
 
-    # Score at predicted center first (fast path)
     accepted, center_bbox, sim = detector.score_at(
-        frame_bgr, descriptor, search_x, search_y, scale,
+        frame_bgr, descriptor, cx, cy, scale,
     )
-    center_hit = accepted and center_bbox is not None
-
-    if center_hit:
+    if accepted and center_bbox is not None:
         return _finalize_track_hit(
             detector=detector,
             frame_bgr=frame_bgr,
@@ -124,15 +106,9 @@ def track_local(
             offset_y=offset_y,
         )
 
-    # Center miss → local heatmap peaks. Cover both last-known and predicted
-    # so a straight-line runner ahead of last-seen is still in the disk, while
-    # a wrong prediction / turn still keeps last-seen in range.
     peak = _find_local_peak(
         detector, frame_bgr, descriptor, cx, cy, scale,
         search_radius_px=radius,
-        cover_x=search_x,
-        cover_y=search_y,
-        peak_attempts=_CATCH_UP_PEAK_ATTEMPTS if catch_up else 1,
         suppress_positions=suppress_positions,
     )
     if peak is not None:
@@ -202,25 +178,16 @@ def _find_local_peak(
     scale: float,
     *,
     search_radius_px: int,
-    cover_x: int | None = None,
-    cover_y: int | None = None,
-    peak_attempts: int = 1,
     suppress_positions: list[tuple[int, int]] | None = None,
 ) -> tuple[int, int, float, float, tuple[int, int, int, int]] | None:
-    cover_x = cx if cover_x is None else int(cover_x)
-    cover_y = cy if cover_y is None else int(cover_y)
     frame_h, frame_w = frame_bgr.shape[:2]
     margin_x = int(round(descriptor.avg_width * scale * _COVERAGE_SIZE_FRAC))
     margin_y = int(round(descriptor.avg_height * scale * _COVERAGE_SIZE_FRAC))
-    # Crop around the midpoint of last-known and predicted so both disks fit.
-    mid_x = (cx + cover_x) // 2
-    mid_y = (cy + cover_y) // 2
-    sep = max(abs(cover_x - cx), abs(cover_y - cy))
-    pad = search_radius_px + (sep + 1) // 2 + max(margin_x, margin_y)
-    x0 = max(0, mid_x - pad)
-    y0 = max(0, mid_y - pad)
-    x1 = min(frame_w, mid_x + pad + 1)
-    y1 = min(frame_h, mid_y + pad + 1)
+    pad = search_radius_px + max(margin_x, margin_y)
+    x0 = max(0, cx - pad)
+    y0 = max(0, cy - pad)
+    x1 = min(frame_w, cx + pad + 1)
+    y1 = min(frame_h, cy + pad + 1)
     if x1 <= x0 or y1 <= y0:
         return None
 
@@ -249,27 +216,19 @@ def _find_local_peak(
                     thickness=-1,
                 )
 
+    anchor_x = cx - x0
+    anchor_y = cy - y0
     yy, xx = np.ogrid[: local_final.shape[0], : local_final.shape[1]]
-    r2 = search_radius_px * search_radius_px
-    last_dx = xx - (cx - x0)
-    last_dy = yy - (cy - y0)
-    pred_dx = xx - (cover_x - x0)
-    pred_dy = yy - (cover_y - y0)
-    mask = (last_dx * last_dx + last_dy * last_dy <= r2) | (
-        pred_dx * pred_dx + pred_dy * pred_dy <= r2
-    )
-    masked = np.where(mask, local_final, 0.0)
+    dist_sq = (xx - anchor_x) ** 2 + (yy - anchor_y) ** 2
+    mask = dist_sq <= (search_radius_px * search_radius_px)
+    work = np.where(mask, local_final, 0.0).copy()
     min_heat = detector.heatmap_detector.min_center_heat * _LOCAL_FOLLOW_MIN_HEAT_FRAC
-
-    best_peak: tuple[int, int, float, float, tuple[int, int, int, int]] | None = None
-    best_living_sim = -1.0
-    work = masked.copy()
     suppress_radius = max(
         _LOCAL_SUPPRESS_RADIUS_FLOOR_PX,
         search_radius_px // _LOCAL_PEAK_SUPPRESS_DIV,
     )
-    attempts = max(1, int(peak_attempts))
-    for _ in range(attempts):
+
+    for _ in range(_LOCAL_PEAK_ATTEMPTS):
         peak_val = float(work.max())
         if peak_val < min_heat:
             break
@@ -279,14 +238,11 @@ def _find_local_peak(
         accepted, bbox, sim = detector.score_at(
             frame_bgr, descriptor, peak_x, peak_y, scale,
         )
-        if accepted and sim > best_living_sim and bbox is not None:
-            best_living_sim = sim
-            best_peak = (peak_x, peak_y, peak_val, sim, bbox)
-            # First accepted peak is enough — do not pay for more score_at.
-            break
+        if accepted and bbox is not None:
+            return peak_x, peak_y, peak_val, sim, bbox
         cv2.circle(work, (peak_x_local, peak_y_local), suppress_radius, 0.0, thickness=-1)
 
-    return best_peak
+    return None
 
 
 def _build_local_follow_heatmap(

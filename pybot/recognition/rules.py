@@ -16,8 +16,8 @@ Ownership:
   Sustained opacity drop while stationary removes the track (in-place
   death fade).  Discovery matches also update ``discovery_stationary``
   from consecutive discovery blob centers (coordinates unchanged within
-  the stop threshold).  On miss it coasts along velocity and wakes
-  discovery for confirmation.
+  the stop threshold).  On miss it keeps the last known position and
+  wakes discovery for confirmation.
 - **Attack** supplies skill clicks and idle SP samples (``was_idle``).
   Confirmed idle-dead / unreachable decisions live in
   ``HuntTracks.evaluate_idle_attack`` (death uses discovery blob stationary,
@@ -37,8 +37,7 @@ HUNT_DISCOVERY_CLUSTER_RADIUS = 48
 
 TrackState = Literal["alive"]
 
-# Velocity coast decay on tracking miss (moving vs stationary).
-VEL_COAST_DECAY_MOVING = 0.9
+# Velocity decay on tracking miss (position stays at last known).
 VEL_COAST_DECAY_STATIONARY = 0.5
 
 
@@ -277,13 +276,15 @@ def apply_track_observation(
     confidence: float,
     now_tick: int,
 ) -> None:
-    """Tracking owns position + liveness. Fresh coords on hit; coast only while moving."""
+    """Tracking owns position + liveness. Fresh coords on hit; hold on miss.
+
+    Misses do **not** coast along velocity — local follow searches a fixed
+    wide disk around the last known hit. Coasting drifted that anchor when
+    velocity was wrong.
+    """
     if found:
         dx = float(x - track.x)
         dy = float(y - track.y)
-        # Responsive velocity EMA: 50/50 weight so direction changes correct
-        # within 1 frame. 0.65/0.35 was too slow for fast mobs and sudden
-        # turns — the tracked position lagged behind actual movement.
         track.vel_x = (0.5 * track.vel_x) + (0.5 * dx)
         track.vel_y = (0.5 * track.vel_y) + (0.5 * dy)
         track.x = x
@@ -299,16 +300,8 @@ def apply_track_observation(
             track.confidence = confidence
         return
 
-    # Coast only when movement is established — residual EMA on a stationary
-    # miss otherwise jumps the search window and looks like lag/racing.
-    if track.moving:
-        track.x += int(round(track.vel_x))
-        track.y += int(round(track.vel_y))
-        track.vel_x *= VEL_COAST_DECAY_MOVING
-        track.vel_y *= VEL_COAST_DECAY_MOVING
-    else:
-        track.vel_x *= VEL_COAST_DECAY_STATIONARY
-        track.vel_y *= VEL_COAST_DECAY_STATIONARY
+    track.vel_x *= VEL_COAST_DECAY_STATIONARY
+    track.vel_y *= VEL_COAST_DECAY_STATIONARY
     track.lost_count += 1
     track.updated_tick = now_tick
 

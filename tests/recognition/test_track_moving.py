@@ -68,7 +68,7 @@ class TrackMovingTests(unittest.TestCase):
         )
         self.assertTrue(track.moving)
 
-    def test_hit_updates_velocity_and_miss_coasts_when_moving(self) -> None:
+    def test_hit_updates_velocity_and_miss_keeps_last_known(self) -> None:
         from pybot.recognition.rules import apply_track_observation
 
         track = MobTrack(id=1, x=100, y=100, moving=True)
@@ -78,13 +78,12 @@ class TrackMovingTests(unittest.TestCase):
         self.assertGreater(track.vel_x, 0.0)
         self.assertGreater(track.vel_y, 0.0)
         before_x, before_y = track.x, track.y
-        vel_x, vel_y = track.vel_x, track.vel_y
         apply_track_observation(
             track, found=False, x=before_x, y=before_y, confidence=0.0, now_tick=20
         )
         self.assertEqual(track.lost_count, 1)
-        self.assertEqual(track.x, before_x + int(round(vel_x)))
-        self.assertEqual(track.y, before_y + int(round(vel_y)))
+        self.assertEqual(track.x, before_x)
+        self.assertEqual(track.y, before_y)
 
     def test_stationary_miss_does_not_coast(self) -> None:
         from pybot.recognition.rules import apply_track_observation

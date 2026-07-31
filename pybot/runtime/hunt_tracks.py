@@ -544,7 +544,7 @@ class HuntTracks:
                     )
                     continue
 
-                # Tracking miss — coast on velocity, advance lost count.
+                # Tracking miss — keep last known position, advance lost count.
                 apply_track_observation(
                     track,
                     found=False,
