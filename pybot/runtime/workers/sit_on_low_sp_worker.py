@@ -2,12 +2,11 @@
 
 Contract
 --------
-* ``_seated`` is True only between a confirmed sit and a confirmed stand.
-* Sit/stand keys are a **toggle**. Blind retries re-sit a standing character.
-* ``stand()`` presses **once**, then re-reads pose. It presses again only when
-  pose is confirmed still sitting — never on unknown/ambiguous reads.
-* Hunt gate (``end_sit_ops``) is released only after ``_seated`` is False.
-  Standing failure keeps the gate held; never hunt while seated.
+* Hunt stays paused (``begin_sit_ops``) until SP ≥ resume threshold **or** stop.
+  Aborting a sit attempt / failed area-clear must **retry**, never resume hunt.
+* ``_seated`` tracks a confirmed sit. ``stand()`` presses once to leave sit;
+  a second press only if pose is confirmed still sitting (toggle-safe).
+* ``end_sit_ops`` runs only after the recover loop exits (SP recovered or stop).
 """
 
 from __future__ import annotations
@@ -93,24 +92,15 @@ class SitOnLowSpWorker:
                 if not self._tap(sit_scan, why="enter_sit"):
                     return False
                 continue
-            # Unknown — wait, do not toggle.
             self._ctx.stop_event.wait(SIT_POSE_SETTLE_S)
         return False
 
     def stand(self, sit_scan: int) -> bool:
-        """Leave sit with at most one press unless still confirmed sitting.
-
-        Sequence:
-        1. If not ``_seated`` → already done (no-op).
-        2. Press once (required: falcon can fake standing while seated).
-        3. Re-read pose. Standing → clear ``_seated`` and return.
-           Still sitting → press once more. Unknown → wait, no press.
-        """
+        """Leave sit: one press, re-press only if still confirmed sitting."""
         if not self._seated:
             return True
         if not self._ok_to_act():
             return False
-        # Mandatory single stand press — we know we sat.
         if not self._tap(sit_scan, why="leave_sit"):
             return False
 
@@ -124,18 +114,16 @@ class SitOnLowSpWorker:
                 self._ctx.logger.behavior("[SIT] standing confirmed")
                 return True
             if sitting is True and extra_presses < 1:
-                # Confirmed still down after the stand press — one more try.
                 if not self._tap(sit_scan, why="still_sitting"):
                     return False
                 extra_presses += 1
                 continue
-            # Unknown, or already used the extra press — wait and re-read only.
             self._ctx.stop_event.wait(SIT_POSE_SETTLE_S)
         self._ctx.logger.behavior("[SIT] standing NOT confirmed — keeping sit gate")
         return False
 
     def _ensure_standing_before_hunt(self, sit_scan: int) -> None:
-        """Block hunt resume until standing is confirmed (or stop)."""
+        """Block until standing is confirmed (or stop)."""
         ctx = self._ctx
         while self._seated and not ctx.is_stopped():
             if self.stand(sit_scan):
@@ -152,6 +140,10 @@ class SitOnLowSpWorker:
             return None
         self._last_fail_log = ""
         return sp / sp_max
+
+    def _sp_recovered(self) -> bool:
+        ratio = self._sp_ratio()
+        return ratio is not None and ratio >= SIT_RESUME_SP_RATIO
 
     def run(self) -> None:
         ctx = self._ctx
@@ -177,6 +169,7 @@ class SitOnLowSpWorker:
                 ctx.logger.behavior(f"[SIT] tick error:\n{traceback.format_exc()}")
 
     def _recover_sp(self, low_ratio: float) -> None:
+        """Hold hunt until SP recovers. Failed sit/clear attempts retry in-place."""
         ctx = self._ctx
         sit_scan = ctx.config.sit_on_low_sp_scan_code
         self._seated = False
@@ -184,38 +177,61 @@ class SitOnLowSpWorker:
             return
         try:
             ctx.logger.behavior(
-                f"[SIT] low SP ratio={low_ratio:.1%} — pausing hunt/timers, "
-                "teleport until clear before sit"
+                f"[SIT] low SP ratio={low_ratio:.1%} — hunt paused until "
+                f"SP>={SIT_RESUME_SP_RATIO:.0%}"
             )
             while not ctx.is_stopped():
                 if not self._ok_to_act():
-                    return
+                    break
+
                 if not self._teleport.teleport_until_quiet(log_tag="SIT"):
-                    return
+                    ctx.logger.behavior(
+                        "[SIT] area clear failed — retry (hunt stays paused)"
+                    )
+                    ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
+                    continue
+
                 outcome = self._sit_until_done(sit_scan)
-                if outcome == "recovered":
-                    return
-                if outcome is None:
-                    return
-                ctx.logger.behavior(f"[SIT] {outcome} — finding another sit spot")
-        finally:
-            # Block until standing is confirmed. Do not hunt while seated.
-            self._ensure_standing_before_hunt(sit_scan)
-            if self._seated and not ctx.is_stopped():
+                if outcome == "recovered" and self._sp_recovered():
+                    ratio = self._sp_ratio()
+                    ctx.logger.behavior(
+                        f"[SIT] SP recovered ratio={ratio:.1%} — resuming hunt"
+                    )
+                    break
+
+                if outcome == "recovered" and not self._sp_recovered():
+                    ctx.logger.behavior(
+                        "[SIT] stood but SP still low — sit again "
+                        "(hunt stays paused)"
+                    )
+                    continue
+
+                if outcome == "interrupted":
+                    ctx.logger.behavior(
+                        "[SIT] interrupted — new sit spot (hunt stays paused)"
+                    )
+                    continue
+
                 ctx.logger.behavior(
-                    "[SIT] still seated — refusing to release hunt gate"
+                    "[SIT] session incomplete — retry (hunt stays paused)"
                 )
-            else:
-                ctx.end_sit_ops()
-                ctx.discovery_wake.set()
+                ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
+        finally:
+            self._ensure_standing_before_hunt(sit_scan)
+            # Loop only exits on SP recovered or stop — then release hunt.
+            ctx.end_sit_ops()
+            ctx.discovery_wake.set()
 
     def _sit_until_done(self, sit_scan: int) -> str | None:
-        """Sit → wait SP/damage → stand. Hunt must not resume here."""
+        """Sit → wait for SP or damage → stand.
+
+        Returns ``"recovered"`` only after standing with SP still ≥ resume.
+        """
         ctx = self._ctx
         self._danger.pop_damage_detected()
 
         if not self.sit(sit_scan):
-            ctx.logger.behavior("[SIT] could not confirm sitting — aborting")
+            ctx.logger.behavior("[SIT] could not confirm sitting — will retry")
             return None
         ctx.logger.behavior("[SIT] waiting for regen")
 
@@ -233,12 +249,18 @@ class SitOnLowSpWorker:
             ratio = self._sp_ratio()
             if ratio is not None and ratio >= SIT_RESUME_SP_RATIO:
                 ctx.logger.behavior(
-                    f"[SIT] SP recovered ratio={ratio:.1%} — standing"
+                    f"[SIT] SP threshold met ratio={ratio:.1%} — standing"
                 )
                 if not self.stand(sit_scan):
                     ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
                     continue
                 if not ctx.wait_unless_stopped(SIT_STAND_RESUME_DELAY_S):
+                    return None
+                # Require SP still recovered after standing.
+                if not self._sp_recovered():
+                    ctx.logger.behavior(
+                        "[SIT] SP dropped below resume after stand — not done"
+                    )
                     return None
                 return "recovered"
 
