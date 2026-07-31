@@ -37,7 +37,8 @@ from pybot.recognition.detector.discovery_pipeline import (
     format_discovery_pipeline_text,
 )
 from pybot.recognition.fixtures import MOB_FIXTURE_SUITES, fixture_search_frame
-from pybot.recognition.ui.character_pose import measure_center_pose, detect_nearby_any_mobs
+from pybot.recognition.nearby_mobs import detect_nearby_any_mobs
+from pybot.recognition.ui.character_pose import measure_center_pose
 from pybot.recognition.ui.status_panel import (
     HP_SCAN_ZONE,
     SP_SCAN_ZONE,

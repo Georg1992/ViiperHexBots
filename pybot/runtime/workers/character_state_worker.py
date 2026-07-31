@@ -3,17 +3,13 @@
 Runs in its own thread, captures the hunt ROI and publishes character
 position, surrounded state, and generic nearby-mob count into
 CharacterState.
-
-Pose (sit/stand) is NOT tracked here — it is verified on-demand by the
-sit worker via ``character_pose.measure_center_pose()`` after pressing
-sit or stand keys.
 """
 
 from __future__ import annotations
 
 import traceback
 
-from pybot.recognition.ui.character_pose import detect_nearby_any_mobs
+from pybot.recognition.nearby_mobs import detect_nearby_any_mobs
 from pybot.runtime.character_state import (
     SURROUND_RADIUS_PX,
     CharacterState,
