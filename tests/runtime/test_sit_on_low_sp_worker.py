@@ -8,12 +8,11 @@ from unittest.mock import MagicMock
 
 from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import (
+    SIT_KEY_SETTLE_S,
     SIT_LOW_SP_RATIO,
-    SIT_POSE_SETTLE_S,
     SIT_RESUME_SP_RATIO,
 )
 from pybot.runtime.danger_detector import DangerDetector
-from pybot.runtime.detection.detector_session import DiscoveryScanResult, RawDetection
 from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.workers.sit_on_low_sp_worker import SitOnLowSpWorker
@@ -59,9 +58,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             control=MagicMock(),
             overlay=MagicMock(),
         )
-        self.ctx.capture.is_valid.return_value = True
-        self.ctx.capture.get_hunt_roi.return_value = MagicMock(x=0, y=0, w=100, h=100)
-        self.ctx.capture.capture_roi.return_value = MagicMock(size=1)
         self.input = MagicMock(spec=ShadowInputBackend)
         from pybot.runtime.teleport import TeleportController
         self.teleport = TeleportController(self.ctx, self.input, MagicMock())
@@ -75,25 +71,10 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             danger=self.danger, vitals=vitals or _ScriptedVitals([]),
         )
 
-    def _living_then_clear(self) -> list[DiscoveryScanResult]:
-        living = RawDetection(
-            x=10, y=10, confidence=0.9, candidate_scale=1.0, living=True,
-            bbox=(0, 0, 20, 20),
-        )
-        empty = DiscoveryScanResult(
-            ok=True, fail_reason="", raw_count=0, accepted_count=0,
-            detections=[], duration_ms=1, elapsed_s=0.001,
-        )
-        living_scan = DiscoveryScanResult(
-            ok=True, fail_reason="", raw_count=1, accepted_count=1,
-            detections=[living], duration_ms=1, elapsed_s=0.001,
-        )
-        return [living_scan, empty, empty, empty, empty]
-
     def test_thresholds(self) -> None:
         self.assertAlmostEqual(SIT_LOW_SP_RATIO, 0.05)
         self.assertAlmostEqual(SIT_RESUME_SP_RATIO, 0.98)
-        self.assertGreaterEqual(SIT_POSE_SETTLE_S, 0.3)
+        self.assertGreaterEqual(SIT_KEY_SETTLE_S, 0.3)
 
     def test_sit_presses_once_and_marks_seated(self) -> None:
         worker = self._worker()
@@ -120,7 +101,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         vitals = _ScriptedVitals(
             [SIT_LOW_SP_RATIO - 0.01, 0.50, SIT_RESUME_SP_RATIO, SIT_RESUME_SP_RATIO]
         )
-        self.ctx.detector.discover_frame.side_effect = self._living_then_clear()
         worker = self._worker(vitals)
         self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
 

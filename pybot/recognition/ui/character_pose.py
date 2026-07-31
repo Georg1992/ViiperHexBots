@@ -1,5 +1,8 @@
 """Center-screen character pose (sitting vs standing) from hunt frames.
 
+Currently unused by the sit worker (toggle is press-once; pose OCR flapped
+sit↔stand). Kept for debug_vis / unit tests and possible future use.
+
 RO keeps the player at the client center. Sitting shrinks the body sprite;
 the Hunter falcon floats above and is ignored by taking the lowest contiguous
 vertical occupancy run (>= 20px) in a narrow center strip (bird sits in a

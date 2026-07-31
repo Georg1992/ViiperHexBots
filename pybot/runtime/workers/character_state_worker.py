@@ -15,10 +15,7 @@ from pybot.runtime.character_state import (
     CharacterState,
     is_surrounded_by_tracks,
 )
-from pybot.runtime.constants import (
-    HUNT_DISCOVERY_INTERVAL_MS,
-    WORKER_POLL_INTERVAL_S,
-)
+from pybot.runtime.constants import HUNT_DISCOVERY_INTERVAL_MS
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.workers.worker_contexts import CharacterStateWorkerContext
 

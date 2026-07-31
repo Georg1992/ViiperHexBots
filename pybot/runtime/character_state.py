@@ -1,13 +1,14 @@
 """CharacterState — dedicated store for character visual state.
 
-Published by the CharacterStateMonitor worker and consumed by other
-workers (attack loop, sit worker, danger detector) for decisions that
-depend on character position and surrounding mobs.
+Published by the CharacterStateMonitor worker and consumed by
+DangerDetector (and teleport area-reset) for surround / nearby-mob
+decisions.
 
 Designed as a lightweight dataclass with thread-safe read/write so it
 can be shared between the monitor thread and worker threads.
 
-Note: sit/stand pose is not tracked here. Nearby sprite counts come from
+Note: sit/stand pose is not tracked here (``character_pose`` is unused by
+the sit worker). Nearby sprite counts come from
 ``pybot.recognition.nearby_mobs`` via CharacterStateMonitor.
 """
 
