@@ -246,8 +246,9 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.assertTrue(self.ctx.should_run_workers())
         self.assertFalse(self.ctx.should_run_combat())
         self.assertFalse(self.ctx.should_run_timers())
-        self.assertFalse(self.ctx.should_run_discovery())
-        self.assertFalse(self.ctx.should_run_tracking())
+        # Discovery/tracking stay up so tracks remain fresh during heal.
+        self.assertTrue(self.ctx.should_run_discovery())
+        self.assertTrue(self.ctx.should_run_tracking())
         self.assertFalse(self.ctx.resume_gate.is_set())
         self.assertFalse(self.ctx.try_begin_heal_ops())
         self.assertFalse(self.ctx.try_begin_sit_ops())

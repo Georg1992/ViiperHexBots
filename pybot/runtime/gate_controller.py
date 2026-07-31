@@ -35,7 +35,7 @@ class GateController:
         self.sitting_event = threading.Event()
         # Set while ItemsToStorage / GetFlyWings runs — combat idles; timers keep going.
         self.storage_event = threading.Event()
-        # Set while heal-until-full — combat/discovery/tracking/timers idle; HP worker runs.
+        # Set while heal-until-full — combat/timers idle; discovery/tracking keep running.
         self.healing_event = threading.Event()
         self._sit_storage_lock = threading.Lock()
         # Monotonic deadline: after teleport settle, heal freely until this time.
@@ -84,20 +84,18 @@ class GateController:
         return self.should_run_workers() and not self.storage_event.is_set()
 
     def should_run_discovery(self) -> bool:
-        """True when discovery may scan (workers running and not storage/heal)."""
-        return (
-            self.should_run_workers()
-            and not self.storage_event.is_set()
-            and not self.healing_event.is_set()
-        )
+        """True when discovery may scan (workers running and not storage).
+
+        Heal does not block discovery — tracks stay fresh while topping up HP.
+        """
+        return self.should_run_workers() and not self.storage_event.is_set()
 
     def should_run_tracking(self) -> bool:
-        """True when tracking may tick (workers running and not storage/heal)."""
-        return (
-            self.should_run_workers()
-            and not self.storage_event.is_set()
-            and not self.healing_event.is_set()
-        )
+        """True when tracking may tick (workers running and not storage).
+
+        Heal does not block tracking — tracks stay fresh while topping up HP.
+        """
+        return self.should_run_workers() and not self.storage_event.is_set()
 
     def _session_held(self) -> bool:
         return (
@@ -201,7 +199,7 @@ class GateController:
         return False
 
     def end_heal_ops(self) -> None:
-        """Release heal session; combat/discovery/tracking/timers may resume."""
+        """Release heal session; combat/timers may resume."""
         with self._sit_storage_lock:
             self.healing_event.clear()
             self._restore_resume_gate()
