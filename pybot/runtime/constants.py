@@ -16,7 +16,7 @@ ATTACK_IDLE_SPIN_S = WORKER_POLL_INTERVAL_S / 2.0
 # otherwise an early mid-wait republish of pre-cost SP can look like idle.
 SP_IDLE_MAX_OBSERVATION_AGE_MS = 1000
 # Discovery scans without a match before track removal.
-DISCOVERY_MISS_REMOVE_COUNT = 2
+DISCOVERY_MISS_REMOVE_COUNT = 3
 # Idle-attack death / unreachable policy.
 IDLE_DEAD_ATTACK_COUNT = 2
 IDLE_UNREACHABLE_ATTACK_COUNT = 5
