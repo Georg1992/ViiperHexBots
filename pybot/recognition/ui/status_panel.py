@@ -197,8 +197,9 @@ def read_status_panel(
             hp_max=previous.hp_max,
             sp=sp,
             sp_max=previous.sp_max,
-            weight=weight,
-            weight_max=previous.weight_max if weight is not None else None,
+            # Transient weight OCR miss keeps prior current+max (storage gate).
+            weight=weight if weight is not None else previous.weight,
+            weight_max=previous.weight_max,
             panel_origin=origin,
         )
 

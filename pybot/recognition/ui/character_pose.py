@@ -157,10 +157,11 @@ def _body_run_height(profile: np.ndarray, thr: int) -> int | None:
     the falcon forms a separate, shorter run above the body.  Floor noise at
     the very bottom of the crop produces very short runs (< 20px).
 
-    Strategy: filter to runs >= 20px tall (body), then take the lowest one.
-    This picks the body over the falcon (higher up) and ignores floor noise.
+    Strategy: filter to runs >= 20px tall (body), then take the lowest one
+    (largest start row). This picks the body over the falcon (higher up) and
+    ignores floor noise.
     """
-    runs: list[int] = []  # heights only
+    runs: list[tuple[int, int]] = []  # (start_row, height)
     start: int | None = None
     for i, occupied in enumerate(profile >= thr):
         if occupied and start is None:
@@ -168,13 +169,14 @@ def _body_run_height(profile: np.ndarray, thr: int) -> int | None:
         elif not occupied and start is not None:
             h = i - start
             if h >= 20:
-                runs.append(h)  # not recording start, just height
+                runs.append((start, h))
             start = None
     if start is not None:
         h = len(profile) - start
         if h >= 20:
-            runs.append(h)
+            runs.append((start, h))
     if not runs:
         return None
-    # The body is the tallest run (falcon and floor noise are shorter).
-    return max(runs)
+    # Lowest on screen = largest start_row.
+    _start, height = max(runs, key=lambda item: item[0])
+    return height

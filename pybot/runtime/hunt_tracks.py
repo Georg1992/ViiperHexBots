@@ -558,27 +558,37 @@ class HuntTracks:
                 return "none", track.idle_attack_count
 
             if was_idle:
+                # Melee auto-attacks often consume no SP; do not treat idle
+                # skill presses as death/unreachable while sitting on the mob.
+                dx = mob_x - char_x
+                dy = mob_y - char_y
+                if (dx * dx + dy * dy) <= (
+                    MELEE_IDLE_GUARD_RADIUS_PX * MELEE_IDLE_GUARD_RADIUS_PX
+                ):
+                    return "none", track.idle_attack_count
+
                 if track.was_accessible:
-                    # Path 1: TRACK WAS ATTACKED + NOT MOVING + 2 IDLE ATTACKS = MOB DEAD
-                    if track.moving:
+                    # Path 1: hittable + discovery-stationary + not moving
+                    # + N idle attacks = dead.
+                    if track.moving or not track.discovery_stationary:
                         track.idle_attack_count = 0
                         return "none", 0
-                    
+
                     track.idle_attack_count += 1
                     if track.idle_attack_count >= IDLE_DEAD_ATTACK_COUNT:
                         tick = now_tick if now_tick is not None else monotonic_ms()
                         self._remove_dead_tracks_locked({track_id}, tick)
                         return "dead", track.idle_attack_count
-                        
+
                     return "none", track.idle_attack_count
                 else:
-                    # Path 2: TRACK WAS NOT ATTACKED SUCCESSFULLY + 5 IDLE ATTACKS = UNREACHABLE
+                    # Path 2: never confirmed hit + N idle attacks = unreachable.
                     track.idle_attack_count += 1
                     if track.idle_attack_count >= IDLE_UNREACHABLE_ATTACK_COUNT:
                         tick = now_tick if now_tick is not None else monotonic_ms()
                         self._remove_dead_tracks_locked({track_id}, tick)
                         return "unreachable", track.idle_attack_count
-                        
+
                     return "none", track.idle_attack_count
 
             # SP consumed → real attack → mob is hittable

@@ -159,7 +159,11 @@ class SitOnLowSpWorker:
         # Reset the flag so we only detect damage WHILE sitting.
         self._danger.pop_damage_detected()
 
-        self._ensure_sitting(sit_scan)
+        if not self._ensure_sitting(sit_scan):
+            ctx.logger.behavior(
+                "[SIT] could not confirm sitting — aborting session"
+            )
+            return None
         ctx.logger.behavior("[SIT] Pressed sit button, waiting for regen")
 
         while not ctx.is_stopped():
@@ -174,7 +178,11 @@ class SitOnLowSpWorker:
                     ctx.logger.behavior(
                         f"[SIT] SP recovered ratio={ratio:.1%} — standing"
                     )
-                    self._ensure_standing(sit_scan)
+                    if not self._ensure_standing(sit_scan):
+                        ctx.logger.behavior(
+                            "[SIT] could not confirm standing — aborting session"
+                        )
+                        return None
                     ctx.wait_unless_stopped(SIT_STAND_RESUME_DELAY_S)
                     return "recovered"
 
@@ -183,27 +191,29 @@ class SitOnLowSpWorker:
     def _ensure_sitting(
         self,
         sit_scan: int,
-    ) -> None:
+    ) -> bool:
         """Press sit and verify with visual pose check (retry up to N times)."""
         for attempt in range(_SIT_VERIFY_RETRIES):
             self._input.teleport_key(sit_scan)
             self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S)
             if self._verify_pose(expected_sit=True):
-                return
+                return True
             self._ctx.logger.behavior(
                 f"[SIT] sit verify failed attempt {attempt + 1}/{_SIT_VERIFY_RETRIES} — retrying"
             )
+        return False
 
     def _ensure_standing(
         self,
         sit_scan: int,
-    ) -> None:
+    ) -> bool:
         """Press stand and verify with visual pose check (retry up to N times)."""
         for attempt in range(_SIT_VERIFY_RETRIES):
             self._input.teleport_key(sit_scan)
             self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S)
             if self._verify_pose(expected_sit=False):
-                return
+                return True
             self._ctx.logger.behavior(
                 f"[SIT] stand verify failed attempt {attempt + 1}/{_SIT_VERIFY_RETRIES} — retrying"
             )
+        return False

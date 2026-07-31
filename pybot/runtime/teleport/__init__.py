@@ -68,14 +68,26 @@ class TeleportController:
     # ── Danger teleport ──────────────────────────────────────────
 
     def danger_teleport(self, reason: str = "") -> None:
-        """Teleport for danger (HP drop, surround). Clears tracks after."""
+        """Teleport for danger (HP drop, surround). Clears tracks after.
+
+        Suspends discovery for the same reason as ``mode_teleport``: a
+        concurrent scan during settle must not confirm clear or recreate
+        tracks on a loading frame.
+        """
+        ctx = self._ctx
         prefix = f"{reason} " if reason else ""
         tp = self.active_scan_code()
-        self._ctx.logger.behavior(
+        ctx.logger.behavior(
             f"[DANGER] {prefix}teleport_scan={tp} — teleporting"
         )
-        self.teleport_once()
-        self._ctx.area_reset(reason="danger_teleport")
+        ctx.discovery_suspend.set()
+        ctx.discovery_wake.clear()
+        try:
+            self.teleport_once()
+            ctx.area_reset(reason="danger_teleport")
+        finally:
+            ctx.discovery_suspend.clear()
+            ctx.discovery_wake.set()
 
     # ── Area clear loops ─────────────────────────────────────────
 

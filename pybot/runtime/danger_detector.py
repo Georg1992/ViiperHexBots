@@ -15,6 +15,7 @@ Teleport execution delegated to :class:`TeleportController`.
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING
 
 from pybot.runtime.constants import WORKER_POLL_INTERVAL_S
@@ -42,6 +43,7 @@ class DangerDetector:
         self._character_state = character_state
         self._vitals = vitals
         self._prev_hp: int | None = None
+        self._damage_lock = threading.Lock()
         self._damage_detected: bool = False
 
     # ── Worker loop ───────────────────────────────────────────────
@@ -50,11 +52,13 @@ class DangerDetector:
         """Ongoing loop: poll HP + surround state, detect danger, sleep."""
         while not self._ctx.is_stopped():
             self._poll_hp()
-            self._poll_surround()
+            # Surround teleports only while combat is allowed (not pause/sit/storage).
+            if self._ctx.should_run_combat():
+                self._poll_surround()
             self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
 
     def _poll_hp(self) -> None:
-        """Read HP from shared vitals and teleport if dropped."""
+        """Read HP from shared vitals; record drops; teleport when combat is live."""
         hp, hp_max = self._vitals.hp_pair()
         if hp is None:
             self._prev_hp = None
@@ -66,11 +70,15 @@ class DangerDetector:
                 and hp_max > 0
                 and hp / hp_max < CRITICAL_HP_RATIO
             )
-            self._damage_detected = True
-            if is_critical:
-                self._teleport.danger_teleport(reason="critical_hp")
-            else:
-                self._teleport.danger_teleport(reason="hp_drop")
+            with self._damage_lock:
+                self._damage_detected = True
+            # Always record the drop (sit worker reads the flag) but only
+            # teleport when combat workers are allowed to run.
+            if self._ctx.should_run_combat():
+                if is_critical:
+                    self._teleport.danger_teleport(reason="critical_hp")
+                else:
+                    self._teleport.danger_teleport(reason="hp_drop")
         self._prev_hp = hp
 
     def _poll_surround(self) -> None:
@@ -81,7 +89,8 @@ class DangerDetector:
 
     def pop_damage_detected(self) -> bool:
         """Return and clear the damage-detected flag for consumers (sit worker)."""
-        if self._damage_detected:
-            self._damage_detected = False
-            return True
-        return False
+        with self._damage_lock:
+            if self._damage_detected:
+                self._damage_detected = False
+                return True
+            return False
