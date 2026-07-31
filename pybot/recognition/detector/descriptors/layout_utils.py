@@ -36,13 +36,20 @@ def candidate_silhouette(
         region[~occupancy_mask.reshape(region.shape[:2])] = 0
 
     pixels = region.reshape(-1, 3).astype(np.float32)
-    min_dist_sq = np.full(pixels.shape[0], np.inf, dtype=np.float32)
-    for start in range(0, len(palette_bgr), 64):
-        chunk = palette_bgr[start : start + 64]
-        diff = pixels[:, None, :] - chunk[None, :, :]
-        dist_sq = np.sum(diff * diff, axis=2)
-        min_dist_sq = np.minimum(min_dist_sq, dist_sq.min(axis=1))
-    match = (min_dist_sq <= max_distance * max_distance).reshape(region.shape[:2])
+    palette = np.asarray(palette_bgr, dtype=np.float32)
+    if palette.size == 0:
+        return np.zeros((height, width), dtype=np.float32)
+    # |p-c|² via BLAS — same metric as sprite_palette_heatmap.
+    p_norm = np.sum(pixels * pixels, axis=1, keepdims=True)
+    c_norm = np.sum(palette * palette, axis=1, keepdims=True)
+    dist_sq = np.dot(pixels, palette.T)
+    dist_sq *= np.float32(-2.0)
+    dist_sq += p_norm
+    dist_sq += c_norm.T
+    np.maximum(dist_sq, np.float32(0.0), out=dist_sq)
+    min_dist_sq = dist_sq.min(axis=1)
+    max_dist_sq = np.float32(max_distance) * np.float32(max_distance)
+    match = (min_dist_sq <= max_dist_sq).reshape(region.shape[:2])
     match_uint8 = (match.astype(np.uint8)) * 255
     return frame_silhouette(match_uint8, width, height)
 

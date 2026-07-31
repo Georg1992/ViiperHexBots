@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -215,7 +216,7 @@ class MobDescriptor:
     def avg_height(self) -> int:
         return max(1, int(round(self.size.avg_height)))
 
-    @property
+    @cached_property
     def body_palette(self) -> list[ColorCluster]:
         """Convenience: dominant + supporting colors for heatmap/scoring."""
         return [self.dominant_color] + self.supporting_colors
