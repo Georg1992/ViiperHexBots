@@ -3,7 +3,10 @@
 Item path (``heal_skill`` off): press HP Restore Key when HP < ``HP_RESTORE_RATIO``.
 
 Heal-skill path (``heal_skill`` on): when HP < ``HP_RESTORE_RATIO``, pause
-combat and cast heal on the character sprite (move cursor → skill button + LMB)
+combat and repeatedly:
+  1. move cursor to the character sprite
+  2. press HP Restore Key
+  3. left-click
 until HP is full. Yields while a teleport settle is in progress so danger
 teleport can finish first.
 """
@@ -47,7 +50,7 @@ class HpRestoreWorker:
             ctx.logger.behavior(
                 f"[HP] worker started key={cfg.hp_button!r} scanCode={scan} "
                 f"healSkill=on threshold<{HP_RESTORE_RATIO:.0%} "
-                f"(heal until full)"
+                f"(cursor→key→LMB until full HP)"
             )
             self._run_heal_skill(scan)
             return
@@ -105,6 +108,7 @@ class HpRestoreWorker:
                 ctx.logger.behavior(f"[HP] heal tick error:\n{traceback.format_exc()}")
 
     def _heal_until_full(self, scan: int) -> None:
+        """Cast heal on self until HP is full. Triggered when HP < 50%."""
         ctx = self._ctx
         cfg = ctx.config
         if not ctx.begin_heal_ops():
@@ -136,13 +140,13 @@ class HpRestoreWorker:
                 if pos is None:
                     ctx.stop_event.wait(HP_RESTORE_POLL_S)
                     continue
-                cx, cy = pos
+                cx, cy = int(pos[0]), int(pos[1])
                 ctx.logger.behavior(
                     f"[HP] heal cast key={cfg.hp_button!r} "
                     f"at=({cx},{cy}) hp={hp}/{hp_max}"
                 )
-                self._input.move_mouse(cx, cy)
-                self._input.skill_click(scan)
+                # Character sprite → HP Restore Key → left click (atomic).
+                self._input.skill_click_at(scan, cx, cy)
                 ctx.stop_event.wait(delay_s)
         finally:
             ctx.end_heal_ops()
