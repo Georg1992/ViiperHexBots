@@ -5,7 +5,7 @@ Responsibilities
 * **Key selection** — mode/area: creamy TP first, wing key next.
   Danger/critical: wing key first when assigned, creamy next.
 * **Execution** — press teleport key, wait for settle, track wings/overlay.
-* **Danger teleport** — for DangerDetector (HP drop / surround / critical).
+* **Danger teleport** — for DangerDetector (critical HP only).
 * **Area clear** — scan-loop that teleports until discovery sees zero mobs.
 * **Quiet area** — clear + idle + re-scan (for sit/storage workers).
 * **Mode teleport** — discovery-gated teleport with suspend/release (for TeleportStrategy).
@@ -34,6 +34,7 @@ class TeleportController:
         self._ctx = ctx
         self._input = input_backend
         self._hunt_mode = hunt_mode
+        self._character_state = None
 
     # ── Key selection ────────────────────────────────────────────
 
@@ -122,6 +123,7 @@ class TeleportController:
         try:
             self.teleport_once(scan_code=tp)
             ctx.area_reset(reason="danger_teleport")
+            self._clear_character_threat()
         finally:
             ctx.discovery_suspend.clear()
             ctx.discovery_wake.set()
@@ -223,6 +225,7 @@ class TeleportController:
             ctx.policy.reset()
             ctx.validation.log_area_reset("pre_teleport")
             self._hunt_mode.on_area_reset()
+            self._clear_character_threat()
 
             tp_button = self.active_button()
             ctx.logger.behavior(
@@ -259,6 +262,12 @@ class TeleportController:
         ctx = self._ctx
         ctx.area_reset(reason)
         self._hunt_mode.on_area_reset()
+        self._clear_character_threat()
         ctx.overlay.set_track_stats(track_count=0, alive_count=0)
         ctx.overlay.set_track_positions([])
         ctx.logger.behavior(f"[{log_tag}] tracking reset reason={reason}")
+
+    def _clear_character_threat(self) -> None:
+        state = self._character_state
+        if state is not None:
+            state.clear_area_threat()

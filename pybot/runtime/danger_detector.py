@@ -3,10 +3,10 @@
 Runs in its own worker thread.  Polls ``PlayerVitals`` for HP and
 reads ``CharacterState`` for surround / nearby mobs.
 
-* HP drop → record damage + danger teleport (when allowed)
-* Surrounded → danger teleport (when allowed)
-* Heal-skill uses ``has_nearby_threat`` / ``has_recent_damage`` for a
-  deterministic safe-to-heal check
+* Any HP drop → record damage (sit/heal consumers)
+* Critical HP (≤50%) → urgent danger teleport (when allowed)
+* Surrounded / single nearby mob → never urgent-teleport; surround is
+  informational for heal threat only (needs ≥2 opposite-side tracks)
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ CRITICAL_HP_RATIO = 0.5
 
 
 class DangerDetector:
-    """Observes HP and CharacterState; triggers danger teleport automatically."""
+    """Observes HP and CharacterState; urgent TP only on critical HP."""
 
     def __init__(
         self,
@@ -45,15 +45,13 @@ class DangerDetector:
         self._last_damage_mono: float | None = None
 
     def run(self) -> None:
-        """Ongoing loop: poll HP + surround state, detect danger, sleep."""
+        """Ongoing loop: poll HP, detect critical danger, sleep."""
         while not self._ctx.is_stopped():
             self._poll_hp()
-            if self._ctx.should_allow_danger_teleport():
-                self._poll_surround()
             self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
 
     def _poll_hp(self) -> None:
-        """Read HP from shared vitals; record drops; teleport when allowed."""
+        """Read HP from shared vitals; record drops; TP only when critical."""
         hp, hp_max = self._vitals.hp_pair()
         if hp is None:
             self._prev_hp = None
@@ -68,16 +66,11 @@ class DangerDetector:
             with self._damage_lock:
                 self._damage_detected = True
                 self._last_damage_mono = time.monotonic()
-            if self._ctx.should_allow_danger_teleport():
-                reason = "critical_hp" if is_critical else "hp_drop"
-                self._teleport.danger_teleport(reason=reason)
+            # Urgent teleport only on critical danger — not every chip hit,
+            # and not from surround / a single nearby tracked mob.
+            if is_critical and self._ctx.should_allow_danger_teleport():
+                self._teleport.danger_teleport(reason="critical_hp")
         self._prev_hp = hp
-
-    def _poll_surround(self) -> None:
-        """Teleport when CharacterState reports surround."""
-        if self._character_state.is_surrounded:
-            reason = self._character_state.surrounded_reason
-            self._teleport.danger_teleport(reason=f"surrounded {reason}")
 
     def has_nearby_threat(self) -> bool:
         """True when any mob is near the character (tracks or visual)."""

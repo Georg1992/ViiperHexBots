@@ -66,6 +66,23 @@ class CharacterState:
                 tick_ms=tick_ms,
             )
 
+    def clear_area_threat(self) -> None:
+        """Clear surround/nearby flags after teleport area reset.
+
+        Prevents a stale ``is_surrounded`` from the previous screen from
+        looking like danger on the new screen before the next charstate tick.
+        """
+        with self._lock:
+            self._data = _CharacterStateData(
+                char_x=self._data.char_x,
+                char_y=self._data.char_y,
+                is_surrounded=False,
+                surrounded_reason="",
+                nearby_mob_count=0,
+                nearby_any_mobs_count=0,
+                tick_ms=self._data.tick_ms,
+            )
+
     # ── Readers ──────────────────────────────────────────────────
 
     @property
@@ -137,6 +154,9 @@ def is_surrounded_by_tracks(
     Returns ``(in_danger, reason)`` where *reason* describes which
     axes are blocked (``"left+right"``, ``"above+below"``, or ``""``).
     Only mobs within *radius_px* of the character are considered.
+
+    A single nearby tracked mob never counts as surrounded — at least two
+    distinct nearby positions on opposite sides of one axis are required.
     """
     if len(all_mobs) < 2:
         return False, ""
@@ -149,6 +169,7 @@ def is_surrounded_by_tracks(
         if (dx * dx + dy * dy) <= radius_px * radius_px:
             nearby.append((mx, my))
 
+    # One mob near the character is normal combat — not surrounded.
     if len(nearby) < 2:
         return False, ""
 

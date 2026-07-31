@@ -100,12 +100,15 @@ class HuntTracks:
     def try_claim_clear_for_teleport(self) -> bool:
         """Atomically claim an empty area for teleport.
 
-        Returns False if any alive track exists. On True, advances the area
-        epoch and clears tracks immediately so a concurrent discovery scan
-        cannot create tracks into the area being left.
+        Returns False if any alive track or pending discovery candidate
+        exists. On True, advances the area epoch and clears tracks so a
+        concurrent discovery scan cannot create tracks into the area being
+        left.
         """
         with self._lock:
             if any(is_alive(track) for track in self._tracks):
+                return False
+            if self._discovery_candidates:
                 return False
             self._area_reset_locked()
             return True
@@ -135,23 +138,35 @@ class HuntTracks:
             return any(is_alive(track) for track in self._tracks)
 
     def get_area_clear_candidate(self, now_tick: int | None = None) -> AreaClearStatus:
-        """Return whether the area has no alive tracks.
+        """Return whether the area has no alive tracks or pending candidates.
 
         Read-only: must not clear pending discovery candidates. Attack's
         no-target path polls this while discovery may have published
-        candidates that tracking has not ingested yet.
+        candidates that tracking has not ingested yet — those must block
+        area-clear teleport so mobs are not skipped mid-ingest.
         """
+        del now_tick
         with self._lock:
             alive = sum(1 for track in self._tracks if is_alive(track))
+            pending = len(self._discovery_candidates)
             if len(self._tracks) == 0:
                 # No tracks at all — reset ID counter to prevent unbounded
                 # growth across many create/remove cycles.
                 self._next_id = 1
-        return AreaClearStatus(
-            clear=alive == 0,
-            reason="" if alive == 0 else "alive_tracks",
-            alive_count=alive,
-        )
+            if alive > 0:
+                return AreaClearStatus(
+                    clear=False, reason="alive_tracks", alive_count=alive,
+                )
+            if pending > 0:
+                return AreaClearStatus(
+                    clear=False, reason="pending_candidates", alive_count=0,
+                )
+            return AreaClearStatus(clear=True, reason="", alive_count=0)
+
+    def has_pending_discovery_candidates(self) -> bool:
+        """True when discovery published mobs that tracking has not ingested."""
+        with self._lock:
+            return bool(self._discovery_candidates)
 
     def get_track_by_id(self, track_id: int) -> MobTrack | None:
         with self._lock:

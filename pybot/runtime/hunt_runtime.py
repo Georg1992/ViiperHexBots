@@ -334,8 +334,9 @@ def create_runtime_deps(
         character_state=char_state, danger=danger,
     )
 
-    # Wire TeleportController's hunt_mode now that it's created.
+    # Wire TeleportController's hunt_mode / charstate now that they exist.
     tport._hunt_mode = hunt_mode
+    tport._character_state = char_state
 
     return RuntimeDependencies(
         ctx=ctx,

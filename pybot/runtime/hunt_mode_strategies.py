@@ -54,12 +54,17 @@ class HuntModeStrategy(ABC):
 
         Uses scan detections (pre-dedup), not post-reconcile alive tracks, so
         corpse heat matched only to death ghosts still blocks teleport.
+        Pending discovery candidates (not yet ingested into tracks) also
+        block clear — otherwise mode TP can wipe them before COORD creates
+        tracks and the bot teleports past live mobs.
         """
         with self._lock:
-            return (
+            if not (
                 self._discovery_confirmed_clear
                 and self._discovery_area_epoch == self._ctx.tracks.area_epoch
-            )
+            ):
+                return False
+        return not self._ctx.tracks.has_pending_discovery_candidates()
 
     def on_area_reset(self) -> None:
         """Reset per-area state (discovery flag, log throttles).
@@ -209,14 +214,23 @@ class TeleportStrategy(HuntModeStrategy):
         # earlier (lost) while mobs are still on screen; without this gate we
         # would teleport on a stale "discovery ran once" flag.
         if not self.discovery_confirmed_clear:
-            reason = (
-                "no_discovery_yet"
-                if not self.discovery_since_reset
-                else "discovery_not_clear"
-            )
+            if not self.discovery_since_reset:
+                reason = "no_discovery_yet"
+            elif ctx.tracks.has_pending_discovery_candidates():
+                reason = "pending_candidates"
+            else:
+                reason = "discovery_not_clear"
             # Don't sit on the 1s discovery cadence — ask for a scan now.
             if not ctx.discovery_suspend.is_set():
                 ctx.discovery_wake.set()
+            self._log_no_target_blocked(reason)
+            self._log_no_target("wait", reason, context)
+            return False
+
+        if not bool(context["area_clear"]):
+            reason = "pending_candidates" if (
+                ctx.tracks.has_pending_discovery_candidates()
+            ) else "alive_tracks"
             self._log_no_target_blocked(reason)
             self._log_no_target("wait", reason, context)
             return False

@@ -140,6 +140,28 @@ class HuntModeTests(unittest.TestCase):
         self.assertTrue(self.mode.discovery_confirmed_clear)
         self.assertTrue(self.mode.on_no_attackable_targets())
 
+    def test_blocks_teleport_while_discovery_candidates_pending(self) -> None:
+        from pybot.recognition.rules import DiscoveryDetection
+
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=self.tracks.area_epoch,
+        )
+        self.tracks.process_discovery_scan(
+            [
+                DiscoveryDetection(
+                    x=100, y=100, confidence=0.9, candidate_scale=1.0,
+                    living=True, bbox=(0, 0, 10, 10),
+                )
+            ],
+            mob_name="anubis",
+            now_tick=1,
+        )
+        self.assertTrue(self.tracks.has_pending_discovery_candidates())
+        self.assertFalse(self.mode.discovery_confirmed_clear)
+        self.assertFalse(self.mode.on_no_attackable_targets())
+
     def test_discovery_confirmed_clear_after_scan(self) -> None:
         self.mode.note_discovery_scan_completed(
             living_count=0,
