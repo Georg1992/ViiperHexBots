@@ -36,8 +36,10 @@ HP_RESTORE_POLL_S = 1.0
 HP_RESTORE_COOLDOWN_S = 1.0
 # Heal-skill path: poll fast so heal↔hunt handoff after TP/clear is seamless.
 HP_HEAL_SKILL_POLL_S = WORKER_POLL_INTERVAL_S
-# No HP drop for this long before heal-skill may start/continue.
+# No HP drop for this long before heal-skill may start/continue (outside post-TP).
 HP_HEAL_DAMAGE_QUIET_S = 1.0
+# After teleport settle, mobs ignore the character briefly — heal freely then.
+HP_POST_TELEPORT_HEAL_S = 2.0
 
 # Minimum gap between distinct skill-timer key presses when several are due.
 SKILL_TIMER_STAGGER_MS = 500
@@ -90,6 +92,7 @@ __all__ = [
     "HP_RESTORE_COOLDOWN_S",
     "HP_HEAL_SKILL_POLL_S",
     "HP_HEAL_DAMAGE_QUIET_S",
+    "HP_POST_TELEPORT_HEAL_S",
     "SKILL_TIMER_STAGGER_MS",
     "STORAGE_WEIGHT_POLL_INTERVAL_S",
     "STORAGE_WEIGHT_MODIFIER_MIN",

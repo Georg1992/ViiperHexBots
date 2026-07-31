@@ -203,6 +203,12 @@ class HuntRuntimeContext:
     def end_heal_ops(self) -> None:
         self.gates.end_heal_ops()
 
+    def mark_post_teleport_heal(self, duration_s: float) -> None:
+        self.gates.mark_post_teleport_heal(duration_s)
+
+    def in_post_teleport_heal_window(self) -> bool:
+        return self.gates.in_post_teleport_heal_window()
+
     def wait_while_stopped_or_paused(self, timeout_s: float) -> bool:
         return self.gates.wait_while_stopped_or_paused(timeout_s)
 

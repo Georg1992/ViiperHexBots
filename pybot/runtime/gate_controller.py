@@ -38,6 +38,8 @@ class GateController:
         # Set while heal-until-full — combat/discovery/tracking/timers idle; HP worker runs.
         self.healing_event = threading.Event()
         self._sit_storage_lock = threading.Lock()
+        # Monotonic deadline: after teleport settle, heal freely until this time.
+        self._post_teleport_heal_until = 0.0
 
     # ── Gate queries ─────────────────────────────────────────────
 
@@ -204,6 +206,16 @@ class GateController:
             self.healing_event.clear()
             self._restore_resume_gate()
         self.discovery_wake.set()
+
+    # ── Post-teleport heal window ────────────────────────────────
+
+    def mark_post_teleport_heal(self, duration_s: float) -> None:
+        """Open the post-teleport heal window (mobs ignore the character briefly)."""
+        self._post_teleport_heal_until = time.monotonic() + duration_s
+
+    def in_post_teleport_heal_window(self) -> bool:
+        """True for a short time after teleport settle completes."""
+        return time.monotonic() < self._post_teleport_heal_until
 
     # ── Wait helpers ─────────────────────────────────────────────
 
