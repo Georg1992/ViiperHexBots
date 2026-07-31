@@ -131,7 +131,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker = self._worker(vitals)
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
         # Sit: standing then sitting; stand: sitting then standing.
-        worker._read_pose_sitting = MagicMock(  # type: ignore[method-assign]
+        worker._is_sitting = MagicMock(  # type: ignore[method-assign]
             side_effect=[False, True, True, False]
         )
 
@@ -160,7 +160,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.detector.discover_frame.side_effect = self._living_then_clear()
         worker = self._worker(vitals)
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-        worker._read_pose_sitting = MagicMock(  # type: ignore[method-assign]
+        worker._is_sitting = MagicMock(  # type: ignore[method-assign]
             side_effect=[False, True, True, False]
         )
 
@@ -179,7 +179,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker = self._worker(vitals)
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
         # Already sitting; after damage already standing — no toggle presses.
-        worker._read_pose_sitting = MagicMock(  # type: ignore[method-assign]
+        worker._is_sitting = MagicMock(  # type: ignore[method-assign]
             side_effect=[True, False]
         )
         # reset → False; loop check → True; then ensure_standing verifies without press.
@@ -192,7 +192,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
     def test_ensure_pose_skips_press_when_already_correct(self) -> None:
         worker = self._worker(_ScriptedVitals([]))
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-        worker._read_pose_sitting = MagicMock(  # type: ignore[method-assign]
+        worker._is_sitting = MagicMock(  # type: ignore[method-assign]
             side_effect=[True, False]
         )
         self.assertTrue(worker._ensure_sitting(82))
@@ -203,29 +203,11 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker = self._worker(_ScriptedVitals([]))
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
         # First look: standing; after press: sitting.
-        worker._read_pose_sitting = MagicMock(  # type: ignore[method-assign]
+        worker._is_sitting = MagicMock(  # type: ignore[method-assign]
             side_effect=[False, True]
         )
         self.assertTrue(worker._ensure_sitting(82))
         self.input.key_tap.assert_called_once_with(82)
-
-    def test_ensure_pose_does_not_press_when_unknown(self) -> None:
-        worker = self._worker(_ScriptedVitals([]))
-        waits: list[float] = []
-
-        def record_wait(timeout_s: float) -> bool:
-            waits.append(timeout_s)
-            return True
-
-        self.ctx.wait_unless_stopped = record_wait  # type: ignore[method-assign]
-        # Unknown → settle → unknown (counts attempt) → unknown → settle → sitting.
-        worker._read_pose_sitting = MagicMock(  # type: ignore[method-assign]
-            side_effect=[None, None, None, True]
-        )
-        self.assertTrue(worker._ensure_sitting(82))
-        self.input.key_tap.assert_not_called()
-        self.assertTrue(waits)
-        self.assertTrue(all(w == SIT_POSE_SETTLE_S for w in waits))
 
     def test_ensure_pose_waits_settle_after_press_before_verify(self) -> None:
         worker = self._worker(_ScriptedVitals([]))
@@ -236,7 +218,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             return True
 
         self.ctx.wait_unless_stopped = record_wait  # type: ignore[method-assign]
-        worker._read_pose_sitting = MagicMock(  # type: ignore[method-assign]
+        worker._is_sitting = MagicMock(  # type: ignore[method-assign]
             side_effect=[False, True]
         )
         self.assertTrue(worker._ensure_sitting(82))
