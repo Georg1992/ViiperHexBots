@@ -59,7 +59,7 @@ class AnubisBehavior(MobBehavior):
         # Average position of all mobs → vector away from their center.
         n = len(all_mobs)
         center_x = sum(mx for mx, _my in all_mobs) // n
-        center_y = sum(_my for _mx, my in all_mobs) // n
+        center_y = sum(my for _mx, my in all_mobs) // n
 
         dx = char_x - center_x
         dy = char_y - center_y
