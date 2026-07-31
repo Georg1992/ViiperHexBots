@@ -6,7 +6,7 @@ Deterministic follow around the last known position:
    disk around that same point and silhouette-score them.
 
 No velocity prediction — runners stay inside a wide enough search disk.
-Tracking is pure follow for position; discovery owns 2-miss removal.
+Tracking is pure follow for position; discovery owns miss-count removal.
 Opacity is measured on hits for in-place death fade.
 """
 

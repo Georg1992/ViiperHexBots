@@ -180,20 +180,20 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(kept_track.discovery_miss_count, 0)
         self.assertEqual(absent_track.discovery_miss_count, 1)
 
-    def test_two_discovery_misses_removes_track(self) -> None:
+    def test_three_discovery_misses_removes_track(self) -> None:
         track_id = self._create(874, 578)
-        # First miss → miss_count = 1, track survives
+        # Misses 1–2 → track survives
+        for i, offset in enumerate((50, 100), start=1):
+            summary = self.tracks.process_discovery_scan(
+                [], mob_name="horn", now_tick=self.now + offset,
+            )
+            self.assertEqual(summary.removed_count, 0)
+            track = self.tracks.get_track_by_id(track_id)
+            assert track is not None
+            self.assertEqual(track.discovery_miss_count, i)
+        # Third miss → removed
         summary = self.tracks.process_discovery_scan(
-            [], mob_name="horn", now_tick=self.now + 50,
-        )
-        self.assertEqual(summary.removed_count, 0)
-        self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
-        track = self.tracks.get_track_by_id(track_id)
-        assert track is not None
-        self.assertEqual(track.discovery_miss_count, 1)
-        # Second miss → miss_count = 2, track removed
-        summary = self.tracks.process_discovery_scan(
-            [], mob_name="horn", now_tick=self.now + 100,
+            [], mob_name="horn", now_tick=self.now + 150,
         )
         self.assertEqual(summary.removed_count, 1)
         self.assertEqual(summary.removed_ids, [track_id])
@@ -233,7 +233,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertIsNone(self.tracks.get_track_by_id(far_id))
 
     def test_discovery_miss_near_character_removes_when_tracking_lost(self) -> None:
-        """Dead/gone under the character: tracker lost → discovery 2-miss removes."""
+        """Dead/gone under the character: tracker lost → discovery 3-miss removes."""
         from pybot.runtime.capture.window_roi import HuntRoi
 
         roi = HuntRoi(x=0, y=0, w=2000, h=2000)
@@ -242,15 +242,14 @@ class HuntTracksRulesTests(unittest.TestCase):
         assert near is not None
         near.lost_count = 1
 
-        self.tracks.process_discovery_scan(
-            [], mob_name="horn", now_tick=self.now + 50, hunt_roi=roi,
-        )
-        near = self.tracks.get_track_by_id(near_id)
-        assert near is not None
-        self.assertEqual(near.discovery_miss_count, 1)
+        for offset in (50, 100):
+            self.tracks.process_discovery_scan(
+                [], mob_name="horn", now_tick=self.now + offset, hunt_roi=roi,
+            )
+            self.assertIsNotNone(self.tracks.get_track_by_id(near_id))
 
         self.tracks.process_discovery_scan(
-            [], mob_name="horn", now_tick=self.now + 100, hunt_roi=roi,
+            [], mob_name="horn", now_tick=self.now + 150, hunt_roi=roi,
         )
         self.assertIsNone(self.tracks.get_track_by_id(near_id))
 
@@ -259,7 +258,7 @@ class HuntTracksRulesTests(unittest.TestCase):
 
         Only discovery determines liveness. The tracker is a pure follower —
         if it finds background noise it should not interfere with discovery's
-        2-miss removal.
+        miss-count removal.
         """
         track_id = self._create(874, 578)
         self.tracks.process_discovery_scan([], mob_name="horn", now_tick=self.now + 50)
@@ -367,15 +366,13 @@ class HuntTracksRulesTests(unittest.TestCase):
         assert track is not None
         self.assertEqual(track.lost_count, 1)
 
-    def test_two_miss_drop_allows_recreate(self) -> None:
+    def test_three_miss_drop_allows_recreate(self) -> None:
         track_id = self._create(874, 578)
-        # Two consecutive misses → removed
-        self.tracks.process_discovery_scan(
-            [], mob_name="horn", now_tick=self.now + 50,
-        )
-        self.tracks.process_discovery_scan(
-            [], mob_name="horn", now_tick=self.now + 100,
-        )
+        # Three consecutive misses → removed
+        for offset in (50, 100, 150):
+            self.tracks.process_discovery_scan(
+                [], mob_name="horn", now_tick=self.now + offset,
+            )
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
         # Re-create after removal (tracking creates the new track)
         new_id = self.tracks.create_track(
@@ -550,11 +547,14 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.tracks.process_discovery_scan(
             [], mob_name="horn", now_tick=self.now + 100, hunt_roi=roi,
         )
+        self.tracks.process_discovery_scan(
+            [], mob_name="horn", now_tick=self.now + 150, hunt_roi=roi,
+        )
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
         summary = self.tracks.process_discovery_scan(
             [det(500, 500)],
             mob_name="horn",
-            now_tick=self.now + 150,
+            now_tick=self.now + 200,
             hunt_roi=roi,
         )
         self.assertEqual(summary.added_count, 0)

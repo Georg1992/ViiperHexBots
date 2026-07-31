@@ -274,13 +274,13 @@ class HuntTracks:
         After matching detections against known tracks, evaluates all
         removal factors on unmatched tracks:
         1. Outside hunt ROI → removed immediately (no death site).
-        2. Two missed discovery scans → removed. If the track was already
+        2. Three missed discovery scans → removed. If the track was already
            opacity-fading, records a death site; otherwise bookkeeping only.
            Misses inside the melee occlusion disk around the character (ROI
            center) do **not** count while local tracking still has the mob
            (``lost_count == 0``). Once tracking has also lost it, misses
            count normally so corpses under the character are removed.
-        3. First miss → ``discovery_miss_count`` += 1 (stays alive one more scan).
+        3. Earlier misses → ``discovery_miss_count`` += 1 (stays alive).
 
         Confirmed death (opacity / idle-dead) uses ``_remove_dead_tracks_locked``
         elsewhere and records death sites.
@@ -359,7 +359,7 @@ class HuntTracks:
             )
             remove_ids.update(out_of_range)
 
-            # Factor 2: Tracks missed by discovery 2+ scans in a row
+            # Factor 2: Tracks missed by discovery 3+ scans in a row
             # Only the remaining in-range tracks are evaluated — out-of-range
             # tracks were already handled by Factor 1.
             remaining_ids = unmatched_ids - out_of_range
@@ -432,7 +432,7 @@ class HuntTracks:
         *,
         hunt_roi: HuntRoi | None = None,
     ) -> tuple[set[int], list[int]]:
-        """Factor 2: Remove tracks missed by 2+ consecutive discovery scans.
+        """Factor 2: Remove tracks missed by 3+ consecutive discovery scans.
 
         Only receives in-range tracks (out-of-range handled by Factor 1).
 
@@ -440,7 +440,7 @@ class HuntTracks:
         holds described below).
 
         Returns ``(remove_ids, first_miss_ids)`` where:
-        - ``remove_ids``: tracks with miss_count >= 2.
+        - ``remove_ids``: tracks with miss_count >= 3.
         - ``first_miss_ids``: tracks on their first miss (still alive).
 
         Caller records a death site when the removed track was opacity-fading.

@@ -6,7 +6,7 @@ Ownership:
 - **Discovery** scans the hunt ROI for living mobs each cycle, publishes
   new-mob candidates, matches detections to existing tracks (resetting
   discovery_miss_count), and removes tracks that are out-of-range or missed
-  for 2 consecutive scans.  Discovery never creates tracks directly.
+  for 3 consecutive scans.  Discovery never creates tracks directly.
 - **Tracking** owns track creation and position.  On each tick it ingests
   discovery candidates, runs a local-follow search on the *current fresh
   frame* to get exact coordinates, creates tracks at those coordinates,
@@ -102,8 +102,8 @@ class MobTrack:
     vel_x: float = 0.0
     vel_y: float = 0.0
     # Consecutive discovery scans that failed to see this track (unmatched).
-    # At >= 2 the track is removed immediately — it failed discovery gates
-    # twice in a row, meaning it's dead or gone.
+    # At >= DISCOVERY_MISS_REMOVE_COUNT the track is removed — it failed
+    # discovery gates that many times in a row, meaning it's dead or gone.
     discovery_miss_count: int = 0
 
     @classmethod
@@ -226,7 +226,7 @@ def apply_discovery_match(
     """Record that discovery saw this track in its latest scan.
 
     Resets the discovery-miss streak so the track is not removed by the
-    2-miss absence rule.  Does NOT write track position — tracking owns that.
+    miss-count absence rule.  Does NOT write track position — tracking owns that.
 
     Sets ``discovery_stationary`` when the discovery blob center did not
     move (within ``movementStopThresholdPx``) vs the previous match.
@@ -295,7 +295,7 @@ def apply_track_observation(
         # NOTE: discovery_miss_count is NOT reset here — only discovery
         # (apply_discovery_match) determines liveness. The tracker is a pure
         # follower; if it reports found=True on background noise it should
-        # NOT block discovery's 2-miss removal.
+        # NOT block discovery's miss-count removal.
         if confidence > 0:
             track.confidence = confidence
         return
