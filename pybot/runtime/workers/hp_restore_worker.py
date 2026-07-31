@@ -133,7 +133,7 @@ class HpRestoreWorker:
                     continue
                 if hp >= hp_max:
                     ctx.logger.behavior(
-                        f"[HP] heal-until-full done hp={hp}/{hp_max}"
+                        f"[HP] heal-until-full done hp={hp}/{hp_max} — resuming hunt"
                     )
                     return
                 pos = ctx.character_screen_pos()

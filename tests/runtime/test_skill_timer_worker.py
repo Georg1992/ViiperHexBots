@@ -37,8 +37,10 @@ class SkillTimerWorkerTests(unittest.TestCase):
             config=SimpleNamespace(skill_timers=timers),
             logger=SimpleNamespace(behavior=MagicMock()),
             stop_event=stop,
+            resume_gate=threading.Event(),
             is_stopped=stop.is_set,
             should_run_workers=lambda: not stop.is_set(),
+            should_run_timers=lambda: not stop.is_set(),
             wait_while_stopped_or_paused=wait_paused,
         )
         worker = SkillTimerWorker(ctx, SimpleNamespace(teleport_key=teleport_key))
@@ -93,8 +95,10 @@ class SkillTimerWorkerTests(unittest.TestCase):
             config=SimpleNamespace(skill_timers=timers),
             logger=SimpleNamespace(behavior=MagicMock()),
             stop_event=stop_event,
+            resume_gate=threading.Event(),
             is_stopped=stop.is_set,
             should_run_workers=should_run,
+            should_run_timers=should_run,
             wait_while_stopped_or_paused=wait_paused,
         )
         worker = SkillTimerWorker(ctx, SimpleNamespace(teleport_key=teleport_key))

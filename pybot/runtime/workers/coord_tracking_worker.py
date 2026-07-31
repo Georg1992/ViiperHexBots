@@ -48,7 +48,8 @@ class CoordTrackingWorker:
                 elif not ctx.should_run_workers():
                     ctx.wait_while_stopped_or_paused(WORKER_POLL_INTERVAL_S)
                 else:
-                    ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
+                    # Storage/heal: resume_gate cleared until session ends.
+                    ctx.resume_gate.wait(WORKER_POLL_INTERVAL_S)
             except Exception:
                 ctx.logger.behavior(f"[COORD] tick error:\n{traceback.format_exc()}")
 
