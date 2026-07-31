@@ -24,7 +24,6 @@ from pybot.runtime.constants import (
 from pybot.recognition.ui.character_pose import (
     measure_center_pose,
     check_is_sitting,
-    check_is_standing,
 )
 from pybot.runtime.danger_detector import DangerDetector
 from pybot.runtime.input.input_backend import InputBackend
@@ -60,17 +59,12 @@ class SitOnLowSpWorker:
             return None
         return self._ctx.capture.capture_roi(roi)
 
-    def _verify_pose(self, expected_sit: bool) -> bool:
-        """Capture frame, measure pose, return True if matching expected."""
+    def _read_pose_sitting(self) -> bool | None:
+        """Return True if sitting, False if standing, None if pose is unknown."""
         frame = self._capture_frame()
         if frame is None or frame.size == 0:
-            return False
-        pose = measure_center_pose(frame)
-        if pose is None:
-            return False
-        if expected_sit:
-            return bool(check_is_sitting(pose))
-        return bool(check_is_standing(pose))
+            return None
+        return check_is_sitting(measure_center_pose(frame))
 
     def run(self) -> None:
         ctx = self._ctx
@@ -205,26 +199,62 @@ class SitOnLowSpWorker:
         return self._ensure_pose(sit_scan, want_sit=False)
 
     def _ensure_pose(self, sit_scan: int, *, want_sit: bool) -> bool:
-        """Toggle-safe sit/stand: verify first, press only on mismatch."""
+        """Toggle-safe sit/stand: verify first, press only on confirmed mismatch.
+
+        Sit/stand animation is ~300ms; after each press we wait
+        ``SIT_POSE_SETTLE_S`` before verifying so mid-animation frames are not
+        treated as failure (which would toggle again). Unknown pose never
+        presses the toggle.
+        """
         label = "sit" if want_sit else "stand"
-        for attempt in range(_SIT_VERIFY_RETRIES):
+        attempts = 0
+        while attempts < _SIT_VERIFY_RETRIES:
             if self._ctx.is_stopped():
                 return False
             if self._ctx.pause_event.is_set():
                 if not self._ctx.wait_while_stopped_or_paused(SIT_SP_POLL_INTERVAL_S):
                     return False
                 continue
-            if self._verify_pose(expected_sit=want_sit):
+
+            sitting = self._read_pose_sitting()
+            if sitting is None:
+                self._ctx.logger.behavior(
+                    f"[SIT] {label} pose unknown — waiting for settle"
+                )
+                if not self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S):
+                    if self._ctx.is_stopped():
+                        return False
+                    continue
+                sitting = self._read_pose_sitting()
+                if sitting is None:
+                    attempts += 1
+                    self._ctx.logger.behavior(
+                        f"[SIT] {label} pose still unknown "
+                        f"attempt {attempts}/{_SIT_VERIFY_RETRIES}"
+                    )
+                    continue
+
+            if sitting == want_sit:
                 return True
+
             self._input.key_tap(sit_scan)
+            attempts += 1
             if not self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S):
                 if self._ctx.is_stopped():
                     return False
                 continue
-            if self._verify_pose(expected_sit=want_sit):
+
+            sitting = self._read_pose_sitting()
+            if sitting == want_sit:
                 return True
-            self._ctx.logger.behavior(
-                f"[SIT] {label} verify failed "
-                f"attempt {attempt + 1}/{_SIT_VERIFY_RETRIES} — retrying"
-            )
+            if sitting is None:
+                self._ctx.logger.behavior(
+                    f"[SIT] {label} pose unknown after press "
+                    f"attempt {attempts}/{_SIT_VERIFY_RETRIES} — retrying"
+                )
+            else:
+                self._ctx.logger.behavior(
+                    f"[SIT] {label} verify failed "
+                    f"attempt {attempts}/{_SIT_VERIFY_RETRIES} — retrying"
+                )
         return False
