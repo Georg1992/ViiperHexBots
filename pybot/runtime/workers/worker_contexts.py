@@ -129,9 +129,9 @@ class HpRestoreWorkerContext(CanStop, CanLog, HasConfig, CanCapture, Protocol):
     """Hunt runtime subset consumed by HpRestoreWorker.
 
     Idle during sit/pause (``should_run_workers``); keeps running during
-    storage. Heal-until-full pauses combat via ``begin_heal_ops``. Yields
-    while ``discovery_suspend`` is set so danger teleport finishes first.
-    Pause aborts an in-progress heal-until-full session.
+    storage. Heal-until-full pauses combat via ``begin_heal_ops`` when HP
+    is not full and DangerDetector reports safe (no surround / recent damage).
+    Danger TP and pause abort an in-progress heal-until-full session.
     """
 
     @property

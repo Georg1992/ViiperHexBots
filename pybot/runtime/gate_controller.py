@@ -57,11 +57,12 @@ class GateController:
         )
 
     def should_run_combat(self) -> bool:
-        """True when attack may run (workers running and not in storage/heal)."""
+        """True when attack may run (workers running and not in storage/heal/TP)."""
         return (
             self.should_run_workers()
             and not self.storage_event.is_set()
             and not self.healing_event.is_set()
+            and not self.discovery_suspend.is_set()
         )
 
     def should_run_timers(self) -> bool:

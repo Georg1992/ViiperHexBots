@@ -263,8 +263,15 @@ def _build_conditional_workers(
     if any(t.scan_code and t.interval_ms > 0 for t in ctx.config.skill_timers):
         workers.append(("skill_timer", SkillTimerWorker(ctx, input_backend).run))
     if ctx.config.hp_scan_code > 0:
+        if danger is None:
+            raise RuntimeError("HP restore requires a shared DangerDetector")
         workers.append(
-            ("hp_restore", HpRestoreWorker(ctx, input_backend, player_vitals).run)
+            (
+                "hp_restore",
+                HpRestoreWorker(
+                    ctx, input_backend, player_vitals, danger=danger,
+                ).run,
+            )
         )
     if ctx.config.sit_on_low_sp:
         if danger is None:
