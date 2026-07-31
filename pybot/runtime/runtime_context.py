@@ -212,6 +212,9 @@ class HuntRuntimeContext:
     def wait_while_stopped_or_paused(self, timeout_s: float) -> bool:
         return self.gates.wait_while_stopped_or_paused(timeout_s)
 
+    def wait_while_user_paused(self, timeout_s: float) -> bool:
+        return self.gates.wait_while_user_paused(timeout_s)
+
     def wait_while_combat_blocked(self, timeout_s: float) -> bool:
         return self.gates.wait_while_combat_blocked(timeout_s)
 

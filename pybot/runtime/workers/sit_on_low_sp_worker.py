@@ -5,7 +5,8 @@ While sitting: if DangerDetector detects damage (HP drop), stand and
 return ``"interrupted"`` so ``_recover_sp`` finds a new spot and sits again.
 On SP recover: stand and resume.
 
-Hunt never resumes until standing is confirmed. SP comes from shared
+Hunt never resumes until standing is confirmed. The sit gate stays held
+across user pause so hunt cannot restart mid-sit. SP comes from shared
 ``PlayerVitals``. Danger detection is handled by ``DangerDetector``.
 """
 
@@ -106,6 +107,15 @@ class SitOnLowSpWorker:
         snap = self._sp_snapshot()
         return None if snap is None else snap[1]
 
+    def _wait_out_user_pause(self) -> bool:
+        """Wait while user-paused. True to continue sit; False if stopped."""
+        ctx = self._ctx
+        while ctx.pause_event.is_set():
+            if ctx.is_stopped():
+                return False
+            ctx.wait_while_user_paused(SIT_SP_POLL_INTERVAL_S)
+        return not ctx.is_stopped()
+
     def _recover_sp(self, low_ratio: float) -> None:
         ctx = self._ctx
         sit_scan = ctx.config.sit_on_low_sp_scan_code
@@ -118,7 +128,7 @@ class SitOnLowSpWorker:
             )
             while not ctx.is_stopped():
                 if ctx.pause_event.is_set():
-                    if not ctx.wait_while_stopped_or_paused(SIT_SP_POLL_INTERVAL_S):
+                    if not self._wait_out_user_pause():
                         return
                     continue
                 if not self._teleport.teleport_until_quiet(log_tag="SIT"):
@@ -134,6 +144,8 @@ class SitOnLowSpWorker:
                 )
         finally:
             # Never release the hunt gate while still sitting.
+            # Do not force-toggle again if standing is already confirmed —
+            # a second from_sit press would re-sit and race the hunt resume.
             self._stand_before_hunt_resume(sit_scan)
             ctx.end_sit_ops()
             ctx.discovery_wake.set()
@@ -142,6 +154,11 @@ class SitOnLowSpWorker:
         """Block until standing is confirmed (or stop), then hunt may resume."""
         ctx = self._ctx
         while not ctx.is_stopped():
+            sitting = self._pose_is_sitting()
+            if sitting is False:
+                # Already standing — do not press again (would sit).
+                return
+            # Sitting or ambiguous: force one toggle, then confirm.
             if self._ensure_standing(sit_scan, from_sit=True):
                 return
             ctx.logger.behavior(
@@ -172,7 +189,7 @@ class SitOnLowSpWorker:
 
         while not ctx.is_stopped():
             if ctx.pause_event.is_set():
-                if not ctx.wait_while_stopped_or_paused(SIT_SP_POLL_INTERVAL_S):
+                if not self._wait_out_user_pause():
                     return None
                 continue
 
@@ -240,7 +257,7 @@ class SitOnLowSpWorker:
             if self._ctx.is_stopped():
                 return False
             if self._ctx.pause_event.is_set():
-                if not self._ctx.wait_while_stopped_or_paused(SIT_SP_POLL_INTERVAL_S):
+                if not self._wait_out_user_pause():
                     return False
                 continue
             sitting = self._pose_is_sitting()

@@ -266,6 +266,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
         # Abort sit session immediately; finally must still stand before end_sit_ops.
         worker._sit_session = MagicMock(return_value=None)  # type: ignore[method-assign]
+        # Ambiguous pose forces a from_sit stand (not a no-op skip).
+        worker._pose_is_sitting = MagicMock(return_value=None)  # type: ignore[method-assign]
         stand_calls = {"n": 0}
         gate_during_stand: list[bool] = []
 
@@ -281,6 +283,45 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertTrue(all(gate_during_stand))
         self.assertFalse(self.ctx.sitting_event.is_set())
         self.assertTrue(self.ctx.should_run_combat())
+
+    def test_stand_before_hunt_resume_skips_toggle_when_already_standing(self) -> None:
+        """Second from_sit press would re-sit and race hunt resume."""
+        worker = self._worker(_ScriptedVitals([]))
+        worker._pose_is_sitting = MagicMock(return_value=False)  # type: ignore[method-assign]
+        worker._ensure_standing = MagicMock(return_value=True)  # type: ignore[method-assign]
+        worker._stand_before_hunt_resume(82)
+        worker._ensure_standing.assert_not_called()
+        self.input.key_tap.assert_not_called()
+
+    def test_pause_during_sit_keeps_gate_until_resume(self) -> None:
+        """User pause must not abort sit via should_run_workers (sit holds it false)."""
+        vitals = _ScriptedVitals([0.40] * 30)
+        worker = self._worker(vitals)
+        self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
+        worker._pose_is_sitting = MagicMock(return_value=True)  # type: ignore[method-assign]
+        self.danger.pop_damage_detected.return_value = False
+        self.ctx.begin_sit_ops()
+        self.ctx.pause_event.set()
+
+        outcomes: list[str | None] = []
+
+        def run_session() -> None:
+            outcomes.append(worker._sit_session())
+
+        thread = threading.Thread(target=run_session, daemon=True)
+        thread.start()
+        self.ctx.stop_event.wait(0.15)
+        self.assertTrue(self.ctx.sitting_event.is_set())
+        self.assertFalse(self.ctx.should_run_workers())
+        self.assertTrue(thread.is_alive())
+        # Resume user pause; SP stays below recover — session still sitting.
+        self.ctx.pause_event.clear()
+        self.ctx.stop_event.wait(0.1)
+        self.assertTrue(thread.is_alive())
+        self.assertTrue(self.ctx.sitting_event.is_set())
+        self.ctx.stop_event.set()
+        thread.join(timeout=1.0)
+        self.assertEqual(outcomes, [None])
 
 
 if __name__ == "__main__":

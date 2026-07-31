@@ -396,6 +396,12 @@ class HuntRuntime:
 
     def run(self, *, run_seconds: float = 0.0, start_paused: bool = False) -> int:
         ctx = self._ctx
+        alive = [t.name for t in self._worker_threads if t.is_alive()]
+        if alive:
+            raise RuntimeError(
+                "HuntRuntime.run refused: workers still alive "
+                f"({', '.join(alive)}) — only one worker set may run"
+            )
         if start_paused:
             ctx.mark_paused()
         else:
