@@ -91,10 +91,10 @@ class HpRestoreWorker:
                 ctx.logger.behavior(f"[HP] tick error:\n{traceback.format_exc()}")
 
     def _is_safe_to_heal(self) -> bool:
-        """True when not mid-TP, not surrounded, and no recent HP drop."""
+        """True when not mid-TP, no nearby mobs, and no recent/latched damage."""
         if self._ctx.discovery_suspend.is_set():
             return False
-        if self._danger.is_surrounded():
+        if self._danger.has_nearby_threat():
             return False
         if self._danger.has_recent_damage(HP_HEAL_DAMAGE_QUIET_S):
             return False

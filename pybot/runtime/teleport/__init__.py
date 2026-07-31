@@ -90,25 +90,35 @@ class TeleportController:
 
     # ── Danger teleport ──────────────────────────────────────────
 
-    def danger_teleport(self, reason: str = "") -> None:
+    def danger_teleport(self, reason: str = "") -> bool:
         """Teleport for danger (HP drop, surround, critical). Clears tracks after.
 
         Uses the wing (Teleport) key when assigned. Suspends discovery for the
         same reason as ``mode_teleport``: a concurrent scan during settle must
         not confirm clear or recreate tracks on a loading frame.
+
+        Returns ``True`` only when a teleport key was pressed and settle completed.
         """
         ctx = self._ctx
         prefix = f"{reason} " if reason else ""
         tp = self.danger_scan_code()
         key_name = self.danger_button() or "(unset)"
+        if tp <= 0:
+            ctx.logger.behavior(
+                f"[DANGER] {prefix}no teleport key configured "
+                f"({key_name!r}) — cannot escape"
+            )
+            return False
         ctx.logger.behavior(
             f"[DANGER] {prefix}key={key_name!r} scan={tp} — teleporting"
         )
         ctx.discovery_suspend.set()
         ctx.discovery_wake.clear()
         try:
-            self.teleport_once(scan_code=tp)
+            if not self.teleport_once(scan_code=tp):
+                return False
             ctx.area_reset(reason="danger_teleport")
+            return True
         finally:
             ctx.discovery_suspend.clear()
             ctx.discovery_wake.set()

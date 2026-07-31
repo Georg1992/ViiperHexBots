@@ -38,7 +38,7 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self.input = MagicMock()
         self.vitals = PlayerVitals()
         self.danger = MagicMock(spec=DangerDetector)
-        self.danger.is_surrounded.return_value = False
+        self.danger.has_nearby_threat.return_value = False
         self.danger.has_recent_damage.return_value = False
 
     def _worker(self) -> HpRestoreWorker:
@@ -170,10 +170,10 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self.input.skill_click_at.assert_not_called()
         self.assertFalse(self.ctx.healing_event.is_set())
 
-    def test_heal_skill_waits_while_surrounded(self) -> None:
+    def test_heal_skill_waits_while_nearby_threat(self) -> None:
         self.config.heal_skill = True
         self.vitals.publish_hp(40, 100)
-        self.danger.is_surrounded.return_value = True
+        self.danger.has_nearby_threat.return_value = True
         polls = {"n": 0}
 
         def stop_after_yield(*_a, **_k):
@@ -186,6 +186,7 @@ class HpRestoreWorkerTests(unittest.TestCase):
         worker = self._worker()
         worker.run()
         self.input.skill_click_at.assert_not_called()
+        self.assertFalse(self.ctx.healing_event.is_set())
 
     def test_heal_skill_waits_while_teleport_suspended(self) -> None:
         self.config.heal_skill = True
@@ -268,9 +269,12 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         )
         self.ctx.mark_running()
         self.teleport = MagicMock()
+        self.teleport.danger_teleport.return_value = True
         self.vitals = PlayerVitals()
         self.character_state = MagicMock()
         self.character_state.is_surrounded = False
+        self.character_state.nearby_mob_count = 0
+        self.character_state.nearby_any_mobs_count = 0
         self.danger = DangerDetector(
             self.ctx, self.teleport, self.character_state, vitals=self.vitals,
         )
@@ -293,6 +297,24 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.danger._poll_hp()
         self.assertFalse(self.danger.has_recent_damage(1.0))
         self.assertFalse(self.danger.pop_damage_detected())
+
+    def test_failed_danger_teleport_keeps_damage_latch(self) -> None:
+        """Missing/failed wing key must not open a heal window mid-fight."""
+        self.teleport.danger_teleport.return_value = False
+        self.vitals.publish_hp(80, 100)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(40, 100)
+        self.danger._poll_hp()
+        self.assertTrue(self.danger.has_recent_damage(0.0))
+        self.assertTrue(self.danger.pop_damage_detected())
+
+    def test_nearby_mobs_are_heal_threat(self) -> None:
+        self.assertFalse(self.danger.has_nearby_threat())
+        self.character_state.nearby_any_mobs_count = 2
+        self.assertTrue(self.danger.has_nearby_threat())
+        self.character_state.nearby_any_mobs_count = 0
+        self.character_state.nearby_mob_count = 1
+        self.assertTrue(self.danger.has_nearby_threat())
 
     def test_recent_damage_blocks_until_quiet(self) -> None:
         self.ctx.mark_paused()  # block danger TP so latch is kept
