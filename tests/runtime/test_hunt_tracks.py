@@ -199,8 +199,8 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(summary.removed_ids, [track_id])
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
-    def test_discovery_miss_near_character_does_not_count(self) -> None:
-        """Player occlusion at ROI center must not 2-miss-remove a living track."""
+    def test_discovery_miss_near_character_held_while_tracking(self) -> None:
+        """Occlusion at ROI center: hold miss only while tracker still has it."""
         from pybot.runtime.capture.window_roi import HuntRoi
         from pybot.runtime.constants import MELEE_IDLE_GUARD_RADIUS_PX
 
@@ -214,6 +214,10 @@ class HuntTracksRulesTests(unittest.TestCase):
             0.9,
             now_tick=self.now,
         ).id
+        # Simulate local follow still locking the near mob.
+        near = self.tracks.get_track_by_id(near_id)
+        assert near is not None
+        near.lost_count = 0
 
         for offset in (50, 100, 150):
             self.tracks.process_discovery_scan(
@@ -227,6 +231,28 @@ class HuntTracksRulesTests(unittest.TestCase):
         assert near is not None
         self.assertEqual(near.discovery_miss_count, 0)
         self.assertIsNone(self.tracks.get_track_by_id(far_id))
+
+    def test_discovery_miss_near_character_removes_when_tracking_lost(self) -> None:
+        """Dead/gone under the character: tracker lost → discovery 2-miss removes."""
+        from pybot.runtime.capture.window_roi import HuntRoi
+
+        roi = HuntRoi(x=0, y=0, w=2000, h=2000)
+        near_id = self._create(roi.center_x + 40, roi.center_y + 40)
+        near = self.tracks.get_track_by_id(near_id)
+        assert near is not None
+        near.lost_count = 1
+
+        self.tracks.process_discovery_scan(
+            [], mob_name="horn", now_tick=self.now + 50, hunt_roi=roi,
+        )
+        near = self.tracks.get_track_by_id(near_id)
+        assert near is not None
+        self.assertEqual(near.discovery_miss_count, 1)
+
+        self.tracks.process_discovery_scan(
+            [], mob_name="horn", now_tick=self.now + 100, hunt_roi=roi,
+        )
+        self.assertIsNone(self.tracks.get_track_by_id(near_id))
 
     def test_discovery_miss_preserved_when_tracking_hits(self) -> None:
         """Tracker hit does NOT reset discovery_miss_count.

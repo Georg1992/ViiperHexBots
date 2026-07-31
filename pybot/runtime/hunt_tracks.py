@@ -277,7 +277,9 @@ class HuntTracks:
         2. Two missed discovery scans → removed. If the track was already
            opacity-fading, records a death site; otherwise bookkeeping only.
            Misses inside the melee occlusion disk around the character (ROI
-           center) do **not** count — player+mob silhouette merge is not "gone".
+           center) do **not** count while local tracking still has the mob
+           (``lost_count == 0``). Once tracking has also lost it, misses
+           count normally so corpses under the character are removed.
         3. First miss → ``discovery_miss_count`` += 1 (stays alive one more scan).
 
         Confirmed death (opacity / idle-dead) uses ``_remove_dead_tracks_locked``
@@ -434,8 +436,8 @@ class HuntTracks:
 
         Only receives in-range tracks (out-of-range handled by Factor 1).
 
-        Side-effect: increments ``discovery_miss_count`` (except in the
-        character melee occlusion disk — see below).
+        Side-effect: increments ``discovery_miss_count`` (except occlusion
+        holds described below).
 
         Returns ``(remove_ids, first_miss_ids)`` where:
         - ``remove_ids``: tracks with miss_count >= 2.
@@ -444,8 +446,10 @@ class HuntTracks:
         Caller records a death site when the removed track was opacity-fading.
 
         Near the character (ROI center), discovery silhouette often fails
-        because the player sprite merges into the extract. That is occlusion,
-        not absence — do not count those misses toward removal.
+        because the player sprite merges into the extract. When local
+        tracking still has the mob (``lost_count == 0``), that is occlusion
+        — do not count the miss. Once tracking has also lost it, count
+        normally so corpses under the character are still removed.
         """
         remove_ids: set[int] = set()
         first_miss_ids: list[int] = []
@@ -459,6 +463,7 @@ class HuntTracks:
             if (
                 char_x is not None
                 and char_y is not None
+                and track.lost_count == 0
                 and _within_melee_guard(track.x, track.y, char_x, char_y)
             ):
                 continue
