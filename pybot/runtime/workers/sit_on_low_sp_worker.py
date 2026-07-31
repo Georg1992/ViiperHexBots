@@ -142,7 +142,7 @@ class SitOnLowSpWorker:
         """Block until standing is confirmed (or stop), then hunt may resume."""
         ctx = self._ctx
         while not ctx.is_stopped():
-            if self._ensure_standing(sit_scan):
+            if self._ensure_standing(sit_scan, from_sit=True):
                 return
             ctx.logger.behavior(
                 "[SIT] standing not confirmed — retrying before hunt resume"
@@ -180,7 +180,7 @@ class SitOnLowSpWorker:
                 ctx.logger.behavior(
                     "[SIT] interrupted by damage — standing before new spot"
                 )
-                if not self._ensure_standing(sit_scan):
+                if not self._ensure_standing(sit_scan, from_sit=True):
                     ctx.logger.behavior(
                         "[SIT] could not confirm standing after damage — "
                         "holding sit gate"
@@ -196,7 +196,7 @@ class SitOnLowSpWorker:
                     ctx.logger.behavior(
                         f"[SIT] SP recovered ratio={ratio:.1%} — standing"
                     )
-                    if not self._ensure_standing(sit_scan):
+                    if not self._ensure_standing(sit_scan, from_sit=True):
                         # Keep the sit gate held; retry stand without resuming hunt.
                         ctx.logger.behavior(
                             "[SIT] could not confirm standing — retrying"
@@ -214,15 +214,25 @@ class SitOnLowSpWorker:
         """Reach sitting pose; press the toggle only when not already sitting."""
         return self._ensure_pose(sit_scan, want_sit=True)
 
-    def _ensure_standing(self, sit_scan: int) -> bool:
-        """Reach standing pose; press the toggle only when not already standing."""
+    def _ensure_standing(self, sit_scan: int, *, from_sit: bool = False) -> bool:
+        """Reach standing pose.
+
+        When ``from_sit`` is True we always press the toggle once first. The
+        falcon can make a sitting sprite look standing, which would otherwise
+        skip the stand key and resume hunt while still seated.
+        """
+        if from_sit:
+            self._input.key_tap(sit_scan)
+            if not self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S):
+                return False
+            if self._pose_is_sitting() is False:
+                return True
         return self._ensure_pose(sit_scan, want_sit=False)
 
     def _ensure_pose(self, sit_scan: int, *, want_sit: bool) -> bool:
         """Toggle-safe sit/stand: succeed only on a confirmed pose read.
 
-        Unreadable pose is never treated as success (that previously made
-        standing look "done" and released hunt while still sitting). After each
+        Unreadable/ambiguous pose is never treated as success. After each
         press we wait ``SIT_POSE_SETTLE_S`` before verifying.
         """
         label = "sit" if want_sit else "stand"

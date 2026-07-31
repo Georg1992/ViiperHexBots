@@ -8,6 +8,7 @@ from pathlib import Path
 import cv2
 
 from pybot.recognition.ui.character_pose import (
+    CharacterPose,
     check_is_sitting,
     check_is_standing,
     measure_center_pose,
@@ -44,6 +45,15 @@ class CharacterPoseTests(unittest.TestCase):
         self.assertLess(max(sit_heights), min(stand_heights))
         # Falcon must not erase the sit/stand gap (body run, not full stack).
         self.assertGreaterEqual(min(stand_heights) - max(sit_heights), 10)
+
+    def test_falcon_merge_band_is_ambiguous_not_standing(self) -> None:
+        """Heights where falcon glues onto a sit must not read as standing."""
+        for height in (77, 80, 85):
+            pose = CharacterPose(body_height=height, fg_count=1000)
+            self.assertIsNone(check_is_sitting(pose), msg=height)
+            self.assertIsNone(check_is_standing(pose), msg=height)
+        self.assertTrue(check_is_sitting(CharacterPose(76, 1)))
+        self.assertTrue(check_is_standing(CharacterPose(86, 1)))
 
 
 if __name__ == "__main__":

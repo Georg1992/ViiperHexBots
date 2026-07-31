@@ -73,24 +73,34 @@ def _central_column_profile(mask: np.ndarray) -> np.ndarray:
     return mask[:, x0:x1].sum(axis=1)
 
 
-# ── Sit/Stand threshold ───────────────────────────────────────────
-# Body-height thresholds calibrated for 128x192 center crop.
-# Sitting: ~55-73px, Standing: ~88-108px (with or without falcon).
-_SIT_BODY_HEIGHT_THRESHOLD = 80
+# ── Sit/Stand thresholds ──────────────────────────────────────────
+# Calibrated for 128x192 center crop.
+# Sitting body alone: ~55-73px. Standing: ~88-108px.
+# When the falcon glues onto a sitting sprite the merged run can land
+# near the old single threshold (80) and look "standing". Keep a dead
+# band so those frames are unknown instead of false standing.
+_SIT_BODY_HEIGHT_MAX = 76
+_STAND_BODY_HEIGHT_MIN = 86
 
 
 def check_is_sitting(pose: CharacterPose | None) -> bool | None:
-    """Returns True if pose indicates sitting, False if standing, None if unknown."""
+    """True if sitting, False if standing, None if unknown/ambiguous."""
     if pose is None:
         return None
-    return pose.body_height < _SIT_BODY_HEIGHT_THRESHOLD
+    h = pose.body_height
+    if h <= _SIT_BODY_HEIGHT_MAX:
+        return True
+    if h >= _STAND_BODY_HEIGHT_MIN:
+        return False
+    return None
 
 
 def check_is_standing(pose: CharacterPose | None) -> bool | None:
-    """Returns True if pose indicates standing, False if sitting, None if unknown."""
-    if pose is None:
+    """True if standing, False if sitting, None if unknown/ambiguous."""
+    sitting = check_is_sitting(pose)
+    if sitting is None:
         return None
-    return pose.body_height >= _SIT_BODY_HEIGHT_THRESHOLD
+    return not sitting
 
 
 # ── Generic nearby-mob detection (250x250 center crop) ────────────

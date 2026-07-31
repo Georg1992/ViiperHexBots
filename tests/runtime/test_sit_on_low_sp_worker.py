@@ -178,7 +178,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         vitals = _ScriptedVitals([0.40] * 20)
         worker = self._worker(vitals)
         self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
-        # Already sitting; after damage already standing — no toggle presses.
+        # Sit confirm; from_sit stand always presses once then sees standing.
         worker._pose_is_sitting = MagicMock(  # type: ignore[method-assign]
             side_effect=[True, False]
         )
@@ -186,7 +186,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         outcome = worker._sit_session()
 
         self.assertEqual(outcome, "interrupted")
-        self.assertEqual(self.input.key_tap.call_count, 0)
+        self.input.key_tap.assert_called_once_with(82)
 
     def test_ensure_pose_skips_press_when_already_correct(self) -> None:
         worker = self._worker(_ScriptedVitals([]))
@@ -195,8 +195,17 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             side_effect=[True, False]
         )
         self.assertTrue(worker._ensure_sitting(82))
-        self.assertTrue(worker._ensure_standing(82))
+        self.assertTrue(worker._ensure_standing(82))  # not from_sit
         self.input.key_tap.assert_not_called()
+
+    def test_from_sit_stand_presses_even_if_pose_looks_standing(self) -> None:
+        """Falcon can make sitting look standing — still press when leaving sit."""
+        worker = self._worker(_ScriptedVitals([]))
+        self.ctx.wait_unless_stopped = lambda _timeout_s: True  # type: ignore[method-assign]
+        # Pose falsely reports standing (falcon); from_sit must still toggle.
+        worker._pose_is_sitting = MagicMock(return_value=False)  # type: ignore[method-assign]
+        self.assertTrue(worker._ensure_standing(82, from_sit=True))
+        self.input.key_tap.assert_called_once_with(82)
 
     def test_ensure_sitting_presses_when_not_sitting(self) -> None:
         worker = self._worker(_ScriptedVitals([]))
@@ -260,9 +269,10 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         stand_calls = {"n": 0}
         gate_during_stand: list[bool] = []
 
-        def stand(_scan: int) -> bool:
+        def stand(_scan: int, *, from_sit: bool = False) -> bool:
             stand_calls["n"] += 1
             gate_during_stand.append(self.ctx.sitting_event.is_set())
+            self.assertTrue(from_sit)
             return True
 
         worker._ensure_standing = stand  # type: ignore[method-assign]
