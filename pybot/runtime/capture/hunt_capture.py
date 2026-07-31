@@ -11,7 +11,18 @@ import numpy as np
 from pybot.runtime.capture.window_roi import HuntRoi, hunt_roi_from_client_rect
 from pybot.runtime.config import HuntRuntimeConfig
 
-user32 = ctypes.windll.user32
+user32 = None
+
+
+def _ensure_user32():
+    global user32
+    if user32 is not None:
+        return user32
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        raise RuntimeError("HuntWindowCapture requires Windows (ctypes.windll)")
+    user32 = windll.user32
+    return user32
 
 
 class HuntWindowCapture:
@@ -29,19 +40,21 @@ class HuntWindowCapture:
         return self._config.hwnd
 
     def is_valid(self) -> bool:
-        return bool(self._config.hwnd) and bool(user32.IsWindow(self._config.hwnd))
+        u32 = _ensure_user32()
+        return bool(self._config.hwnd) and bool(u32.IsWindow(self._config.hwnd))
 
     def get_client_rect_screen(self) -> tuple[int, int, int, int] | None:
+        u32 = _ensure_user32()
         hwnd = self._config.hwnd
-        if not hwnd or not user32.IsWindow(hwnd):
+        if not hwnd or not u32.IsWindow(hwnd):
             return None
 
         client_rect = wintypes.RECT()
-        if not user32.GetClientRect(hwnd, ctypes.byref(client_rect)):
+        if not u32.GetClientRect(hwnd, ctypes.byref(client_rect)):
             return None
 
         origin = wintypes.POINT(0, 0)
-        if not user32.ClientToScreen(hwnd, ctypes.byref(origin)):
+        if not u32.ClientToScreen(hwnd, ctypes.byref(origin)):
             return None
 
         client_w = client_rect.right - client_rect.left

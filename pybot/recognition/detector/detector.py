@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -201,15 +202,25 @@ class DetectionResult:
 
 
 
-def load_detector_config(path: Optional[Path] = None) -> dict:
-    config_path = path or (Path(__file__).resolve().parent / "detector_config.json")
+@lru_cache(maxsize=8)
+def _load_detector_config_cached(path_str: str) -> dict:
     import json
 
-    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config = json.loads(Path(path_str).read_text(encoding="utf-8"))
     missing = sorted(REQUIRED_CONFIG_KEYS - set(config))
     if missing:
         raise ValueError(f"missing detector config keys: {', '.join(missing)}")
     return config
+
+
+def load_detector_config(path: Optional[Path] = None) -> dict:
+    config_path = path or (Path(__file__).resolve().parent / "detector_config.json")
+    # Return a copy so callers cannot mutate the cached object.
+    return dict(_load_detector_config_cached(str(Path(config_path).resolve())))
+
+
+def clear_detector_config_cache() -> None:
+    _load_detector_config_cached.cache_clear()
 
 
 class MobDetector:
@@ -225,6 +236,9 @@ class MobDetector:
         self.use_sprite_grf = use_sprite_grf
         self.heatmap_detector = HeatmapDetector(self.config)
         self._descriptor_cache: dict[str, MobDescriptor] = {}
+        self._silhouette_ref_cache: dict[
+            tuple[int, ...], list[tuple[np.ndarray, np.ndarray]]
+        ] = {}
         self.discovery_heatmap_downscale = int(self.config["discoveryHeatmapDownscale"])
         self.discovery_heatmap_downscale_min_side = int(self.config["discoveryHeatmapDownscaleMinSide"])
         self.local_track_search_radius_px = int(self.config["localTrackSearchRadiusPx"])
@@ -235,6 +249,7 @@ class MobDetector:
     def apply_runtime_config(self, config: dict) -> None:
         self.config = dict(config)
         self.heatmap_detector = HeatmapDetector(self.config)
+        self._silhouette_ref_cache.clear()
         self.discovery_heatmap_downscale = int(self.config["discoveryHeatmapDownscale"])
         self.discovery_heatmap_downscale_min_side = int(self.config["discoveryHeatmapDownscaleMinSide"])
         self.local_track_search_radius_px = int(self.config["localTrackSearchRadiusPx"])
@@ -769,6 +784,10 @@ class MobDetector:
     ) -> list[tuple[np.ndarray, np.ndarray]]:
         if not masks:
             return []
+        cache_key = tuple(id(mask) for mask in masks)
+        cached = self._silhouette_ref_cache.get(cache_key)
+        if cached is not None:
+            return cached
         refs: list[tuple[np.ndarray, np.ndarray]] = []
         for mask in masks:
             if not mask.stable_mask or not any(mask.stable_mask):
@@ -777,6 +796,7 @@ class MobDetector:
                 np.array(mask.avg_mask, dtype=np.float32).reshape(mask.height, mask.width),
                 np.array(mask.stable_mask, dtype=bool).reshape(mask.height, mask.width),
             ))
+        self._silhouette_ref_cache[cache_key] = refs
         return refs
 
 

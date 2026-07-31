@@ -93,7 +93,7 @@ def _load_templates() -> dict[str, np.ndarray]:
     loaded: dict[str, np.ndarray] = {}
     for name, filename in TEMPLATE_FILES.items():
         path = UI_DIR / filename
-        tpl = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        tpl = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if tpl is None or tpl.size == 0:
             raise FileNotFoundError(f"missing inventory UI template: {path}")
         loaded[name] = tpl
@@ -111,16 +111,17 @@ def _load_inventory_panel() -> np.ndarray:
 
 @lru_cache(maxsize=1)
 def _load_inventory_header() -> tuple[np.ndarray, int, int]:
-    """Return (header_bgr, offset_x, offset_y) within the full panel."""
+    """Return (header_gray, offset_x, offset_y) within the full panel."""
     panel = _load_inventory_panel()
     h, w = panel.shape[:2]
     x0 = INV_HEADER_X
     y0 = INV_HEADER_Y
     x1 = min(w, x0 + INV_HEADER_W)
     y1 = min(h, y0 + INV_HEADER_H)
-    header = panel[y0:y1, x0:x1]
-    if header.size == 0:
+    header_bgr = panel[y0:y1, x0:x1]
+    if header_bgr.size == 0:
         raise RuntimeError("inventory panel header crop is empty")
+    header = cv2.cvtColor(header_bgr, cv2.COLOR_BGR2GRAY)
     return header, x0, y0
 
 
@@ -153,7 +154,12 @@ def find_template(
         or frame_bgr.shape[1] < tpl.shape[1]
     ):
         return None
-    result = cv2.matchTemplate(frame_bgr, tpl, cv2.TM_SQDIFF_NORMED)
+    gray = (
+        frame_bgr
+        if frame_bgr.ndim == 2
+        else cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    )
+    result = cv2.matchTemplate(gray, tpl, cv2.TM_SQDIFF_NORMED)
     min_val, _max_val, min_loc, _max_loc = cv2.minMaxLoc(result)
     if min_val > max_sqdiff:
         return None
@@ -216,7 +222,12 @@ def find_inventory_panel(
     hh, hw = int(header.shape[0]), int(header.shape[1])
     if frame_bgr.shape[0] < hh or frame_bgr.shape[1] < hw:
         return None
-    result = cv2.matchTemplate(frame_bgr, header, cv2.TM_SQDIFF_NORMED)
+    gray = (
+        frame_bgr
+        if frame_bgr.ndim == 2
+        else cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    )
+    result = cv2.matchTemplate(gray, header, cv2.TM_SQDIFF_NORMED)
     work = result.copy()
     suppress_y = max(8, hh // 2)
     suppress_x = max(8, hw // 2)
@@ -398,7 +409,12 @@ def find_storage_wing(
         or frame_bgr.shape[1] < tpl.shape[1]
     ):
         return None
-    result = cv2.matchTemplate(frame_bgr, tpl, cv2.TM_SQDIFF_NORMED)
+    gray = (
+        frame_bgr
+        if frame_bgr.ndim == 2
+        else cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    )
+    result = cv2.matchTemplate(gray, tpl, cv2.TM_SQDIFF_NORMED)
     hit = panel or find_inventory_panel(frame_bgr)
     th, tw = tpl.shape[:2]
     # Walk best matches until one sits outside the inventory window.

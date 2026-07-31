@@ -1,9 +1,9 @@
 """Center-screen character pose (sitting vs standing) from client frames.
 
 RO keeps the player at the client center. Sitting shrinks the body sprite;
-the Hunter falcon floats above and is ignored by taking the largest contiguous
-vertical occupancy run in a narrow center strip (bird sits in a separate run
-when there is a gap above the body).
+the Hunter falcon floats above and is ignored by taking the lowest contiguous
+vertical occupancy run (>= 20px) in a narrow center strip (bird sits in a
+separate run when there is a gap above the body).
 
 Danger detection is handled by :class:`DangerDetector`, not this module.
 """
@@ -17,10 +17,11 @@ import numpy as np
 
 # Crop around client center (px). Tall enough for standing + falcon, narrow
 # enough that nearby NPCs/mobs stay outside the body strip.
-# The falcon floats above and is ignored by the largest-run-height logic.
 _CENTER_HALF_W = 64
 _CENTER_HALF_H = 96
 _CENTER_DY = 8  # feet sit slightly below geometric center
+_MORPH_OPEN_KERNEL = np.ones((2, 2), np.uint8)
+_MORPH_CLOSE_KERNEL = np.ones((3, 3), np.uint8)
 
 
 @dataclass(frozen=True)
@@ -47,8 +48,8 @@ def measure_center_pose(frame_bgr: np.ndarray) -> CharacterPose | None:
         cx - _CENTER_HALF_W : cx + _CENTER_HALF_W,
     ]
     mask = _foreground_mask(crop)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _MORPH_OPEN_KERNEL)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _MORPH_CLOSE_KERNEL)
 
     profile = _central_column_profile(mask)
     thr = max(4, int(0.08 * (crop.shape[1] * 0.40)))
@@ -122,8 +123,8 @@ def detect_nearby_any_mobs(frame_bgr: np.ndarray) -> int:
         return 0
 
     mask = _foreground_mask(crop)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _MORPH_CLOSE_KERNEL)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _MORPH_CLOSE_KERNEL)
 
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 4)
     if num_labels <= 1:

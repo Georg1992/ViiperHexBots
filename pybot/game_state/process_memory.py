@@ -13,35 +13,46 @@ from dataclasses import dataclass
 
 from pybot.config.clients import MemoryAddresses
 
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
-
 PROCESS_VM_READ = 0x0010
 TH32CS_SNAPMODULE = 0x00000008
 TH32CS_SNAPMODULE32 = 0x00000010
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
-kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-kernel32.OpenProcess.restype = wintypes.HANDLE
-kernel32.ReadProcessMemory.argtypes = [
-    wintypes.HANDLE,
-    wintypes.LPCVOID,
-    wintypes.LPVOID,
-    ctypes.c_size_t,
-    ctypes.POINTER(ctypes.c_size_t),
-]
-kernel32.ReadProcessMemory.restype = wintypes.BOOL
-kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
-kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-kernel32.Module32FirstW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
-kernel32.Module32FirstW.restype = wintypes.BOOL
-kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-kernel32.CloseHandle.restype = wintypes.BOOL
-user32.GetWindowThreadProcessId.argtypes = [
-    wintypes.HWND,
-    ctypes.POINTER(wintypes.DWORD),
-]
-user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+user32 = None
+kernel32 = None
+
+
+def _ensure_win32() -> None:
+    """Bind user32/kernel32 on first use (importable off Windows)."""
+    global user32, kernel32
+    if user32 is not None and kernel32 is not None:
+        return
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        raise RuntimeError("process memory requires Windows (ctypes.windll)")
+    user32 = windll.user32
+    kernel32 = windll.kernel32
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.ReadProcessMemory.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPCVOID,
+        wintypes.LPVOID,
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    kernel32.ReadProcessMemory.restype = wintypes.BOOL
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Module32FirstW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    kernel32.Module32FirstW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    user32.GetWindowThreadProcessId.argtypes = [
+        wintypes.HWND,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 
 
 class MODULEENTRY32W(ctypes.Structure):
@@ -77,6 +88,7 @@ class MemorySnapshot:
 
 
 def pid_from_hwnd(hwnd: int) -> int:
+    _ensure_win32()
     if not hwnd:
         return 0
     process_id = wintypes.DWORD()
@@ -88,6 +100,7 @@ def pid_from_hwnd(hwnd: int) -> int:
 
 def module_base_address(pid: int) -> int:
     """Base address of the first module (the executable) for *pid*."""
+    _ensure_win32()
     if pid <= 0:
         raise OSError("invalid pid")
     flags = TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32
@@ -108,6 +121,7 @@ def module_base_address(pid: int) -> int:
 
 
 def _read_uint32(handle: int, absolute_addr: int) -> int:
+    _ensure_win32()
     value = wintypes.DWORD()
     n_read = ctypes.c_size_t(0)
     ok = kernel32.ReadProcessMemory(
@@ -123,6 +137,7 @@ def _read_uint32(handle: int, absolute_addr: int) -> int:
 
 
 def _read_cstring(handle: int, absolute_addr: int, *, max_bytes: int = CHAR_NAME_MAX_BYTES) -> str:
+    _ensure_win32()
     buf = (ctypes.c_char * max_bytes)()
     n_read = ctypes.c_size_t(0)
     ok = kernel32.ReadProcessMemory(
@@ -145,6 +160,7 @@ def read_snapshot(
     addresses: MemoryAddresses,
 ) -> MemorySnapshot:
     """Read name/SP/weight for *pid* using *module_base* + profile offsets."""
+    _ensure_win32()
     if pid <= 0:
         return MemorySnapshot(error="no process")
     if module_base <= 0:

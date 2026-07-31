@@ -20,12 +20,13 @@ from pybot.recognition.ui.inventory import (
 )
 from pybot.runtime.input.input_backend import InputBackend
 
-user32 = ctypes.windll.user32
-
 
 def cursor_pos() -> tuple[int, int]:
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        raise RuntimeError("cursor_pos requires Windows (ctypes.windll)")
     pt = wintypes.POINT()
-    if not user32.GetCursorPos(ctypes.byref(pt)):
+    if not windll.user32.GetCursorPos(ctypes.byref(pt)):
         raise RuntimeError("GetCursorPos failed")
     return int(pt.x), int(pt.y)
 

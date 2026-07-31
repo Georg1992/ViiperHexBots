@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import ctypes
-from ctypes import wintypes
-
-user32 = ctypes.windll.user32
 
 MAPVK_VK_TO_VSC = 0
 
@@ -34,6 +31,13 @@ _NAMED_KEY_VK: dict[str, int] = {
 }
 
 
+def _user32():
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        raise RuntimeError("scan codes require Windows (ctypes.windll)")
+    return windll.user32
+
+
 def keysym_to_key_name(keysym: str) -> str:
     """Map a Tk ``event.keysym`` to a config key name, or empty if unsupported."""
     if not keysym:
@@ -58,5 +62,5 @@ def key_name_to_scan_code(key_name: str) -> int:
         vk = _NAMED_KEY_VK.get(name.lower(), 0)
         if vk == 0:
             return 0
-    scan_code = user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)
+    scan_code = _user32().MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)
     return int(scan_code) if scan_code else 0

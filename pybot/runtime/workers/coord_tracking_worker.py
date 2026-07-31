@@ -41,6 +41,8 @@ class CoordTrackingWorker:
             try:
                 if ctx.should_run_tracking():
                     self._tick()
+                    # Yield the shared capture lock so discovery/OCR can run.
+                    ctx.stop_event.wait(0.005)
                     if ctx.stop_event.is_set():
                         break
                 elif not ctx.should_run_workers():

@@ -22,25 +22,38 @@ from pybot.runtime.workers.items_to_storage_worker import (
 from pybot.viiper.keyboard import MOD_LEFT_ALT, vk_to_modifier
 
 _WORKER = "pybot.runtime.workers.items_to_storage_worker"
+_INVENTORY = "pybot.recognition.ui.inventory"
+_AUTOMATION = "pybot.recognition.ui.inventory_automation"
 
-# ── common patches shared across storage / restock tests ─────────────
-
-# Patch targets present in nearly every storage/restock test.
-# Each key is a short name; _enter_worker_patches prepends _WORKER.
-# Wrapped in a factory so every call gets fresh MagicMock instances.
+# Where each inventory symbol is bound for patching.
+_PATCH_TARGETS = {
+    "require_inventory_panel": f"{_WORKER}.require_inventory_panel",
+    "find_template": [
+        f"{_WORKER}.find_template",
+        f"{_AUTOMATION}.find_template",
+    ],
+    "find_storage_wing": f"{_WORKER}.find_storage_wing",
+    "find_wings_in_use_grid": f"{_WORKER}.find_wings_in_use_grid",
+    "slot_looks_empty": f"{_WORKER}.slot_looks_empty",
+    "slot_contains_template": f"{_WORKER}._slot_contains_template",
+    "require_template": f"{_AUTOMATION}.require_template",
+    "is_inventory_open": f"{_AUTOMATION}.is_inventory_open",
+    "is_storage_open": f"{_AUTOMATION}.is_storage_open",
+}
 
 
 def _default_worker_patch_targets():
     """Return a fresh dict of {target: mock_or_DEFAULT} for storage tests."""
     return {
         "time.sleep": MagicMock(return_value=None),
-        "_cursor_pos": MagicMock(return_value=(150, 100)),
-        "ItemsToStorageWorker._close_menus": MagicMock(),
-        "ItemsToStorageWorker._ensure_storage_open": MagicMock(),
-        "ItemsToStorageWorker._ensure_inventory_open": MagicMock(
+        f"{_AUTOMATION}.cursor_pos": MagicMock(return_value=(150, 100)),
+        "key_name_to_scan_code": MagicMock(return_value=0x1C),
+        "InventoryAutomation.close_menus": MagicMock(),
+        "InventoryAutomation.ensure_storage_open": MagicMock(),
+        "InventoryAutomation.ensure_inventory_open": MagicMock(
             return_value=InventoryPanelHit(x=0, y=0, width=312, height=254)
         ),
-        "ItemsToStorageWorker._wait_for_inventory_panel": MagicMock(
+        "InventoryAutomation.wait_for_inventory_panel": MagicMock(
             return_value=(
                 InventoryPanelHit(x=0, y=0, width=312, height=254),
                 np.zeros((10, 10, 3), dtype=np.uint8),
@@ -55,7 +68,7 @@ def _enter_worker_patches(**extras):
 
     Returns ``(stack, mocks)`` where *stack* is an ``ExitStack`` that undoes
     patches on exit, and *mocks* is a dict keyed by the short attribute name
-    (e.g. ``"_close_menus"``, ``"require_inventory_panel"``).
+    (e.g. ``"InventoryAutomation.close_menus"``, ``"require_inventory_panel"``).
 
     Every call creates **fresh** ``MagicMock`` instances, so tests are
     isolated and call-count assertions don't leak.
@@ -73,10 +86,28 @@ def _enter_worker_patches(**extras):
     for name, value in merged.items():
         if value is DEFAULT:
             value = MagicMock()
-        full_target = name if name.startswith(_WORKER) else f"{_WORKER}.{name}"
-        mock = stack.enter_context(patch(full_target, value))
-        # Short key for lookup: drop _WORKER prefix if present.
-        short = name[len(_WORKER) + 1:] if name.startswith(_WORKER) else name
+        if name.startswith("pybot."):
+            targets = [name]
+            short = name.rsplit(".", 1)[-1]
+        elif name.startswith("InventoryAutomation."):
+            targets = [f"{_AUTOMATION}.{name}"]
+            short = name
+        elif name in _PATCH_TARGETS:
+            targets = (
+                _PATCH_TARGETS[name]
+                if isinstance(_PATCH_TARGETS[name], list)
+                else [_PATCH_TARGETS[name]]
+            )
+            short = name
+        elif name.startswith(_WORKER):
+            targets = [name]
+            short = name[len(_WORKER) + 1 :]
+        else:
+            targets = [f"{_WORKER}.{name}"]
+            short = name
+        mock = None
+        for full_target in targets:
+            mock = stack.enter_context(patch(full_target, value))
         mocks[short] = mock
     return stack, mocks
 
@@ -269,8 +300,8 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             worker.items_to_storage()
 
             kinds = [c[0] for c in self.input.calls]
-            m["ItemsToStorageWorker._ensure_storage_open"].assert_called()
-            m["ItemsToStorageWorker._close_menus"].assert_called()
+            m["InventoryAutomation.ensure_storage_open"].assert_called()
+            m["InventoryAutomation.close_menus"].assert_called()
             self.assertIn(("left_click",), self.input.calls)
             self.assertGreaterEqual(kinds.count("alt_rmb"), 3)
             self.assertEqual(kinds.count("left_click"), 3)
@@ -309,7 +340,7 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             m["require_template"].return_value = (10, 10)
             m["find_wings_in_use_grid"].side_effect = [[(0, 0, 46, 42)], []]
             m["find_storage_wing"].return_value = (200, 100)
-            m["ItemsToStorageWorker._ensure_inventory_open"].return_value = panel
+            m["InventoryAutomation.ensure_inventory_open"].return_value = panel
             self.config.fly_wings_amount = 150
 
             self.vitals.publish_weight(10, 100)
@@ -318,9 +349,9 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             self.assertEqual(self.ctx.wingcount, 0)
             worker.get_fly_wings()
 
-            m["ItemsToStorageWorker._ensure_inventory_open"].assert_called()
-            m["ItemsToStorageWorker._ensure_storage_open"].assert_called()
-            m["ItemsToStorageWorker._close_menus"].assert_called()
+            m["InventoryAutomation.ensure_inventory_open"].assert_called()
+            m["InventoryAutomation.ensure_storage_open"].assert_called()
+            m["InventoryAutomation.close_menus"].assert_called()
             self.assertIn(("move", 146, 92), self.input.calls)
             self.assertIn(("move", 98, 48), self.input.calls)
             self.assertEqual(self.input.calls.count(("alt_rmb",)), 1)
@@ -348,7 +379,7 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             worker = self._worker()
             worker.get_fly_wings()
 
-            m["ItemsToStorageWorker._close_menus"].assert_called()
+            m["InventoryAutomation.close_menus"].assert_called()
             self.assertTrue(self.ctx.fly_wings_exhausted)
             self.assertEqual(self.ctx.wingcount, 0)
             self.assertFalse(self.ctx.should_restock_fly_wings())
@@ -359,7 +390,7 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
     def test_storage_session_closes_menus_on_ui_miss(self) -> None:
         stack, m = _enter_worker_patches(
             find_template=DEFAULT,
-            **{f"{_WORKER}.ItemsToStorageWorker._open_storage": MagicMock(
+            **{"InventoryAutomation.ensure_storage_open": MagicMock(
                 side_effect=InventoryUiError("storage open failed")
             )},
         )
@@ -370,7 +401,7 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             worker = self._worker()
             with self.assertRaises(InventoryUiError):
                 worker.storage_session(dump=False, restock=True)
-            m["ItemsToStorageWorker._close_menus"].assert_called()
+            m["InventoryAutomation.close_menus"].assert_called()
 
     def test_menu_validation_open_closed(self) -> None:
         stack, m = _enter_worker_patches(
@@ -385,25 +416,25 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             m["is_inventory_open"].return_value = False
             m["is_storage_open"].return_value = False
             with self.assertRaisesRegex(Exception, "inventory open"):
-                worker._wait_menu_state(
+                worker._ui.wait_menu_state(
                     menu="inventory", want_open=True, label="inventory open",
                     timeout_s=0.0,
                 )
 
             m["is_inventory_open"].return_value = True
-            frame = worker._wait_menu_state(
+            frame = worker._ui.wait_menu_state(
                 menu="inventory", want_open=True, label="inventory open",
                 timeout_s=0.5,
             )
             self.assertIs(frame, self.frame)
 
             m["is_storage_open"].return_value = True
-            worker._wait_menu_state(
+            worker._ui.wait_menu_state(
                 menu="storage", want_open=True, label="storage open",
                 timeout_s=0.5,
             )
             m["is_storage_open"].return_value = False
-            worker._wait_menu_state(
+            worker._ui.wait_menu_state(
                 menu="storage", want_open=False, label="storage closed",
                 timeout_s=0.5,
             )
@@ -435,9 +466,9 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             worker.storage_session(dump=True, restock=True)
 
             self.assertEqual(
-                m["ItemsToStorageWorker._ensure_storage_open"].call_count, 1
+                m["InventoryAutomation.ensure_storage_open"].call_count, 1
             )
-            m["ItemsToStorageWorker._close_menus"].assert_called_once()
+            m["InventoryAutomation.close_menus"].assert_called_once()
             self.assertEqual(self.ctx.wingcount, 150)
             self.assertIn(("type", "150"), self.input.calls)
 

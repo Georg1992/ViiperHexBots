@@ -64,13 +64,14 @@ class WingTracker:
         self, *, open_storage_steps: bool, take_fly_wings: bool, fly_wings_amount: int
     ) -> bool:
         """True when GetFlyWings should run (enabled, amount set, count 0)."""
-        return (
-            bool(open_storage_steps)
-            and take_fly_wings
-            and fly_wings_amount > 0
-            and not self._fly_wings_exhausted
-            and self._wingcount <= 0
-        )
+        with self._lock:
+            return (
+                bool(open_storage_steps)
+                and take_fly_wings
+                and fly_wings_amount > 0
+                and not self._fly_wings_exhausted
+                and self._wingcount <= 0
+            )
 
     def mark_exhausted(self) -> None:
         """Stop fly-wing restock for this hunt."""
