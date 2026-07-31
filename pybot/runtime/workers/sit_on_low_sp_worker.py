@@ -5,8 +5,8 @@ While sitting: if DangerDetector detects damage (HP drop), stand and
 return ``"interrupted"`` so ``_recover_sp`` finds a new spot and sits again.
 On SP recover: stand and resume.
 
-SP comes from shared ``PlayerVitals``. Danger detection is handled by
-``DangerDetector`` — the sit worker only checks a flag.
+Hunt never resumes until standing is confirmed. SP comes from shared
+``PlayerVitals``. Danger detection is handled by ``DangerDetector``.
 """
 
 from __future__ import annotations
@@ -59,13 +59,12 @@ class SitOnLowSpWorker:
             return None
         return self._ctx.capture.capture_roi(roi)
 
-    def _is_sitting(self) -> bool:
-        """Return True if sitting, False if standing."""
+    def _pose_is_sitting(self) -> bool | None:
+        """True if sitting, False if standing, None if pose cannot be read."""
         frame = self._capture_frame()
         if frame is None or frame.size == 0:
-            return False
-        sitting = check_is_sitting(measure_center_pose(frame))
-        return bool(sitting)
+            return None
+        return check_is_sitting(measure_center_pose(frame))
 
     def run(self) -> None:
         ctx = self._ctx
@@ -109,6 +108,7 @@ class SitOnLowSpWorker:
 
     def _recover_sp(self, low_ratio: float) -> None:
         ctx = self._ctx
+        sit_scan = ctx.config.sit_on_low_sp_scan_code
         if not ctx.begin_sit_ops():
             return
         try:
@@ -133,8 +133,21 @@ class SitOnLowSpWorker:
                     "finding another sit spot"
                 )
         finally:
+            # Never release the hunt gate while still sitting.
+            self._stand_before_hunt_resume(sit_scan)
             ctx.end_sit_ops()
             ctx.discovery_wake.set()
+
+    def _stand_before_hunt_resume(self, sit_scan: int) -> None:
+        """Block until standing is confirmed (or stop), then hunt may resume."""
+        ctx = self._ctx
+        while not ctx.is_stopped():
+            if self._ensure_standing(sit_scan):
+                return
+            ctx.logger.behavior(
+                "[SIT] standing not confirmed — retrying before hunt resume"
+            )
+            ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
 
     def _sit_session(self) -> str | None:
         """Sit until SP recovers.
@@ -167,7 +180,13 @@ class SitOnLowSpWorker:
                 ctx.logger.behavior(
                     "[SIT] interrupted by damage — standing before new spot"
                 )
-                self._ensure_standing(sit_scan)
+                if not self._ensure_standing(sit_scan):
+                    ctx.logger.behavior(
+                        "[SIT] could not confirm standing after damage — "
+                        "holding sit gate"
+                    )
+                    ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
+                    continue
                 return "interrupted"
 
             sp_state = self._sp_snapshot()
@@ -200,11 +219,11 @@ class SitOnLowSpWorker:
         return self._ensure_pose(sit_scan, want_sit=False)
 
     def _ensure_pose(self, sit_scan: int, *, want_sit: bool) -> bool:
-        """Toggle-safe sit/stand: verify first, press only on mismatch.
+        """Toggle-safe sit/stand: succeed only on a confirmed pose read.
 
-        Sit/stand animation is ~300ms; after each press we wait
-        ``SIT_POSE_SETTLE_S`` before verifying so mid-animation frames are not
-        treated as failure (which would toggle again).
+        Unreadable pose is never treated as success (that previously made
+        standing look "done" and released hunt while still sitting). After each
+        press we wait ``SIT_POSE_SETTLE_S`` before verifying.
         """
         label = "sit" if want_sit else "stand"
         for attempt in range(_SIT_VERIFY_RETRIES):
@@ -214,14 +233,16 @@ class SitOnLowSpWorker:
                 if not self._ctx.wait_while_stopped_or_paused(SIT_SP_POLL_INTERVAL_S):
                     return False
                 continue
-            if self._is_sitting() == want_sit:
+            sitting = self._pose_is_sitting()
+            if sitting is not None and sitting == want_sit:
                 return True
             self._input.key_tap(sit_scan)
             if not self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S):
                 if self._ctx.is_stopped():
                     return False
                 continue
-            if self._is_sitting() == want_sit:
+            sitting = self._pose_is_sitting()
+            if sitting is not None and sitting == want_sit:
                 return True
             self._ctx.logger.behavior(
                 f"[SIT] {label} verify failed "
