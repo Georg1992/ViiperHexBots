@@ -212,6 +212,9 @@ class HuntRuntimeContext:
     def wait_unless_stopped(self, timeout_s: float) -> bool:
         return self.gates.wait_unless_stopped(timeout_s)
 
+    def wait_unless_paused_or_suspended(self, timeout_s: float) -> bool:
+        return self.gates.wait_unless_paused_or_suspended(timeout_s)
+
     # ── Wing convenience methods (delegate to wings) ─────────────
 
     def note_teleport_for_wings(self) -> None:

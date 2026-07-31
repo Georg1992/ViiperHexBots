@@ -84,13 +84,14 @@ class HpRestoreWorkerTests(unittest.TestCase):
 
         self.input.skill_click_at.side_effect = cast_heal
 
-        def stop_when_full(*_a, **_k):
+        def gap_ok(*_a, **_k):
             hp, hp_max = self.vitals.hp_pair()
             if hp is not None and hp_max is not None and hp >= hp_max:
                 self.ctx.stop_event.set()
-            return False
+            return True
 
-        self.ctx.stop_event.wait = stop_when_full  # type: ignore[method-assign]
+        self.ctx.wait_unless_paused_or_suspended = gap_ok  # type: ignore[method-assign]
+        self.ctx.wait_unless_stopped = gap_ok  # type: ignore[method-assign]
         worker = HpRestoreWorker(self.ctx, self.input, self.vitals)
         worker.run()
 
@@ -125,10 +126,56 @@ class HpRestoreWorkerTests(unittest.TestCase):
                 self.ctx.stop_event.set()
             return False
 
-        self.ctx.stop_event.wait = stop_after_yield  # type: ignore[method-assign]
+        self.ctx.wait_unless_stopped = stop_after_yield  # type: ignore[method-assign]
         worker = HpRestoreWorker(self.ctx, self.input, self.vitals)
         worker.run()
         self.input.skill_click_at.assert_not_called()
+        self.assertFalse(self.ctx.healing_event.is_set())
+
+    def test_heal_skill_aborts_on_pause(self) -> None:
+        self.config.heal_skill = True
+        self.vitals.publish_hp(40, 100)
+
+        def cast_then_pause(*_a, **_k):
+            self.ctx.mark_paused()
+            return True
+
+        self.input.skill_click_at.side_effect = cast_then_pause
+        self.ctx.wait_unless_paused_or_suspended = (  # type: ignore[method-assign]
+            lambda *_a, **_k: False
+        )
+        worker = HpRestoreWorker(self.ctx, self.input, self.vitals)
+        worker._heal_until_full(59)
+        self.assertEqual(self.input.skill_click_at.call_count, 1)
+        self.assertFalse(self.ctx.healing_event.is_set())
+
+    def test_heal_cast_gap_yields_to_danger_suspend(self) -> None:
+        self.config.heal_skill = True
+        self.vitals.publish_hp(40, 100)
+        casts = {"n": 0}
+
+        def cast_once(scan: int, x: int, y: int) -> bool:
+            casts["n"] += 1
+            self.ctx.discovery_suspend.set()
+            return True
+
+        self.input.skill_click_at.side_effect = cast_once
+
+        def gap_interrupted(*_a, **_k):
+            # Suspend interrupts cast gap; next loop yields then we stop.
+            return False
+
+        def stop_after_suspend_yield(*_a, **_k):
+            self.ctx.stop_event.set()
+            return False
+
+        self.ctx.wait_unless_paused_or_suspended = (  # type: ignore[method-assign]
+            gap_interrupted
+        )
+        self.ctx.wait_unless_stopped = stop_after_suspend_yield  # type: ignore[method-assign]
+        worker = HpRestoreWorker(self.ctx, self.input, self.vitals)
+        worker._heal_until_full(59)
+        self.assertEqual(casts["n"], 1)
         self.assertFalse(self.ctx.healing_event.is_set())
 
 
