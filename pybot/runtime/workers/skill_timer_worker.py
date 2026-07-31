@@ -1,8 +1,8 @@
 """Periodic skill timer key presses — one worker for all configured timers.
 
 Timers press the key only (no mouse click), same as teleport_key.
-Paused while sitting/user-paused; on hunt resume they re-arm and fire again
-with ``SKILL_TIMER_STAGGER_MS`` between presses when several are due.
+Paused while sitting/user-paused/healing; on hunt resume they re-arm and fire
+again with ``SKILL_TIMER_STAGGER_MS`` between presses when several are due.
 Storage sessions do not pause timers (combat only), so keys are not re-armed.
 """
 
@@ -49,11 +49,15 @@ class SkillTimerWorker:
 
         while not ctx.is_stopped():
             try:
-                if not ctx.should_run_workers():
+                if not ctx.should_run_timers():
                     if self._armed:
                         self._armed = False
-                        ctx.logger.behavior("[TIMER] paused (sit/pause)")
-                    ctx.wait_while_stopped_or_paused(0.25)
+                        ctx.logger.behavior("[TIMER] paused (sit/pause/heal)")
+                    if not ctx.should_run_workers():
+                        ctx.wait_while_stopped_or_paused(0.25)
+                    else:
+                        # Heal: workers still run but resume_gate is cleared.
+                        ctx.resume_gate.wait(0.25)
                     continue
 
                 now = monotonic_ms()
@@ -70,11 +74,11 @@ class SkillTimerWorker:
                     >= timer.interval_ms
                 ]
                 for timer in due:
-                    if not ctx.should_run_workers():
+                    if not ctx.should_run_timers():
                         break
                     if not self._wait_stagger_gap():
                         break
-                    if not ctx.should_run_workers():
+                    if not ctx.should_run_timers():
                         break
                     self._input.teleport_key(timer.scan_code)
                     pressed_at = monotonic_ms()

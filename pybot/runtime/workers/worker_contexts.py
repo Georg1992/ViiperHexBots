@@ -10,7 +10,7 @@ depends on the full god object.
 Pause matrix (see ``runtime_context`` module docstring):
   sit     → discovery, tracking, attack, timers idle
   storage → discovery, tracking, attack idle; timers keep running
-  heal    → discovery, tracking, attack idle; timers keep running
+  heal    → discovery, tracking, attack, timers idle; HP restore keeps running
   sit ↔ storage ↔ heal mutually exclusive
 """
 
@@ -72,6 +72,9 @@ class CoordTrackingWorkerContext(
 ):
     """Hunt runtime subset consumed by CoordTrackingWorker."""
 
+    @property
+    def resume_gate(self) -> object: ...
+
     def should_run_tracking(self) -> bool: ...
 
 
@@ -112,10 +115,14 @@ class AttackLoopContext(
 class SkillTimerWorkerContext(CanStop, CanLog, HasConfig, Protocol):
     """Hunt runtime subset consumed by SkillTimerWorker.
 
-    Uses ``should_run_workers`` (via CanStop): idle during sit/pause, keep
-    firing during storage so timer schedules are not re-armed mid-session.
+    Uses ``should_run_timers``: idle during sit/pause/heal; keep firing
+    during storage so timer schedules are not re-armed mid-session.
     """
-    pass
+
+    @property
+    def resume_gate(self) -> object: ...
+
+    def should_run_timers(self) -> bool: ...
 
 
 class HpRestoreWorkerContext(CanStop, CanLog, HasConfig, CanCapture, Protocol):

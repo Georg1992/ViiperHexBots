@@ -16,7 +16,7 @@ Signal  Discovery Tracking    Attack Timers
 pause   no        no          no     no
 sit     no        no          no     no
 storage no        no          no     yes
-heal    no        no          no     yes
+heal    no        no          no     no
 ======= ========= =========== ====== ======
 
 Sit, storage, and heal are mutually exclusive.
@@ -154,6 +154,9 @@ class HuntRuntimeContext:
 
     def should_run_combat(self) -> bool:
         return self.gates.should_run_combat()
+
+    def should_run_timers(self) -> bool:
+        return self.gates.should_run_timers()
 
     def should_allow_danger_teleport(self) -> bool:
         return self.gates.should_allow_danger_teleport()

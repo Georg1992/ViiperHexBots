@@ -240,19 +240,34 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.assertTrue(self.ctx.should_run_discovery())
         self.assertTrue(self.ctx.should_run_tracking())
 
-    def test_heal_ops_pause_combat_not_timers(self) -> None:
+    def test_heal_ops_pause_combat_and_timers_then_resume(self) -> None:
+        self.ctx.mark_running()
         self.assertTrue(self.ctx.begin_heal_ops())
         self.assertTrue(self.ctx.should_run_workers())
         self.assertFalse(self.ctx.should_run_combat())
+        self.assertFalse(self.ctx.should_run_timers())
         self.assertFalse(self.ctx.should_run_discovery())
         self.assertFalse(self.ctx.should_run_tracking())
+        self.assertFalse(self.ctx.resume_gate.is_set())
         self.assertFalse(self.ctx.try_begin_heal_ops())
         self.assertFalse(self.ctx.try_begin_sit_ops())
         self.assertFalse(self.ctx.try_begin_storage_ops())
         self.ctx.end_heal_ops()
         self.assertTrue(self.ctx.should_run_combat())
+        self.assertTrue(self.ctx.should_run_timers())
         self.assertTrue(self.ctx.should_run_discovery())
         self.assertTrue(self.ctx.should_run_tracking())
+        self.assertTrue(self.ctx.resume_gate.is_set())
+        self.assertTrue(self.ctx.wait_while_combat_blocked(0.2))
+
+    def test_storage_ops_clear_resume_gate_until_end(self) -> None:
+        self.ctx.mark_running()
+        self.assertTrue(self.ctx.begin_storage_ops())
+        self.assertFalse(self.ctx.resume_gate.is_set())
+        self.assertTrue(self.ctx.should_run_timers())
+        self.ctx.end_storage_ops()
+        self.assertTrue(self.ctx.resume_gate.is_set())
+        self.assertTrue(self.ctx.should_run_combat())
 
     def test_note_teleport_decrements_wingcount(self) -> None:
         self.ctx.wingcount = 3

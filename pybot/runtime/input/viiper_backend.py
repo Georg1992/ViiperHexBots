@@ -207,11 +207,15 @@ class ViiperBackend(ShadowInputBackend):
     def _skill_click_locked(self, scan_code: int) -> None:
         """Skill key down → left click → key up. Caller holds ``_operation_lock``."""
         self._key_press(scan_code, down=True)
-        time.sleep(0.05)
-        self._mouse_button(MOUSE_BUTTON_LEFT, down=True)
-        time.sleep(0.05)
-        self._mouse_button(MOUSE_BUTTON_LEFT, down=False)
-        self._key_press(scan_code, down=False)
+        try:
+            time.sleep(0.05)
+            self._mouse_button(MOUSE_BUTTON_LEFT, down=True)
+            try:
+                time.sleep(0.05)
+            finally:
+                self._mouse_button(MOUSE_BUTTON_LEFT, down=False)
+        finally:
+            self._key_press(scan_code, down=False)
 
     def teleport_key(self, scan_code: int) -> bool:
         """Press and release a teleport key.
