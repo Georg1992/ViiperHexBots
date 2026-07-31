@@ -251,6 +251,48 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self.input.skill_click_at.assert_not_called()
         self.assertFalse(self.ctx.healing_event.is_set())
 
+    def test_post_teleport_window_allows_heal_despite_nearby_or_damage(self) -> None:
+        self.config.heal_skill = True
+        self.vitals.publish_hp(40, 100)
+        self.danger.has_nearby_threat.return_value = True
+        self.danger.has_recent_damage.return_value = True
+        self.ctx.mark_post_teleport_heal(2.0)
+        casts = {"n": 0}
+
+        def cast_heal(*_a, **_k):
+            casts["n"] += 1
+            self.vitals.publish_hp(100, 100)
+            return True
+
+        self.input.skill_click_at.side_effect = cast_heal
+        self.ctx.wait_unless_paused_or_suspended = (  # type: ignore[method-assign]
+            lambda *_a, **_k: True
+        )
+        worker = self._worker()
+        worker._heal_until_full(59)
+        self.assertGreaterEqual(casts["n"], 1)
+        self.assertFalse(self.ctx.healing_event.is_set())
+
+    def test_post_teleport_window_still_yields_to_urgent_tp(self) -> None:
+        self.config.heal_skill = True
+        self.vitals.publish_hp(40, 100)
+        self.ctx.mark_post_teleport_heal(2.0)
+        self.ctx.discovery_suspend.set()
+        worker = self._worker()
+        self.assertFalse(worker._is_safe_to_heal())
+        worker._heal_until_full(59)
+        self.input.skill_click_at.assert_not_called()
+        self.assertFalse(self.ctx.healing_event.is_set())
+
+    def test_heal_done_releases_hunt_gate(self) -> None:
+        self.config.heal_skill = True
+        self.vitals.publish_hp(100, 100)
+        self.ctx.mark_post_teleport_heal(2.0)
+        worker = self._worker()
+        worker._heal_until_full(59)
+        self.assertFalse(self.ctx.healing_event.is_set())
+        self.assertTrue(self.ctx.should_run_combat())
+
 
 class DangerTeleportPriorityTests(unittest.TestCase):
     def setUp(self) -> None:

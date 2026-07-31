@@ -18,7 +18,11 @@ and the TeleportStrategy.
 
 from __future__ import annotations
 
-from pybot.runtime.constants import SIT_IDLE_BEFORE_SIT_S, SIT_SP_POLL_INTERVAL_S
+from pybot.runtime.constants import (
+    HP_POST_TELEPORT_HEAL_S,
+    SIT_IDLE_BEFORE_SIT_S,
+    SIT_SP_POLL_INTERVAL_S,
+)
 from pybot.runtime.detection.discovery_filter import filter_scan_candidates
 from pybot.runtime.input.input_backend import InputBackend
 
@@ -84,9 +88,13 @@ class TeleportController:
         if tp == cfg.teleport_scan_code and cfg.teleport_scan_code > 0:
             self._ctx.note_teleport_for_wings()
         self._ctx.overlay.increment_teleports()
-        return self._ctx.wait_unless_stopped(
+        settled = self._ctx.wait_unless_stopped(
             cfg.teleport_duration_ms / 1000.0
         )
+        if settled:
+            # Aggro-free window after landing — heal may run immediately.
+            self._ctx.mark_post_teleport_heal(HP_POST_TELEPORT_HEAL_S)
+        return settled
 
     # ── Danger teleport ──────────────────────────────────────────
 
