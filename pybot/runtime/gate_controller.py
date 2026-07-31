@@ -188,8 +188,10 @@ class GateController:
             return True
 
     def begin_heal_ops(self) -> bool:
-        """Wait until heal ops can start. False if stopped first."""
+        """Wait until heal ops can start. False if stopped or paused first."""
         while not self.stop_event.is_set():
+            if self.pause_event.is_set():
+                return False
             if self.try_begin_heal_ops():
                 return True
             self.stop_event.wait(WORKER_POLL_INTERVAL_S)
@@ -237,6 +239,23 @@ class GateController:
         deadline = time.monotonic() + timeout_s
         while not self.stop_event.is_set():
             if self.pause_event.is_set():
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            if self.stop_event.wait(min(WORKER_POLL_INTERVAL_S, remaining)):
+                return False
+        return False
+
+    def wait_unless_paused_or_suspended(self, timeout_s: float) -> bool:
+        """Wait up to *timeout_s* unless stop, pause, or discovery_suspend.
+
+        Returns True only when the full duration elapsed without interruption.
+        Used by heal so danger teleport and user pause can preempt cast delays.
+        """
+        deadline = time.monotonic() + timeout_s
+        while not self.stop_event.is_set():
+            if self.pause_event.is_set() or self.discovery_suspend.is_set():
                 return False
             remaining = deadline - time.monotonic()
             if remaining <= 0:

@@ -7,8 +7,8 @@ combat and repeatedly:
   1. move cursor to the character sprite
   2. press HP Restore Key
   3. left-click
-until HP is full. Yields while a teleport settle is in progress so danger
-teleport can finish first.
+until HP is full. Danger teleport always preempts heal (``discovery_suspend``).
+User pause aborts the heal-until-full session.
 """
 
 from __future__ import annotations
@@ -97,7 +97,7 @@ class HpRestoreWorker:
                     continue
                 # Let in-flight danger/mode teleport finish before starting heal.
                 if ctx.discovery_suspend.is_set():
-                    ctx.stop_event.wait(HP_RESTORE_POLL_S)
+                    ctx.wait_unless_stopped(HP_RESTORE_POLL_S)
                     continue
                 ratio = self._hp_ratio()
                 if ratio is None or ratio >= HP_RESTORE_RATIO:
@@ -119,17 +119,24 @@ class HpRestoreWorker:
             )
             delay_s = float(cfg.skill_delay_ms) / 1000.0
             while not ctx.is_stopped():
-                if not ctx.should_run_workers():
-                    if not ctx.wait_while_stopped_or_paused(HP_RESTORE_POLL_S):
-                        return
-                    continue
-                # Danger teleport has priority — wait out settle before casting.
+                # Pause (alt-tab) aborts heal — do not resume this session.
+                if ctx.pause_event.is_set() or not ctx.should_run_workers():
+                    ctx.logger.behavior(
+                        "[HP] heal-until-full aborted (pause/sit) — releasing"
+                    )
+                    return
+                # Danger teleport has priority — never cast during TP settle.
                 if ctx.discovery_suspend.is_set():
-                    ctx.stop_event.wait(HP_RESTORE_POLL_S)
+                    if not ctx.wait_unless_stopped(HP_RESTORE_POLL_S):
+                        ctx.logger.behavior(
+                            "[HP] heal-until-full aborted (pause) — releasing"
+                        )
+                        return
                     continue
                 hp, hp_max = self._vitals.hp_pair()
                 if hp is None or hp_max is None or hp_max <= 0:
-                    ctx.stop_event.wait(HP_RESTORE_POLL_S)
+                    if not ctx.wait_unless_stopped(HP_RESTORE_POLL_S):
+                        return
                     continue
                 if hp >= hp_max:
                     ctx.logger.behavior(
@@ -138,7 +145,15 @@ class HpRestoreWorker:
                     return
                 pos = ctx.character_screen_pos()
                 if pos is None:
-                    ctx.stop_event.wait(HP_RESTORE_POLL_S)
+                    if not ctx.wait_unless_stopped(HP_RESTORE_POLL_S):
+                        return
+                    continue
+                # Re-check gates immediately before taking the input lock.
+                if (
+                    ctx.pause_event.is_set()
+                    or not ctx.should_run_workers()
+                    or ctx.discovery_suspend.is_set()
+                ):
                     continue
                 cx, cy = int(pos[0]), int(pos[1])
                 ctx.logger.behavior(
@@ -147,7 +162,15 @@ class HpRestoreWorker:
                 )
                 # Character sprite → HP Restore Key → left click (atomic).
                 self._input.skill_click_at(scan, cx, cy)
-                ctx.stop_event.wait(delay_s)
+                # Abort cast gap on pause or danger teleport settle.
+                if not ctx.wait_unless_paused_or_suspended(delay_s):
+                    if ctx.pause_event.is_set() or ctx.is_stopped():
+                        ctx.logger.behavior(
+                            "[HP] heal-until-full aborted (pause) — releasing"
+                        )
+                        return
+                    # discovery_suspend — yield to danger TP, then continue.
+                    continue
         finally:
             ctx.end_heal_ops()
 
