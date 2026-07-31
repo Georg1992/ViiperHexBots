@@ -555,13 +555,6 @@ class MainWindow:
         )
         heal_check.pack(side=tk.LEFT, padx=(8, 0))
         self._settings_checkbuttons.append(heal_check)
-        ttk.Label(hp_cell, text="Critical HP%:").pack(side=tk.LEFT, padx=(8, 0))
-        self.critical_hp_percent = ttk.Entry(hp_cell, width=4)
-        self.critical_hp_percent.insert(
-            0, str(max(1, min(99, int(self.config.critical_hp_percent))))
-        )
-        self.critical_hp_percent.pack(side=tk.LEFT, padx=(4, 0))
-        self._bind_setting_entry(self.critical_hp_percent)
         self.sp_button = self._key_entry(
             keys_main,
             "SP Item Key:",
@@ -1304,10 +1297,6 @@ class MainWindow:
         self.config.skill_timers = self._collect_skill_timers_from_ui()
         self.config.hp_button = self.hp_button.get().strip()
         self.config.heal_skill = self.heal_skill_var.get()
-        raw_crit = self.critical_hp_percent.get().strip()
-        self.config.critical_hp_percent = (
-            max(1, min(99, int(raw_crit))) if raw_crit else 50
-        )
         self.config.sp_button = self.sp_button.get().strip()
         self.config.sit_on_low_sp_button = self.sit_on_low_sp_button.get().strip()
         self.config.sit_on_low_sp = self.sit_on_low_sp_var.get()
@@ -1484,7 +1473,6 @@ class MainWindow:
             self.save_point_button,
             self.open_storage_cog,
             self.hp_button,
-            self.critical_hp_percent,
             self.sp_button,
             self.sit_on_low_sp_button,
             self.sit_on_low_sp_toggle,

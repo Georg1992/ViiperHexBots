@@ -6,12 +6,12 @@ out.  No other module knows danger exists.
 
 Inputs:
 * ``run()`` — polls ``hp_pair()`` from PlayerVitals; HP drops trigger
-  teleport; drops at/below configured critical HP%% are logged as critical
-  and (when heal skill is enabled) request heal-until-full after the TP
+  teleport; drops at/below 50% of max are logged as critical
 * ``run()`` (continued) — polls ``CharacterState.is_surrounded`` and
   teleports when the character is boxed in by mobs
 
 Teleport execution delegated to :class:`TeleportController`.
+Danger teleport has priority over healing (allowed while heal ops are held).
 """
 
 from __future__ import annotations
@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from pybot.game_state import PlayerVitals
     from pybot.runtime.teleport import TeleportController
     from pybot.runtime.character_state import CharacterState
+
+CRITICAL_HP_RATIO = 0.5
 
 
 class DangerDetector:
@@ -44,8 +46,6 @@ class DangerDetector:
         self._prev_hp: int | None = None
         self._damage_lock = threading.Lock()
         self._damage_detected: bool = False
-        self._heal_lock = threading.Lock()
-        self._heal_until_full_requested: bool = False
 
     # ── Worker loop ───────────────────────────────────────────────
 
@@ -53,37 +53,31 @@ class DangerDetector:
         """Ongoing loop: poll HP + surround state, detect danger, sleep."""
         while not self._ctx.is_stopped():
             self._poll_hp()
-            # Surround teleports only while combat is allowed (not pause/sit/storage/heal).
-            if self._ctx.should_run_combat():
+            # Surround teleports while danger is allowed (incl. during heal).
+            if self._ctx.should_allow_danger_teleport():
                 self._poll_surround()
             self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
 
-    def _critical_hp_ratio(self) -> float:
-        return max(1, min(99, int(self._ctx.config.critical_hp_percent))) / 100.0
-
     def _poll_hp(self) -> None:
-        """Read HP from shared vitals; record drops; teleport when combat is live."""
+        """Read HP from shared vitals; record drops; teleport when allowed."""
         hp, hp_max = self._vitals.hp_pair()
         if hp is None:
             self._prev_hp = None
             return
 
         if self._prev_hp is not None and hp < self._prev_hp:
-            critical_ratio = self._critical_hp_ratio()
             is_critical = (
                 hp_max is not None
                 and hp_max > 0
-                and hp / hp_max <= critical_ratio
+                and hp / hp_max <= CRITICAL_HP_RATIO
             )
             with self._damage_lock:
                 self._damage_detected = True
-            # Always record the drop (sit worker reads the flag) but only
-            # teleport when combat workers are allowed to run.
-            if self._ctx.should_run_combat():
+            # Always record the drop (sit worker reads the flag). Danger TP
+            # is allowed during heal; sit/storage/pause still block it.
+            if self._ctx.should_allow_danger_teleport():
                 if is_critical:
                     self._teleport.danger_teleport(reason="critical_hp")
-                    with self._heal_lock:
-                        self._heal_until_full_requested = True
                 else:
                     self._teleport.danger_teleport(reason="hp_drop")
         self._prev_hp = hp
@@ -99,13 +93,5 @@ class DangerDetector:
         with self._damage_lock:
             if self._damage_detected:
                 self._damage_detected = False
-                return True
-            return False
-
-    def pop_heal_until_full_requested(self) -> bool:
-        """Return and clear the post-critical heal-until-full request."""
-        with self._heal_lock:
-            if self._heal_until_full_requested:
-                self._heal_until_full_requested = False
                 return True
             return False

@@ -264,12 +264,7 @@ def _build_conditional_workers(
         workers.append(("skill_timer", SkillTimerWorker(ctx, input_backend).run))
     if ctx.config.hp_scan_code > 0:
         workers.append(
-            (
-                "hp_restore",
-                HpRestoreWorker(
-                    ctx, input_backend, player_vitals, danger=danger,
-                ).run,
-            )
+            ("hp_restore", HpRestoreWorker(ctx, input_backend, player_vitals).run)
         )
     if ctx.config.sit_on_low_sp:
         sit_worker = SitOnLowSpWorker(

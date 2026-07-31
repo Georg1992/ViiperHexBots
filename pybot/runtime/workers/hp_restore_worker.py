@@ -1,17 +1,17 @@
-"""HP restore — item key below threshold, or heal skill after critical danger TP.
+"""HP restore — item key below threshold, or heal skill until full HP.
 
 Item path (``heal_skill`` off): press HP Restore Key when HP < ``HP_RESTORE_RATIO``.
 
-Heal-skill path (``heal_skill`` on): after DangerDetector triggers a critical
-danger teleport, pause combat and cast heal on the character sprite
-(move cursor → skill button + LMB) until HP is full.
+Heal-skill path (``heal_skill`` on): when HP < ``HP_RESTORE_RATIO``, pause
+combat and cast heal on the character sprite (move cursor → skill button + LMB)
+until HP is full. Yields while a teleport settle is in progress so danger
+teleport can finish first.
 """
 
 from __future__ import annotations
 
 import time
 import traceback
-from typing import TYPE_CHECKING
 
 from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import (
@@ -22,25 +22,19 @@ from pybot.runtime.constants import (
 from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.workers.worker_contexts import HpRestoreWorkerContext
 
-if TYPE_CHECKING:
-    from pybot.runtime.danger_detector import DangerDetector
-
 
 class HpRestoreWorker:
-    """Restore HP via item key, or heal-until-full after critical danger TP."""
+    """Restore HP via item key, or heal-until-full when heal skill is enabled."""
 
     def __init__(
         self,
         ctx: HpRestoreWorkerContext,
         input_backend: InputBackend,
         vitals: PlayerVitals,
-        *,
-        danger: DangerDetector | None = None,
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
         self._vitals = vitals
-        self._danger = danger
         self._last_press_mono = 0.0
 
     def run(self) -> None:
@@ -52,8 +46,8 @@ class HpRestoreWorker:
         if cfg.heal_skill:
             ctx.logger.behavior(
                 f"[HP] worker started key={cfg.hp_button!r} scanCode={scan} "
-                f"healSkill=on criticalHP<={cfg.critical_hp_percent}% "
-                f"(heal until full after critical danger TP)"
+                f"healSkill=on threshold<{HP_RESTORE_RATIO:.0%} "
+                f"(heal until full)"
             )
             self._run_heal_skill(scan)
             return
@@ -98,7 +92,12 @@ class HpRestoreWorker:
                 if not ctx.should_run_workers():
                     ctx.wait_while_stopped_or_paused(HP_RESTORE_POLL_S)
                     continue
-                if self._danger is None or not self._danger.pop_heal_until_full_requested():
+                # Let in-flight danger/mode teleport finish before starting heal.
+                if ctx.discovery_suspend.is_set():
+                    ctx.stop_event.wait(HP_RESTORE_POLL_S)
+                    continue
+                ratio = self._hp_ratio()
+                if ratio is None or ratio >= HP_RESTORE_RATIO:
                     ctx.stop_event.wait(HP_RESTORE_POLL_S)
                     continue
                 self._heal_until_full(scan)
@@ -119,6 +118,10 @@ class HpRestoreWorker:
                 if not ctx.should_run_workers():
                     if not ctx.wait_while_stopped_or_paused(HP_RESTORE_POLL_S):
                         return
+                    continue
+                # Danger teleport has priority — wait out settle before casting.
+                if ctx.discovery_suspend.is_set():
+                    ctx.stop_event.wait(HP_RESTORE_POLL_S)
                     continue
                 hp, hp_max = self._vitals.hp_pair()
                 if hp is None or hp_max is None or hp_max <= 0:

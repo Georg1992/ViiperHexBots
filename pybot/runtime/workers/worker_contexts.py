@@ -122,8 +122,12 @@ class HpRestoreWorkerContext(CanStop, CanLog, HasConfig, CanCapture, Protocol):
     """Hunt runtime subset consumed by HpRestoreWorker.
 
     Idle during sit/pause (``should_run_workers``); keeps running during
-    storage. Heal-until-full pauses combat via ``begin_heal_ops``.
+    storage. Heal-until-full pauses combat via ``begin_heal_ops``. Yields
+    while ``discovery_suspend`` is set so danger teleport finishes first.
     """
+
+    @property
+    def discovery_suspend(self) -> object: ...
 
     def character_screen_pos(self) -> tuple[int, int] | None: ...
     def begin_heal_ops(self) -> bool: ...

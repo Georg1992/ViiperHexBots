@@ -64,6 +64,14 @@ class GateController:
             and not self.healing_event.is_set()
         )
 
+    def should_allow_danger_teleport(self) -> bool:
+        """True when danger TP may run.
+
+        Heal does not block this — danger teleport has priority over healing.
+        Sit/storage/pause/stop still block.
+        """
+        return self.should_run_workers() and not self.storage_event.is_set()
+
     def should_run_discovery(self) -> bool:
         """True when discovery may scan (workers running and not storage/heal)."""
         return (

@@ -155,6 +155,9 @@ class HuntRuntimeContext:
     def should_run_combat(self) -> bool:
         return self.gates.should_run_combat()
 
+    def should_allow_danger_teleport(self) -> bool:
+        return self.gates.should_allow_danger_teleport()
+
     def should_run_discovery(self) -> bool:
         return self.gates.should_run_discovery()
 
