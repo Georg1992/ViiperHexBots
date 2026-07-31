@@ -1,13 +1,17 @@
-"""Sit when SP is low; pause hunting (and timers) until SP recovers.
+"""Sit when SP is low; pause hunting until SP recovers.
 
-Before sitting: teleport until discovery sees no mobs, then sit.
-While sitting: if DangerDetector detects damage (HP drop), stand and
-return ``"interrupted"`` so ``_recover_sp`` finds a new spot and sits again.
-On SP recover: stand and resume.
+Deterministic sit lifecycle (one toggle direction at a time):
 
-Hunt never resumes until standing is confirmed. The sit gate stays held
-across user pause so hunt cannot restart mid-sit. SP comes from shared
-``PlayerVitals``. Danger detection is handled by ``DangerDetector``.
+1. ``begin_sit_ops`` — hunt/timers pause
+2. teleport until clear
+3. **sit once** — confirm sitting, set ``_seated``
+4. wait for SP recover (or damage interrupt)
+5. **stand once** — because ``_seated`` is True we know we must press;
+   clear ``_seated`` only after standing is confirmed
+6. ``end_sit_ops`` — hunt resumes
+
+``finally`` only stands if ``_seated`` is still True. It never force-toggles
+after a successful stand (that was the sit→stand→sit→hunt bug).
 """
 
 from __future__ import annotations
@@ -52,6 +56,8 @@ class SitOnLowSpWorker:
         self._vitals = vitals
         self._danger = danger
         self._last_fail_log = ""
+        # True only after we confirmed sitting and have not yet confirmed stand.
+        self._seated = False
 
     def _capture_frame(self):
         """Capture a hunt frame for pose verification."""
@@ -119,6 +125,7 @@ class SitOnLowSpWorker:
     def _recover_sp(self, low_ratio: float) -> None:
         ctx = self._ctx
         sit_scan = ctx.config.sit_on_low_sp_scan_code
+        self._seated = False
         if not ctx.begin_sit_ops():
             return
         try:
@@ -143,28 +150,11 @@ class SitOnLowSpWorker:
                     "finding another sit spot"
                 )
         finally:
-            # Never release the hunt gate while still sitting.
-            # Do not force-toggle again if standing is already confirmed —
-            # a second from_sit press would re-sit and race the hunt resume.
-            self._stand_before_hunt_resume(sit_scan)
+            # Stand only if we are still marked seated. A successful session
+            # stand already cleared _seated — pressing again would re-sit.
+            self._stand_if_seated(sit_scan)
             ctx.end_sit_ops()
             ctx.discovery_wake.set()
-
-    def _stand_before_hunt_resume(self, sit_scan: int) -> None:
-        """Block until standing is confirmed (or stop), then hunt may resume."""
-        ctx = self._ctx
-        while not ctx.is_stopped():
-            sitting = self._pose_is_sitting()
-            if sitting is False:
-                # Already standing — do not press again (would sit).
-                return
-            # Sitting or ambiguous: force one toggle, then confirm.
-            if self._ensure_standing(sit_scan, from_sit=True):
-                return
-            ctx.logger.behavior(
-                "[SIT] standing not confirmed — retrying before hunt resume"
-            )
-            ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
 
     def _sit_session(self) -> str | None:
         """Sit until SP recovers.
@@ -180,7 +170,7 @@ class SitOnLowSpWorker:
         # Reset the flag so we only detect damage WHILE sitting.
         self._danger.pop_damage_detected()
 
-        if not self._ensure_sitting(sit_scan):
+        if not self._sit(sit_scan):
             ctx.logger.behavior(
                 "[SIT] could not confirm sitting — aborting session"
             )
@@ -197,7 +187,7 @@ class SitOnLowSpWorker:
                 ctx.logger.behavior(
                     "[SIT] interrupted by damage — standing before new spot"
                 )
-                if not self._ensure_standing(sit_scan, from_sit=True):
+                if not self._stand_if_seated(sit_scan):
                     ctx.logger.behavior(
                         "[SIT] could not confirm standing after damage — "
                         "holding sit gate"
@@ -213,8 +203,7 @@ class SitOnLowSpWorker:
                     ctx.logger.behavior(
                         f"[SIT] SP recovered ratio={ratio:.1%} — standing"
                     )
-                    if not self._ensure_standing(sit_scan, from_sit=True):
-                        # Keep the sit gate held; retry stand without resuming hunt.
+                    if not self._stand_if_seated(sit_scan):
                         ctx.logger.behavior(
                             "[SIT] could not confirm standing — retrying"
                         )
@@ -227,32 +216,49 @@ class SitOnLowSpWorker:
             ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
         return None
 
-    def _ensure_sitting(self, sit_scan: int) -> bool:
-        """Reach sitting pose; press the toggle only when not already sitting."""
-        return self._ensure_pose(sit_scan, want_sit=True)
+    def _sit(self, sit_scan: int) -> bool:
+        """Reach sitting pose; set ``_seated`` only on confirmed sitting."""
+        if not self._reach_pose(sit_scan, want_sit=True):
+            return False
+        self._seated = True
+        return True
 
-    def _ensure_standing(self, sit_scan: int, *, from_sit: bool = False) -> bool:
-        """Reach standing pose.
+    def _stand_if_seated(self, sit_scan: int) -> bool:
+        """Stand only when ``_seated``; never toggle after a confirmed stand.
 
-        When ``from_sit`` is True we always press the toggle once first. The
-        falcon can make a sitting sprite look standing, which would otherwise
-        skip the stand key and resume hunt while still seated.
+        Because we know we sat (flag), we press once before verifying. That
+        covers falcon false-standing without a second finally press later.
         """
-        if from_sit:
-            self._input.key_tap(sit_scan)
-            if not self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S):
-                return False
-            if self._pose_is_sitting() is False:
-                return True
-        return self._ensure_pose(sit_scan, want_sit=False)
+        if not self._seated:
+            return True
+        if not self._reach_pose(sit_scan, want_sit=False, force_press=True):
+            return False
+        self._seated = False
+        return True
 
-    def _ensure_pose(self, sit_scan: int, *, want_sit: bool) -> bool:
-        """Toggle-safe sit/stand: succeed only on a confirmed pose read.
+    def _reach_pose(
+        self,
+        sit_scan: int,
+        *,
+        want_sit: bool,
+        force_press: bool = False,
+    ) -> bool:
+        """Toggle toward the desired pose; succeed only on a confirmed read.
 
-        Unreadable/ambiguous pose is never treated as success. After each
-        press we wait ``SIT_POSE_SETTLE_S`` before verifying.
+        ``force_press``: press once before the first pose check (used when
+        leaving a known seated state so falcon cannot skip the stand key).
         """
         label = "sit" if want_sit else "stand"
+        pressed = False
+        if force_press:
+            self._input.key_tap(sit_scan)
+            pressed = True
+            if not self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S):
+                return False
+            sitting = self._pose_is_sitting()
+            if sitting is not None and sitting == want_sit:
+                return True
+
         for attempt in range(_SIT_VERIFY_RETRIES):
             if self._ctx.is_stopped():
                 return False
@@ -264,6 +270,7 @@ class SitOnLowSpWorker:
             if sitting is not None and sitting == want_sit:
                 return True
             self._input.key_tap(sit_scan)
+            pressed = True
             if not self._ctx.wait_unless_stopped(SIT_POSE_SETTLE_S):
                 if self._ctx.is_stopped():
                     return False
@@ -273,6 +280,7 @@ class SitOnLowSpWorker:
                 return True
             self._ctx.logger.behavior(
                 f"[SIT] {label} verify failed "
-                f"attempt {attempt + 1}/{_SIT_VERIFY_RETRIES} — retrying"
+                f"attempt {attempt + 1}/{_SIT_VERIFY_RETRIES} "
+                f"pressed={pressed} — retrying"
             )
         return False
