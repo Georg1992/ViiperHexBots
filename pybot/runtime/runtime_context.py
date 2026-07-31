@@ -16,9 +16,10 @@ Signal  Discovery Tracking    Attack Timers
 pause   no        no          no     no
 sit     no        no          no     no
 storage no        no          no     yes
+heal    no        no          no     yes
 ======= ========= =========== ====== ======
 
-Sit and storage are mutually exclusive.
+Sit, storage, and heal are mutually exclusive.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ from pybot.runtime.wing_tracker import WingTracker
 class HuntRuntimeContext:
     """Shared runtime state and service references for all workers.
 
-    Event gate logic (should_run_*, begin/end sit/storage, wait helpers)
+    Event gate logic (should_run_*, begin/end sit/storage/heal, wait helpers)
     is delegated to :attr:`gates`.
     Wing counter management is delegated to :attr:`wings`.
     """
@@ -120,6 +121,14 @@ class HuntRuntimeContext:
     def storage_event(self, event: threading.Event) -> None:
         self.gates.storage_event = event
 
+    @property
+    def healing_event(self) -> threading.Event:
+        return self.gates.healing_event
+
+    @healing_event.setter
+    def healing_event(self, event: threading.Event) -> None:
+        self.gates.healing_event = event
+
     # ── Wing convenience properties (delegate to wings) ──────────
 
     @property
@@ -145,6 +154,9 @@ class HuntRuntimeContext:
 
     def should_run_combat(self) -> bool:
         return self.gates.should_run_combat()
+
+    def should_allow_danger_teleport(self) -> bool:
+        return self.gates.should_allow_danger_teleport()
 
     def should_run_discovery(self) -> bool:
         return self.gates.should_run_discovery()
@@ -178,6 +190,15 @@ class HuntRuntimeContext:
 
     def end_storage_ops(self) -> None:
         self.gates.end_storage_ops()
+
+    def try_begin_heal_ops(self) -> bool:
+        return self.gates.try_begin_heal_ops()
+
+    def begin_heal_ops(self) -> bool:
+        return self.gates.begin_heal_ops()
+
+    def end_heal_ops(self) -> None:
+        self.gates.end_heal_ops()
 
     def begin_sit_regen(self) -> bool:
         return self.gates.begin_sit_ops()

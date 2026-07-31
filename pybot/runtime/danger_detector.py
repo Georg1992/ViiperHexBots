@@ -6,11 +6,12 @@ out.  No other module knows danger exists.
 
 Inputs:
 * ``run()`` — polls ``hp_pair()`` from PlayerVitals; HP drops trigger
-  teleport; drops below 50% of max are logged as critical
+  teleport; drops at/below 50% of max are logged as critical
 * ``run()`` (continued) — polls ``CharacterState.is_surrounded`` and
   teleports when the character is boxed in by mobs
 
 Teleport execution delegated to :class:`TeleportController`.
+Danger teleport has priority over healing (allowed while heal ops are held).
 """
 
 from __future__ import annotations
@@ -52,13 +53,13 @@ class DangerDetector:
         """Ongoing loop: poll HP + surround state, detect danger, sleep."""
         while not self._ctx.is_stopped():
             self._poll_hp()
-            # Surround teleports only while combat is allowed (not pause/sit/storage).
-            if self._ctx.should_run_combat():
+            # Surround teleports while danger is allowed (incl. during heal).
+            if self._ctx.should_allow_danger_teleport():
                 self._poll_surround()
             self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
 
     def _poll_hp(self) -> None:
-        """Read HP from shared vitals; record drops; teleport when combat is live."""
+        """Read HP from shared vitals; record drops; teleport when allowed."""
         hp, hp_max = self._vitals.hp_pair()
         if hp is None:
             self._prev_hp = None
@@ -68,13 +69,13 @@ class DangerDetector:
             is_critical = (
                 hp_max is not None
                 and hp_max > 0
-                and hp / hp_max < CRITICAL_HP_RATIO
+                and hp / hp_max <= CRITICAL_HP_RATIO
             )
             with self._damage_lock:
                 self._damage_detected = True
-            # Always record the drop (sit worker reads the flag) but only
-            # teleport when combat workers are allowed to run.
-            if self._ctx.should_run_combat():
+            # Always record the drop (sit worker reads the flag). Danger TP
+            # is allowed during heal; sit/storage/pause still block it.
+            if self._ctx.should_allow_danger_teleport():
                 if is_critical:
                     self._teleport.danger_teleport(reason="critical_hp")
                 else:
