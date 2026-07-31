@@ -74,13 +74,15 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self.vitals.publish_hp(40, 100)
         cast_count = {"n": 0}
 
-        def cast_heal(_scan: int) -> bool:
+        def cast_heal(scan: int, x: int, y: int) -> bool:
+            self.assertEqual(scan, 59)
+            self.assertEqual((x, y), (300, 350))
             cast_count["n"] += 1
             if cast_count["n"] >= 2:
                 self.vitals.publish_hp(100, 100)
             return True
 
-        self.input.skill_click.side_effect = cast_heal
+        self.input.skill_click_at.side_effect = cast_heal
 
         def stop_when_full(*_a, **_k):
             hp, hp_max = self.vitals.hp_pair()
@@ -93,8 +95,7 @@ class HpRestoreWorkerTests(unittest.TestCase):
         worker.run()
 
         self.assertGreaterEqual(cast_count["n"], 2)
-        self.input.move_mouse.assert_called_with(300, 350)
-        self.input.skill_click.assert_called_with(59)
+        self.input.skill_click_at.assert_called_with(59, 300, 350)
         self.input.teleport_key.assert_not_called()
         self.assertFalse(self.ctx.healing_event.is_set())
 
@@ -109,7 +110,7 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self.ctx.stop_event.wait = stop_soon  # type: ignore[method-assign]
         worker = HpRestoreWorker(self.ctx, self.input, self.vitals)
         worker.run()
-        self.input.skill_click.assert_not_called()
+        self.input.skill_click_at.assert_not_called()
         self.input.teleport_key.assert_not_called()
 
     def test_heal_skill_waits_while_teleport_suspended(self) -> None:
@@ -127,7 +128,7 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self.ctx.stop_event.wait = stop_after_yield  # type: ignore[method-assign]
         worker = HpRestoreWorker(self.ctx, self.input, self.vitals)
         worker.run()
-        self.input.skill_click.assert_not_called()
+        self.input.skill_click_at.assert_not_called()
         self.assertFalse(self.ctx.healing_event.is_set())
 
 

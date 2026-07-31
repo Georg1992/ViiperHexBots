@@ -186,16 +186,32 @@ class ViiperBackend(ShadowInputBackend):
 
         with self._operation_lock:
             self._ensure_connected()
-
-            self._key_press(scan_code, down=True)
-            time.sleep(0.02)
-
-            self._mouse_button(MOUSE_BUTTON_LEFT, down=True)
-            time.sleep(0.02)
-            self._mouse_button(MOUSE_BUTTON_LEFT, down=False)
-
-            self._key_press(scan_code, down=False)
+            self._skill_click_locked(scan_code)
         return True
+
+    def skill_click_at(self, scan_code: int, x: int, y: int) -> bool:
+        """Move cursor to ``(x, y)``, then skill-key + left-click.
+
+        Atomic so nothing can steal the cursor between move and click.
+        """
+        if scan_code <= 0:
+            return False
+
+        with self._operation_lock:
+            self._ensure_connected()
+            user32.SetCursorPos(int(x), int(y))
+            time.sleep(0.05)
+            self._skill_click_locked(scan_code)
+        return True
+
+    def _skill_click_locked(self, scan_code: int) -> None:
+        """Skill key down → left click → key up. Caller holds ``_operation_lock``."""
+        self._key_press(scan_code, down=True)
+        time.sleep(0.05)
+        self._mouse_button(MOUSE_BUTTON_LEFT, down=True)
+        time.sleep(0.05)
+        self._mouse_button(MOUSE_BUTTON_LEFT, down=False)
+        self._key_press(scan_code, down=False)
 
     def teleport_key(self, scan_code: int) -> bool:
         """Press and release a teleport key.
