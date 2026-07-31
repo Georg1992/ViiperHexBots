@@ -37,7 +37,8 @@ HP_RESTORE_COOLDOWN_S = 1.0
 # Heal-skill path: poll fast so heal↔hunt handoff after TP/clear is seamless.
 HP_HEAL_SKILL_POLL_S = WORKER_POLL_INTERVAL_S
 # No HP drop for this long before heal-skill may start/continue.
-HP_HEAL_DAMAGE_QUIET_S = 0.25
+# Longer than status-panel OCR cadence so mid-fight gaps do not look "safe".
+HP_HEAL_DAMAGE_QUIET_S = 1.0
 
 # Minimum gap between distinct skill-timer key presses when several are due.
 SKILL_TIMER_STAGGER_MS = 500

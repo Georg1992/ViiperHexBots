@@ -9,8 +9,8 @@ Inputs:
 * ``run()`` (continued) — polls ``CharacterState.is_surrounded`` and
   teleports when the character is boxed in by mobs
 
-Heal-skill reads ``is_surrounded`` / ``has_recent_damage`` to heal only
-when safe. Teleport execution delegated to :class:`TeleportController`.
+Heal-skill reads ``has_nearby_threat`` / ``has_recent_damage`` to heal
+only when safe. Teleport execution delegated to :class:`TeleportController`.
 Danger teleport has priority over healing (allowed while heal ops are held).
 """
 
@@ -76,26 +76,25 @@ class DangerDetector:
             with self._damage_lock:
                 self._damage_detected = True
                 self._last_damage_mono = time.monotonic()
-            # Always record the drop (sit worker reads the flag). Danger TP
+            # Always record the drop (sit/heal read the latch). Danger TP
             # is allowed during heal; sit/storage/pause still block it.
             if self._ctx.should_allow_danger_teleport():
-                if is_critical:
-                    self._teleport.danger_teleport(reason="critical_hp")
-                else:
-                    self._teleport.danger_teleport(reason="hp_drop")
-                # Fresh map after TP — do not block post-TP heal on that hit.
-                self._clear_damage_after_teleport()
+                reason = "critical_hp" if is_critical else "hp_drop"
+                if self._teleport.danger_teleport(reason=reason):
+                    # Only clear after a real escape — failed/missing key
+                    # must keep blocking heal.
+                    self._clear_damage_after_teleport()
         self._prev_hp = hp
 
     def _poll_surround(self) -> None:
         """Check CharacterState for surround danger and teleport."""
         if self._character_state.is_surrounded:
             reason = self._character_state.surrounded_reason
-            self._teleport.danger_teleport(reason=f"surrounded {reason}")
-            self._clear_damage_after_teleport()
+            if self._teleport.danger_teleport(reason=f"surrounded {reason}"):
+                self._clear_damage_after_teleport()
 
     def _clear_damage_after_teleport(self) -> None:
-        """Allow heal-skill to start after danger TP settle."""
+        """Allow heal-skill to start after a successful danger TP."""
         with self._damage_lock:
             self._last_damage_mono = None
             self._damage_detected = False
@@ -104,9 +103,28 @@ class DangerDetector:
         """True when CharacterState reports the character is boxed in."""
         return bool(self._character_state.is_surrounded)
 
+    def has_nearby_threat(self) -> bool:
+        """True when mobs are near the character (tracks or visual blobs).
+
+        Formal surround (opposite sides) is not required — any nearby mob
+        means combat is unsafe for heal-skill.
+        """
+        state = self._character_state
+        return (
+            bool(state.is_surrounded)
+            or int(state.nearby_mob_count) > 0
+            or int(state.nearby_any_mobs_count) > 0
+        )
+
     def has_recent_damage(self, within_s: float) -> bool:
-        """True if an HP drop was observed within the last ``within_s`` seconds."""
+        """True if damage latch is set or an HP drop was recent.
+
+        The latch stays set until a successful danger teleport (or sit pop),
+        so missing wing keys cannot open a heal window mid-fight.
+        """
         with self._damage_lock:
+            if self._damage_detected:
+                return True
             if self._last_damage_mono is None:
                 return False
             return (time.monotonic() - self._last_damage_mono) < within_s
