@@ -167,6 +167,10 @@ class AttackLoop:
         # Sole inter-skill wait — game applies SP cost; UI may refresh vitals.
         self._ctx.stop_event.wait(ctx.config.skill_delay_ms / 1000.0)
 
+        # Sit/heal/pause may have claimed the gate during the skill delay.
+        if not ctx.should_run_combat():
+            return
+
         # Kite: move away from ALL tracked mobs after attacking (Anubis, etc.)
         try:
             all_mobs = ctx.tracks.positions_snapshot()

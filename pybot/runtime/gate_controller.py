@@ -229,6 +229,22 @@ class GateController:
             self.resume_gate.wait(min(WORKER_POLL_INTERVAL_S, remaining))
         return False
 
+    def wait_while_user_paused(self, timeout_s: float) -> bool:
+        """Block while the user-pause flag is set (ignores sit/heal/storage).
+
+        Returns True when not paused and not stopped. Used inside sit sessions
+        where ``should_run_workers`` is false because ``sitting_event`` is held.
+        """
+        deadline = time.monotonic() + timeout_s
+        while not self.stop_event.is_set():
+            if not self.pause_event.is_set():
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return not self.pause_event.is_set()
+            self.stop_event.wait(min(WORKER_POLL_INTERVAL_S, remaining))
+        return False
+
     def wait_while_combat_blocked(self, timeout_s: float) -> bool:
         """Block while sit/pause/storage/heal holds combat. True if combat may run."""
         deadline = time.monotonic() + timeout_s
