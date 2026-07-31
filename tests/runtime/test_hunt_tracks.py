@@ -199,6 +199,35 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(summary.removed_ids, [track_id])
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
+    def test_discovery_miss_near_character_does_not_count(self) -> None:
+        """Player occlusion at ROI center must not 2-miss-remove a living track."""
+        from pybot.runtime.capture.window_roi import HuntRoi
+        from pybot.runtime.constants import MELEE_IDLE_GUARD_RADIUS_PX
+
+        roi = HuntRoi(x=0, y=0, w=2000, h=2000)
+        near_id = self._create(roi.center_x + 40, roi.center_y + 40)
+        far_id = self.tracks.create_track(
+            "horn",
+            roi.center_x + MELEE_IDLE_GUARD_RADIUS_PX + 80,
+            roi.center_y,
+            0.71,
+            0.9,
+            now_tick=self.now,
+        ).id
+
+        for offset in (50, 100, 150):
+            self.tracks.process_discovery_scan(
+                [],
+                mob_name="horn",
+                now_tick=self.now + offset,
+                hunt_roi=roi,
+            )
+
+        near = self.tracks.get_track_by_id(near_id)
+        assert near is not None
+        self.assertEqual(near.discovery_miss_count, 0)
+        self.assertIsNone(self.tracks.get_track_by_id(far_id))
+
     def test_discovery_miss_preserved_when_tracking_hits(self) -> None:
         """Tracker hit does NOT reset discovery_miss_count.
 
