@@ -269,7 +269,6 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         )
         self.ctx.mark_running()
         self.teleport = MagicMock()
-        self.teleport.danger_teleport.return_value = True
         self.vitals = PlayerVitals()
         self.character_state = MagicMock()
         self.character_state.is_surrounded = False
@@ -290,24 +289,6 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.teleport.danger_teleport.assert_called_with(reason="critical_hp")
         self.assertFalse(hasattr(self.danger, "pop_heal_until_full_requested"))
 
-    def test_danger_teleport_clears_damage_so_heal_can_start(self) -> None:
-        self.vitals.publish_hp(80, 100)
-        self.danger._poll_hp()
-        self.vitals.publish_hp(40, 100)
-        self.danger._poll_hp()
-        self.assertFalse(self.danger.has_recent_damage(1.0))
-        self.assertFalse(self.danger.pop_damage_detected())
-
-    def test_failed_danger_teleport_keeps_damage_latch(self) -> None:
-        """Missing/failed wing key must not open a heal window mid-fight."""
-        self.teleport.danger_teleport.return_value = False
-        self.vitals.publish_hp(80, 100)
-        self.danger._poll_hp()
-        self.vitals.publish_hp(40, 100)
-        self.danger._poll_hp()
-        self.assertTrue(self.danger.has_recent_damage(0.0))
-        self.assertTrue(self.danger.pop_damage_detected())
-
     def test_nearby_mobs_are_heal_threat(self) -> None:
         self.assertFalse(self.danger.has_nearby_threat())
         self.character_state.nearby_any_mobs_count = 2
@@ -316,13 +297,14 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.character_state.nearby_mob_count = 1
         self.assertTrue(self.danger.has_nearby_threat())
 
-    def test_recent_damage_blocks_until_quiet(self) -> None:
-        self.ctx.mark_paused()  # block danger TP so latch is kept
+    def test_recent_damage_is_time_based(self) -> None:
+        self.ctx.mark_paused()  # block danger TP
         self.vitals.publish_hp(80, 100)
         self.danger._poll_hp()
         self.vitals.publish_hp(70, 100)
         self.danger._poll_hp()
         self.assertTrue(self.danger.has_recent_damage(1.0))
+        self.assertFalse(self.danger.has_recent_damage(0.0))
         self.teleport.danger_teleport.assert_not_called()
 
     def test_danger_teleport_allowed_during_heal_ops(self) -> None:
