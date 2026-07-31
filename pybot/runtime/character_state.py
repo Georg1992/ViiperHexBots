@@ -7,8 +7,8 @@ depend on character position and surrounding mobs.
 Designed as a lightweight dataclass with thread-safe read/write so it
 can be shared between the monitor thread and worker threads.
 
-Note: pose (sit/stand) is not tracked here — it is verified on-demand
-by the sit worker after pressing sit/stand keys (see ``character_pose``).
+Note: sit/stand pose is not tracked here. Nearby sprite counts come from
+``pybot.recognition.nearby_mobs`` via CharacterStateMonitor.
 """
 
 from __future__ import annotations

@@ -1,11 +1,11 @@
-"""Center-screen character pose (sitting vs standing) from client frames.
+"""Center-screen character pose (sitting vs standing) from hunt frames.
 
 RO keeps the player at the client center. Sitting shrinks the body sprite;
 the Hunter falcon floats above and is ignored by taking the lowest contiguous
 vertical occupancy run (>= 20px) in a narrow center strip (bird sits in a
 separate run when there is a gap above the body).
 
-Danger detection is handled by :class:`DangerDetector`, not this module.
+Nearby-sprite counting lives in ``pybot.recognition.nearby_mobs``.
 """
 
 from __future__ import annotations
@@ -101,64 +101,6 @@ def check_is_standing(pose: CharacterPose | None) -> bool | None:
     if sitting is None:
         return None
     return not sitting
-
-
-# ── Generic nearby-mob detection (250x250 center crop) ────────────
-# Crop used to detect ANY sprite blobs near the character (not just hunted ones).
-_NEARBY_CROP_HALF = 125  # 250x250
-_NEARBY_MIN_BLOB_AREA = 30
-_NEARBY_CHAR_RADIUS = 80  # px from center — includes character + falcon
-
-
-def detect_nearby_any_mobs(frame_bgr: np.ndarray) -> int:
-    """Count distinct non-character sprite blobs in a 250x250 center crop.
-
-    Any mob sprite that walks near the character appears as a saturated
-    foreground blob in the center crop.  The character sprite itself is the
-    largest blob near the center and is excluded.
-
-    Returns ``0`` when no other sprites are nearby.
-    """
-    if frame_bgr is None or frame_bgr.size == 0:
-        return 0
-    h, w = frame_bgr.shape[:2]
-    cx, cy = w // 2, h // 2 + _CENTER_DY
-
-    x1 = max(0, cx - _NEARBY_CROP_HALF)
-    y1 = max(0, cy - _NEARBY_CROP_HALF)
-    x2 = min(w, cx + _NEARBY_CROP_HALF)
-    y2 = min(h, cy + _NEARBY_CROP_HALF)
-    crop = frame_bgr[y1:y2, x1:x2]
-    if crop.size == 0:
-        return 0
-
-    mask = _foreground_mask(crop)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _MORPH_CLOSE_KERNEL)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _MORPH_CLOSE_KERNEL)
-
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 4)
-    if num_labels <= 1:
-        return 0
-
-    crop_cx = crop.shape[1] // 2
-    crop_cy = crop.shape[0] // 2
-    radius_sq = _NEARBY_CHAR_RADIUS * _NEARBY_CHAR_RADIUS
-
-    nearby = 0
-    for lbl in range(1, num_labels):
-        area = int(stats[lbl, cv2.CC_STAT_AREA])
-        if area < _NEARBY_MIN_BLOB_AREA:
-            continue
-        # Centroids: [col, row] (x, y) in crop coordinates
-        bx = int(centroids[lbl, 0])
-        by = int(centroids[lbl, 1])
-        dx = bx - crop_cx
-        dy = by - crop_cy
-        if dx * dx + dy * dy <= radius_sq:
-            continue  # Too close to center — likely the character sprite
-        nearby += 1
-
-    return nearby
 
 
 def _body_run_height(profile: np.ndarray, thr: int) -> int | None:
