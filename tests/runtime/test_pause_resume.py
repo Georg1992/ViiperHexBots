@@ -32,6 +32,31 @@ class HuntRuntimeContextPauseTests(unittest.TestCase):
         ctx.end_sit_ops()
         self.assertTrue(ctx.should_run_workers())
 
+    def test_healing_keeps_timers_running_but_sit_pauses_them(self) -> None:
+        ctx = HuntRuntimeContext(
+            config=MagicMock(),
+            logger=MagicMock(),
+            tracks=MagicMock(),
+            policy=MagicMock(),
+            capture=MagicMock(),
+            detector=MagicMock(),
+            tracker=MagicMock(),
+            validation=MagicMock(),
+            control=MagicMock(),
+        )
+
+        self.assertTrue(ctx.should_run_timers())
+        self.assertTrue(ctx.begin_heal_ops())
+        self.assertFalse(ctx.should_run_combat())
+        self.assertTrue(ctx.should_run_timers())
+        ctx.end_heal_ops()
+
+        self.assertTrue(ctx.begin_sit_ops())
+        self.assertFalse(ctx.should_run_workers())
+        self.assertFalse(ctx.should_run_timers())
+        ctx.end_sit_ops()
+        self.assertTrue(ctx.should_run_timers())
+
     def test_should_run_workers_respects_pause(self) -> None:
         ctx = HuntRuntimeContext(
             config=MagicMock(),

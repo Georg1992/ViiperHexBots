@@ -9,6 +9,8 @@ from typing import Protocol
 class InputBackend(Protocol):
     def move_mouse(self, x: int, y: int) -> bool: ...
 
+    def move_and_click(self, x: int, y: int) -> bool: ...
+
     def skill_click(self, scan_code: int) -> bool: ...
 
     def skill_click_at(self, scan_code: int, x: int, y: int) -> bool: ...
@@ -54,6 +56,10 @@ class ShadowInputBackend:
 
     def move_mouse(self, x: int, y: int) -> bool:
         return True
+
+    def move_and_click(self, x: int, y: int) -> bool:
+        del x, y
+        return self.left_click()
 
     def skill_click(self, scan_code: int) -> bool:
         if scan_code <= 0:

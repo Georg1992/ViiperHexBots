@@ -89,9 +89,13 @@ _EXTRACT_BODY_STRONG_FLOOR_FRAC = 0.75
 
 
 
-# Very small sprites at 2× downscale lose too much signal — GaussianBlur on
-# a sub-24px field smears heat into gate-rejected speckles. Below this work
-# resolution the detector runs at native scale to preserve blob shape.
+# Modified sprite.grf assets are rendered from a single deterministic sprite
+# source, so discovery always uses this fixed work-scale reduction. The scale
+# is selected from the rendering mode, never from the selected mob descriptor.
+_SPRITE_GRF_HEATMAP_DOWNSCALE = 4
+# Non-GRF discovery keeps the generic small-sprite safety floor. GRF mode is
+# intentionally exempt: its fixed rendering mode is the contract, regardless
+# of descriptor dimensions.
 _DOWNSCALE_MIN_WORK_RESOLUTION_PX = 16.0
 
 # Extract / content-noise thresholds shared by silhouette gate control flow
@@ -309,6 +313,23 @@ class MobDetector:
     #  Discovery: heatmap → blobs → geometry → color structure → silhouette
     # ------------------------------------------------------------------
 
+    def _discovery_heatmap_downscale(self, frame_bgr: np.ndarray) -> int:
+        """Choose discovery scale from frame size and rendering mode only.
+
+        GRF mode deliberately uses a fixed 4× work scale for every mob. The
+        detector must not silently undo that choice based on descriptor size:
+        doing so makes performance and memory use depend on which mob is being
+        hunted, and was the source of the Noxious native-resolution fallback.
+        """
+        if self.use_sprite_grf:
+            return _SPRITE_GRF_HEATMAP_DOWNSCALE
+        if (
+            self.discovery_heatmap_downscale > 1
+            and min(frame_bgr.shape[:2]) >= self.discovery_heatmap_downscale_min_side
+        ):
+            return self.discovery_heatmap_downscale
+        return 1
+
     def detect(
         self,
         frame_bgr: np.ndarray,
@@ -320,29 +341,19 @@ class MobDetector:
         All blobs go through every gate — dedup against existing tracks is
         handled by TrackReconciler after detection.
 
-        When ``use_sprite_grf`` is True, forces 4× heatmap downscale for
-        speed (sprite.grf sprites are pixel-perfect with no death anims).
+        When ``use_sprite_grf`` is True, uses a deterministic 4× heatmap
+        downscale for every mob; no descriptor-size or mob-specific fallback is
+        applied.
         """
         start = time.perf_counter()
         descriptor = self.ensure_descriptor(mob_name)
 
         # --- heatmap --------------------------------------------------
         heatmap_start = time.perf_counter()
-        fh, fw = frame_bgr.shape[:2]
-        if self.use_sprite_grf:
-            # sprite.grf: force 4× downscale for speed — no death
-            # animations to worry about, mobs are pixel-perfect.
-            downscale = 4
-        elif self.discovery_heatmap_downscale > 1 and min(fw, fh) >= self.discovery_heatmap_downscale_min_side:
-            downscale = self.discovery_heatmap_downscale
-        else:
-            downscale = 1
-        # Very small sprites lose too much signal at 2× downscale —
-        # GaussianBlur smears heat into area-gate-rejected speckles.
-        # FPs from native-resolution heatmaps are caught by geometry /
-        # color-structure / silhouette gates (no safety valve).
+        downscale = self._discovery_heatmap_downscale(frame_bgr)
         if (
-            downscale > 1
+            not self.use_sprite_grf
+            and downscale > 1
             and min(descriptor.avg_width, descriptor.avg_height) / downscale
             < _DOWNSCALE_MIN_WORK_RESOLUTION_PX
         ):

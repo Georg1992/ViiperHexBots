@@ -55,6 +55,70 @@ class SkillTimerWorkerTests(unittest.TestCase):
         self.assertEqual(len(waits), 1)
         self.assertAlmostEqual(waits[0], SKILL_TIMER_STAGGER_MS / 1000.0, places=3)
 
+    def test_healing_does_not_disarm_or_rearm_timers(self) -> None:
+        timers = (
+            SkillTimerRuntime(button="f1", scan_code=59, interval_ms=10),
+        )
+        from pybot.runtime.gate_controller import GateController
+
+        gates = GateController()
+        gates.mark_running()
+        presses: list[int] = []
+        clock = {"ms": 0}
+
+        def teleport_key(scan_code: int) -> None:
+            presses.append(scan_code)
+            if len(presses) == 1:
+                self.assertTrue(gates.begin_heal_ops())
+            else:
+                gates.stop_event.set()
+
+        def stop_wait(_timeout_s: float) -> bool:
+            if not gates.stop_event.is_set():
+                clock["ms"] += 1
+            return gates.stop_event.is_set()
+
+        ctx = SimpleNamespace(
+            config=SimpleNamespace(skill_timers=timers),
+            logger=SimpleNamespace(behavior=MagicMock()),
+            stop_event=SimpleNamespace(
+                wait=stop_wait,
+                is_set=gates.is_stopped,
+                set=gates.stop_event.set,
+            ),
+            resume_gate=gates.resume_gate,
+            is_stopped=gates.is_stopped,
+            should_run_workers=gates.should_run_workers,
+            should_run_timers=gates.should_run_timers,
+            wait_while_stopped_or_paused=lambda _timeout: gates.should_run_workers(),
+        )
+        worker = SkillTimerWorker(ctx, SimpleNamespace(teleport_key=teleport_key))
+
+        try:
+            with patch(
+                "pybot.runtime.workers.skill_timer_worker.monotonic_ms",
+                side_effect=lambda: clock["ms"],
+            ):
+                worker.run()
+        finally:
+            was_healing = gates.healing_event.is_set()
+            gates.end_heal_ops()
+
+        self.assertTrue(was_healing)
+        self.assertEqual(presses, [59, 59])
+        arm_logs = [
+            call.args[0]
+            for call in ctx.logger.behavior.call_args_list
+            if call.args and "armed" in call.args[0]
+        ]
+        pause_logs = [
+            call.args[0]
+            for call in ctx.logger.behavior.call_args_list
+            if call.args and "paused" in call.args[0]
+        ]
+        self.assertEqual(len(arm_logs), 1)
+        self.assertEqual(pause_logs, [])
+
     def test_disarm_on_sit_then_rearm_on_resume(self) -> None:
         timers = (
             SkillTimerRuntime(button="f1", scan_code=59, interval_ms=60_000),

@@ -696,7 +696,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertFalse(track.was_accessible)
         self.assertEqual(track.idle_attack_count, 1)
 
-    def test_melee_range_idle_continues_streak(self) -> None:
+    def test_melee_range_idle_does_not_increment_streak(self) -> None:
         track_id = self._create(100, 100)
         for _ in range(3):
             self.tracks.evaluate_idle_attack(
@@ -706,10 +706,12 @@ class HuntTracksRulesTests(unittest.TestCase):
             track_id, was_idle=True, mob_x=100, mob_y=100, char_x=100, char_y=100,
         )
         self.assertEqual(action, "none")
-        self.assertEqual(count, 4)
+        # Melee-range idle attacks are ignored to avoid false death/unreachable
+        # detection while the character is sitting on the mob.
+        self.assertEqual(count, 3)
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
-        self.assertEqual(track.idle_attack_count, 4)
+        self.assertEqual(track.idle_attack_count, 3)
 
     def test_accessible_stationary_dies_at_two_idle(self) -> None:
         track_id = self._create(500, 500)
@@ -834,7 +836,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(summary.added_count, 1)
         self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 1)
 
-    def test_accessible_without_blob_stationary_removes_at_two(self) -> None:
+    def test_accessible_without_blob_stationary_resets_idle_streak(self) -> None:
         track_id = self._create(500, 500)
         self.tracks.evaluate_idle_attack(
             track_id, was_idle=False, mob_x=500, mob_y=500, char_x=0, char_y=0,
@@ -846,14 +848,16 @@ class HuntTracksRulesTests(unittest.TestCase):
             track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
         )
         self.assertEqual(action, "none")
-        self.assertEqual(count, 1)
+        self.assertEqual(count, 0)
         action, count = self.tracks.evaluate_idle_attack(
             track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
             now_tick=self.now + 50,
         )
-        self.assertEqual(action, "dead")
-        self.assertEqual(count, 2)
-        self.assertIsNone(self.tracks.get_track_by_id(track_id))
+        # Without a stationary discovery blob, idle attacks are inconclusive
+        # and must not mark a live target dead.
+        self.assertEqual(action, "none")
+        self.assertEqual(count, 0)
+        self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
     def test_discovery_blob_stability_sets_stationary(self) -> None:
         track_id = self._create(500, 500)
         bbox = (480, 480, 40, 40)

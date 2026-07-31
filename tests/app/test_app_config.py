@@ -10,6 +10,7 @@ from pathlib import Path
 from pybot.app.config_store import AppConfig, list_client_profiles
 from pybot.config.clients import memory_reading_enabled
 from pybot.config.runtime import resolve_mob_name
+from pybot.config.schema import MobCustomSettings
 from pybot.mobs.catalog import load_mob_catalog, mob_display_name
 from pybot.paths import PROJECT_ROOT
 
@@ -26,6 +27,13 @@ class AppConfigTests(unittest.TestCase):
             config.teleport_button = "q"
             config.search_range = 12
             config.hunt_mode = "walk"
+            config.mob_custom_settings["horn"] = MobCustomSettings(
+                kiting_tick_s=0.5,
+                debuff_button="r",
+                heal_button="q",
+                buff1_button="f1",
+                buff1_delay_s=10,
+            )
             config.save()
 
             loaded = AppConfig(config_path=path).load()
@@ -33,6 +41,27 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual(loaded.window_title, "Test Game")
             self.assertEqual(loaded.search_range, 12)
             self.assertEqual(loaded.hunt_mode, "walk")
+            self.assertEqual(loaded.mob_custom_settings["horn"].kiting_tick_s, 0.5)
+            self.assertEqual(loaded.mob_custom_settings["horn"].debuff_button, "r")
+            self.assertEqual(loaded.mob_custom_settings["horn"].heal_button, "q")
+            self.assertEqual(loaded.mob_custom_settings["horn"].buff1_delay_s, 10)
+
+    def test_removed_heal_skill_setting_is_migrated_on_save(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.ini"
+            path.write_text(
+                "[Keybindings]\nHPButton=f2\nHealSkill=1\n",
+                encoding="utf-8",
+            )
+
+            config = AppConfig(config_path=path).load()
+            self.assertEqual(config.hp_button, "f2")
+            config.save()
+
+            parser = configparser.ConfigParser()
+            parser.read(path, encoding="utf-8")
+            self.assertEqual(parser["Keybindings"]["HPButton"], "f2")
+            self.assertNotIn("HealSkill", parser["Keybindings"])
 
     def test_client_profiles_exist(self) -> None:
         profiles = list_client_profiles(PROJECT_ROOT)

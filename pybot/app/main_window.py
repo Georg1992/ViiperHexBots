@@ -41,7 +41,13 @@ from pybot.app.storage_chain_dialog import (
     StorageChainDialog,
     format_storage_chain_summary,
 )
-from pybot.config.schema import MAX_SKILL_TIMERS, KeyChainStep, SkillTimerSetting
+from pybot.app.mob_behavior_dialog import MobBehaviorDialog
+from pybot.config.schema import (
+    MAX_SKILL_TIMERS,
+    KeyChainStep,
+    MobCustomSettings,
+    SkillTimerSetting,
+)
 from pybot.mobs.catalog import load_mob_catalog
 from pybot.runtime.mob_behaviors import mob_has_custom_behavior
 from pybot.runtime.input.scan_codes import keysym_to_key_name
@@ -125,6 +131,7 @@ class MainWindow:
         # Ignore widget callbacks while building; enable at end of _build_ui.
         self._settings_apply_enabled = False
         self._mob_radios: list[ttk.Radiobutton] = []
+        self._mob_settings_buttons: list[ttk.Button] = []
         self._settings_checkbuttons: list[ttk.Checkbutton] = []
         self._mob_import_busy = False
         self._mob_radio_frame: ttk.Frame | None = None
@@ -187,11 +194,14 @@ class MainWindow:
             return
         for radio in self._mob_radios:
             radio.destroy()
+        for button in self._mob_settings_buttons:
+            button.destroy()
         self._mob_radios.clear()
+        self._mob_settings_buttons.clear()
         for index, mob in enumerate(self.mob_catalog, start=1):
             label = mob.display_name
             if mob_has_custom_behavior(mob.descriptor_name):
-                label = f"{mob.display_name}  (custom behavior)"
+                label = f"{mob.display_name}  (legacy custom)"
             radio = ttk.Radiobutton(
                 frame,
                 text=label,
@@ -201,6 +211,14 @@ class MainWindow:
             )
             radio.grid(row=index - 1, column=0, sticky="w")
             self._mob_radios.append(radio)
+            settings_button = ttk.Button(
+                frame,
+                text="⚙",
+                width=3,
+                command=lambda name=mob.descriptor_name: self._open_mob_behavior_dialog(name),
+            )
+            settings_button.grid(row=index - 1, column=1, sticky="w", padx=(6, 0))
+            self._mob_settings_buttons.append(settings_button)
         if self.mob_catalog:
             current = int(self.mob_var.get() or 1)
             if current < 1 or current > len(self.mob_catalog):
@@ -539,21 +557,12 @@ class MainWindow:
         )
         hp_cell = ttk.Frame(keys_main)
         hp_cell.grid(row=3, column=0, sticky="w", pady=2)
-        ttk.Label(hp_cell, text="HP Restore Key:").pack(side=tk.LEFT)
+        ttk.Label(hp_cell, text="HP Item Key:").pack(side=tk.LEFT)
         self.hp_button = ttk.Entry(hp_cell, width=6)
         self.hp_button.insert(0, self.config.hp_button)
         self.hp_button.pack(side=tk.LEFT, padx=(4, 0))
         self._bind_key_capture(self.hp_button)
         self._bind_setting_entry(self.hp_button)
-        self.heal_skill_var = tk.BooleanVar(value=self.config.heal_skill)
-        heal_check = ttk.Checkbutton(
-            hp_cell,
-            text="Heal skill",
-            variable=self.heal_skill_var,
-            command=self._apply_ui_settings,
-        )
-        heal_check.pack(side=tk.LEFT, padx=(8, 0))
-        self._settings_checkbuttons.append(heal_check)
         self.sp_button = self._key_entry(
             keys_main,
             "SP Item Key:",
@@ -768,6 +777,22 @@ class MainWindow:
         widget.insert(0, name)
         self._apply_ui_settings()
         return "break"
+
+    def _open_mob_behavior_dialog(self, mob_name: str) -> None:
+        key = mob_name.strip().lower()
+        current = self.config.mob_custom_settings.get(key, MobCustomSettings())
+
+        def _apply(settings: MobCustomSettings) -> None:
+            self.config.mob_custom_settings[key] = settings
+            self.config.save()
+            self.log_pipe.log(f"[MOB] custom behavior saved: {mob_name}")
+
+        MobBehaviorDialog(
+            self.root,
+            mob_name,
+            current,
+            on_apply=_apply,
+        )
 
     def _refresh_storage_chain_summary(self) -> None:
         self.open_storage_summary.configure(
@@ -1295,7 +1320,6 @@ class MainWindow:
         self.config.weight_modifier = int(float(self.storage_weight.get()))
         self.config.skill_timers = self._collect_skill_timers_from_ui()
         self.config.hp_button = self.hp_button.get().strip()
-        self.config.heal_skill = self.heal_skill_var.get()
         self.config.sp_button = self.sp_button.get().strip()
         self.config.sit_on_low_sp_button = self.sit_on_low_sp_button.get().strip()
         self.config.sit_on_low_sp = self.sit_on_low_sp_var.get()
@@ -1458,6 +1482,8 @@ class MainWindow:
         self.storage_weight_scale.configure(state=state)
         for radio in self._mob_radios:
             radio.configure(state=state)
+        for button in self._mob_settings_buttons:
+            button.configure(state=state)
         if hasattr(self, "_mob_browse_button"):
             browse_state = tk.DISABLED if (locked or self._mob_import_busy) else tk.NORMAL
             self._mob_browse_button.configure(state=browse_state)

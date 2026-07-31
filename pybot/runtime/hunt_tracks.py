@@ -74,6 +74,7 @@ class MobTrackSnapshot:
     was_accessible: bool = False
     discovery_stationary: bool = False
     moving: bool = False
+    debuff_applied: bool = False
 
 
 @dataclass(frozen=True)
@@ -194,6 +195,15 @@ class HuntTracks:
     def snapshot_alive(self, now_tick: int | None = None) -> list[MobTrackSnapshot]:
         with self._lock:
             return [self._to_snapshot(track) for track in self._tracks if is_alive(track)]
+
+    def mark_debuff_applied(self, track_id: int) -> bool:
+        """Record that the configured per-mob debuff was cast successfully."""
+        with self._lock:
+            track = self._get_track_by_id_locked(track_id)
+            if track is None or not is_alive(track):
+                return False
+            track.debuff_applied = True
+            return True
 
     def apply_attack_event(self, track_id: int, *, now_tick: int | None = None) -> bool:
         tick = now_tick if now_tick is not None else monotonic_ms()
@@ -821,6 +831,7 @@ class HuntTracks:
             y=track.y,
             confidence=track.confidence,
             attack_count=track.attack_count,
+            debuff_applied=track.debuff_applied,
             state=track.state,
             mob_name=track.mob_name,
             updated_tick=track.updated_tick,

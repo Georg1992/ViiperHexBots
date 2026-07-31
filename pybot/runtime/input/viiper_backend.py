@@ -172,6 +172,17 @@ class ViiperBackend(ShadowInputBackend):
             time.sleep(0.005)
         return True
 
+    def move_and_click(self, x: int, y: int) -> bool:
+        """Move and click atomically under the input operation lock."""
+        with self._operation_lock:
+            self._ensure_connected()
+            user32.SetCursorPos(int(x), int(y))
+            time.sleep(0.005)
+            self._mouse_button(MOUSE_BUTTON_LEFT, down=True)
+            time.sleep(0.05)
+            self._mouse_button(MOUSE_BUTTON_LEFT, down=False)
+        return True
+
     def skill_click(self, scan_code: int) -> bool:
         """Press a keyboard key, left-click, then release the key.
 

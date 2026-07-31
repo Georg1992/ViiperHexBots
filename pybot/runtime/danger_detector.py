@@ -15,7 +15,10 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from pybot.runtime.constants import WORKER_POLL_INTERVAL_S
+from pybot.runtime.constants import (
+    HP_HEAL_DAMAGE_QUIET_S,
+    WORKER_POLL_INTERVAL_S,
+)
 
 if TYPE_CHECKING:
     from pybot.game_state import PlayerVitals
@@ -79,6 +82,21 @@ class DangerDetector:
             bool(state.is_surrounded)
             or int(state.nearby_mob_count) > 0
             or int(state.nearby_any_mobs_count) > 0
+        )
+
+    def is_safe_for_heal(self) -> bool:
+        """True when a self-heal may run without an active nearby threat.
+
+        The post-teleport grace window is intentionally safe; otherwise the
+        character must have no nearby visual/tracked threat and no recent HP
+        damage. Discovery suspension always wins over healing.
+        """
+        if self._ctx.discovery_suspend.is_set():
+            return False
+        if self._ctx.in_post_teleport_heal_window():
+            return True
+        return not self.has_nearby_threat() and not self.has_recent_damage(
+            HP_HEAL_DAMAGE_QUIET_S
         )
 
     def has_recent_damage(self, within_s: float) -> bool:

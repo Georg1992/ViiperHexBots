@@ -29,16 +29,14 @@ SIT_IDLE_BEFORE_SIT_S = 1.0
 SIT_STAND_RESUME_DELAY_S = 0.5
 # Wait after sit/stand key tap for the toggle animation to finish.
 SIT_KEY_SETTLE_S = 0.35
-# Press HP Restore Key when vision HP/max is below this (item path only).
+# Press HP Item Key when vision HP/max is below this.
 HP_RESTORE_RATIO = 0.5
-# Vision HP poll / min gap between HP Restore Key presses (item path).
+# Vision HP poll / min gap between HP Item Key presses.
 HP_RESTORE_POLL_S = 1.0
 HP_RESTORE_COOLDOWN_S = 1.0
-# Heal-skill path: poll fast so heal↔hunt handoff after TP/clear is seamless.
-HP_HEAL_SKILL_POLL_S = WORKER_POLL_INTERVAL_S
-# No HP drop for this long before heal-skill may start/continue (outside post-TP).
+# No HP drop for this long before custom self-heal may run.
 HP_HEAL_DAMAGE_QUIET_S = 1.0
-# After teleport settle, mobs ignore the character briefly — heal freely then.
+# After teleport settle, custom self-heal may cast during this grace window.
 HP_POST_TELEPORT_HEAL_S = 2.0
 
 # Minimum gap between distinct skill-timer key presses when several are due.
@@ -90,7 +88,6 @@ __all__ = [
     "HP_RESTORE_RATIO",
     "HP_RESTORE_POLL_S",
     "HP_RESTORE_COOLDOWN_S",
-    "HP_HEAL_SKILL_POLL_S",
     "HP_HEAL_DAMAGE_QUIET_S",
     "HP_POST_TELEPORT_HEAL_S",
     "SKILL_TIMER_STAGGER_MS",

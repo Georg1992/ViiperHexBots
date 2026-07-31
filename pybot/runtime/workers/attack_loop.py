@@ -152,17 +152,72 @@ class AttackLoop:
         click_x, click_y = snap.x, snap.y
         char_x, char_y = self._character_pos()
 
+        # A configured debuff is cast once for this stable track before its
+        # first attack. Failed input leaves the flag unset so the next cycle
+        # can retry instead of attacking an unprepared target.
+        try:
+            prepared = self._mob_behavior.prepare_target(
+                target_id,
+                click_x,
+                click_y,
+                self._input,
+                target_debuffed=getattr(snap, "debuff_applied", False),
+                mark_debuffed=lambda: ctx.tracks.mark_debuff_applied(target_id),
+            )
+        except Exception:
+            ctx.logger.behavior(
+                f"[ATTACK] custom target preparation error id={target_id}:\\n"
+                f"{traceback.format_exc()}"
+            )
+            return
+        if not prepared:
+            return
+
+        # Custom behavior runs before the attack: kite, then safe self-heal.
+        # Its input methods are atomic, so the cursor cannot be interleaved with
+        # another worker's self-cast or storage action.
+        try:
+            all_mobs = ctx.tracks.positions_snapshot()
+            self._mob_behavior.before_attack(
+                char_x, char_y, self._input, all_mobs=all_mobs,
+            )
+        except Exception:
+            ctx.logger.behavior(
+                f"[ATTACK] custom pre-attack error id={target_id}:\n"
+                f"{traceback.format_exc()}"
+            )
+
         # Idle death: cheap cache samples around the configured skill delay.
         # Pacing is exactly skill_delay_ms (plus click) — no OCR / capture here.
         pre_sp, pre_obs_ms, pre_chg_ms = self._vitals.sp_sample()
         try:
-            self._input.move_mouse(click_x, click_y)
-            self._input.skill_click(ctx.config.skill_scan_code)
+            # Atomic target move + skill key + click. This prevents a periodic
+            # self-buff or heal worker from stealing the cursor between move
+            # and attack input.
+            attack_started = self._input.skill_click_at(
+                ctx.config.skill_scan_code, click_x, click_y
+            )
         except Exception:
             ctx.logger.behavior(
                 f"[ATTACK] input error id={target_id}:\n{traceback.format_exc()}"
             )
             return
+        if not attack_started:
+            return
+
+        # Start kiting immediately after the attack input, before the skill
+        # delay. This gives movement the full delay window to take effect.
+        kite_x, kite_y = char_x, char_y
+        try:
+            kite_x, kite_y = self._character_pos()
+            all_mobs = ctx.tracks.positions_snapshot()
+            self._mob_behavior.kite_after_attack(
+                kite_x, kite_y, self._input, all_mobs=all_mobs,
+            )
+        except Exception:
+            ctx.logger.behavior(
+                f"[ATTACK] kite error id={target_id}:\n{traceback.format_exc()}"
+            )
 
         # Sole inter-skill wait — game applies SP cost; UI may refresh vitals.
         self._ctx.stop_event.wait(ctx.config.skill_delay_ms / 1000.0)
@@ -171,19 +226,11 @@ class AttackLoop:
         if not ctx.should_run_combat():
             return
 
-        # Kite: move away from ALL tracked mobs after attacking (Anubis, etc.)
-        try:
-            all_mobs = ctx.tracks.positions_snapshot()
-            self._mob_behavior.kite_after_attack(
-                char_x, char_y, self._input, all_mobs=all_mobs,
-            )
-        except Exception:
-            ctx.logger.behavior(
-                f"[ATTACK] kite error id={target_id}:\n{traceback.format_exc()}"
-            )
-
         post_sp, post_obs_ms, post_chg_ms = self._vitals.sp_sample()
         sample_now = monotonic_ms()
+        # Kiting may have moved the character during the skill delay; use the
+        # fresh position when deciding whether the target is melee-guarded.
+        idle_char_x, idle_char_y = self._character_pos()
 
         was_idle = self._classify_idle(
             target_id, ctx,
@@ -205,8 +252,8 @@ class AttackLoop:
             was_idle=was_idle,
             mob_x=click_x,
             mob_y=click_y,
-            char_x=char_x,
-            char_y=char_y,
+            char_x=idle_char_x,
+            char_y=idle_char_y,
             now_tick=now_tick,
         )
         if not ctx.config.use_sprite_grf and action == "dead":

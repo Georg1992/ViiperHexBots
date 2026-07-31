@@ -240,13 +240,13 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.assertTrue(self.ctx.should_run_discovery())
         self.assertTrue(self.ctx.should_run_tracking())
 
-    def test_heal_ops_pause_combat_and_timers_then_resume(self) -> None:
+    def test_heal_ops_pause_combat_but_not_timers_then_resume(self) -> None:
         self.ctx.mark_running()
         self.assertTrue(self.ctx.begin_heal_ops())
         self.assertTrue(self.ctx.should_run_workers())
         self.assertFalse(self.ctx.should_run_combat())
-        self.assertFalse(self.ctx.should_run_timers())
-        # Discovery/tracking stay up so tracks remain fresh during heal.
+        self.assertTrue(self.ctx.should_run_timers())
+        # Discovery/tracking/timers stay up so state remains fresh during heal.
         self.assertTrue(self.ctx.should_run_discovery())
         self.assertTrue(self.ctx.should_run_tracking())
         self.assertFalse(self.ctx.resume_gate.is_set())

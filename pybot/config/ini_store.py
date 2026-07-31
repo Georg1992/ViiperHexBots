@@ -12,6 +12,7 @@ from pybot.config.schema import (
     MAX_SKILL_TIMERS,
     AppSettings,
     KeyChainStep,
+    MobCustomSettings,
     SkillTimerSetting,
 )
 from pybot.paths import CONFIG_PATH
@@ -50,7 +51,66 @@ def _save_open_storage_chain(steps: list[KeyChainStep]) -> str:
     return json.dumps(payload, separators=(",", ":"))
 
 
-def _load_skill_timers(parser: configparser.ConfigParser) -> list[SkillTimerSetting]:
+def _load_mob_custom_settings(
+    parser: configparser.ConfigParser,
+) -> dict[str, MobCustomSettings]:
+    raw = parser.get("MonsterSettings", "CustomBehaviors", fallback="").strip()
+    if not raw:
+        return {}
+    try:
+        items = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(items, dict):
+        return {}
+
+    result: dict[str, MobCustomSettings] = {}
+    for mob_name, item in items.items():
+        if not isinstance(item, dict):
+            continue
+        key = str(mob_name).strip().lower()
+        if not key:
+            continue
+        try:
+            result[key] = MobCustomSettings(
+                kiting_tick_s=max(0.0, float(item.get("kitingTick", 0.0))),
+                debuff_button=str(item.get("debuffKey", "")).strip(),
+                heal_button=str(item.get("healKey", "")).strip(),
+                buff1_button=str(item.get("buff1Key", "")).strip(),
+                buff1_delay_s=max(0, int(item.get("buff1Delay", 0))),
+                buff2_button=str(item.get("buff2Key", "")).strip(),
+                buff2_delay_s=max(0, int(item.get("buff2Delay", 0))),
+                buff3_button=str(item.get("buff3Key", "")).strip(),
+                buff3_delay_s=max(0, int(item.get("buff3Delay", 0))),
+            )
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _save_mob_custom_settings(
+    settings: dict[str, MobCustomSettings],
+) -> str:
+    payload = {}
+    for mob_name, value in settings.items():
+        key = mob_name.strip().lower()
+        if not key:
+            continue
+        payload[key] = {
+            "kitingTick": float(value.kiting_tick_s),
+            "debuffKey": value.debuff_button,
+            "healKey": value.heal_button,
+            "buff1Key": value.buff1_button,
+            "buff1Delay": int(value.buff1_delay_s),
+            "buff2Key": value.buff2_button,
+            "buff2Delay": int(value.buff2_delay_s),
+            "buff3Key": value.buff3_button,
+            "buff3Delay": int(value.buff3_delay_s),
+        }
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def _load_skill_timers(parser: configparser.ConfigParser):
     raw = parser.get("Keybindings", "SkillTimers", fallback="").strip()
     if raw:
         try:
@@ -119,6 +179,7 @@ def load_settings(path: Path | None = None) -> AppSettings:
             parser.get("Client", "Profile", fallback="Generic")
         ),
         selected_monster=parser.getint("MonsterSettings", "SelectedMonster", fallback=1),
+        mob_custom_settings=_load_mob_custom_settings(parser),
         search_range=parser.getint("Settings", "SearchRange", fallback=16),
         hunt_mode=parser.get("Settings", "HuntMode", fallback="teleport"),
         time_on_location=parser.getint("Settings", "TimeOnLocation", fallback=20),
@@ -138,7 +199,6 @@ def load_settings(path: Path | None = None) -> AppSettings:
         teleport_delay=parser.getint("Keybindings", "TeleportDelay", fallback=800),
         save_point_button=parser.get("Keybindings", "SavePointButton", fallback=""),
         hp_button=parser.get("Keybindings", "HPButton", fallback=""),
-        heal_skill=parser.getint("Keybindings", "HealSkill", fallback=0) == 1,
         sp_button=parser.get("Keybindings", "SPButton", fallback=""),
         open_storage_chain=_load_open_storage_chain(parser),
         skill_timers=_load_skill_timers(parser),
@@ -174,6 +234,9 @@ def save_settings(settings: AppSettings) -> None:
 
     _ensure_section(parser, "MonsterSettings")
     parser["MonsterSettings"]["SelectedMonster"] = str(settings.selected_monster)
+    parser["MonsterSettings"]["CustomBehaviors"] = _save_mob_custom_settings(
+        settings.mob_custom_settings
+    )
 
     _ensure_section(parser, "Settings")
     parser["Settings"]["SearchRange"] = str(settings.search_range)
@@ -206,7 +269,8 @@ def save_settings(settings: AppSettings) -> None:
     parser["Keybindings"]["TeleportDelay"] = str(settings.teleport_delay)
     parser["Keybindings"]["SavePointButton"] = settings.save_point_button
     parser["Keybindings"]["HPButton"] = settings.hp_button
-    parser["Keybindings"]["HealSkill"] = "1" if settings.heal_skill else "0"
+    # HealSkill was removed; self-healing is configured per mob.
+    parser["Keybindings"].pop("HealSkill", None)
     parser["Keybindings"]["SPButton"] = settings.sp_button
     parser["Keybindings"]["OpenStorageChain"] = _save_open_storage_chain(
         settings.open_storage_chain

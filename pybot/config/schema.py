@@ -12,6 +12,21 @@ MAX_OPEN_STORAGE_STEPS = 7
 
 
 @dataclass
+class MobCustomSettings:
+    """Per-mob kiting and self-cast skill settings."""
+
+    kiting_tick_s: float = 0.0
+    debuff_button: str = ""
+    heal_button: str = ""
+    buff1_button: str = ""
+    buff1_delay_s: int = 0
+    buff2_button: str = ""
+    buff2_delay_s: int = 0
+    buff3_button: str = ""
+    buff3_delay_s: int = 0
+
+
+@dataclass
 class SkillTimerSetting:
     """One periodic skill-timer key press."""
 
@@ -64,10 +79,10 @@ class AppSettings:
     teleport_delay: int = 800
     save_point_button: str = ""
     hp_button: str = ""
-    heal_skill: bool = False
     sp_button: str = ""
     open_storage_chain: list[KeyChainStep] = field(default_factory=list)
     skill_timers: list[SkillTimerSetting] = field(default_factory=list)
+    mob_custom_settings: dict[str, MobCustomSettings] = field(default_factory=dict)
     sit_on_low_sp: bool = False
     sit_on_low_sp_button: str = "insert"
 

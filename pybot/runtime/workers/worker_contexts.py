@@ -10,7 +10,7 @@ depends on the full god object.
 Pause matrix (see ``runtime_context`` module docstring):
   sit     → discovery, tracking, attack, timers idle
   storage → discovery, tracking, attack idle; timers keep running
-  heal    → attack, timers idle; discovery/tracking keep running
+  heal    → attack idle; discovery/tracking/timers keep running
   sit ↔ storage ↔ heal mutually exclusive
 """
 
@@ -112,11 +112,19 @@ class AttackLoopContext(
     def character_screen_pos(self) -> tuple[int, int] | None: ...
 
 
+class SelfBuffWorkerContext(CanStop, CanLog, HasConfig, Protocol):
+    """Hunt runtime subset consumed by per-mob self-buff casts."""
+
+    def should_run_combat(self) -> bool: ...
+    def wait_while_combat_blocked(self, timeout_s: float) -> bool: ...
+    def character_screen_pos(self) -> tuple[int, int] | None: ...
+
+
 class SkillTimerWorkerContext(CanStop, CanLog, HasConfig, Protocol):
     """Hunt runtime subset consumed by SkillTimerWorker.
 
-    Uses ``should_run_timers``: idle during sit/pause/heal; keep firing
-    during storage so timer schedules are not re-armed mid-session.
+    Uses ``should_run_timers``: idle during sit/pause; keep firing during
+    storage/healing so timer schedules are not re-armed mid-session.
     """
 
     @property
@@ -125,26 +133,11 @@ class SkillTimerWorkerContext(CanStop, CanLog, HasConfig, Protocol):
     def should_run_timers(self) -> bool: ...
 
 
-class HpRestoreWorkerContext(CanStop, CanLog, HasConfig, CanCapture, Protocol):
-    """Hunt runtime subset consumed by HpRestoreWorker.
+class HpRestoreWorkerContext(CanStop, CanLog, HasConfig, Protocol):
+    """Hunt runtime subset consumed by the HP item worker."""
 
-    Idle during sit/pause (``should_run_workers``); keeps running during
-    storage. Heal-until-full pauses combat via ``begin_heal_ops`` when HP
-    is not full and safe, or during the post-teleport heal window. Danger TP
-    and pause abort an in-progress heal-until-full session.
-    """
-
-    @property
-    def discovery_suspend(self) -> object: ...
-    @property
-    def pause_event(self) -> object: ...
-
-    def character_screen_pos(self) -> tuple[int, int] | None: ...
-    def begin_heal_ops(self) -> bool: ...
-    def end_heal_ops(self) -> None: ...
-    def in_post_teleport_heal_window(self) -> bool: ...
-    def wait_unless_stopped(self, timeout_s: float) -> bool: ...
-    def wait_unless_paused_or_suspended(self, timeout_s: float) -> bool: ...
+    def should_run_workers(self) -> bool: ...
+    def wait_while_stopped_or_paused(self, timeout_s: float) -> bool: ...
 
 
 class CharacterStateWorkerContext(

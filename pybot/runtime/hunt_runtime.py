@@ -28,7 +28,10 @@ from pybot.recognition.detector.detector import load_detector_config
 from pybot.runtime.detection.detector_session import DetectorSession
 from pybot.runtime.workers.attack_loop import AttackLoop
 from pybot.runtime.workers.coord_tracking_worker import CoordTrackingWorker
-from pybot.runtime.mob_behaviors import get_mob_behavior
+from pybot.runtime.mob_behaviors import (
+    get_configured_mob_behavior,
+    get_mob_behavior,
+)
 from pybot.runtime.danger_detector import DangerDetector
 from pybot.runtime.teleport import TeleportController
 from pybot.runtime.character_state import CharacterState
@@ -37,6 +40,7 @@ from pybot.game_state import PlayerVitals
 
 from pybot.runtime.workers.discovery_worker import DiscoveryWorker
 from pybot.runtime.workers.skill_timer_worker import SkillTimerWorker
+from pybot.runtime.workers.self_buff_worker import SelfBuffWorker
 from pybot.config.clients import (
     MemoryAddresses,
     load_client_profile,
@@ -98,8 +102,9 @@ class RuntimeDependencies:
     input_backend: InputBackend
     hunt_mode: HuntModeController
     logger: HuntLogger
-    teleport_controller: TeleportController
     workers: list[tuple[str, Callable[[], None]]]
+    # Optional for lightweight test/runtime fixtures; production always wires it.
+    teleport_controller: TeleportController | None = None
 
 
 def _build_logger(
@@ -220,6 +225,7 @@ def _build_core_workers(
     player_vitals: PlayerVitals,
     mob_behavior,
     character_state: CharacterState,
+    danger: DangerDetector | None = None,
 ) -> tuple[list[tuple[str, Callable[[], None]]], DangerDetector]:
     """Build always-running workers: danger, coord, discovery, attack.
 
@@ -231,9 +237,10 @@ def _build_core_workers(
     roi = ctx.capture.get_hunt_roi()
     char_x = roi.x + roi.w // 2 if roi else 0
     char_y = roi.y + roi.h // 2 if roi else 0
-    danger = DangerDetector(
-        ctx, tport, character_state, vitals=player_vitals,
-    )
+    if danger is None:
+        danger = DangerDetector(
+            ctx, tport, character_state, vitals=player_vitals,
+        )
     attack = AttackLoop(
         ctx, hunt_mode, input_backend,
         mob_behavior=mob_behavior,
@@ -262,17 +269,16 @@ def _build_conditional_workers(
 
     if any(t.scan_code and t.interval_ms > 0 for t in ctx.config.skill_timers):
         workers.append(("skill_timer", SkillTimerWorker(ctx, input_backend).run))
+    if ctx.config.custom_behavior.buffs:
+        workers.append(("custom_buffs", SelfBuffWorker(ctx, input_backend).run))
     if ctx.config.hp_scan_code > 0:
-        if danger is None:
-            raise RuntimeError("HP restore requires a shared DangerDetector")
         workers.append(
             (
                 "hp_restore",
-                HpRestoreWorker(
-                    ctx, input_backend, player_vitals, danger=danger,
-                ).run,
+                HpRestoreWorker(ctx, input_backend, player_vitals).run,
             )
         )
+
     if ctx.config.sit_on_low_sp:
         if danger is None:
             raise RuntimeError("Sit-on-low-SP requires a shared DangerDetector")
@@ -309,8 +315,6 @@ def create_runtime_deps(
 
     input_backend: InputBackend = ViiperBackend()
     player_vitals = vitals or PlayerVitals()
-    mob_behavior = get_mob_behavior(config.mob_name)
-
     # Create TeleportController early — every teleport concern lives here.
     tport = TeleportController(ctx, input_backend, None)
     _validate_teleport_mode(config, tport)
@@ -323,9 +327,25 @@ def create_runtime_deps(
     char_state = CharacterState()
     char_monitor = CharacterStateMonitor(ctx, char_state)
 
+    # Build danger before the configurable behavior because safe self-heal
+    # decisions share its threat/teleport observations.
+    danger = DangerDetector(
+        ctx, tport, char_state, vitals=player_vitals,
+    )
+    legacy_behavior = get_mob_behavior(config.mob_name)
+    if config.custom_behavior.configured:
+        mob_behavior = get_configured_mob_behavior(
+            config.custom_behavior,
+            player_vitals,
+            danger,
+            legacy_behavior=legacy_behavior,
+        )
+    else:
+        mob_behavior = legacy_behavior
+
     core_workers, danger = _build_core_workers(
         ctx, hunt_mode, input_backend, tport, player_vitals, mob_behavior,
-        character_state=char_state,
+        character_state=char_state, danger=danger,
     )
     core_workers.append(("charstate", char_monitor.run))
 
@@ -434,10 +454,13 @@ class HuntRuntime:
             f"[PYBOT] hunt runtime start mob={ctx.config.mob_name} hwnd={ctx.config.hwnd} "
             f"mode={ctx.config.hunt_mode} roi={roi_text}"
         )
+        teleport_button = (
+            self._teleport.active_button() if self._teleport is not None else ""
+        )
         ctx.logger.behavior(
             f"[MODE] active={ctx.config.hunt_mode} "
             f"skill={ctx.config.skill_button} "
-            f"teleport={self._teleport.active_button()!r}"
+            f"teleport={teleport_button!r}"
         )
 
         threads = [

@@ -523,7 +523,7 @@ class HeatmapDetector:
             fh, fw = frame_bgr.shape[:2]
             return cv2.resize(
                 frame_bgr,
-                (fw // downscale, fh // downscale),
+                (max(1, fw // downscale), max(1, fh // downscale)),
                 interpolation=cv2.INTER_NEAREST,
             )
         return frame_bgr

@@ -126,8 +126,9 @@ class DetectorSession:
     ) -> DiscoveryScanResult:
         """Discovery scan — silhouette-gate pipeline.
 
-        sprite.grf mode forces 4× downscale in the detector for speed; the
-        pipeline is identical otherwise.  Dedup against existing tracks is
+        sprite.grf mode uses a deterministic 4× discovery scale for every
+        mob, independent of descriptor dimensions. The pipeline is identical
+        otherwise. Dedup against existing tracks is
         handled by TrackReconciler after detection.
         """
         if frame is None or frame.size == 0:

@@ -13,6 +13,7 @@ from pybot.runtime.control import RuntimeControl
 from pybot.runtime.hunt_mode import create_hunt_mode
 from pybot.runtime.hunt_policy import HuntPolicy
 from pybot.runtime.hunt_tracks import HuntTracks
+from pybot.runtime.gate_controller import GateController
 from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.logging import HuntLogger
 from pybot.runtime.runtime_context import HuntRuntimeContext
@@ -56,8 +57,9 @@ class ShadowPipelineTests(unittest.TestCase):
             tracker=detector,
             validation=HuntValidationLogger(logger, tracks, enabled=False),
             control=RuntimeControl(None),
-            stop_event=stop,
+            gates=GateController(),
         )
+        ctx.stop_event = stop
         hunt_mode = create_hunt_mode(ctx, ShadowInputBackend())
 
         from pybot.recognition.rules import DiscoveryDetection

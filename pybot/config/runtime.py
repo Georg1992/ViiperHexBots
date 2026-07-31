@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from pybot.config.ini_store import load_settings
-from pybot.config.schema import AppSettings
+from pybot.config.schema import AppSettings, MobCustomSettings
 from pybot.mobs.catalog import resolve_mob_descriptor_name
 from pybot.paths import CONFIG_PATH, SESSIONS_DIR
 from pybot.runtime.constants import (
@@ -23,6 +23,24 @@ class SkillTimerRuntime:
     button: str
     scan_code: int
     interval_ms: int
+
+
+@dataclass(frozen=True)
+class SelfBuffRuntime:
+    button: str
+    scan_code: int
+    delay_ms: int
+
+
+@dataclass(frozen=True)
+class CustomBehaviorRuntime:
+    configured: bool = False
+    kiting_tick_ms: int = 0
+    debuff_button: str = ""
+    debuff_scan_code: int = 0
+    heal_button: str = ""
+    heal_scan_code: int = 0
+    buffs: tuple[SelfBuffRuntime, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -45,11 +63,11 @@ class HuntRuntimeConfig:
     creamy_tp_button: str = ""
     creamy_tp_scan_code: int = 0
     skill_timers: tuple[SkillTimerRuntime, ...] = ()
+    custom_behavior: CustomBehaviorRuntime = CustomBehaviorRuntime()
     save_point_button: str = ""
     save_point_scan_code: int = 0
     hp_button: str = ""
     hp_scan_code: int = 0
-    heal_skill: bool = False
     sp_button: str = ""
     sp_scan_code: int = 0
     # (button, scan_code, delay_ms) for each assigned Open Storage chain step.
@@ -127,13 +145,44 @@ def hunt_runtime_config_from_settings(
                 )
             )
 
+    resolved_mob_name = resolve_mob_descriptor_name(
+        selected_monster=settings.selected_monster,
+        mob_name=mob_name,
+    )
+    custom_settings = settings.mob_custom_settings.get(
+        resolved_mob_name.strip().lower(), MobCustomSettings()
+    )
+    custom_buffs: list[SelfBuffRuntime] = []
+    for button, delay_s in (
+        (custom_settings.buff1_button, custom_settings.buff1_delay_s),
+        (custom_settings.buff2_button, custom_settings.buff2_delay_s),
+        (custom_settings.buff3_button, custom_settings.buff3_delay_s),
+    ):
+        button = button.strip()
+        scan = key_name_to_scan_code(button)
+        if button and scan > 0 and int(delay_s) > 0:
+            custom_buffs.append(
+                SelfBuffRuntime(
+                    button=button,
+                    scan_code=scan,
+                    delay_ms=max(1, int(delay_s)) * 1000,
+                )
+            )
+    custom_behavior = CustomBehaviorRuntime(
+        configured=resolved_mob_name.strip().lower()
+        in settings.mob_custom_settings,
+        kiting_tick_ms=max(0, int(round(custom_settings.kiting_tick_s * 1000))),
+        debuff_button=custom_settings.debuff_button.strip(),
+        debuff_scan_code=key_name_to_scan_code(custom_settings.debuff_button),
+        heal_button=custom_settings.heal_button.strip(),
+        heal_scan_code=key_name_to_scan_code(custom_settings.heal_button),
+        buffs=tuple(custom_buffs),
+    )
+
     return HuntRuntimeConfig(
         config_path=settings.config_path,
         hwnd=hwnd,
-        mob_name=resolve_mob_descriptor_name(
-            selected_monster=settings.selected_monster,
-            mob_name=mob_name,
-        ),
+        mob_name=resolved_mob_name,
         hunt_mode=hunt_mode or settings.hunt_mode,
         skill_delay_ms=max(200, settings.skill_delay),
         skill_button=settings.skill_button,
@@ -149,11 +198,11 @@ def hunt_runtime_config_from_settings(
         validation_enabled=val_enabled,
         control_file=resolved_control,
         skill_timers=tuple(skill_timers),
+        custom_behavior=custom_behavior,
         save_point_button=settings.save_point_button,
         save_point_scan_code=key_name_to_scan_code(settings.save_point_button),
         hp_button=settings.hp_button,
         hp_scan_code=key_name_to_scan_code(settings.hp_button),
-        heal_skill=settings.heal_skill,
         sp_button=settings.sp_button,
         sp_scan_code=key_name_to_scan_code(settings.sp_button),
         open_storage_steps=_open_storage_steps_from_settings(settings),

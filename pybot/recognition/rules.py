@@ -105,6 +105,8 @@ class MobTrack:
     # At >= DISCOVERY_MISS_REMOVE_COUNT the track is removed — it failed
     # discovery gates that many times in a row, meaning it's dead or gone.
     discovery_miss_count: int = 0
+    # True after the configured per-mob debuff was successfully cast once.
+    debuff_applied: bool = False
 
     @classmethod
     def from_discovery(

@@ -16,7 +16,7 @@ Signal  Discovery Tracking    Attack Timers
 pause   no        no          no     no
 sit     no        no          no     no
 storage no        no          no     yes
-heal    yes       yes         no     no
+heal    yes       yes         no     yes
 ======= ========= =========== ====== ======
 
 Sit, storage, and heal are mutually exclusive.

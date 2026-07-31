@@ -35,7 +35,7 @@ class GateController:
         self.sitting_event = threading.Event()
         # Set while ItemsToStorage / GetFlyWings runs — combat idles; timers keep going.
         self.storage_event = threading.Event()
-        # Set while heal-until-full — combat/timers idle; discovery/tracking keep running.
+        # Set while heal-until-full — combat idles; discovery/tracking/timers keep running.
         self.healing_event = threading.Event()
         self._sit_storage_lock = threading.Lock()
         # Monotonic deadline: after teleport settle, heal freely until this time.
@@ -50,7 +50,7 @@ class GateController:
         """True when discovery, tracking, and skill timers may run.
 
         False while stopped, user-paused, or sitting. Storage/healing do not
-        clear this (HP restore keeps running; timers have their own gate).
+        clear this; their combat-specific gates are checked separately.
         """
         return (
             not self.stop_event.is_set()
@@ -70,10 +70,10 @@ class GateController:
     def should_run_timers(self) -> bool:
         """True when skill timers may fire.
 
-        Timers keep running during storage, but pause during heal so they
-        cannot steal the skill bar mid-heal cast.
+        Timers keep running during storage and healing. Sitting and the
+        user-pause gate still stop them through ``should_run_workers``.
         """
-        return self.should_run_workers() and not self.healing_event.is_set()
+        return self.should_run_workers()
 
     def should_allow_danger_teleport(self) -> bool:
         """True when danger TP may run.
