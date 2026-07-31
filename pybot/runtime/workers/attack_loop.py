@@ -168,10 +168,15 @@ class AttackLoop:
         self._ctx.stop_event.wait(ctx.config.skill_delay_ms / 1000.0)
 
         # Kite: move away from ALL tracked mobs after attacking (Anubis, etc.)
-        all_mobs = ctx.tracks.positions_snapshot()
-        self._mob_behavior.kite_after_attack(
-            char_x, char_y, self._input, all_mobs=all_mobs,
-        )
+        try:
+            all_mobs = ctx.tracks.positions_snapshot()
+            self._mob_behavior.kite_after_attack(
+                char_x, char_y, self._input, all_mobs=all_mobs,
+            )
+        except Exception:
+            ctx.logger.behavior(
+                f"[ATTACK] kite error id={target_id}:\n{traceback.format_exc()}"
+            )
 
         post_sp, post_obs_ms, post_chg_ms = self._vitals.sp_sample()
         sample_now = monotonic_ms()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import MagicMock
 
 from pybot.mobs.catalog import load_mob_catalog
 from pybot.runtime.mob_behaviors import (
@@ -44,6 +45,18 @@ class MobBehaviorRegistryTests(unittest.TestCase):
         self.assertFalse(mob_has_custom_behavior("horn"))
         self.assertFalse(mob_has_custom_behavior(""))
         self.assertIsInstance(get_mob_behavior("not_a_mob"), MobBehavior)
+
+    def test_anubis_kite_moves_away_from_mob_center(self) -> None:
+        behavior = AnubisBehavior()
+        backend = MagicMock()
+        backend.left_click.return_value = True
+        # Char at (100, 100); one mob at (120, 100) → kite left to (80, 100).
+        ok = behavior.kite_after_attack(
+            100, 100, backend, all_mobs=[(120, 100)],
+        )
+        self.assertTrue(ok)
+        backend.move_mouse.assert_called_once_with(80, 100)
+        backend.left_click.assert_called_once()
 
 
 if __name__ == "__main__":
