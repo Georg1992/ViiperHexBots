@@ -11,7 +11,11 @@ from pybot.paths import PROJECT_ROOT, RECOGNITION_DIR
 from pybot.recognition.cli import apply_scale_calibration
 from pybot.recognition.fixtures import default_horn_fixture
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
-from pybot.recognition.detector.tracking.local_tracker import LocalTrackResult, track_local
+from pybot.recognition.detector.tracking.local_tracker import (
+    LocalTrackResult,
+    _local_follow_scales,
+    track_local,
+)
 
 ROOT = PROJECT_ROOT
 MOB_REC = RECOGNITION_DIR
@@ -109,6 +113,14 @@ class LocalTrackerTests(unittest.TestCase):
         result = track_local(detector, self.roi, "horn", track)
         self.assertTrue(result.found)
         self.assertGreater(result.confidence, 0.0)
+
+    def test_local_follow_scales_prefers_track_scale(self) -> None:
+        self.assertEqual(
+            _local_follow_scales([0.35, 0.45, 0.55, 0.82, 0.98], 0.90),
+            [0.90, 0.98],
+        )
+        self.assertEqual(_local_follow_scales([0.35, 0.45], 0.35), [0.35, 0.45])
+        self.assertEqual(_local_follow_scales([], 0.90), [0.90])
 
     def test_benchmark_one_three_six_tracks(self) -> None:
         detector = self._detector()

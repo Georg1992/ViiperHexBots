@@ -107,6 +107,23 @@ _MIN_EXTRACT_COMPONENT_PX = 4
 _MIN_HORIZONTAL_BRIDGE_PX = 3
 _DEFORM_RADIUS_SILHOUETTE_CELLS = 2
 _MORPH_NEIGHBORHOOD_PX = 3
+# Fixed morph kernels — recreating these every score_at was pure overhead.
+_MORPH_ELLIPSE_3 = cv2.getStructuringElement(
+    cv2.MORPH_ELLIPSE, (_MORPH_NEIGHBORHOOD_PX, _MORPH_NEIGHBORHOOD_PX),
+)
+_MORPH_RECT_3 = cv2.getStructuringElement(
+    cv2.MORPH_RECT, (_MORPH_NEIGHBORHOOD_PX, _MORPH_NEIGHBORHOOD_PX),
+)
+
+
+@lru_cache(maxsize=64)
+def _horizontal_bridge_kernel(bridge_px: int) -> np.ndarray:
+    return cv2.getStructuringElement(cv2.MORPH_RECT, (bridge_px, 1))
+
+
+@lru_cache(maxsize=16)
+def _ellipse_kernel(ksize: int) -> np.ndarray:
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
 
 
 def _descriptor_sprite_size_px(descriptor: MobDescriptor) -> tuple[int, int]:
@@ -855,12 +872,7 @@ class MobDetector:
         if not np.any(binary_raw):
             return fail
 
-        k = _MORPH_NEIGHBORHOOD_PX
-        binary = cv2.dilate(
-            binary_raw,
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)),
-            iterations=1,
-        )
+        binary = cv2.dilate(binary_raw, _MORPH_ELLIPSE_3, iterations=1)
         best_mask = self._best_overlapping_palette_component(
             binary, local_bbox_left, local_bbox_top, ref_w, ref_h,
         )
@@ -1083,13 +1095,13 @@ class MobDetector:
         closed = cv2.morphologyEx(
             band,
             cv2.MORPH_CLOSE,
-            cv2.getStructuringElement(cv2.MORPH_RECT, (bridge_px, 1)),
+            _horizontal_bridge_kernel(bridge_px),
         )
         grown = best_mask.astype(np.uint8)
-        k = _MORPH_NEIGHBORHOOD_PX
-        grow_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
         for _ in range(max(1, bridge_px // 2)):
-            grown = cv2.bitwise_and(cv2.dilate(grown, grow_kernel, iterations=1), closed)
+            grown = cv2.bitwise_and(
+                cv2.dilate(grown, _MORPH_RECT_3, iterations=1), closed,
+            )
         return grown.astype(bool) | best_mask
 
     def _maybe_deform_noisy_candidate(
@@ -1161,16 +1173,17 @@ class MobDetector:
         cell_px = max(1, int(round(w / float(gate_w))))
         radius_px = _DEFORM_RADIUS_SILHOUETTE_CELLS * cell_px
         ksize = 2 * radius_px + 1
-        band_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
-        band = cv2.dilate(base.astype(np.uint8), band_kernel, iterations=1).astype(bool)
+        band = cv2.dilate(
+            base.astype(np.uint8), _ellipse_kernel(ksize), iterations=1,
+        ).astype(bool)
         allowed = (band & signal) | base
 
         grown = base.astype(np.uint8)
-        k = _MORPH_NEIGHBORHOOD_PX
-        grow_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
         allowed_u8 = allowed.astype(np.uint8)
         for _ in range(radius_px):
-            nxt = cv2.bitwise_and(cv2.dilate(grown, grow_kernel, iterations=1), allowed_u8)
+            nxt = cv2.bitwise_and(
+                cv2.dilate(grown, _MORPH_ELLIPSE_3, iterations=1), allowed_u8,
+            )
             if np.array_equal(nxt, grown):
                 break
             grown = nxt

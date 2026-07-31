@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from pybot.recognition.rules import (
     DiscoveryDetection,
@@ -219,9 +219,13 @@ class HuntTracks:
     def tracking_frame_snapshot(
         self, now_tick: int | None = None
     ) -> tuple[int, list[MobTrack]]:
-        """Atomic sample for one tracking pass: epoch + deep-copied alive tracks."""
+        """Atomic sample for one tracking pass: epoch + copied alive tracks.
+
+        ``replace`` is enough — MobTrack fields are scalars/tuples; the
+        snapshot is read-only before ``apply_tracking`` writes under the lock.
+        """
         with self._lock:
-            alive = [copy.deepcopy(t) for t in self._tracks if is_alive(t)]
+            alive = [replace(t) for t in self._tracks if is_alive(t)]
             return self._area_epoch, alive
 
     # ── Discovery candidates pipeline ────────────────────────────────────

@@ -198,8 +198,8 @@ class CoordTrackingWorker:
         dedup_radius = int(config["trackDedupRadiusPx"])
         dedup_sq = dedup_radius * dedup_radius
 
-        created = 0
-        retry: list = []
+        pending: list = []
+        snaps: list[StateTrackSnapshot] = []
         for candidate in candidates:
             cx, cy = candidate.x, candidate.y
 
@@ -216,28 +216,43 @@ class CoordTrackingWorker:
             if candidate.candidate_scale <= 0:
                 continue
 
-            # Build a temporary snapshot for track_local on the fresh frame.
-            # Uses track_id=0 as a sentinel — track_locals_frame treats this
-            # like any other track for the local-follow search; only the
-            # result's x/y are used for track creation.
-            snap = StateTrackSnapshot(
-                track_id=0,
-                x=cx,
-                y=cy,
-                scale=candidate.candidate_scale,
-                now_tick=now_ms,
+            # track_id=0 sentinel — only result x/y are used for creation.
+            # Batch all candidates on this frame so heatmap setup is shared.
+            snaps.append(
+                StateTrackSnapshot(
+                    track_id=0,
+                    x=cx,
+                    y=cy,
+                    scale=candidate.candidate_scale,
+                    now_tick=now_ms,
+                )
             )
-            batch = ctx.tracker.track_locals_frame(frame, roi, [snap])
-            if not batch.ok or not batch.results:
-                # Transient tracker failure — keep candidate for the next tick.
-                retry.append(candidate)
-                continue
+            pending.append(candidate)
 
-            result = batch.results[0]
+        if not snaps:
+            return 0
+
+        batch = ctx.tracker.track_locals_frame(frame, roi, snaps)
+        if not batch.ok or len(batch.results) != len(pending):
+            ctx.tracks.requeue_discovery_candidates(pending)
+            return 0
+
+        created = 0
+        for candidate, result in zip(pending, batch.results, strict=True):
+            cx, cy = candidate.x, candidate.y
             # Prefer the fresh local-follow hit; if the mob moved/occluded,
             # still create at the discovery point so mode TP cannot claim
             # clear while a published Anubis candidate is dropped.
             create_x, create_y = (result.x, result.y) if result.found else (cx, cy)
+
+            # Re-check dedup after earlier creates in this batch.
+            duplicate = False
+            for px, py in existing_positions:
+                if (create_x - px) ** 2 + (create_y - py) ** 2 <= dedup_sq:
+                    duplicate = True
+                    break
+            if duplicate:
+                continue
 
             # Create under the lock with epoch gate — rejects if teleport won.
             track = ctx.tracks.create_track(
@@ -256,8 +271,6 @@ class CoordTrackingWorker:
             existing_positions.append((create_x, create_y))
             created += 1
 
-        if retry:
-            ctx.tracks.requeue_discovery_candidates(retry)
         if created > 0:
             ctx.logger.behavior(
                 f"[COORD] created {created} track(s) from discovery candidates"

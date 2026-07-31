@@ -51,23 +51,24 @@ _GAUSSIAN_BLUR_MAX_WORK_SIZE_FRAC = 0.40
 _EDGE_DENSITY_BASE = np.float32(0.5)
 _EDGE_DENSITY_WEIGHT = np.float32(0.5)
 
-def _cluster_match(bgr_f: np.ndarray, cluster: ColorCluster) -> np.ndarray:
-    center = np.array(cluster.bgr, dtype=np.float32)
-    diff = bgr_f - center
-    dist = np.sqrt(np.sum(diff * diff, axis=2))
-    max_d = max(float(cluster.max_distance), 1.0)
-    return np.clip(1.0 - dist / max_d, 0.0, 1.0).astype(np.float32)
+def _palette_dist_sq(pixels: np.ndarray, palette: np.ndarray) -> np.ndarray:
+    """Squared Euclidean distances (N, C) via |p-c|² = |p|² + |c|² - 2p·c.
+
+    Routes through BLAS ``dot`` and avoids a (N, C, 3) intermediate.
+    """
+    p_norm = np.sum(pixels * pixels, axis=1, keepdims=True)  # (N, 1)
+    c_norm = np.sum(palette * palette, axis=1, keepdims=True)  # (C, 1)
+    dist_sq = np.dot(pixels, palette.T)  # (N, C)
+    dist_sq *= np.float32(-2.0)
+    dist_sq += p_norm
+    dist_sq += c_norm.T
+    np.maximum(dist_sq, np.float32(0.0), out=dist_sq)  # clamp fp noise
+    return dist_sq
 
 
 def palette_heatmap(frame_bgr: np.ndarray, clusters: list[ColorCluster]) -> np.ndarray:
     """BGR Euclidean heatmap against ColorCluster centers (tracking/opacity)."""
-    if not clusters:
-        return np.zeros(frame_bgr.shape[:2], dtype=np.float32)
-    bgr_f = frame_bgr.astype(np.float32)
-    heat = np.zeros(frame_bgr.shape[:2], dtype=np.float32)
-    for cluster in clusters:
-        heat = np.maximum(heat, _cluster_match(bgr_f, cluster))
-    return heat
+    return _multi_cluster_match_max(frame_bgr.astype(np.float32), clusters)
 
 
 def sprite_palette_heatmap(
@@ -81,14 +82,8 @@ def sprite_palette_heatmap(
 
     pixels = frame_bgr.reshape(-1, 3).astype(np.float32)
     palette = np.asarray(palette_bgr, dtype=np.float32)
-    min_dist_sq = np.full(pixels.shape[0], np.inf, dtype=np.float32)
-    for start in range(0, len(palette), 128):
-        chunk = palette[start : start + 128]
-        diff = pixels[:, None, :] - chunk[None, :, :]
-        dist_sq = np.sum(diff * diff, axis=2)
-        min_dist_sq = np.minimum(min_dist_sq, dist_sq.min(axis=1))
-
-    max_dist = max(max_distance, 1.0)
+    max_dist = np.float32(max(max_distance, 1.0))
+    min_dist_sq = _palette_dist_sq(pixels, palette).min(axis=1)
     heat = 1.0 - (np.sqrt(min_dist_sq) / max_dist)
     return np.clip(heat, 0.0, 1.0).reshape(frame_bgr.shape[:2]).astype(np.float32)
 
@@ -134,14 +129,7 @@ def weighted_sprite_palette_heatmap(
     n_colors = len(palette)
     max_dist = np.float32(max(max_distance, 1.0))
 
-    # --- distance via expansion (avoids 3×-larger diff intermediate) ---
-    p_norm = np.sum(pixels * pixels, axis=1, keepdims=True)            # (N, 1)
-    c_norm = np.sum(palette * palette, axis=1, keepdims=True)          # (C, 1)
-    dist_sq = np.dot(pixels, palette.T)                                # (N, C)
-    dist_sq *= np.float32(-2.0)
-    dist_sq += p_norm                                                  # broadcast (N, 1)
-    dist_sq += c_norm.T                                                # broadcast (1, C)
-    np.maximum(dist_sq, np.float32(0.0), out=dist_sq)  # clamp fp noise
+    dist_sq = _palette_dist_sq(pixels, palette)
 
     # --- nearest-color index → per-color rarity weights ---
     nearest_idx = dist_sq.argmin(axis=1)
@@ -283,10 +271,9 @@ def required_groups_structure(
     # (opaque sprite pixels at native scale).
     body_clusters = mass_body_clusters(descriptor)
     if body_clusters:
-        body_best = np.stack(
-            [_cluster_match(crop_bgr.astype(np.float32), cluster) for cluster in body_clusters],
-            axis=2,
-        ).max(axis=2)
+        body_best = _multi_cluster_match_max(
+            crop_bgr.astype(np.float32), body_clusters,
+        )
         body_strong = float((body_best >= _BODY_STRONG_SIM).mean())
     else:
         body_strong = 0.0
@@ -305,25 +292,14 @@ def required_groups_structure(
 def _multi_cluster_match_max(bgr_f: np.ndarray, clusters: list[ColorCluster]) -> np.ndarray:
     if not clusters:
         return np.zeros(bgr_f.shape[:2], dtype=np.float32)
-    
-    pixels = bgr_f.reshape(-1, 3)
-    n_pixels = pixels.shape[0]
-    
-    centers = np.array([c.bgr for c in clusters], dtype=np.float32)
-    max_dists = np.array([max(float(c.max_distance), 1.0) for c in clusters], dtype=np.float32)
-    
-    p_norm = np.sum(pixels * pixels, axis=1, keepdims=True)
-    c_norm = np.sum(centers * centers, axis=1, keepdims=True)
-    
-    dist_sq = np.dot(pixels, centers.T)
-    dist_sq *= np.float32(-2.0)
-    dist_sq += p_norm
-    dist_sq += c_norm.T
-    np.maximum(dist_sq, np.float32(0.0), out=dist_sq)
-    
-    dist = np.sqrt(dist_sq)
+    pixels = bgr_f.reshape(-1, 3).astype(np.float32, copy=False)
+    centers = np.asarray([cluster.bgr for cluster in clusters], dtype=np.float32)
+    max_dists = np.asarray(
+        [max(float(cluster.max_distance), 1.0) for cluster in clusters],
+        dtype=np.float32,
+    )
+    dist = np.sqrt(_palette_dist_sq(pixels, centers))
     match = np.float32(1.0) - (dist / max_dists)
-    
     return np.clip(match.max(axis=1), 0.0, 1.0).reshape(bgr_f.shape[:2]).astype(np.float32)
 
 

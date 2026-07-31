@@ -281,13 +281,12 @@ def _build_local_follow_heatmap(
     )
 
     final = np.zeros(crop_bgr.shape[:2], dtype=np.float32)
-    # Use at most 2 scales — the track's rough scale plus one adjacent.
-    # For a 16ms tracking interval, the mob's apparent size doesn't change
-    # significantly, so the full multi-scale blend is unnecessary.
-    scales = heatmap_detector._center_scales(crop_bgr.shape[1])
-    if scale not in scales:
-        scales = [scale, *scales]
-    for track_scale in scales[:2]:
+    # At most 2 scales: the track's scale first, then the nearest distinct
+    # centerScale. Preferring the track scale matters — centerScales is often
+    # sorted low→high, so a naive [:2] skipped the known size and weakened peaks.
+    for track_scale in _local_follow_scales(
+        heatmap_detector._center_scales(crop_bgr.shape[1]), scale,
+    ):
         window = (
             max(3, int(round(descriptor.avg_width * track_scale)) | 1),
             max(3, int(round(descriptor.avg_height * track_scale)) | 1),
@@ -300,3 +299,20 @@ def _build_local_follow_heatmap(
         ).astype(np.float32)
         final = np.maximum(final, combined)
     return final
+
+
+def _local_follow_scales(center_scales: list[float], track_scale: float) -> list[float]:
+    """Track scale first, then one nearest distinct entry from centerScales."""
+    scales = [float(track_scale)]
+    nearest: float | None = None
+    nearest_dist = float("inf")
+    for candidate in center_scales:
+        dist = abs(float(candidate) - float(track_scale))
+        if dist < 1e-9:
+            continue
+        if dist < nearest_dist:
+            nearest_dist = dist
+            nearest = float(candidate)
+    if nearest is not None:
+        scales.append(nearest)
+    return scales
