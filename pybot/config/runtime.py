@@ -50,6 +50,7 @@ class HuntRuntimeConfig:
     hp_button: str = ""
     hp_scan_code: int = 0
     heal_skill: bool = False
+    critical_hp_percent: int = 50
     sp_button: str = ""
     sp_scan_code: int = 0
     # (button, scan_code, delay_ms) for each assigned Open Storage chain step.
@@ -154,6 +155,7 @@ def hunt_runtime_config_from_settings(
         hp_button=settings.hp_button,
         hp_scan_code=key_name_to_scan_code(settings.hp_button),
         heal_skill=settings.heal_skill,
+        critical_hp_percent=max(1, min(99, int(settings.critical_hp_percent))),
         sp_button=settings.sp_button,
         sp_scan_code=key_name_to_scan_code(settings.sp_button),
         open_storage_steps=_open_storage_steps_from_settings(settings),

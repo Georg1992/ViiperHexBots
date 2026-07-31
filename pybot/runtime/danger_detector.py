@@ -6,7 +6,8 @@ out.  No other module knows danger exists.
 
 Inputs:
 * ``run()`` — polls ``hp_pair()`` from PlayerVitals; HP drops trigger
-  teleport; drops below 50% of max are logged as critical
+  teleport; drops at/below configured critical HP%% are logged as critical
+  and (when heal skill is enabled) request heal-until-full after the TP
 * ``run()`` (continued) — polls ``CharacterState.is_surrounded`` and
   teleports when the character is boxed in by mobs
 
@@ -24,8 +25,6 @@ if TYPE_CHECKING:
     from pybot.game_state import PlayerVitals
     from pybot.runtime.teleport import TeleportController
     from pybot.runtime.character_state import CharacterState
-
-CRITICAL_HP_RATIO = 0.5
 
 
 class DangerDetector:
@@ -45,6 +44,8 @@ class DangerDetector:
         self._prev_hp: int | None = None
         self._damage_lock = threading.Lock()
         self._damage_detected: bool = False
+        self._heal_lock = threading.Lock()
+        self._heal_until_full_requested: bool = False
 
     # ── Worker loop ───────────────────────────────────────────────
 
@@ -52,10 +53,13 @@ class DangerDetector:
         """Ongoing loop: poll HP + surround state, detect danger, sleep."""
         while not self._ctx.is_stopped():
             self._poll_hp()
-            # Surround teleports only while combat is allowed (not pause/sit/storage).
+            # Surround teleports only while combat is allowed (not pause/sit/storage/heal).
             if self._ctx.should_run_combat():
                 self._poll_surround()
             self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
+
+    def _critical_hp_ratio(self) -> float:
+        return max(1, min(99, int(self._ctx.config.critical_hp_percent))) / 100.0
 
     def _poll_hp(self) -> None:
         """Read HP from shared vitals; record drops; teleport when combat is live."""
@@ -65,10 +69,11 @@ class DangerDetector:
             return
 
         if self._prev_hp is not None and hp < self._prev_hp:
+            critical_ratio = self._critical_hp_ratio()
             is_critical = (
                 hp_max is not None
                 and hp_max > 0
-                and hp / hp_max < CRITICAL_HP_RATIO
+                and hp / hp_max <= critical_ratio
             )
             with self._damage_lock:
                 self._damage_detected = True
@@ -77,6 +82,8 @@ class DangerDetector:
             if self._ctx.should_run_combat():
                 if is_critical:
                     self._teleport.danger_teleport(reason="critical_hp")
+                    with self._heal_lock:
+                        self._heal_until_full_requested = True
                 else:
                     self._teleport.danger_teleport(reason="hp_drop")
         self._prev_hp = hp
@@ -92,5 +99,13 @@ class DangerDetector:
         with self._damage_lock:
             if self._damage_detected:
                 self._damage_detected = False
+                return True
+            return False
+
+    def pop_heal_until_full_requested(self) -> bool:
+        """Return and clear the post-critical heal-until-full request."""
+        with self._heal_lock:
+            if self._heal_until_full_requested:
+                self._heal_until_full_requested = False
                 return True
             return False

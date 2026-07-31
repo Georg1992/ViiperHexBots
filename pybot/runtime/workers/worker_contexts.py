@@ -10,7 +10,8 @@ depends on the full god object.
 Pause matrix (see ``runtime_context`` module docstring):
   sit     → discovery, tracking, attack, timers idle
   storage → discovery, tracking, attack idle; timers keep running
-  sit ↔ storage mutually exclusive
+  heal    → discovery, tracking, attack idle; timers keep running
+  sit ↔ storage ↔ heal mutually exclusive
 """
 
 from __future__ import annotations
@@ -120,9 +121,13 @@ class SkillTimerWorkerContext(CanStop, CanLog, HasConfig, Protocol):
 class HpRestoreWorkerContext(CanStop, CanLog, HasConfig, CanCapture, Protocol):
     """Hunt runtime subset consumed by HpRestoreWorker.
 
-    Idle during sit/pause (``should_run_workers``); keeps running during storage.
+    Idle during sit/pause (``should_run_workers``); keeps running during
+    storage. Heal-until-full pauses combat via ``begin_heal_ops``.
     """
-    pass
+
+    def character_screen_pos(self) -> tuple[int, int] | None: ...
+    def begin_heal_ops(self) -> bool: ...
+    def end_heal_ops(self) -> None: ...
 
 
 class CharacterStateWorkerContext(

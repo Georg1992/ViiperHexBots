@@ -139,6 +139,9 @@ def load_settings(path: Path | None = None) -> AppSettings:
         save_point_button=parser.get("Keybindings", "SavePointButton", fallback=""),
         hp_button=parser.get("Keybindings", "HPButton", fallback=""),
         heal_skill=parser.getint("Keybindings", "HealSkill", fallback=0) == 1,
+        critical_hp_percent=parser.getint(
+            "Keybindings", "CriticalHpPercent", fallback=50
+        ),
         sp_button=parser.get("Keybindings", "SPButton", fallback=""),
         open_storage_chain=_load_open_storage_chain(parser),
         skill_timers=_load_skill_timers(parser),
@@ -207,6 +210,9 @@ def save_settings(settings: AppSettings) -> None:
     parser["Keybindings"]["SavePointButton"] = settings.save_point_button
     parser["Keybindings"]["HPButton"] = settings.hp_button
     parser["Keybindings"]["HealSkill"] = "1" if settings.heal_skill else "0"
+    parser["Keybindings"]["CriticalHpPercent"] = str(
+        max(1, min(99, int(settings.critical_hp_percent)))
+    )
     parser["Keybindings"]["SPButton"] = settings.sp_button
     parser["Keybindings"]["OpenStorageChain"] = _save_open_storage_chain(
         settings.open_storage_chain

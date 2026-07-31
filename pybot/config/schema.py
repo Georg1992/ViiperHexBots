@@ -65,6 +65,9 @@ class AppSettings:
     save_point_button: str = ""
     hp_button: str = ""
     heal_skill: bool = False
+    # HP%% at/below which danger teleport is tagged critical and (with heal
+    # skill) triggers heal-until-full after the teleport.
+    critical_hp_percent: int = 50
     sp_button: str = ""
     open_storage_chain: list[KeyChainStep] = field(default_factory=list)
     skill_timers: list[SkillTimerSetting] = field(default_factory=list)
