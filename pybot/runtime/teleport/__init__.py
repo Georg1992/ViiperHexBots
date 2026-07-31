@@ -3,7 +3,7 @@
 Responsibilities
 ----------------
 * **Key selection** — mode/area: creamy TP first, wing key next.
-  Danger/critical: wing key first when assigned, creamy next.
+  Danger/critical: wing key when Teleport Key is assigned, else creamy.
 * **Execution** — press teleport key, wait for settle, track wings/overlay.
 * **Danger teleport** — for DangerDetector (critical HP only).
 * **Area clear** — scan-loop that teleports until discovery sees zero mobs.
@@ -50,19 +50,26 @@ class TeleportController:
             return cfg.creamy_tp_button
         return cfg.teleport_button
 
-    def danger_scan_code(self) -> int:
-        """Wing (Teleport) key first when assigned; creamy next.
+    @staticmethod
+    def _wing_key_assigned(cfg) -> bool:
+        """True when Teleport Key (fly wing) is bound to a real scan code."""
+        return bool((cfg.teleport_button or "").strip()) and int(cfg.teleport_scan_code) > 0
 
-        Critical / danger teleports must consume fly wings when the wing key
-        is configured, not the creamy card.
+    def danger_scan_code(self) -> int:
+        """Wing (Teleport) key when assigned; otherwise Creamy TP.
+
+        Urgent/critical escapes use fly wings only if Teleport Key is set.
+        If wing is unset, creamy must still fire — never a no-op escape.
         """
         cfg = self._ctx.config
-        return cfg.teleport_scan_code or cfg.creamy_tp_scan_code
+        if self._wing_key_assigned(cfg):
+            return int(cfg.teleport_scan_code)
+        return int(cfg.creamy_tp_scan_code)
 
     def danger_button(self) -> str:
-        """Wing (Teleport) key first when assigned; creamy next."""
+        """Wing (Teleport) key when assigned; otherwise Creamy TP."""
         cfg = self._ctx.config
-        if cfg.teleport_scan_code > 0 and cfg.teleport_button:
+        if self._wing_key_assigned(cfg):
             return cfg.teleport_button
         return cfg.creamy_tp_button
 

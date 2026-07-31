@@ -133,7 +133,7 @@ def load_settings(path: Path | None = None) -> AppSettings:
         warper_location=parser.getint("Warper", "warperLocation", fallback=0),
         skill_button=parser.get("Keybindings", "SkillButton", fallback="e"),
         skill_delay=parser.getint("Keybindings", "SkillDelay", fallback=500),
-        teleport_button=parser.get("Keybindings", "TeleportButton", fallback="q"),
+        teleport_button=parser.get("Keybindings", "TeleportButton", fallback=""),
         creamy_tp_button=parser.get("Keybindings", "CreamyTpButton", fallback=""),
         teleport_delay=parser.getint("Keybindings", "TeleportDelay", fallback=800),
         save_point_button=parser.get("Keybindings", "SavePointButton", fallback=""),
