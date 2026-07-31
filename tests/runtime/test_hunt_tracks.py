@@ -264,6 +264,19 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(self.tracks.get_track_count(), 1)
         self.assertEqual(self.tracks.area_epoch, 0)
 
+    def test_try_claim_clear_for_teleport_rejects_pending_candidates(self) -> None:
+        self.tracks.process_discovery_scan(
+            [det(100, 100)],
+            mob_name="horn",
+            now_tick=self.now,
+        )
+        self.assertTrue(self.tracks.has_pending_discovery_candidates())
+        self.assertFalse(self.tracks.try_claim_clear_for_teleport())
+        self.assertEqual(self.tracks.area_epoch, 0)
+        status = self.tracks.get_area_clear_candidate()
+        self.assertFalse(status.clear)
+        self.assertEqual(status.reason, "pending_candidates")
+
     def test_try_claim_clear_for_teleport_advances_epoch(self) -> None:
         self.assertTrue(self.tracks.try_claim_clear_for_teleport())
         self.assertEqual(self.tracks.area_epoch, 1)

@@ -199,6 +199,7 @@ class CoordTrackingWorker:
         dedup_sq = dedup_radius * dedup_radius
 
         created = 0
+        retry: list = []
         for candidate in candidates:
             cx, cy = candidate.x, candidate.y
 
@@ -228,28 +229,35 @@ class CoordTrackingWorker:
             )
             batch = ctx.tracker.track_locals_frame(frame, roi, [snap])
             if not batch.ok or not batch.results:
+                # Transient tracker failure — keep candidate for the next tick.
+                retry.append(candidate)
                 continue
 
             result = batch.results[0]
-            if not result.found:
-                continue
+            # Prefer the fresh local-follow hit; if the mob moved/occluded,
+            # still create at the discovery point so mode TP cannot claim
+            # clear while a published Anubis candidate is dropped.
+            create_x, create_y = (result.x, result.y) if result.found else (cx, cy)
 
             # Create under the lock with epoch gate — rejects if teleport won.
             track = ctx.tracks.create_track(
                 mob_name,
-                result.x,
-                result.y,
+                create_x,
+                create_y,
                 candidate.confidence,
                 candidate.candidate_scale,
                 now_tick=now_ms,
                 area_epoch=area_epoch,
             )
             if track is None:
-                break
+                # Area epoch advanced — do not requeue into the new screen.
+                return created
 
-            existing_positions.append((result.x, result.y))
+            existing_positions.append((create_x, create_y))
             created += 1
 
+        if retry:
+            ctx.tracks.requeue_discovery_candidates(retry)
         if created > 0:
             ctx.logger.behavior(
                 f"[COORD] created {created} track(s) from discovery candidates"

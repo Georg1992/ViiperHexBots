@@ -331,6 +331,21 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.teleport.danger_teleport.assert_called_with(reason="critical_hp")
         self.assertFalse(hasattr(self.danger, "pop_heal_until_full_requested"))
 
+    def test_non_critical_hp_drop_does_not_urgent_teleport(self) -> None:
+        self.vitals.publish_hp(90, 100)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(80, 100)
+        self.danger._poll_hp()
+        self.teleport.danger_teleport.assert_not_called()
+        self.assertTrue(self.danger.has_recent_damage(1.0))
+
+    def test_surround_does_not_urgent_teleport(self) -> None:
+        # Surround polling removed — critical HP is the only urgent TP path.
+        self.assertFalse(hasattr(self.danger, "_poll_surround"))
+        self.character_state.is_surrounded = True
+        self.character_state.surrounded_reason = "above+below"
+        self.teleport.danger_teleport.assert_not_called()
+
     def test_nearby_mobs_are_heal_threat(self) -> None:
         self.assertFalse(self.danger.has_nearby_threat())
         self.character_state.nearby_any_mobs_count = 2
