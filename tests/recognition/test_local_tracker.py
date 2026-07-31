@@ -93,54 +93,35 @@ class LocalTrackerTests(unittest.TestCase):
         dist = abs(result.x - anchor.center_x) + abs(result.y - anchor.center_y)
         self.assertLess(dist, 50)
 
-    def test_moving_search_uses_wider_default_radius(self) -> None:
+    def test_wide_radius_finds_mob_lagged_behind_last_known(self) -> None:
+        """No velocity needed — fixed wide disk around last-known catches runners."""
         detector = self._detector()
         anchor = self._living_anchor(detector)
-        offset = detector.local_track_search_radius_px + 25
-        self.assertLess(offset, detector.local_track_moving_search_radius_px)
-        track = self._build_track_dict(anchor, trackId=5,
-            x=anchor.center_x + offset, moving=True)
-        result = track_local(detector, self.roi, "horn", track)
-        self.assertTrue(result.found)
-        # With exact palette matching the nearest match from an offset search
-        # position may be the closest body pixel rather than the center.
-        self.assertLess(result.confidence, 1.1)
-
-    def test_velocity_catchup_finds_mob_ahead_of_last_known(self) -> None:
-        """Peak search must cover predicted coast, not only last-known."""
-        detector = self._detector()
-        anchor = self._living_anchor(detector)
-        # Seed behind the mob with velocity pointing at the true center —
-        # last-known alone would put the peak disk behind the runner.
         lag = 70
+        self.assertLess(lag, detector.local_track_moving_search_radius_px)
         track = self._build_track_dict(
             anchor,
-            trackId=6,
+            trackId=5,
             x=anchor.center_x - lag,
             y=anchor.center_y,
-            moving=True,
-            velX=lag,
-            velY=0.0,
         )
         result = track_local(detector, self.roi, "horn", track)
         self.assertTrue(result.found, result.miss_reason)
         dist = abs(result.x - anchor.center_x) + abs(result.y - anchor.center_y)
         self.assertLess(dist, 50)
 
-    def test_lost_count_coasts_velocity_after_moving_cleared(self) -> None:
-        """After a miss clears ``moving``, residual vel + lostCount still coasts."""
+    def test_follow_ignores_velocity_fields(self) -> None:
+        """Wrong vel must not pull search away from last-known."""
         detector = self._detector()
         anchor = self._living_anchor(detector)
-        lag = 55
         track = self._build_track_dict(
             anchor,
-            trackId=7,
-            x=anchor.center_x - lag,
+            trackId=6,
+            x=anchor.center_x,
             y=anchor.center_y,
-            moving=False,
-            lostCount=1,
-            velX=lag,
-            velY=0.0,
+            moving=True,
+            velX=400.0,
+            velY=-400.0,
         )
         result = track_local(detector, self.roi, "horn", track)
         self.assertTrue(result.found, result.miss_reason)
