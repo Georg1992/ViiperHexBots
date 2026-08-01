@@ -415,6 +415,7 @@ class HuntRuntime:
         self._workers = deps.workers
         self._input_backend = deps.input_backend
         self._teleport = deps.teleport_controller
+        self._logger = deps.logger
         self._worker_threads: list[threading.Thread] = []
         self._shutdown_complete = threading.Event()
 
@@ -432,10 +433,23 @@ class HuntRuntime:
         if self._shutdown_complete.is_set():
             return True
         clean_shutdown = self._shutdown_workers()
-        if clean_shutdown:
+        logger_closed = self._close_logger() if clean_shutdown else False
+        if clean_shutdown and logger_closed:
             reset_capture_session()
             self._shutdown_complete.set()
-        return clean_shutdown
+        elif clean_shutdown and not logger_closed:
+            self._ctx.logger.behavior(
+                "[PYBOT] shutdown incomplete; logger writer is still active"
+            )
+        return clean_shutdown and logger_closed
+
+    def _close_logger(self) -> bool:
+        """Release the async logger owned by this runtime session."""
+        close = getattr(self._logger, "close", None)
+        if not callable(close):
+            return True
+        result = close()
+        return result is not False
 
     def _cancel_input(self) -> None:
         """Cancel an in-flight input operation when the backend supports it."""
@@ -595,7 +609,9 @@ class HuntRuntime:
                 "[PYBOT] input session could not be re-armed; startup aborted"
             )
             ctx.stop_event.set()
-            if self._shutdown_workers():
+            clean_shutdown = self._shutdown_workers()
+            logger_closed = self._close_logger() if clean_shutdown else False
+            if clean_shutdown and logger_closed:
                 reset_capture_session()
                 self._shutdown_complete.set()
             return 1
@@ -622,9 +638,14 @@ class HuntRuntime:
         finally:
             ctx.logger.behavior("[PYBOT] hunt runtime stopped")
             clean_shutdown = self._shutdown_workers()
-            if clean_shutdown:
+            logger_closed = self._close_logger() if clean_shutdown else False
+            if clean_shutdown and logger_closed:
                 reset_capture_session()
                 self._shutdown_complete.set()
+            elif clean_shutdown and not logger_closed:
+                ctx.logger.behavior(
+                    "[PYBOT] shutdown incomplete; logger writer is still active"
+                )
             else:
                 ctx.logger.behavior(
                     "[PYBOT] runtime remains owned because shutdown was incomplete"

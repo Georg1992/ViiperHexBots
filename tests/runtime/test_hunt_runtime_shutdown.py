@@ -60,6 +60,33 @@ class HuntRuntimeShutdownTests(unittest.TestCase):
             self.assertTrue(runtime.retry_shutdown())
             self.assertTrue(runtime.is_shutdown_complete())
             input_backend.shutdown.assert_called_once()
+            ctx.logger.close.assert_called_once()
+
+    def test_retry_shutdown_waits_for_logger_cleanup(self) -> None:
+        ctx = MagicMock()
+        ctx.stop_event = threading.Event()
+        ctx.discovery_wake = threading.Event()
+        ctx.resume_gate = threading.Event()
+        ctx.logger.behavior = MagicMock()
+        logger = MagicMock()
+        logger.close.side_effect = [False, True]
+
+        input_backend = MagicMock()
+        runtime = HuntRuntime(
+            RuntimeDependencies(
+                ctx=ctx,
+                input_backend=input_backend,
+                hunt_mode=MagicMock(),
+                logger=logger,
+                workers=[],
+            )
+        )
+
+        self.assertFalse(runtime.retry_shutdown())
+        self.assertFalse(runtime.is_shutdown_complete())
+        self.assertTrue(runtime.retry_shutdown())
+        self.assertTrue(runtime.is_shutdown_complete())
+        self.assertEqual(logger.close.call_count, 2)
 
     def test_unresolved_sit_cleanup_blocks_shutdown_until_retry_succeeds(self) -> None:
         ctx = MagicMock()
@@ -137,6 +164,7 @@ class HuntRuntimeShutdownTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertTrue(worker_exited.is_set())
         input_backend.shutdown.assert_called_once()
+        ctx.logger.close.assert_called_once()
 
 
 if __name__ == "__main__":

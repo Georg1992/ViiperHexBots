@@ -16,6 +16,7 @@ from pathlib import Path
 from pybot.paths import SESSIONS_DIR
 
 LOGS_DIR = SESSIONS_DIR
+_MAX_QUEUE_ITEMS = 2000
 
 
 class AppSessionLog:
@@ -36,7 +37,9 @@ class AppSessionLog:
         self._system_log: Path | None = None
         self._opened = False
         self._closed = False
-        self._queue: queue.Queue[str | None] = queue.Queue()
+        self._queue: queue.Queue[str | None] = queue.Queue(
+            maxsize=_MAX_QUEUE_ITEMS
+        )
         self._writer_thread: threading.Thread | None = None
 
     # ── Public API ──────────────────────────────────────────────────
@@ -96,7 +99,7 @@ class AppSessionLog:
             if stripped:
                 lines.append(f"  {stripped}\n")
         lines.append("---\n")
-        self._queue.put_nowait("".join(lines))
+        self._put("".join(lines))
 
     def write_focus_change(self, reason: str, active_hwnd: int = 0) -> None:
         """Queue a focus-change log line."""
@@ -108,13 +111,13 @@ class AppSessionLog:
             return
         self._closed = True
         self._enqueue("INFO", "session", f"session end reason={reason}")
-        self._queue.put_nowait(None)  # sentinel: flush + stop
+        self._put(None)  # sentinel: flush + stop
         self._close_writer()
 
     def _close_writer(self) -> None:
         """Flush pending writes and stop the background writer thread."""
         if self._writer_thread is not None and self._writer_thread.is_alive():
-            self._queue.put_nowait(None)
+            self._put(None)
             self._writer_thread.join(timeout=2.0)
         self._writer_thread = None
         # Drain any leftover items so next open() starts clean
@@ -126,10 +129,31 @@ class AppSessionLog:
 
     # ── Internal ────────────────────────────────────────────────────
 
+    def _put(self, item: str | None) -> None:
+        """Bound the queue while keeping writers non-blocking."""
+        try:
+            self._queue.put_nowait(item)
+        except queue.Full:
+            if item is None:
+                # A sentinel must not be lost; make room for shutdown.
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    pass
+            else:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    return
+            try:
+                self._queue.put_nowait(item)
+            except queue.Full:
+                pass
+
     def _enqueue(self, level: str, category: str, message: str) -> None:
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         line = f"[{stamp}] [{level}] [{category}] {message}\n"
-        self._queue.put_nowait(line)
+        self._put(line)
 
     def _writer_loop(self) -> None:
         """Daemon thread: drain the queue and write to system.log."""

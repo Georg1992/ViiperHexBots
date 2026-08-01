@@ -11,6 +11,7 @@ thread only, never the bot.
 from __future__ import annotations
 
 import logging
+import itertools
 import logging.handlers
 import queue
 import sys
@@ -21,6 +22,26 @@ from pathlib import Path
 from pybot.paths import SESSIONS_DIR
 
 LOGS_DIR = SESSIONS_DIR
+_LOG_QUEUE_MAXSIZE = 2000
+_LOGGER_STOP_TIMEOUT_S = 0.5
+_logger_sequence = itertools.count()
+
+
+class _DroppingQueueHandler(logging.handlers.QueueHandler):
+    """Non-blocking handler that drops oldest records under backpressure."""
+
+    def enqueue(self, record: logging.LogRecord) -> None:
+        try:
+            self.queue.put_nowait(record)
+        except queue.Full:
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self.queue.put_nowait(record)
+            except queue.Full:
+                pass
 
 
 class HuntLogger:
@@ -38,8 +59,12 @@ class HuntLogger:
         self._on_behavior = on_behavior
         self._echo_stdout = echo_stdout
         self._listener: logging.handlers.QueueListener | None = None
+        self._closed = False
 
-        self._behavior = logging.getLogger(f"pybot.behavior.{self.session_id}")
+        # A fresh logger name gives each HuntLogger exclusive ownership of
+        # its listener and handlers, even when a session ID is reused.
+        logger_name = f"pybot.behavior.{self.session_id}.{next(_logger_sequence)}"
+        self._behavior = logging.getLogger(logger_name)
         if not self._behavior.handlers:
             self._configure_async_logger(self._behavior, self.session_dir / "behavior.log")
 
@@ -47,8 +72,10 @@ class HuntLogger:
         logger.setLevel(logging.DEBUG)
         logger.propagate = False
 
-        log_queue: queue.Queue[logging.LogRecord] = queue.Queue()
-        logger.addHandler(logging.handlers.QueueHandler(log_queue))
+        log_queue: queue.Queue[logging.LogRecord] = queue.Queue(
+            maxsize=_LOG_QUEUE_MAXSIZE
+        )
+        logger.addHandler(_DroppingQueueHandler(log_queue))
 
         file_handler = logging.FileHandler(path, encoding="utf-8")
         file_handler.setFormatter(
@@ -69,7 +96,42 @@ class HuntLogger:
         """Set the callback for behavior log lines (replaces direct _on_behavior access)."""
         self._on_behavior = callback
 
+    def close(self) -> bool:
+        """Stop the writer within a bounded time and detach owned handlers.
+
+        A filesystem or console handler can block a logging thread. Never let
+        that handler make the hunt shutdown wait forever; leave ownership in
+        place so a later runtime shutdown retry can finish the close.
+        """
+        listener = self._listener
+        if listener is not None:
+            listener.enqueue_sentinel()
+            thread = getattr(listener, "_thread", None)
+            if thread is not None:
+                thread.join(timeout=_LOGGER_STOP_TIMEOUT_S)
+                if thread.is_alive():
+                    return False
+            self._listener = None
+        if self._closed:
+            return True
+        self._closed = True
+        for handler in list(self._behavior.handlers):
+            self._behavior.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
+        # Logger objects are kept globally by logging.Manager. Remove only
+        # this instance's entry so repeated hunt sessions do not accumulate
+        # logger objects, while never disturbing a replacement logger.
+        manager = self._behavior.manager
+        if manager.loggerDict.get(self._behavior.name) is self._behavior:
+            manager.loggerDict.pop(self._behavior.name, None)
+        return True
+
     def behavior(self, message: str) -> None:
+        if self._closed:
+            return
         line = message if message.startswith("[") else f"[PYBOT] {message}"
         # Non-blocking: QueueHandler just puts the record on an in-memory
         # queue; the listener thread performs the file/stdout writes.

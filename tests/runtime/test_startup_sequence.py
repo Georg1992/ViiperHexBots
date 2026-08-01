@@ -52,8 +52,30 @@ class HuntStartupSequenceTests(unittest.TestCase):
         self.assertFalse(sequence.area_clear.is_set())
         self.assertFalse(sequence.buffs_done.is_set())
         self.assertFalse(sequence.timers_done.is_set())
-        self.assertFalse(sequence.is_combat_ready())
+        # A recovered landing area may contain mobs. Combat must remain live
+        # so discovery/tracking can create tracks and attack can clear it.
+        self.assertTrue(sequence.is_combat_ready())
         sequence.mark_area_clear()
+        self.assertFalse(sequence.is_combat_ready())
+        sequence.mark_buffs_done()
+        self.assertFalse(sequence.is_combat_ready())
+        sequence.mark_timers_done()
+        self.assertTrue(sequence.is_combat_ready())
+
+    def test_recovered_populated_area_can_be_cleared_before_startup_gate(self) -> None:
+        sequence = HuntStartupSequence()
+        sequence.begin(require_buffs=True, require_timers=True)
+        sequence.mark_area_clear()
+        sequence.mark_buffs_done()
+        sequence.mark_timers_done()
+        sequence.begin_new_hunt()
+
+        # This is the post-sit landing case: tracks must be discoverable and
+        # attackable before an empty scan can transition to startup actions.
+        self.assertTrue(sequence.is_combat_ready())
+        sequence.mark_area_clear(False)
+        self.assertTrue(sequence.is_combat_ready())
+        sequence.mark_area_clear(True)
         self.assertFalse(sequence.is_combat_ready())
         sequence.mark_buffs_done()
         self.assertFalse(sequence.is_combat_ready())
@@ -79,7 +101,9 @@ class HuntStartupSequenceTests(unittest.TestCase):
         self.assertFalse(sequence.area_clear.is_set())
         self.assertFalse(sequence.buffs_done.is_set())
         self.assertFalse(sequence.timers_done.is_set())
-        self.assertFalse(sequence.is_combat_ready())
+        # Stale completion does not unlock any milestone. Combat may still
+        # clear a populated landing area before the first valid clear scan.
+        self.assertTrue(sequence.is_combat_ready())
 
         self.assertTrue(
             sequence.mark_area_clear(expected_generation=new_generation)
@@ -194,9 +218,9 @@ class HuntStartupSequenceTests(unittest.TestCase):
         self.assertFalse(sequence.area_clear.is_set())
         self.assertFalse(sequence.buffs_done.is_set())
         self.assertFalse(sequence.timers_done.is_set())
-        # Post-recovery combat remains blocked while discovery establishes
-        # the new area and startup actions replay.
-        self.assertFalse(gates.should_run_combat())
+        # Post-recovery combat remains available while discovery establishes
+        # the new area; startup actions still remain gated until clear.
+        self.assertTrue(gates.should_run_combat())
 
         sequence.mark_area_clear()
         self.assertFalse(gates.should_run_combat())

@@ -20,6 +20,7 @@ from tkinter import ttk
 
 _DRAIN_INTERVAL_MS = 50
 _MAX_ITEMS_PER_DRAIN = 30
+_MAX_QUEUE_ITEMS = 2000
 
 
 class LogPipe:
@@ -42,7 +43,7 @@ class LogPipe:
         self._status_label: ttk.Label | None = None
         self._hint_label: ttk.Label | None = None
         self._on_append_log: Callable[[str], None] | None = None
-        self._queue: queue.Queue[tuple] = queue.Queue()
+        self._queue: queue.Queue[tuple] = queue.Queue(maxsize=_MAX_QUEUE_ITEMS)
         # __init__ runs on the main thread, so scheduling the drain here
         # keeps every Tk interaction on the main thread.
         self._root.after(_DRAIN_INTERVAL_MS, self._drain)
@@ -70,11 +71,25 @@ class LogPipe:
 
     def log(self, message: str) -> None:
         """Queue *message* for the log box (safe from any thread)."""
-        self._queue.put_nowait(("log", message))
+        self._put(("log", message))
 
     def status(self, title: str, hint: str = "") -> None:
         """Queue an input status update (safe from any thread)."""
-        self._queue.put_nowait(("status", title, hint))
+        self._put(("status", title, hint))
+
+    def _put(self, item: tuple) -> None:
+        """Keep producer calls non-blocking and bound memory when UI stalls."""
+        try:
+            self._queue.put_nowait(item)
+        except queue.Full:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._queue.put_nowait(item)
+            except queue.Full:
+                pass
 
     # ── Internal dispatch (runs on main thread via root.after) ──────
 

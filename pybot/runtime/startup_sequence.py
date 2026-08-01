@@ -29,9 +29,9 @@ class HuntStartupSequence:
         # them. Defaults preserve the strict behavior of standalone fixtures.
         self._require_buffs = True
         self._require_timers = True
-        # Only the initial generation may fight before its first clear scan.
-        # After sit recovery, discovery must confirm the new area before any
-        # startup action or combat can run.
+        # Combat may clear a populated area before the first successful scan.
+        # Startup actions remain gated until discovery confirms the area is
+        # empty, so this never releases normal post-clear combat prematurely.
         self._allow_combat_before_area_clear = True
         self.area_clear = threading.Event()
         self.buffs_done = threading.Event()
@@ -65,9 +65,11 @@ class HuntStartupSequence:
         with self._lock:
             self._generation += 1
             if self._managed:
-                # A recovered hunt is a strict startup cycle: discovery first,
-                # then buffs, then timers, then combat.
-                self._allow_combat_before_area_clear = False
+                # A recovered hunt must be able to clear a populated landing
+                # area. Discovery/tracking and attack remain live before the
+                # first clear scan; once clear is confirmed, buffs then timers
+                # gate the normal hunt exactly like the initial cycle.
+                self._allow_combat_before_area_clear = True
                 self._clear_milestones()
 
     def mark_area_clear(
@@ -127,11 +129,10 @@ class HuntStartupSequence:
             if not self._managed:
                 return True
             if not self.area_clear.is_set():
-                # The initial area may already contain mobs. Let combat clear
-                # that area first; discovery then closes the gate and startup
-                # actions run before the normal hunt resumes. Recovered
-                # generations set this flag false, so they cannot bypass their
-                # clear milestone.
+                # The area may already contain mobs after startup or a
+                # post-sit teleport. Let combat clear that area first;
+                # discovery then closes this pre-clear window and startup
+                # actions run before the normal hunt resumes.
                 return self._allow_combat_before_area_clear
             return self.buffs_done.is_set() and self.timers_done.is_set()
 

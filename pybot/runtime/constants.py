@@ -9,6 +9,10 @@ WORKER_SHUTDOWN_TIMEOUT_S = 2.0
 CELL_SIZE_PX = 64
 DEFAULT_SEARCH_RANGE_CELLS = 16
 WORKER_POLL_INTERVAL_S = 0.05
+# Tracking needs to follow moving mobs, but must yield the shared capture
+# session so discovery and character-state sampling are not starved.
+TRACKING_LOOP_INTERVAL_S = 0.02
+TRACKING_OVERLAY_INTERVAL_S = 0.10
 LOG_REPEAT_INTERVAL_MS = 5000
 # Attack loop spin when no target or after one attack (half worker poll).
 ATTACK_IDLE_SPIN_S = WORKER_POLL_INTERVAL_S / 2.0
@@ -76,6 +80,8 @@ __all__ = [
     "CELL_SIZE_PX",
     "DEFAULT_SEARCH_RANGE_CELLS",
     "WORKER_POLL_INTERVAL_S",
+    "TRACKING_LOOP_INTERVAL_S",
+    "TRACKING_OVERLAY_INTERVAL_S",
     "LOG_REPEAT_INTERVAL_MS",
     "ATTACK_IDLE_SPIN_S",
     "SP_IDLE_MAX_OBSERVATION_AGE_MS",

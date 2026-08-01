@@ -19,7 +19,12 @@ from __future__ import annotations
 
 import traceback
 
-from pybot.runtime.constants import LOG_REPEAT_INTERVAL_MS, WORKER_POLL_INTERVAL_S
+from pybot.runtime.constants import (
+    LOG_REPEAT_INTERVAL_MS,
+    TRACKING_LOOP_INTERVAL_S,
+    TRACKING_OVERLAY_INTERVAL_S,
+    WORKER_POLL_INTERVAL_S,
+)
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.detection.detector_session import StateTrackSnapshot
 from pybot.runtime.workers.worker_contexts import CoordTrackingWorkerContext
@@ -32,7 +37,8 @@ class CoordTrackingWorker:
         self._ctx = ctx
         self._last_empty_frame_log_ms = 0
         # Track IDs whose first-tick data has been logged (one shot per track).
-        self._logged_first_tick: set[int] = set()
+        self._logged_first_tick: set[tuple[int, int]] = set()
+        self._last_overlay_ms = 0
 
     def run(self) -> None:
         ctx = self._ctx
@@ -41,8 +47,9 @@ class CoordTrackingWorker:
             try:
                 if ctx.should_run_tracking():
                     self._tick()
-                    # Yield the shared capture lock so discovery/OCR can run.
-                    ctx.stop_event.wait(0.005)
+                    # Yield the shared capture session so discovery and
+                    # character-state sampling get predictable turns.
+                    ctx.stop_event.wait(TRACKING_LOOP_INTERVAL_S)
                     if ctx.stop_event.is_set():
                         break
                 elif not ctx.should_run_workers():
@@ -127,12 +134,12 @@ class CoordTrackingWorker:
         # to measure actual delay and movement before tracking gets its first
         # chance to follow. Each track is logged at most once.
         for track in alive_tracks:
-            if track.id in self._logged_first_tick:
+            if (area_epoch, track.id) in self._logged_first_tick:
                 continue
             age_ms = now_ms - track.created_tick
             if age_ms <= 0:
                 continue
-            self._logged_first_tick.add(track.id)
+            self._logged_first_tick.add((area_epoch, track.id))
             age_sec = age_ms / 1000.0
             result = next((r for r in results if r.track_id == track.id), None)
             if result is not None:
@@ -280,5 +287,16 @@ class CoordTrackingWorker:
     def _update_overlay(self, now_ms: int) -> None:
         ctx = self._ctx
         track_count, alive = ctx.tracks.overlay_track_state(now_ms)
+        current_epoch = ctx.tracks.area_epoch
+        active_keys = {(current_epoch, track.id) for track in alive}
+        self._logged_first_tick.intersection_update(active_keys)
+        if (
+            self._last_overlay_ms
+            and now_ms - self._last_overlay_ms < int(
+                TRACKING_OVERLAY_INTERVAL_S * 1000
+            )
+        ):
+            return
+        self._last_overlay_ms = now_ms
         ctx.overlay.set_track_stats(track_count=track_count, alive_count=len(alive))
         ctx.overlay.set_track_positions([(t.x, t.y) for t in alive])
