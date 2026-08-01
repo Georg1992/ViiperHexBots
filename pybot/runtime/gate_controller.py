@@ -46,6 +46,9 @@ class GateController:
         self.startup = startup or HuntStartupSequence()
         # Set by DangerDetector; the sit worker is the sole hunt-breaker.
         self.danger_sit_requested = threading.Event()
+        # A seated toggle could not be undone during worker cleanup. Runtime
+        # shutdown must retry this before releasing input ownership.
+        self.sit_cleanup_unresolved = threading.Event()
 
     # ── Gate queries ─────────────────────────────────────────────
 
@@ -205,6 +208,14 @@ class GateController:
             self.startup.begin_new_hunt()
             self.sitting_event.clear()
             self._restore_resume_gate()
+
+    def mark_sit_cleanup_unresolved(self) -> None:
+        """Keep runtime ownership until a seated state is explicitly undone."""
+        self.sit_cleanup_unresolved.set()
+
+    def clear_sit_cleanup_unresolved(self) -> None:
+        """Record that shutdown successfully undid the seated toggle."""
+        self.sit_cleanup_unresolved.clear()
 
     # ── Storage lifecycle ────────────────────────────────────────
 

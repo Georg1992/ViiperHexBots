@@ -49,11 +49,42 @@ class SitOnLowSpWorker:
         self._danger = danger
         self._last_fail_log = ""
         self._seated = False
+        register_cleanup = getattr(ctx, "register_sit_cleanup", None)
+        if callable(register_cleanup):
+            register_cleanup(self._retry_cleanup_stand)
 
     def _tap(self, sit_scan: int, *, why: str) -> bool:
+        """Send one toggle and report whether the input was accepted.
+
+        The settle wait may be interrupted by Stop/Pause after the key has
+        already been sent. Callers must therefore use the key result—not the
+        wait result—to update the logical seated state.
+        """
         self._ctx.logger.behavior(f"[SIT] tap sit-key reason={why}")
-        self._input.key_tap(sit_scan)
-        return self._ctx.wait_unless_stopped(SIT_KEY_SETTLE_S)
+        try:
+            toggle = getattr(self._input, "toggle_key", None)
+            if callable(toggle):
+                accepted = bool(toggle(sit_scan))
+            else:
+                # Compatibility for narrow legacy test/custom backends.
+                accepted = bool(self._input.key_tap(sit_scan, after_s=0.0))
+        except Exception:
+            self._ctx.logger.behavior(
+                f"[SIT] sit-key input failed reason={why}:\n"
+                f"{traceback.format_exc()}"
+            )
+            return False
+        if not accepted:
+            self._ctx.logger.behavior(
+                f"[SIT] sit-key input rejected reason={why}"
+            )
+            return False
+        if not self._ctx.wait_unless_stopped(SIT_KEY_SETTLE_S):
+            self._ctx.logger.behavior(
+                f"[SIT] sit-key settle interrupted reason={why}"
+            )
+        # The toggle was accepted even if Stop/Pause interrupted the settle.
+        return True
 
     def _ok_to_act(self) -> bool:
         ctx = self._ctx
@@ -83,12 +114,44 @@ class SitOnLowSpWorker:
             return True
         if not self._ok_to_act():
             return False
-        # Clear flag before settle wait so a retry/finally cannot tap again.
-        self._seated = False
+        # Keep the flag set until the stand key is accepted. If input is
+        # rejected, cleanup/retry must know the character may still be seated.
         ok = self._tap(sit_scan, why="leave_sit")
-        if ok:
-            self._ctx.logger.behavior("[SIT] standing")
-        return ok
+        if not ok:
+            return False
+        self._seated = False
+        self._ctx.logger.behavior("[SIT] standing")
+        return True
+
+    def _cleanup_stand(self, sit_scan: int) -> bool:
+        """Undo an accepted sit toggle during shutdown.
+
+        Normal input is cancelled before worker joins so long macros unwind.
+        A seated character is different: leaving it seated would make the next
+        runtime's first toggle invert the state. The dedicated backend method
+        is allowed to emit only this final key pair after cancellation.
+        """
+        cleanup = getattr(self._input, "cleanup_toggle_key", None)
+        if not callable(cleanup):
+            return False
+        try:
+            return bool(cleanup(sit_scan))
+        except Exception:
+            self._ctx.logger.behavior(
+                f"[SIT] shutdown stand failed:\n{traceback.format_exc()}"
+            )
+            return False
+
+    def _retry_cleanup_stand(self) -> bool:
+        """Retry the one unresolved stand toggle during runtime shutdown."""
+        if not self._seated:
+            return True
+        sit_scan = self._ctx.config.sit_on_low_sp_scan_code
+        if not self._cleanup_stand(sit_scan):
+            return False
+        self._seated = False
+        self._ctx.logger.behavior("[SIT] shutdown stand accepted on retry")
+        return True
 
     def _sp_ratio(self) -> float | None:
         sp, sp_max = self._vitals.sp_pair()
@@ -180,7 +243,6 @@ class SitOnLowSpWorker:
         """Break hunt, move safe, sit/recover, then start a fresh hunt."""
         ctx = self._ctx
         sit_scan = ctx.config.sit_on_low_sp_scan_code
-        self._seated = False
         if consume_danger_request:
             # Danger requests are retried by the outer loop if storage/heal
             # currently owns the session; never block while holding the queue.
@@ -198,6 +260,15 @@ class SitOnLowSpWorker:
             while not ctx.is_stopped():
                 if not self._ok_to_act():
                     break
+
+                # A previous interrupted attempt may have sent the sit toggle
+                # but failed its settle wait. Never teleport or press sit again
+                # while that logical seated state is still owned by this
+                # worker; stand first, retrying while the session is held.
+                if self._seated:
+                    if not self.stand(sit_scan):
+                        ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
+                    continue
 
                 if not self._teleport.teleport_to_safe_place(log_tag="SIT"):
                     ctx.logger.behavior(
@@ -232,7 +303,44 @@ class SitOnLowSpWorker:
                 )
                 ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
         finally:
-            self.stand(sit_scan)  # no-op if already stood
+            # Do not release the sit gate while we still believe the character
+            # is seated. Retry transient input rejection while running; Pause
+            # intentionally waits for resume. Stop uses the shutdown-only
+            # toggle path because normal input has already been cancelled.
+            shutdown_cleanup_attempts = 0
+            while self._seated:
+                if ctx.is_stopped():
+                    shutdown_cleanup_attempts += 1
+                    if self._cleanup_stand(sit_scan):
+                        self._seated = False
+                        ctx.logger.behavior("[SIT] shutdown stand accepted")
+                        break
+                    if shutdown_cleanup_attempts >= 3:
+                        # Never let an unavailable input backend deadlock the
+                        # entire runtime. The character state is explicitly
+                        # unresolved; the failure is visible in the log rather
+                        # than being mistaken for a successful stand.
+                        ctx.logger.behavior(
+                            "[SIT] shutdown stand could not be confirmed "
+                            "after 3 attempts"
+                        )
+                        mark_unresolved = getattr(
+                            ctx, "mark_sit_cleanup_unresolved", None
+                        )
+                        if callable(mark_unresolved):
+                            mark_unresolved()
+                        break
+                    continue
+                if ctx.pause_event.is_set():
+                    # Keep the sit gate held while the character is still
+                    # seated. Once the user resumes, stand cleanly before
+                    # releasing the gate; otherwise hunting could resume
+                    # while the game character remains seated.
+                    ctx.wait_while_user_paused(SIT_SP_POLL_INTERVAL_S)
+                    continue
+                if self.stand(sit_scan):
+                    break
+                ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
             ctx.end_sit_ops()
             ctx.discovery_wake.set()
 
@@ -268,12 +376,13 @@ class SitOnLowSpWorker:
                 # first, then use the emergency teleport path. The outer
                 # recovery loop will clear/idle the new area before sitting.
                 stood = self.stand(sit_scan)
-                # Damage always invalidates this location. Even if the stand
-                # tap reports an interrupted settle, attempt the urgent escape
-                # unless Stop/Pause has explicitly cancelled input.
-                self._urgent_escape(reason="sit_danger")
-                if not stood and (ctx.is_stopped() or ctx.pause_event.is_set()):
+                # Never teleport while the stand toggle was rejected: the
+                # worker still owns a seated state and must retry standing
+                # before moving to another area. An accepted toggle remains
+                # authoritative even if its settle wait was interrupted.
+                if not stood:
                     return None
+                self._urgent_escape(reason="sit_danger")
                 return "interrupted"
 
             ratio = self._sp_ratio()

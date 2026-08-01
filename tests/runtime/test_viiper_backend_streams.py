@@ -95,6 +95,27 @@ class ViiperBackendStreamLifetimeTests(unittest.TestCase):
             2,
         )
 
+    def test_toggle_key_stays_accepted_after_cancellation(self) -> None:
+        backend = ViiperBackend()
+        backend._connected = True
+        backend._kb_stream = MagicMock()
+        backend._mouse_stream = MagicMock()
+        backend._cancel_event.clear()
+        result: list[bool] = []
+
+        thread = threading.Thread(
+            target=lambda: result.append(backend.toggle_key(82)),
+            daemon=True,
+        )
+        thread.start()
+        time.sleep(0.01)
+        backend.cancel_pending()
+        thread.join(timeout=1.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result, [True])
+        self.assertEqual(backend._kb_stream.write.call_count, 2)
+
     def test_cancelled_session_still_releases_left_button(self) -> None:
         backend = ViiperBackend()
         kb = MagicMock()

@@ -81,22 +81,69 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker = self._worker()
         self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
         self.assertTrue(worker.sit(82))
-        self.input.key_tap.assert_called_once_with(82)
+        self.input.toggle_key.assert_called_once_with(82)
         self.assertTrue(worker._seated)
         # Second sit is no-op — no flap.
         self.assertTrue(worker.sit(82))
-        self.input.key_tap.assert_called_once_with(82)
+        self.input.toggle_key.assert_called_once_with(82)
+
+    def test_rejected_sit_does_not_mark_seated_or_retry_toggle(self) -> None:
+        worker = self._worker()
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        self.input.toggle_key.return_value = False
+
+        self.assertFalse(worker.sit(82))
+        self.assertFalse(worker._seated)
+        self.assertFalse(worker.sit(82))
+        self.input.toggle_key.assert_has_calls([
+            unittest.mock.call(82),
+            unittest.mock.call(82),
+        ])
+
+    def test_interrupted_settle_after_accepted_sit_keeps_state_seated(self) -> None:
+        worker = self._worker()
+        self.ctx.wait_unless_stopped = lambda _t: False  # type: ignore[method-assign]
+        self.input.toggle_key.return_value = True
+
+        self.assertTrue(worker.sit(82))
+        self.assertTrue(worker._seated)
+        self.input.toggle_key.assert_called_once_with(82)
+
+    def test_rejected_stand_keeps_state_for_cleanup_retry(self) -> None:
+        worker = self._worker()
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        worker._seated = True
+        self.input.toggle_key.side_effect = [False, True]
+
+        self.assertFalse(worker.stand(82))
+        self.assertTrue(worker._seated)
+        self.assertTrue(worker.stand(82))
+        self.assertFalse(worker._seated)
+        self.assertEqual(
+            [call.args[0] for call in self.input.toggle_key.call_args_list],
+            [82, 82],
+        )
+
+    def test_shutdown_cleanup_stands_after_stop_without_normal_toggle(self) -> None:
+        worker = self._worker()
+        self.ctx.stop_event.set()
+        worker._seated = True
+        self.input.cleanup_toggle_key.return_value = True
+
+        self.assertTrue(worker._cleanup_stand(82))
+        worker._seated = False
+        self.input.cleanup_toggle_key.assert_called_once_with(82)
 
     def test_stand_presses_once_and_clears_seated(self) -> None:
         worker = self._worker()
         self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
         worker._seated = True
         self.assertTrue(worker.stand(82))
-        self.input.key_tap.assert_called_once_with(82)
+        self.input.toggle_key.assert_called_once_with(82)
         self.assertFalse(worker._seated)
         # Second stand is no-op — no flap.
         self.assertTrue(worker.stand(82))
-        self.input.key_tap.assert_called_once_with(82)
+        self.input.toggle_key.assert_called_once_with(82)
 
     def test_happy_path_exactly_two_taps(self) -> None:
         vitals = _ScriptedVitals(
@@ -106,15 +153,24 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
 
         def stop_after_two() -> None:
-            while self.input.key_tap.call_count < 2 and not self.ctx.is_stopped():
+            while self.input.toggle_key.call_count < 2 and not self.ctx.is_stopped():
                 self.ctx.stop_event.wait(0.01)
             self.ctx.stop_event.set()
 
         threading.Thread(target=stop_after_two, daemon=True).start()
         worker.run()
-        presses = [c.args[0] for c in self.input.key_tap.call_args_list if c.args[0] == 82]
+        presses = [c.args[0] for c in self.input.toggle_key.call_args_list if c.args[0] == 82]
         self.assertEqual(len(presses), 2, presses)
         self.assertFalse(worker._seated)
+
+    def test_cleanup_failure_does_not_claim_standing(self) -> None:
+        worker = self._worker()
+        self.ctx.stop_event.set()
+        worker._seated = True
+        self.input.cleanup_toggle_key.return_value = False
+
+        self.assertFalse(worker._cleanup_stand(82))
+        self.assertTrue(worker._seated)
 
     def test_finally_does_not_extra_tap_after_stand(self) -> None:
         worker = self._worker(_ScriptedVitals([SIT_LOW_SP_RATIO - 0.01]))
@@ -122,7 +178,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker._sit_until_done = MagicMock(return_value="recovered")  # type: ignore[method-assign]
         worker._seated = False
         worker._recover_sp(SIT_LOW_SP_RATIO - 0.01)
-        self.input.key_tap.assert_not_called()
+        self.input.toggle_key.assert_not_called()
         self.assertFalse(self.ctx.sitting_event.is_set())
 
     def test_danger_request_survives_competing_storage_session(self) -> None:
@@ -164,7 +220,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.danger.pop_damage_detected.side_effect = [False, True]
         self.assertEqual(worker._sit_until_done(82), "interrupted")
         # enter_sit + leave_sit
-        self.assertEqual(self.input.key_tap.call_count, 2)
+        self.assertEqual(self.input.toggle_key.call_count, 2)
         self.assertFalse(worker._seated)
 
     def test_damage_during_area_clear_rejects_sit_spot(self) -> None:
@@ -174,7 +230,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
 
         self.assertEqual(worker._sit_until_done(82), "interrupted")
-        self.input.key_tap.assert_not_called()
+        self.input.toggle_key.assert_not_called()
         self.teleport.danger_teleport.assert_called_once_with(
             reason="sit_spot_danger"
         )
@@ -189,7 +245,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
 
         self.assertEqual(worker._sit_until_done(82), "interrupted")
         self.assertEqual(
-            [call.args[0] for call in self.input.key_tap.call_args_list],
+            [call.args[0] for call in self.input.toggle_key.call_args_list],
             [82, 82],
         )
         self.teleport.danger_teleport.assert_called_once_with(
@@ -206,7 +262,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
 
         self.assertEqual(worker._sit_until_done(82), "interrupted")
         self.assertEqual(
-            [call.args[0] for call in self.input.key_tap.call_args_list],
+            [call.args[0] for call in self.input.toggle_key.call_args_list],
             [82, 82],
         )
         self.teleport.danger_teleport.assert_called_once_with(

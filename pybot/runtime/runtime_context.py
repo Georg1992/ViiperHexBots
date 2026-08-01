@@ -25,6 +25,7 @@ Sit, storage, and heal are mutually exclusive.
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from pybot.runtime.capture.hunt_capture import HuntWindowCapture
@@ -64,6 +65,11 @@ class HuntRuntimeContext:
     wings: WingTracker = field(default_factory=WingTracker)
     # Shared danger observer used by safe character actions (heal/buff).
     danger_detector: object | None = field(default=None, repr=False)
+    # Registered by the sit worker so runtime shutdown can retry an unresolved
+    # seated toggle after the worker thread has exited.
+    sit_cleanup_callback: Callable[[], bool] | None = field(
+        default=None, repr=False,
+    )
 
     # ── Event gate convenience properties (delegate to gates) ────
 
@@ -135,6 +141,31 @@ class HuntRuntimeContext:
     def danger_sit_requested(self) -> threading.Event:
         """Pending danger-driven sit request raised by DangerDetector."""
         return self.gates.danger_sit_requested
+
+    @property
+    def sit_cleanup_unresolved(self) -> threading.Event:
+        """True when a seated toggle still needs shutdown cleanup."""
+        return self.gates.sit_cleanup_unresolved
+
+    def register_sit_cleanup(self, callback: Callable[[], bool]) -> None:
+        """Register the sit worker's narrow shutdown cleanup operation."""
+        self.sit_cleanup_callback = callback
+
+    def mark_sit_cleanup_unresolved(self) -> None:
+        self.gates.mark_sit_cleanup_unresolved()
+
+    def clear_sit_cleanup_unresolved(self) -> None:
+        self.gates.clear_sit_cleanup_unresolved()
+
+    def retry_sit_cleanup(self) -> bool:
+        """Retry unresolved seated cleanup without restarting worker threads."""
+        if not self.sit_cleanup_unresolved.is_set():
+            return True
+        callback = self.sit_cleanup_callback
+        if callback is None or not callback():
+            return False
+        self.clear_sit_cleanup_unresolved()
+        return True
 
     # ── Wing convenience properties (delegate to wings) ──────────
 

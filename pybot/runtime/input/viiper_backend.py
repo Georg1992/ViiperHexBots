@@ -390,6 +390,49 @@ class ViiperBackend(ShadowInputBackend):
                 self._wait_or_cancel(after_s)
         return not self._cancel_event.is_set()
 
+    def toggle_key(self, scan_code: int) -> bool:
+        """Press/release a toggle key and report whether it was emitted.
+
+        Cancellation before key-down rejects the operation. Cancellation during
+        the press or after-key timing does not turn an already-emitted toggle
+        into a false result, which keeps sit/stand state synchronized.
+        """
+        if scan_code <= 0:
+            return False
+        with self._operation_lock:
+            if self._cancel_event.is_set():
+                return False
+            self._ensure_connected()
+            self._key_press(scan_code, down=True)
+            try:
+                self._wait_or_cancel(0.05)
+            finally:
+                self._key_press(scan_code, down=False)
+        return True
+
+    def cleanup_toggle_key(self, scan_code: int) -> bool:
+        """Emit one final toggle after normal input cancellation.
+
+        Shutdown cancellation must stop long-running actions, but it must not
+        prevent the sit worker from undoing a toggle that was already accepted.
+        This operation is deliberately limited to the key down/up pair and
+        always releases the key before returning.
+        """
+        if scan_code <= 0:
+            return False
+        if not self._operation_lock.acquire(timeout=0.25):
+            return False
+        try:
+            self._ensure_connected()
+            self._key_press(scan_code, down=True)
+            try:
+                self._wait_or_cancel(0.05)
+            finally:
+                self._key_press(scan_code, down=False)
+        finally:
+            self._operation_lock.release()
+        return True
+
     def type_text(self, text: str) -> bool:
         """Type printable characters (digits/letters) via scan codes."""
         if not text:

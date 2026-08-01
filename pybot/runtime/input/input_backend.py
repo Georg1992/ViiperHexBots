@@ -42,6 +42,10 @@ class InputBackend(Protocol):
         after_s: float = 0.30,
     ) -> bool: ...
 
+    def toggle_key(self, scan_code: int) -> bool: ...
+
+    def cleanup_toggle_key(self, scan_code: int) -> bool: ...
+
     def type_text(self, text: str) -> bool: ...
 
     def toggle_inventory(self) -> bool: ...
@@ -129,6 +133,14 @@ class ShadowInputBackend:
         if scan_code <= 0:
             return False
         return True
+
+    def toggle_key(self, scan_code: int) -> bool:
+        """Send one toggle key without a second post-key delay."""
+        return self.key_tap(scan_code, after_s=0.0)
+
+    def cleanup_toggle_key(self, scan_code: int) -> bool:
+        """Send a shutdown-only toggle after normal input is cancelled."""
+        return self.toggle_key(scan_code)
 
     def type_text(self, text: str) -> bool:
         if not text:

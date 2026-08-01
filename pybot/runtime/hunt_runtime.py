@@ -521,6 +521,19 @@ class HuntRuntime:
             # this runtime non-restartable until a later stop retry succeeds.
             return False
 
+        # A sit worker may have exited after three failed cleanup attempts.
+        # Keep runtime ownership and input resources until its dedicated
+        # shutdown toggle succeeds; otherwise a restart could invert the
+        # character's seated state.
+        unresolved = getattr(self._ctx, "sit_cleanup_unresolved", None)
+        if isinstance(unresolved, threading.Event) and unresolved.is_set():
+            retry_cleanup = getattr(self._ctx, "retry_sit_cleanup", None)
+            if not callable(retry_cleanup) or retry_cleanup() is not True:
+                self._ctx.logger.behavior(
+                    "[PYBOT] shutdown incomplete; seated state unresolved"
+                )
+                return False
+
         self._worker_threads.clear()
         if not self._shutdown_input():
             self._ctx.logger.behavior(
