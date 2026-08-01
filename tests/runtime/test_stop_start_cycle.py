@@ -128,6 +128,67 @@ class BotControllerStopStartCycleTests(unittest.TestCase):
                 self.assertTrue(stopped)
                 self.assertFalse(controller.running)
 
+    def test_stop_refuses_overlap_until_runtime_cleanup_completes(self) -> None:
+        app_config = MagicMock()
+        app_config.window_id = 1
+        app_config.hunt_validation_log = False
+        controller = BotController(
+            app_config=app_config,
+            session_id="test_pending_shutdown",
+        )
+        cleanup_complete = {"value": False}
+        retry_calls = {"n": 0}
+        runtime = MagicMock()
+
+        def run(**_kwargs) -> int:
+            return 0
+
+        def retry_shutdown() -> bool:
+            retry_calls["n"] += 1
+            if retry_calls["n"] >= 2:
+                cleanup_complete["value"] = True
+            return cleanup_complete["value"]
+
+        runtime.run = run
+        runtime.stop = MagicMock()
+        runtime.is_shutdown_complete.side_effect = (
+            lambda: cleanup_complete["value"]
+        )
+        runtime.retry_shutdown.side_effect = retry_shutdown
+
+        with TemporaryDirectory() as tmp:
+            sessions = Path(tmp)
+            with patch(
+                "pybot.app.bot_controller.create_runtime_deps",
+                return_value=MagicMock(),
+            ), patch(
+                "pybot.app.bot_controller.load_runtime_config",
+                return_value=MagicMock(),
+            ), patch(
+                "pybot.app.bot_controller.HuntRuntime",
+                return_value=runtime,
+            ), patch(
+                "pybot.app.bot_controller.SESSIONS_DIR",
+                sessions,
+            ):
+                controller.start(mob_name="horn")
+                thread = controller._thread
+                self.assertIsNotNone(thread)
+                assert thread is not None
+                thread.join(timeout=1.0)
+                self.assertFalse(thread.is_alive())
+                self.assertTrue(controller.shutdown_pending)
+
+                self.assertFalse(controller.stop(join_timeout=1.0))
+                self.assertTrue(controller.shutdown_pending)
+                # A retained incomplete runtime cannot be replaced.
+                controller.start(mob_name="new-horn")
+                self.assertIs(controller._runtime, runtime)
+
+                self.assertTrue(controller.stop(join_timeout=1.0))
+                self.assertFalse(controller.shutdown_pending)
+                self.assertIsNone(controller._runtime)
+
     def test_stop_start_stop_start_cycle(self) -> None:
         app_config = MagicMock()
         app_config.window_id = 1
@@ -174,6 +235,54 @@ class BotControllerStopStartCycleTests(unittest.TestCase):
                     self.assertFalse(controller.running)
 
         self.assertEqual(run_count["n"], 2)
+
+
+class BotLifecycleStoppingTests(unittest.TestCase):
+    def test_stop_owns_shutdown_and_refuses_restart_until_bot_exits(self) -> None:
+        root = MagicMock()
+        root.after = MagicMock()
+        lifecycle = BotLifecycleManager(
+            root=root,
+            config=MagicMock(),
+            mob_catalog=[],
+            session=MagicMock(),
+            viiper=MagicMock(),
+            hunt_overlay=MagicMock(),
+        )
+        bot = MagicMock()
+        stop_called = threading.Event()
+        release_stop = threading.Event()
+
+        def stop(join_timeout: float = 3.0) -> bool:
+            del join_timeout
+            stop_called.set()
+            release_stop.wait(timeout=2.0)
+            return True
+
+        bot.stop.side_effect = stop
+        lifecycle._bot = bot
+        lifecycle._state = BotState.RUNNING
+
+        lifecycle.stop()
+        self.assertTrue(stop_called.wait(timeout=1.0))
+
+        self.assertEqual(lifecycle.state, BotState.STOPPING)
+        self.assertTrue(lifecycle.stopping)
+        lifecycle.stop()
+        bot.request_stop.assert_called_once()
+        self.assertFalse(
+            lifecycle.start(config_snapshot=MagicMock(), session_id="new-session")
+        )
+
+        release_stop.set()
+        joiner = lifecycle._stop_joiner
+        self.assertIsNotNone(joiner)
+        assert joiner is not None
+        joiner.join(timeout=2.0)
+        self.assertFalse(joiner.is_alive())
+        lifecycle._refresh_stopped_state()
+        self.assertEqual(lifecycle.state, BotState.OFF)
+        self.assertFalse(lifecycle.stopping)
 
 
 class HuntRuntimeStopWakesPausedWorkersTests(unittest.TestCase):
@@ -275,10 +384,25 @@ class BotLifecycleRestartAfterCancelTests(unittest.TestCase):
                 and lifecycle._start_thread.is_alive()
             )
 
-            self.assertTrue(lifecycle.start(config_snapshot=cfg, session_id="s1"))
-            self.assertEqual(lifecycle.state, BotState.STARTING)
+            # Do not overlap the cancelled startup thread. Restart becomes
+            # available only after that thread has observed cancellation.
+            self.assertFalse(lifecycle.start(config_snapshot=cfg, session_id="s1"))
             release.set()
 
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                root.update()
+                if (
+                    lifecycle._start_thread is not None
+                    and not lifecycle._start_thread.is_alive()
+                ):
+                    break
+                time.sleep(0.02)
+            self.assertTrue(
+                lifecycle._start_thread is not None
+                and not lifecycle._start_thread.is_alive()
+            )
+            self.assertTrue(lifecycle.start(config_snapshot=cfg, session_id="s1"))
             deadline = time.monotonic() + 3.0
             while time.monotonic() < deadline and lifecycle.state != BotState.RUNNING:
                 root.update()

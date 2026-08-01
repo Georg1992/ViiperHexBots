@@ -1350,6 +1350,8 @@ class MainWindow:
             BotState.STARTING,
         ):
             self.stop_bot()
+        elif self.lifecycle.state == BotState.STOPPING or self.lifecycle.stopping:
+            self.log_pipe.log("Stop already in progress; waiting for workers to exit")
         else:
             self.start_bot()
 
@@ -1455,13 +1457,19 @@ class MainWindow:
             self.bot_status.configure(text="Starting...")
             self.status_indicator.configure(text=" START ", bg="#1565c0")
             self._lock_ui(True)
+        elif state == BotState.STOPPING:
+            self.bot_button.configure(text="Stopping...", state=tk.DISABLED)
+            self.continue_button.configure(state=tk.DISABLED)
+            self.bot_status.configure(text="Stopping...")
+            self.status_indicator.configure(text=" STOP ", bg="#6d4c41")
+            self._lock_ui(True)
         elif state == BotState.PAUSED:
             self.bot_button.configure(text="Stop Bot")
             self.bot_status.configure(text="Paused (TAB)")
             self.status_indicator.configure(text=" PAUSED ", bg="#f9a825")
             self.continue_button.configure(state=tk.NORMAL)
         elif state == BotState.OFF:
-            self.bot_button.configure(text="Start Bot")
+            self.bot_button.configure(text="Start Bot", state=tk.NORMAL)
             self.continue_button.configure(state=tk.DISABLED)
             self.bot_status.configure(text="Off")
             self.status_indicator.configure(text="  OFF  ", bg="#c62828")
@@ -1527,7 +1535,15 @@ class MainWindow:
         self._apply_ui_settings()
         if self.lifecycle.state != BotState.OFF:
             self.stop_bot()
-        self.lifecycle.await_shutdown(timeout=DEFAULT_STOP_JOIN_TIMEOUT_S + 1.0)
+        shutdown_complete = self.lifecycle.await_shutdown(
+            timeout=DEFAULT_STOP_JOIN_TIMEOUT_S + 1.0
+        )
+        if not shutdown_complete:
+            self.log_pipe.log(
+                "[STATE] Shutdown still in progress; keeping VIIPER and UI alive "
+                "to avoid racing live workers"
+            )
+            return
         if self._memory_poll_after_id is not None:
             try:
                 self.root.after_cancel(self._memory_poll_after_id)

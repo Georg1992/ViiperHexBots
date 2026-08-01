@@ -74,10 +74,6 @@ class MobBehavior:
         """Run configured pre-attack actions; default is a no-op."""
         return False
 
-    def defers_heal_until_after_kite(self) -> bool:
-        """Whether healing should wait for the post-attack kite input."""
-        return False
-
     def kite_after_attack(
         self,
         char_x: int,
@@ -123,7 +119,11 @@ class AnubisBehavior(MobBehavior):
 
 
 class ConfiguredMobBehavior(MobBehavior):
-    """Generic per-mob cycle: debuff, safe self-heal, kite, then attack."""
+    """Generic per-mob cycle: debuff, kite, and attack with safe healing.
+
+    Healing is deliberately kept out of the kiting hook so movement and
+    self-targeted recovery remain separate actions.
+    """
 
     def __init__(
         self,
@@ -138,10 +138,6 @@ class ConfiguredMobBehavior(MobBehavior):
         self._legacy_behavior = legacy_behavior
         self._last_kite_ms = 0
         self._last_heal_ms: int | None = None
-
-    def defers_heal_until_after_kite(self) -> bool:
-        """Keep self-healing after the kite input for configured kiting."""
-        return self._settings.kiting_tick_ms > 0 or self._legacy_behavior is not None
 
     def prepare_target(
         self,
@@ -198,9 +194,8 @@ class ConfiguredMobBehavior(MobBehavior):
         *,
         all_mobs: list[tuple[int, int]],
     ) -> bool:
-        # Healing is intentionally never a pre-attack action. It belongs
-        # after a successful kite or in the attack loop's no-target safe-area
-        # branch, where the character is not actively fighting.
+        # Healing is owned by the attack loop's safe pre-attack and idle
+        # branches; kiting only handles movement.
         del char_x, char_y, input_backend, all_mobs
         return False
 
@@ -212,7 +207,7 @@ class ConfiguredMobBehavior(MobBehavior):
         *,
         all_mobs: list[tuple[int, int]],
     ) -> bool:
-        """Kite in the inter-attack window, before the next heal/attack."""
+        """Kite in the inter-attack window before the next attack."""
         now = monotonic_ms()
         if self._settings.kiting_tick_ms > 0:
             if now - self._last_kite_ms < self._settings.kiting_tick_ms:
@@ -222,22 +217,13 @@ class ConfiguredMobBehavior(MobBehavior):
             )
             if acted:
                 self._last_kite_ms = now
-                # The kite click is the first input in the skill-delay window.
-                # Heal immediately afterwards, while the same delay is still
-                # elapsing, so the next attack does not wait for a separate
-                # healing cycle.
-                self.heal_if_needed(char_x, char_y, input_backend)
             return acted
         if self._legacy_behavior is not None:
             # Keep Anubis's original post-attack kite timing when its cog has
-            # no custom kite interval configured, but preserve the same
-            # post-kite self-heal ordering as configured kiting.
-            acted = self._legacy_behavior.kite_after_attack(
+            # no custom kite interval configured.
+            return self._legacy_behavior.kite_after_attack(
                 char_x, char_y, input_backend, all_mobs=all_mobs
             )
-            if acted:
-                self.heal_if_needed(char_x, char_y, input_backend)
-            return acted
         return False
 
 

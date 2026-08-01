@@ -37,8 +37,21 @@ class BotController:
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    @property
+    def shutdown_pending(self) -> bool:
+        """True while this controller still owns a live runtime or worker set."""
+        if self._thread is not None and self._thread.is_alive():
+            return True
+        runtime = self._runtime
+        complete = getattr(runtime, "is_shutdown_complete", None)
+        if not callable(complete):
+            # Lightweight/custom runtimes predate the completion handshake;
+            # once their top-level thread exits, preserve old compatibility.
+            return False
+        return complete() is False
+
     def start(self, *, mob_name: str) -> None:
-        if self.running:
+        if self.shutdown_pending:
             return
 
         control_file = SESSIONS_DIR / self._session_id / "control.json"
@@ -71,11 +84,12 @@ class BotController:
             self._runtime.stop()
 
     def stop(self, *, join_timeout: float = DEFAULT_STOP_JOIN_TIMEOUT_S) -> bool:
-        """Stop the hunt runtime and join its thread.
+        """Stop the hunt and release ownership only after full cleanup.
 
-        Returns True when the hunt thread has exited. If the join times out the
-        controller keeps its handles so ``running`` stays True and a later
-        ``stop`` / start-await can finish the shutdown — never overlap two hunts.
+        The top-level runtime thread can return after its first bounded worker
+        shutdown attempt while a non-cooperative worker is still alive. In
+        that case the runtime object remains owned and a later stop retries
+        cleanup; a new hunt can never be started over those workers.
         """
         self.request_stop()
         thread = self._thread
@@ -83,6 +97,14 @@ class BotController:
             thread.join(timeout=join_timeout)
             if thread.is_alive():
                 return False
+
+        runtime = self._runtime
+        complete = getattr(runtime, "is_shutdown_complete", None)
+        if callable(complete) and complete() is False:
+            retry = getattr(runtime, "retry_shutdown", None)
+            if not callable(retry) or retry() is not True:
+                return False
+
         self._thread = None
         self._runtime = None
         control_file = SESSIONS_DIR / self._session_id / "control.json"

@@ -34,7 +34,7 @@ class MobBehaviorDialog(tk.Toplevel):
 
         ttk.Label(
             body,
-            text="Cast the debuff once per target, kite during the attack delay, then optionally heal yourself.",
+            text="Cast the debuff once per target, heal safely before attacks, and kite during the attack delay.",
             wraplength=360,
         ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
 

@@ -405,9 +405,53 @@ class HuntRuntime:
         self._input_backend = deps.input_backend
         self._teleport = deps.teleport_controller
         self._worker_threads: list[threading.Thread] = []
+        self._shutdown_complete = threading.Event()
 
+    def is_shutdown_complete(self) -> bool:
+        """True only after every worker and input operation has shut down."""
+        return self._shutdown_complete.is_set()
+
+    def retry_shutdown(self) -> bool:
+        """Retry bounded cleanup after the runtime thread has returned.
+
+        A worker can outlive the control loop's first shutdown budget. Keep the
+        runtime object as the owner and allow the controller's later stop
+        attempt to join those workers without starting a second worker set.
+        """
+        if self._shutdown_complete.is_set():
+            return True
+        clean_shutdown = self._shutdown_workers()
+        if clean_shutdown:
+            reset_capture_session()
+            self._shutdown_complete.set()
+        return clean_shutdown
+
+    def _cancel_input(self) -> None:
+        """Cancel an in-flight input operation when the backend supports it."""
+        cancel = getattr(self._input_backend, "cancel_pending", None)
+        if callable(cancel):
+            cancel()
+
+    def _begin_input_session(self) -> None:
+        """Re-arm a reusable input backend for a fresh hunt session."""
+        begin = getattr(self._input_backend, "begin_session", None)
+        if callable(begin):
+            begin()
+
+    def _shutdown_input(self) -> bool:
+        """Release input state while retaining backend compatibility."""
+        shutdown = getattr(self._input_backend, "shutdown", None)
+        if not callable(shutdown):
+            return True
+        result = shutdown()
+        return result is not False
 
     def stop(self) -> None:
+        # Cancel input first so workers blocked inside a composite key/mouse
+        # operation can unwind and observe stop_event without waiting for the
+        # full storage/skill delay. The backend keeps shared VIIPER streams
+        # alive; shutdown later sends neutral reports.
+        self._cancel_input()
         # Wake workers blocked on pause/sit gates so they observe stop_event.
         self._ctx.stop_event.set()
         self._ctx.discovery_wake.set()
@@ -425,7 +469,13 @@ class HuntRuntime:
     def set_search_range_cells(self, cells: int) -> None:
         self._ctx.capture.set_search_range_cells(cells)
 
-    def _shutdown_workers(self) -> None:
+    def _shutdown_workers(self) -> bool:
+        # Make cancellation idempotent and repeat it here for runtimes stopped
+        # by a control file, signal, or run_seconds deadline rather than stop().
+        self._cancel_input()
+        self._ctx.discovery_wake.set()
+        self._ctx.resume_gate.set()
+
         deadline = time.monotonic() + WORKER_SHUTDOWN_TIMEOUT_S
         pending = [thread for thread in self._worker_threads if thread.is_alive()]
         while pending and time.monotonic() < deadline:
@@ -435,10 +485,20 @@ class HuntRuntime:
         if pending:
             names = ", ".join(thread.name for thread in pending)
             self._ctx.logger.behavior(
-                f"[PYBOT] shutdown timeout; workers still alive: {names}"
+                f"[PYBOT] shutdown incomplete; workers still alive: {names}"
             )
+            # Never discard live worker handles or close shared input/capture
+            # resources while they remain active. The owning controller keeps
+            # this runtime non-restartable until a later stop retry succeeds.
+            return False
+
         self._worker_threads.clear()
-        self._input_backend.shutdown()
+        if not self._shutdown_input():
+            self._ctx.logger.behavior(
+                "[PYBOT] input shutdown did not acquire the shared operation lock"
+            )
+            return False
+        return True
 
     def run(self, *, run_seconds: float = 0.0, start_paused: bool = False) -> int:
         ctx = self._ctx
@@ -488,6 +548,7 @@ class HuntRuntime:
             f"teleport={teleport_button!r}"
         )
 
+        self._begin_input_session()
         threads = [
             threading.Thread(target=fn, name=name, daemon=True)
             for name, fn in self._workers
@@ -509,8 +570,14 @@ class HuntRuntime:
                 ctx.stop_event.wait(0.25)
         finally:
             ctx.logger.behavior("[PYBOT] hunt runtime stopped")
-            self._shutdown_workers()
-            reset_capture_session()
+            clean_shutdown = self._shutdown_workers()
+            if clean_shutdown:
+                reset_capture_session()
+                self._shutdown_complete.set()
+            else:
+                ctx.logger.behavior(
+                    "[PYBOT] runtime remains owned because shutdown was incomplete"
+                )
 
         return 0
 

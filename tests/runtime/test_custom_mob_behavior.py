@@ -57,7 +57,7 @@ class CustomMobBehaviorConfigTests(unittest.TestCase):
 
 
 class ConfiguredMobBehaviorTests(unittest.TestCase):
-    def test_kites_then_heals_during_delay_and_before_next_attack(self) -> None:
+    def test_kiting_does_not_cast_heal(self) -> None:
         settings = SimpleNamespace(
             configured=True,
             kiting_tick_ms=1,
@@ -70,7 +70,6 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
         vitals = PlayerVitals()
         vitals.publish_hp(80, 100)
         danger = MagicMock()
-        danger.is_safe_for_heal.return_value = True
         backend = MagicMock()
         backend.move_and_click.return_value = True
         backend.skill_click_at.return_value = True
@@ -90,15 +89,11 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
                 all_mobs=[(120, 100)],
             )
 
-        self.assertTrue(behavior.defers_heal_until_after_kite())
         self.assertEqual(
             backend.method_calls,
-            [
-                unittest.mock.call.move_and_click(80, 100),
-                unittest.mock.call.skill_click_at(16, 100, 100),
-            ],
+            [unittest.mock.call.move_and_click(80, 100)],
         )
-        danger.is_safe_for_heal.assert_called_once()
+        danger.is_safe_for_heal.assert_not_called()
 
     def test_casts_debuff_once_per_target_and_retries_failed_cast(self) -> None:
         settings = SimpleNamespace(

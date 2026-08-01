@@ -55,24 +55,17 @@ class AttackLoop:
 
                 target_id = self._ctx.policy.select_target(policy_tracks, tick)
                 if target_id:
-                    # Safe self-heal is attempted every attack-loop tick. The
-                    # behavior cooldown prevents duplicate casts when the
-                    # pre-attack or post-kite hook already healed.
-                    defer_heal = getattr(
-                        self._mob_behavior,
-                        "defers_heal_until_after_kite",
-                        lambda: False,
-                    )
-                    if not defer_heal():
-                        heal = getattr(self._mob_behavior, "heal_if_needed", None)
-                        if callable(heal):
-                            try:
-                                hx, hy = self._character_pos()
-                                heal(hx, hy, self._input)
-                            except Exception:
-                                self._ctx.logger.behavior(
-                                    f"[HEAL] self-heal error:\\n{traceback.format_exc()}"
-                                )
+                    # Safe self-heal is attempted before the attack. Kiting
+                    # only handles movement and never casts self-targeted skills.
+                    heal = getattr(self._mob_behavior, "heal_if_needed", None)
+                    if callable(heal):
+                        try:
+                            hx, hy = self._character_pos()
+                            heal(hx, hy, self._input)
+                        except Exception:
+                            self._ctx.logger.behavior(
+                                f"[HEAL] self-heal error:\\n{traceback.format_exc()}"
+                            )
                     self._attack_one(target_id, tick)
                     self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
                     continue
@@ -159,7 +152,8 @@ class AttackLoop:
         if not prepared:
             return
 
-        # Custom behavior runs before the attack: kite, then safe self-heal.
+        # Custom behavior runs before the attack. Healing is handled by the
+        # outer loop before this method; this hook only prepares the target.
         # Its input methods are atomic, so the cursor cannot be interleaved with
         # another worker's self-cast or storage action.
         try:
@@ -193,33 +187,16 @@ class AttackLoop:
 
         # Start kiting immediately after the attack input, before the skill
         # delay. This gives movement the full delay window to take effect.
-        kite_x, kite_y = char_x, char_y
-        kite_acted = False
         try:
             kite_x, kite_y = self._character_pos()
             all_mobs = ctx.tracks.positions_snapshot()
-            kite_acted = bool(self._mob_behavior.kite_after_attack(
+            self._mob_behavior.kite_after_attack(
                 kite_x, kite_y, self._input, all_mobs=all_mobs,
-            ))
+            )
         except Exception:
             ctx.logger.behavior(
                 f"[ATTACK] kite error id={target_id}:\n{traceback.format_exc()}"
             )
-
-        # Retry safe self-healing only after a successful kite input. A
-        # throttled/failed kite is not a valid healing window while a target
-        # remains active; a successful kite's cooldown suppresses duplicates
-        # when its behavior already healed internally.
-        if kite_acted:
-            heal = getattr(self._mob_behavior, "heal_if_needed", None)
-            if callable(heal):
-                try:
-                    heal(kite_x, kite_y, self._input)
-                except Exception:
-                    ctx.logger.behavior(
-                        f"[HEAL] post-kite fallback error id={target_id}:\n"
-                        f"{traceback.format_exc()}"
-                    )
 
         # Sole inter-skill wait — game applies SP cost; UI may refresh vitals.
         self._ctx.stop_event.wait(ctx.config.skill_delay_ms / 1000.0)

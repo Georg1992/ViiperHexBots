@@ -66,6 +66,33 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         self.assertEqual(events, ["debuff", "marked", "before", "attack", "kite", "delay"])
         ctx.tracks.mark_debuff_applied.assert_called_once_with(1)
 
+    def test_run_keeps_healing_in_normal_target_and_idle_paths(self) -> None:
+        ctx = MagicMock()
+        ctx.config = SimpleNamespace(skill_scan_code=16, skill_delay_ms=1)
+        ctx.logger = MagicMock()
+        ctx.should_run_combat.return_value = True
+        ctx.is_stopped.side_effect = [False, False, True]
+        ctx.tracks.tracks_for_policy.return_value = []
+        ctx.policy.select_target.side_effect = [1, None]
+        ctx.stop_event = MagicMock()
+        ctx.character_screen_pos.return_value = (100, 100)
+
+        mob_behavior = MagicMock()
+        loop = AttackLoop(
+            ctx,
+            MagicMock(),
+            MagicMock(),
+            mob_behavior=mob_behavior,
+            vitals=PlayerVitals(),
+        )
+        loop._attack_one = MagicMock()
+
+        loop.run()
+
+        self.assertEqual(mob_behavior.heal_if_needed.call_count, 2)
+        mob_behavior.heal_if_needed.assert_any_call(100, 100, loop._input)
+        loop._attack_one.assert_called_once_with(1, unittest.mock.ANY)
+
     def test_attack_kites_before_sit_blocks_combat_during_skill_delay(self) -> None:
         ctx = MagicMock()
         ctx.config = SimpleNamespace(skill_scan_code=16, skill_delay_ms=50)
@@ -81,6 +108,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         input_backend = MagicMock()
         input_backend.skill_click_at.side_effect = lambda *_args: events.append("attack") or True
         mob_behavior = MagicMock()
+        mob_behavior.heal_if_needed = MagicMock()
         mob_behavior.kite_after_attack.side_effect = lambda *_args, **_kwargs: events.append("kite")
         vitals = PlayerVitals()
         vitals.publish_sp(100, 200)
@@ -101,6 +129,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         input_backend.skill_click_at.assert_called_once_with(16, 10, 20)
         mob_behavior.kite_after_attack.assert_called_once()
         self.assertEqual(events, ["attack", "kite", "delay"])
+        mob_behavior.heal_if_needed.assert_not_called()
 
 
 if __name__ == "__main__":

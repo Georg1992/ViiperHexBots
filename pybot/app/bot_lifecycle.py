@@ -26,6 +26,9 @@ from pybot.runtime.overlay_ports import NullOverlay
 
 _MAIN_DISPATCH_MS = 50
 _MAX_DISPATCH_PER_TICK = 20
+# A stop attempt must yield even when a worker is permanently non-cooperative.
+# Ownership remains with this lifecycle manager so a later Stop can retry.
+_STOP_RETRY_ATTEMPTS = 3
 
 
 class BotState(Enum):
@@ -34,6 +37,7 @@ class BotState(Enum):
     OFF = auto()
     STARTING = auto()
     RUNNING = auto()
+    STOPPING = auto()
     PAUSED = auto()
 
 
@@ -72,6 +76,9 @@ class BotLifecycleManager:
         self._input_ready = False
         self._focus_grace_until = 0.0
         self._stop_joiner: threading.Thread | None = None
+        # Serializes ownership handoff between the Tk thread and stop joiner.
+        self._ownership_lock = threading.RLock()
+        self._stopping = False
         self._start_thread: threading.Thread | None = None
         self._start_cancelled = False
         self._start_generation = 0
@@ -92,6 +99,11 @@ class BotLifecycleManager:
     @property
     def window_id(self) -> int:
         return self._config.window_id
+
+    @property
+    def stopping(self) -> bool:
+        """True while a prior hunt is still unwinding its worker threads."""
+        return self._stopping
 
     def _post_to_main(self, callback: Callable[[], None]) -> None:
         self._main_queue.put_nowait(callback)
@@ -129,13 +141,53 @@ class BotLifecycleManager:
 
         self._post_to_main(_mark_input_ready)
 
-    def await_shutdown(self, timeout: float = DEFAULT_STOP_JOIN_TIMEOUT_S + 1.0) -> None:
-        """Block until async start/stop threads finish (for app exit)."""
-        self._start_cancelled = True
-        if self._start_thread is not None and self._start_thread.is_alive():
-            self._start_thread.join(timeout=timeout)
-        if self._stop_joiner is not None and self._stop_joiner.is_alive():
-            self._stop_joiner.join(timeout=timeout)
+    def await_shutdown(self, timeout: float = DEFAULT_STOP_JOIN_TIMEOUT_S + 1.0) -> bool:
+        """Wait for async lifecycle threads; return whether shutdown completed."""
+        with self._ownership_lock:
+            self._start_cancelled = True
+            start_thread = self._start_thread
+            stop_joiner = self._stop_joiner
+            stopping = self._stopping
+            bot = self._bot
+        deadline = time.monotonic() + timeout
+        if start_thread is not None and start_thread.is_alive():
+            start_thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if stop_joiner is not None and stop_joiner.is_alive():
+            stop_joiner.join(timeout=max(0.0, deadline - time.monotonic()))
+        # A bounded joiner intentionally yields after a finite retry budget.
+        # If ownership is still retained, start one more bounded attempt when
+        # shutdown is requested again instead of requiring a hidden UI action.
+        with self._ownership_lock:
+            current_joiner = self._stop_joiner
+            needs_retry = (
+                self._stopping
+                and self._bot is not None
+                and (
+                    current_joiner is None or not current_joiner.is_alive()
+                )
+            )
+            bot = self._bot
+            epoch = self._overlay_epoch
+        if needs_retry and bot is not None and time.monotonic() < deadline:
+            self._start_stop_joiner(bot, overlay_epoch=epoch)
+            with self._ownership_lock:
+                retry_joiner = self._stop_joiner
+            if retry_joiner is not None:
+                retry_joiner.join(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
+        with self._ownership_lock:
+            return not (
+                (
+                    self._start_thread is not None
+                    and self._start_thread.is_alive()
+                )
+                or (
+                    self._stop_joiner is not None
+                    and self._stop_joiner.is_alive()
+                )
+                or self._stopping
+            )
 
     def _is_current_start(self, generation: int) -> bool:
         """True when *generation* is still the active, non-cancelled start."""
@@ -144,6 +196,19 @@ class BotLifecycleManager:
             and not self._start_cancelled
             and self._state == BotState.STARTING
         )
+
+    @staticmethod
+    def _bot_shutdown_pending(bot: BotController) -> bool:
+        """Read the optional controller ownership flag compatibly.
+
+        Older/custom doubles may not define ``shutdown_pending``; MagicMock
+        also fabricates arbitrary attributes. Only a real bool is authoritative
+        so those doubles continue to use their existing ``running`` contract.
+        """
+        pending = getattr(bot, "shutdown_pending", None)
+        if isinstance(pending, bool):
+            return pending
+        return bool(getattr(bot, "running", False))
 
     def _emit_state(self, state: BotState, *, generation: int | None = None) -> None:
         """Notify UI of *state*, ignoring stale STARTING events after cancel."""
@@ -164,13 +229,46 @@ class BotLifecycleManager:
         A cancelled in-flight start thread may still be alive; this bumps the
         start generation so that thread's finish is ignored and restart works.
         """
-        if self._state not in (BotState.OFF,):
-            return False
+        with self._ownership_lock:
+            # A completed stop may have queued its UI callback but already
+            # released ownership. Reconcile that state before applying the
+            # normal start guards so a quick restart cannot be blocked by stale
+            # STOPPING.
+            if (
+                self._state == BotState.STOPPING
+                and not self._stopping
+                and self._bot is None
+                and (
+                    self._stop_joiner is None
+                    or not self._stop_joiner.is_alive()
+                )
+            ):
+                self._state = BotState.OFF
+                self._emit_state(BotState.OFF)
+            if self._state not in (BotState.OFF,):
+                return False
+            if self._stopping:
+                self._on_log(
+                    "[STATE] Start refused — previous hunt is still stopping"
+                )
+                return False
+            if self._start_thread is not None and self._start_thread.is_alive():
+                self._on_log(
+                    "[STATE] Start refused — previous startup is still stopping"
+                )
+                return False
+            # A previous hunt may still be unwinding in the background after
+            # the UI has returned to OFF. Never launch over that joiner.
+            if self._stop_joiner is not None and self._stop_joiner.is_alive():
+                self._on_log(
+                    "[STATE] Start refused — previous hunt is still stopping"
+                )
+                return False
 
-        self._start_cancelled = False
-        self._start_generation += 1
-        generation = self._start_generation
-        self._state = BotState.STARTING
+            self._start_cancelled = False
+            self._start_generation += 1
+            generation = self._start_generation
+            self._state = BotState.STARTING
         self._post_to_main(
             lambda: self._emit_state(BotState.STARTING, generation=generation),
         )
@@ -179,7 +277,11 @@ class BotLifecycleManager:
             posted_terminal = False
             try:
                 self._on_log("[STATE] Start: waiting for prior hunt to exit")
-                self._await_prior_stop_joiner()
+                if not self._await_prior_stop_joiner():
+                    self._on_log(
+                        "[STATE] Start aborted — prior hunt is still stopping"
+                    )
+                    return
                 if not self._is_current_start(generation):
                     return
 
@@ -214,7 +316,9 @@ class BotLifecycleManager:
                 self._on_log(f"[STATE] Start: launching hunt thread mob={mob_name}")
                 bot.start(mob_name=mob_name)
                 if not self._is_current_start(generation):
-                    if bot.running:
+                    pending = self._bot_shutdown_pending(bot)
+                    if pending:
+                        self._bot = bot
                         bot.request_stop()
                         self._start_stop_joiner(bot, destroy_overlay=False)
                     return
@@ -266,13 +370,17 @@ class BotLifecycleManager:
         generation: int,
     ) -> None:
         if generation != self._start_generation:
-            if bot.running:
+            pending = self._bot_shutdown_pending(bot)
+            if pending:
+                self._bot = bot
                 bot.request_stop()
                 self._start_stop_joiner(bot, destroy_overlay=False)
             return
 
         if self._start_cancelled or self._state != BotState.STARTING:
-            if bot.running:
+            pending = self._bot_shutdown_pending(bot)
+            if pending:
+                self._bot = bot
                 bot.request_stop()
                 self._start_stop_joiner(bot)
             if self._state == BotState.STARTING:
@@ -281,6 +389,14 @@ class BotLifecycleManager:
             return
 
         if not bot.running:
+            if self._bot_shutdown_pending(bot):
+                # The top-level thread may have returned while workers remain
+                # owned. Keep the controller and route it through the same
+                # bounded stop joiner rather than abandoning those workers.
+                self._bot = bot
+                bot.request_stop()
+                self._start_stop_joiner(bot)
+                return
             self._on_log("[STATE] Bot start failed — hunt thread did not start")
             self._state = BotState.OFF
             self._emit_state(BotState.OFF)
@@ -323,25 +439,44 @@ class BotLifecycleManager:
         self._emit_state(BotState.OFF)
 
     def stop(self) -> None:
-        if self._state == BotState.OFF and self._bot is None:
-            return
+        with self._ownership_lock:
+            if self._stopping:
+                # A bounded joiner may have finished without success. Preserve
+                # the bot handle and allow a later Stop to start one retry.
+                bot = self._bot
+                joiner = self._stop_joiner
+                if bot is not None and (
+                    joiner is None or not joiner.is_alive()
+                ):
+                    self._start_stop_joiner(
+                        bot, overlay_epoch=self._overlay_epoch
+                    )
+                return
+            if self._state == BotState.OFF and self._bot is None:
+                return
 
-        if self._state == BotState.STARTING:
-            self._start_cancelled = True
+            if self._state == BotState.STARTING:
+                self._start_cancelled = True
 
-        bot = self._bot
-        if bot is not None:
-            bot.request_stop()
+            bot = self._bot
+            if bot is not None:
+                bot.request_stop()
 
-        overlay_epoch = self._overlay_epoch
-        self._bot = None
-        self._state = BotState.OFF
-        self._hunt_overlay.reset_stats()
-        if bot is None:
-            self._hunt_overlay.destroy()
-        self._emit_state(BotState.OFF)
-        if bot is not None:
-            self._start_stop_joiner(bot, overlay_epoch=overlay_epoch)
+            overlay_epoch = self._overlay_epoch
+            # Keep ``_bot`` until the joiner proves full shutdown. This is the
+            # retry handle if the runtime thread returned with workers live.
+            self._stopping = bot is not None
+            self._state = BotState.STOPPING if bot is not None else BotState.OFF
+            self._hunt_overlay.reset_stats()
+            if bot is None:
+                self._hunt_overlay.destroy()
+                self._emit_state(BotState.OFF)
+            else:
+                self._on_log(
+                    "[STATE] Bot stopping — waiting for workers to exit"
+                )
+                self._emit_state(BotState.STOPPING)
+                self._start_stop_joiner(bot, overlay_epoch=overlay_epoch)
 
     def _destroy_hunt_overlay_if_epoch(self, overlay_epoch: int) -> None:
         """Destroy overlay only if no newer hunt has claimed it."""
@@ -359,43 +494,105 @@ class BotLifecycleManager:
         overlay_epoch: int | None = None,
     ) -> None:
         epoch = self._overlay_epoch if overlay_epoch is None else overlay_epoch
+        # Every path that hands a live bot to the joiner must claim stopping
+        # ownership, including a cancelled STARTING generation that finishes
+        # launching just after the user pressed Stop.
+        with self._ownership_lock:
+            self._stopping = True
+            if self._state != BotState.STOPPING:
+                self._state = BotState.STOPPING
+                self._post_to_main(lambda: self._emit_state(BotState.STOPPING))
+            existing = self._stop_joiner
+            if existing is not None and existing.is_alive():
+                return
 
         def _join() -> None:
-            # Retry until the hunt thread exits — do not start another hunt over it.
-            stopped = bot.stop(join_timeout=DEFAULT_STOP_JOIN_TIMEOUT_S)
-            if not stopped:
-                stopped = bot.stop(join_timeout=DEFAULT_STOP_JOIN_TIMEOUT_S)
+            stopped = False
+            # Each call has a bounded join timeout. After a finite number of
+            # attempts, yield the joiner while retaining ownership and the bot
+            # handle so Stop can retry later without overlapping runtimes.
+            for _attempt in range(_STOP_RETRY_ATTEMPTS):
+                try:
+                    if bot.stop(join_timeout=DEFAULT_STOP_JOIN_TIMEOUT_S):
+                        stopped = True
+                        break
+                except Exception as exc:
+                    self._on_log(f"[STATE] Hunt stop retry failed: {exc}")
+                self._on_log(
+                    "[STATE] Hunt thread still alive after stop join — retrying"
+                )
+
             if not stopped:
                 self._on_log(
-                    "[STATE] Hunt thread still alive after stop join — "
-                    "restart will wait for it"
+                    "[STATE] Hunt stop incomplete; ownership retained for retry"
                 )
-                bot.stop(join_timeout=DEFAULT_STOP_JOIN_TIMEOUT_S * 2)
+                # Keep STOPPING visible and keep ``_stopping`` true. A later
+                # Stop call will create another bounded joiner.
+                return
+
+            # Mark ownership complete before posting UI work. Keep the visible
+            # STOPPING state until Tk processes the transition; the start
+            # guard also reconciles this state if a callback is delayed.
+            with self._ownership_lock:
+                self._stopping = False
+                if self._bot is bot:
+                    self._bot = None
+            self._post_to_main(self._refresh_stopped_state)
             if destroy_overlay:
                 self._post_to_main(
                     lambda: self._destroy_hunt_overlay_if_epoch(epoch),
                 )
 
-        self._stop_joiner = threading.Thread(
-            target=_join,
-            name="bot-stop-joiner",
-            daemon=True,
-        )
-        self._stop_joiner.start()
+        # Reserve, assign, and start the joiner in one critical section. A
+        # concurrent Stop/Exit caller therefore observes the reservation rather
+        # than creating a second joiner for the same BotController. Thread.start
+        # itself does not wait for the worker; bot.stop remains outside the lock.
+        with self._ownership_lock:
+            existing = self._stop_joiner
+            if existing is not None and existing.is_alive():
+                return
+            joiner = threading.Thread(
+                target=_join,
+                name="bot-stop-joiner",
+                daemon=True,
+            )
+            self._stop_joiner = joiner
+            joiner.start()
 
-    def _await_prior_stop_joiner(self) -> None:
-        """Block until the previous hunt fully stopped (required before restart)."""
-        joiner = self._stop_joiner
-        if joiner is not None and joiner.is_alive():
-            # Match the stop-joiner's worst-case join budget (3 + 3 + 6)s.
-            joiner.join(timeout=DEFAULT_STOP_JOIN_TIMEOUT_S * 4)
-            if joiner.is_alive():
-                self._on_log(
-                    "[STATE] Prior hunt stop still running — continuing restart wait"
-                )
-                joiner.join(timeout=DEFAULT_STOP_JOIN_TIMEOUT_S * 4)
-        if self._stop_joiner is joiner:
-            self._stop_joiner = None
+    def _refresh_stopped_state(self) -> None:
+        """Refresh the UI after the owned stop joiner has completed."""
+        with self._ownership_lock:
+            if self._state == BotState.STOPPING and not self._stopping:
+                self._state = BotState.OFF
+                self._emit_state(BotState.OFF)
+
+    def _await_prior_stop_joiner(self) -> bool:
+        """Wait for the previous hunt; return False if it remains alive.
+
+        A start must never continue after this bounded wait if the old stop
+        joiner is still alive. The joiner remains owned by the lifecycle
+        manager, so a later Start can retry without overlapping worker sets.
+        """
+        with self._ownership_lock:
+            joiner = self._stop_joiner
+        if joiner is None or not joiner.is_alive():
+            with self._ownership_lock:
+                if self._stop_joiner is joiner:
+                    self._stop_joiner = None
+            return True
+
+        # Keep the UI responsive by waiting on the start worker, but do not
+        # silently proceed over a stop that has not completed.
+        joiner.join(timeout=DEFAULT_STOP_JOIN_TIMEOUT_S * 4)
+        if joiner.is_alive():
+            self._on_log(
+                "[STATE] Prior hunt stop still running — start remains blocked"
+            )
+            return False
+        with self._ownership_lock:
+            if self._stop_joiner is joiner:
+                self._stop_joiner = None
+        return True
 
     def pause(self) -> None:
         if self._state != BotState.RUNNING:

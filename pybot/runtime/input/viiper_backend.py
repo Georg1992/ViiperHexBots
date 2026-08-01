@@ -40,6 +40,11 @@ MOUSE_BUTTON_LEFT = 0
 MOUSE_BUTTON_RIGHT = 1
 
 _shared_lock = threading.Lock()
+# All backend instances may share the same process-wide VIIPER streams.
+# Serialise operations globally so overlapping lifecycle threads cannot
+# interleave keyboard/mouse reports even during a stop/start race.
+_shared_operation_lock = threading.Lock()
+_shared_cancel_event = threading.Event()
 _shared_kb: DeviceStream | None = None
 _shared_mouse: DeviceStream | None = None
 
@@ -69,7 +74,10 @@ class ViiperBackend(ShadowInputBackend):
         self._mouse_button_left = 0  # button index for left click
         self._connected = False
         self._connect_lock = threading.Lock()
-        self._operation_lock = threading.Lock()
+        self._operation_lock = _shared_operation_lock
+        # Set by runtime stop before shutdown joins workers. Long input
+        # sequences observe it and release their keys/buttons promptly.
+        self._cancel_event = _shared_cancel_event
 
         # Track modifier key state (Ctrl, Shift, Alt, Win)
         self._modifiers: int = 0
@@ -145,21 +153,37 @@ class ViiperBackend(ShadowInputBackend):
     def close_shared_streams() -> None:
         """Close process-wide device streams (application shutdown only)."""
         global _shared_kb, _shared_mouse
-        with _shared_lock:
-            if _shared_kb is not None:
-                try:
-                    _shared_kb.close()
-                except OSError:
-                    pass
-                _shared_kb = None
-            if _shared_mouse is not None:
-                try:
-                    _shared_mouse.close()
-                except OSError:
-                    pass
-                _shared_mouse = None
+        _shared_cancel_event.set()
+        with _shared_operation_lock:
+            with _shared_lock:
+                if _shared_kb is not None:
+                    try:
+                        _shared_kb.close()
+                    except OSError:
+                        pass
+                    _shared_kb = None
+                if _shared_mouse is not None:
+                    try:
+                        _shared_mouse.close()
+                    except OSError:
+                        pass
+                    _shared_mouse = None
 
     # ── Input methods ─────────────────────────────────────────────────
+
+    def begin_session(self) -> None:
+        """Allow input again for a newly started hunt runtime."""
+        self._cancel_event.clear()
+
+    def cancel_pending(self) -> None:
+        """Interrupt a current/queued input operation without closing streams."""
+        self._cancel_event.set()
+
+    def _wait_or_cancel(self, seconds: float) -> bool:
+        """Wait interruptibly; return False when runtime shutdown was requested."""
+        if seconds <= 0:
+            return not self._cancel_event.is_set()
+        return not self._cancel_event.wait(seconds)
 
     def move_mouse(self, x: int, y: int) -> bool:
         """Move the mouse cursor to an absolute screen position.
@@ -169,7 +193,8 @@ class ViiperBackend(ShadowInputBackend):
         """
         with self._operation_lock:
             user32.SetCursorPos(int(x), int(y))
-            time.sleep(0.005)
+            if not self._wait_or_cancel(0.005):
+                return False
         return True
 
     def move_and_click(self, x: int, y: int) -> bool:
@@ -177,11 +202,14 @@ class ViiperBackend(ShadowInputBackend):
         with self._operation_lock:
             self._ensure_connected()
             user32.SetCursorPos(int(x), int(y))
-            time.sleep(0.005)
+            if not self._wait_or_cancel(0.005):
+                return False
             self._mouse_button(MOUSE_BUTTON_LEFT, down=True)
-            time.sleep(0.05)
-            self._mouse_button(MOUSE_BUTTON_LEFT, down=False)
-        return True
+            try:
+                self._wait_or_cancel(0.05)
+            finally:
+                self._mouse_button(MOUSE_BUTTON_LEFT, down=False)
+        return not self._cancel_event.is_set()
 
     def skill_click(self, scan_code: int) -> bool:
         """Press a keyboard key, left-click, then release the key.
@@ -196,9 +224,10 @@ class ViiperBackend(ShadowInputBackend):
             return False
 
         with self._operation_lock:
+            if self._cancel_event.is_set():
+                return False
             self._ensure_connected()
-            self._skill_click_locked(scan_code)
-        return True
+            return self._skill_click_locked(scan_code)
 
     def skill_click_at(
         self,
@@ -218,21 +247,23 @@ class ViiperBackend(ShadowInputBackend):
             return False
 
         with self._operation_lock:
+            if self._cancel_event.is_set():
+                return False
             self._ensure_connected()
             user32.SetCursorPos(int(x), int(y))
-            if move_delay_s > 0:
-                time.sleep(move_delay_s)
-            self._skill_click_locked(scan_code)
-        return True
+            if not self._wait_or_cancel(move_delay_s):
+                return False
+            return self._skill_click_locked(scan_code)
 
-    def _skill_click_locked(self, scan_code: int) -> None:
-        """Skill key down → left click → key up. Caller holds ``_operation_lock``."""
+    def _skill_click_locked(self, scan_code: int) -> bool:
+        """Skill key down → left click → key up. Caller holds the shared lock."""
         self._key_press(scan_code, down=True)
         try:
-            time.sleep(0.05)
+            if not self._wait_or_cancel(0.05):
+                return False
             self._mouse_button(MOUSE_BUTTON_LEFT, down=True)
             try:
-                time.sleep(0.05)
+                return self._wait_or_cancel(0.05)
             finally:
                 self._mouse_button(MOUSE_BUTTON_LEFT, down=False)
         finally:
@@ -252,40 +283,59 @@ class ViiperBackend(ShadowInputBackend):
     def left_click(self) -> bool:
         """AHK ``AHIclick``: left button down 50ms, then up."""
         with self._operation_lock:
+            if self._cancel_event.is_set():
+                return False
             self._ensure_connected()
             self._mouse_button(MOUSE_BUTTON_LEFT, down=True)
-            time.sleep(0.05)
-            self._mouse_button(MOUSE_BUTTON_LEFT, down=False)
-        return True
+            try:
+                self._wait_or_cancel(0.05)
+            finally:
+                self._mouse_button(MOUSE_BUTTON_LEFT, down=False)
+        return not self._cancel_event.is_set()
 
     def right_click(self) -> bool:
         """Right button down 50ms, then up."""
         with self._operation_lock:
+            if self._cancel_event.is_set():
+                return False
             self._ensure_connected()
             self._mouse_button(MOUSE_BUTTON_RIGHT, down=True)
-            time.sleep(0.05)
-            self._mouse_button(MOUSE_BUTTON_RIGHT, down=False)
-        return True
+            try:
+                self._wait_or_cancel(0.05)
+            finally:
+                self._mouse_button(MOUSE_BUTTON_RIGHT, down=False)
+        return not self._cancel_event.is_set()
 
     def set_left_button(self, down: bool) -> bool:
         """Press or release the left mouse button (for drag)."""
         with self._operation_lock:
+            if self._cancel_event.is_set():
+                return False
             self._ensure_connected()
             self._mouse_button(MOUSE_BUTTON_LEFT, down=down)
-        return True
+        return not self._cancel_event.is_set()
 
     def alt_right_click(self) -> bool:
         """Alt+RMB once, then always wait ``ALT_MOUSE_CLICK_DELAY_S`` (100ms)."""
+        click_ok = False
         with self._operation_lock:
             self._ensure_connected()
+            if self._cancel_event.is_set():
+                return False
             self._key_press(SCAN_CODE_ALT, down=True)
-            time.sleep(0.05)
-            self._mouse_button(MOUSE_BUTTON_RIGHT, down=True)
-            time.sleep(0.05)
-            self._mouse_button(MOUSE_BUTTON_RIGHT, down=False)
-            self._key_press(SCAN_CODE_ALT, down=False)
-        time.sleep(ALT_MOUSE_CLICK_DELAY_S)
-        return True
+            try:
+                if not self._wait_or_cancel(0.05):
+                    return False
+                self._mouse_button(MOUSE_BUTTON_RIGHT, down=True)
+                try:
+                    click_ok = self._wait_or_cancel(0.05)
+                finally:
+                    self._mouse_button(MOUSE_BUTTON_RIGHT, down=False)
+            finally:
+                self._key_press(SCAN_CODE_ALT, down=False)
+        if not click_ok:
+            return False
+        return self._wait_or_cancel(ALT_MOUSE_CLICK_DELAY_S)
 
     def alt_right_clicks(self, times: int = 1) -> bool:
         """AHK ``AltClicks``: Alt+RMB × N with 100ms after each click."""
@@ -307,13 +357,17 @@ class ViiperBackend(ShadowInputBackend):
         if scan_code <= 0:
             return False
         with self._operation_lock:
+            if self._cancel_event.is_set():
+                return False
             self._ensure_connected()
             self._key_press(scan_code, down=True)
-            time.sleep(press_s)
-            self._key_press(scan_code, down=False)
+            try:
+                self._wait_or_cancel(press_s)
+            finally:
+                self._key_press(scan_code, down=False)
             if after_s > 0:
-                time.sleep(after_s)
-        return True
+                self._wait_or_cancel(after_s)
+        return not self._cancel_event.is_set()
 
     def type_text(self, text: str) -> bool:
         """Type printable characters (digits/letters) via scan codes."""
@@ -322,28 +376,41 @@ class ViiperBackend(ShadowInputBackend):
         with self._operation_lock:
             self._ensure_connected()
             for ch in text:
+                if self._cancel_event.is_set():
+                    return False
                 scan = key_name_to_scan_code(ch)
                 if scan <= 0:
                     return False
                 self._key_press(scan, down=True)
-                time.sleep(0.05)
-                self._key_press(scan, down=False)
-                time.sleep(0.05)
-        return True
+                try:
+                    self._wait_or_cancel(0.05)
+                finally:
+                    self._key_press(scan, down=False)
+                if not self._wait_or_cancel(0.05):
+                    return False
+        return not self._cancel_event.is_set()
 
     def toggle_inventory(self) -> bool:
         """AHK ``ManageInventoryWindow``: Alt+E with the same sleeps."""
         with self._operation_lock:
+            if self._cancel_event.is_set():
+                return False
             self._ensure_connected()
             self._key_press(SCAN_CODE_ALT, down=True)
-            time.sleep(0.05)
-            self._key_press(SCAN_CODE_E, down=True)
-            time.sleep(0.05)
-            self._key_press(SCAN_CODE_E, down=False)
-            time.sleep(0.05)
-            self._key_press(SCAN_CODE_ALT, down=False)
-            time.sleep(0.50)
-        return True
+            try:
+                if not self._wait_or_cancel(0.05):
+                    return False
+                if self._cancel_event.is_set():
+                    return False
+                self._key_press(SCAN_CODE_E, down=True)
+                try:
+                    self._wait_or_cancel(0.05)
+                finally:
+                    self._key_press(SCAN_CODE_E, down=False)
+            finally:
+                self._key_press(SCAN_CODE_ALT, down=False)
+            self._wait_or_cancel(0.50)
+        return not self._cancel_event.is_set()
 
     def play_key_chain(
         self, steps: tuple[tuple[str, int, int], ...]
@@ -354,20 +421,27 @@ class ViiperBackend(ShadowInputBackend):
         with self._operation_lock:
             self._ensure_connected()
             for _button, scan_code, delay_ms in steps:
-                if scan_code <= 0:
+                if self._cancel_event.is_set() or scan_code <= 0:
                     return False
                 self._key_press(scan_code, down=True)
-                time.sleep(0.05)
-                self._key_press(scan_code, down=False)
-                if delay_ms > 0:
-                    time.sleep(delay_ms / 1000.0)
-        return True
+                try:
+                    self._wait_or_cancel(0.05)
+                finally:
+                    self._key_press(scan_code, down=False)
+                if delay_ms > 0 and not self._wait_or_cancel(delay_ms / 1000.0):
+                    return False
+        return not self._cancel_event.is_set()
 
-    def shutdown(self) -> None:
-        """Release pressed keys; keep streams open for the next hunt."""
-        acquired = self._operation_lock.acquire(timeout=1.0)
+    def shutdown(self) -> bool:
+        """Cancel pending input and release keys/buttons.
+
+        Returns False if another operation still owns the shared input lock;
+        callers must not treat that as a clean input shutdown.
+        """
+        self.cancel_pending()
+        acquired = self._operation_lock.acquire(timeout=2.0)
         if not acquired:
-            return
+            return False
         try:
             with self._connect_lock:
                 if self._connected and self._kb_stream is not None:
@@ -375,11 +449,17 @@ class ViiperBackend(ShadowInputBackend):
                         self._kb_stream.write(KeyboardState(0).marshal())
                     except (OSError, RuntimeError):
                         pass
+                if self._connected and self._mouse_stream is not None:
+                    try:
+                        self._mouse_stream.write(MouseState(buttons=0).marshal())
+                    except (OSError, RuntimeError):
+                        pass
                 self._modifiers = 0
                 self._mouse_buttons = 0
                 # Intentionally do not close streams — see module docstring.
         finally:
             self._operation_lock.release()
+        return True
 
     # ── Low-level helpers ─────────────────────────────────────────────
 

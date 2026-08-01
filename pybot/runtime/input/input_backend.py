@@ -50,7 +50,11 @@ class InputBackend(Protocol):
         self, steps: tuple[tuple[str, int, int], ...]
     ) -> bool: ...
 
-    def shutdown(self) -> None: ...
+    def begin_session(self) -> None: ...
+
+    def cancel_pending(self) -> None: ...
+
+    def shutdown(self) -> bool: ...
 
 
 class ShadowInputBackend:
@@ -147,5 +151,11 @@ class ShadowInputBackend:
                 time.sleep(delay_ms / 1000.0)
         return True
 
-    def shutdown(self) -> None:
+    def begin_session(self) -> None:
         return None
+
+    def cancel_pending(self) -> None:
+        return None
+
+    def shutdown(self) -> bool:
+        return True

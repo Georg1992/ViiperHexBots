@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 import unittest
 from unittest.mock import MagicMock
 
@@ -48,6 +50,50 @@ class ViiperBackendStreamLifetimeTests(unittest.TestCase):
         self.assertIs(second._kb_stream, kb)
         self.assertTrue(first._connected)
         self.assertTrue(second._connected)
+
+    def test_shutdown_releases_mouse_buttons_as_well_as_keys(self) -> None:
+        backend = ViiperBackend()
+        kb = MagicMock()
+        mouse = MagicMock()
+        with vb._shared_lock:
+            vb._shared_kb = kb
+            vb._shared_mouse = mouse
+        backend._kb_stream = kb
+        backend._mouse_stream = mouse
+        backend._connected = True
+        backend._mouse_buttons = 1
+
+        backend.shutdown()
+
+        kb.write.assert_called_once()
+        mouse.write.assert_called_once()
+        self.assertEqual(backend._mouse_buttons, 0)
+
+    def test_cancel_interrupts_key_tap_and_releases_key(self) -> None:
+        backend = ViiperBackend()
+        backend._connected = True
+        backend._kb_stream = MagicMock()
+        backend._mouse_stream = MagicMock()
+        backend._cancel_event.clear()
+        result: list[bool] = []
+
+        thread = threading.Thread(
+            target=lambda: result.append(
+                backend.key_tap(82, press_s=1.0, after_s=5.0)
+            ),
+            daemon=True,
+        )
+        thread.start()
+        time.sleep(0.05)
+        backend.cancel_pending()
+        thread.join(timeout=1.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result, [False])
+        self.assertEqual(
+            backend._kb_stream.write.call_count,
+            2,
+        )
 
     def test_close_shared_streams_closes_tcp(self) -> None:
         kb = MagicMock()
