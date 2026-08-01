@@ -9,6 +9,8 @@ from unittest.mock import MagicMock
 
 from pybot.app.bot_lifecycle import BotLifecycleManager, BotState
 from pybot.runtime.hunt_runtime import HuntRuntime
+from pybot.runtime.input import viiper_backend as vb
+from pybot.runtime.input.viiper_backend import ViiperBackend
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.workers.discovery_worker import DiscoveryWorker
 
@@ -117,13 +119,64 @@ class HuntRuntimePauseTests(unittest.TestCase):
 
         runtime = HuntRuntime.__new__(HuntRuntime)
         runtime._ctx = ctx
+        runtime._input_backend = MagicMock()
 
         runtime.pause()
+        runtime._input_backend.cancel_pending.assert_called_once_with()
         self.assertTrue(ctx.pause_event.is_set())
 
         runtime.resume()
+        runtime._input_backend.begin_session.assert_called_once_with()
         self.assertFalse(ctx.pause_event.is_set())
         self.assertTrue(ctx.discovery_wake.is_set())
+
+    def test_resume_is_bounded_when_shared_input_is_still_unwinding(self) -> None:
+        ctx = MagicMock()
+        ctx.logger = MagicMock()
+        backend = ViiperBackend()
+        runtime = HuntRuntime.__new__(HuntRuntime)
+        runtime._ctx = ctx
+        runtime._input_backend = backend
+
+        vb._shared_operation_lock.acquire()
+        try:
+            result: list[bool] = []
+            thread = threading.Thread(
+                target=lambda: result.append(runtime.resume()),
+                daemon=True,
+            )
+            thread.start()
+            thread.join(timeout=1.0)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result, [False])
+            ctx.mark_running.assert_not_called()
+        finally:
+            vb._shared_operation_lock.release()
+            backend.begin_session()
+
+    def test_pause_cancels_input_before_workers_are_paused(self) -> None:
+        events: list[str] = []
+        ctx = MagicMock()
+        ctx.logger = MagicMock()
+
+        def cancel() -> None:
+            events.append("cancel")
+
+        def mark_paused() -> None:
+            events.append("pause")
+
+        ctx.mark_paused.side_effect = mark_paused
+        backend = MagicMock()
+        backend.cancel_pending.side_effect = cancel
+
+        runtime = HuntRuntime.__new__(HuntRuntime)
+        runtime._ctx = ctx
+        runtime._input_backend = backend
+
+        runtime.pause()
+
+        self.assertEqual(events, ["cancel", "pause"])
 
 
 class DiscoveryWorkerPauseTests(unittest.TestCase):

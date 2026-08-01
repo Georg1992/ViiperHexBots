@@ -1,8 +1,8 @@
 """Per-hunt startup sequencing state.
 
 The startup sequence is deliberately independent from the broader runtime
-lifecycle gates.  It coordinates the three milestones that release combat:
-area-clear discovery, character buffs, and normal skill timers.
+lifecycle gates. It tracks area-clear discovery and character buffs before
+safe startup actions; normal skill timers have a separate auxiliary milestone.
 """
 
 from __future__ import annotations
@@ -14,9 +14,11 @@ class HuntStartupSequence:
     """Own startup milestones and the generation of the active hunt cycle.
 
     The sequence starts in an unmanaged/ready state so lightweight gate
-    fixtures retain their historical behavior.  Production calls ``begin``
-    before workers start, which enables startup gating and clears all
-    milestones.
+    fixtures retain their historical behavior. Production calls ``begin``
+    before workers start, which enables startup gating. Initial combat remains
+    available while discovery is finding/clearing the area; once the area is
+    confirmed clear, combat waits for character buffs. Normal skill timers are
+    auxiliary and never hold the attack loop hostage.
     """
 
     def __init__(self) -> None:
@@ -57,16 +59,29 @@ class HuntStartupSequence:
             self.area_clear.clear()
 
     def mark_buffs_done(self) -> None:
-        """Release the normal timer startup phase."""
+        """Record that the safe character-buff phase has completed."""
         self.buffs_done.set()
 
     def mark_timers_done(self) -> None:
-        """Release combat after this cycle's normal timers have fired."""
+        """Record that this cycle's auxiliary timers have fired once."""
         self.timers_done.set()
 
     def is_combat_ready(self) -> bool:
-        """Return whether startup no longer blocks combat."""
-        return self.timers_done.is_set()
+        """Return whether the character-buff phase no longer blocks combat.
+
+        Normal skill timers are auxiliary work. They may be staggered at hunt
+        startup, but one slow/missing timer must never prevent the attack loop
+        from starting after the area is clear and the safe character-buff
+        phase is complete.
+        """
+        # The first scan may find mobs. Combat must remain available so the
+        # hunt can clear that area; only the confirmed-clear phase is gated on
+        # completion of safe character buffs. Unmanaged fixtures stay ready.
+        return (
+            not self._managed
+            or not self.area_clear.is_set()
+            or self.buffs_done.is_set()
+        )
 
     def _clear_milestones(self) -> None:
         # Called only while _lock is held. Keeping this operation together with

@@ -7,6 +7,7 @@ Extracted from ItemsToStorageWorker so the worker owns only orchestration
 from __future__ import annotations
 
 import ctypes
+import threading
 import time
 from ctypes import wintypes
 
@@ -65,6 +66,27 @@ class InventoryAutomation:
         ox, oy = self.client_origin()
         return sx - ox, sy - oy
 
+    def _wait(self, seconds: float) -> None:
+        """Wait for UI settling, aborting promptly on stop/focus cancellation."""
+        wait = getattr(self._input, "wait_interruptible", None)
+        # InputBackend implementations own the real cancellation event. A
+        # lightweight custom backend without that optional helper still gets
+        # the original UI-settle delay via an ordinary interruptible wait.
+        if callable(wait):
+            completed = wait(seconds)
+        else:
+            stop_event = getattr(self._ctx, "stop_event", None)
+            if isinstance(stop_event, threading.Event):
+                completed = not stop_event.wait(seconds)
+            else:
+                # Keep lightweight/test doubles patchable and preserve their
+                # historical timing without treating MagicMock as stopped.
+                time.sleep(seconds)
+                completed = True
+        stopped = self._ctx.is_stopped()
+        if completed is False or stopped is True:
+            raise InventoryUiError("input wait cancelled")
+
     def cursor_off_screen(self) -> None:
         """Move cursor just outside the client so it cannot cover UI."""
         client = self._ctx.capture.get_client_rect_screen()
@@ -74,7 +96,7 @@ class InventoryAutomation:
         x = max(0, int(left) - 2)
         y = max(0, int(top) - 2)
         self._input.move_mouse(x, y)
-        time.sleep(0.3)
+        self._wait(0.3)
 
     # ── Template matching with retry ─────────────────────────────
 
@@ -103,7 +125,7 @@ class InventoryAutomation:
             loc = require_template(frame, name)
         ox, oy = self.client_origin()
         self._input.move_mouse(ox + loc[0] + x_offset, oy + loc[1] + y_offset)
-        time.sleep(0.2)
+        self._wait(0.2)
 
     def recognize(self, label: str, fn):
         """Run recognition with cursor off UI; one off-screen retry on miss."""
@@ -152,7 +174,7 @@ class InventoryAutomation:
                     f"storage={is_storage_open(last_frame)}"
                 )
                 return last_frame
-            time.sleep(poll_s)
+            self._wait(poll_s)
         inv = is_inventory_open(last_frame) if last_frame is not None else False
         stor = is_storage_open(last_frame) if last_frame is not None else False
         raise InventoryUiError(
@@ -178,7 +200,7 @@ class InventoryAutomation:
             return require_inventory_panel(frame)
         self._ctx.logger.behavior("[STORAGE] Alt+E open inventory")
         self._input.toggle_inventory()
-        time.sleep(0.5)
+        self._wait(0.5)
         panel, _frame = self.wait_for_inventory_panel()
         return panel
 
@@ -198,7 +220,7 @@ class InventoryAutomation:
         )
         if not self._input.play_key_chain(steps):
             raise InventoryUiError("Open Storage keychain failed")
-        time.sleep(0.5)
+        self._wait(0.5)
         self.wait_menu_state(
             menu="storage", want_open=True, label="storage open",
         )
@@ -206,18 +228,22 @@ class InventoryAutomation:
     def click_storage_close(self) -> None:
         """Click the storage window close control (double click)."""
         self.move_to_template("close")
-        time.sleep(0.2)
+        self._wait(0.2)
         # First click
-        self._input.set_left_button(True)
-        time.sleep(0.05)
-        self._input.set_left_button(False)
-        time.sleep(0.05)
+        if self._input.set_left_button(True):
+            try:
+                self._wait(0.05)
+            finally:
+                self._input.set_left_button(False)
+        self._wait(0.05)
         # Second click
-        self._input.set_left_button(True)
-        time.sleep(0.05)
-        self._input.set_left_button(False)
+        if self._input.set_left_button(True):
+            try:
+                self._wait(0.05)
+            finally:
+                self._input.set_left_button(False)
         self.cursor_off_screen()
-        time.sleep(0.5)
+        self._wait(0.5)
 
     def menus_are_open(self) -> bool:
         """True when inventory and/or storage is visible (cursor cleared first)."""
@@ -249,8 +275,8 @@ class InventoryAutomation:
                     self.cursor_off_screen()
             elif inv:
                 self._input.toggle_inventory()
-                time.sleep(0.5)
-            time.sleep(0.2)
+                self._wait(0.5)
+            self._wait(0.2)
         self.cursor_off_screen()
         frame = self.capture_client()
         raise InventoryUiError(
@@ -288,8 +314,8 @@ class InventoryAutomation:
         self._ctx.logger.behavior("[STORAGE] click Use tab")
         ox, oy = self.client_origin()
         self._input.move_mouse(ox + loc[0], oy + loc[1])
-        time.sleep(0.2)
-        time.sleep(0.1)
+        self._wait(0.2)
+        self._wait(0.1)
         self._input.left_click()
         self.cursor_off_screen()
-        time.sleep(0.5)
+        self._wait(0.5)

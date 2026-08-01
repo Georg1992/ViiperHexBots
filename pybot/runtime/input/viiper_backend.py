@@ -171,9 +171,21 @@ class ViiperBackend(ShadowInputBackend):
 
     # ── Input methods ─────────────────────────────────────────────────
 
-    def begin_session(self) -> None:
-        """Allow input again for a newly started hunt runtime."""
-        self._cancel_event.clear()
+    def begin_session(self) -> bool:
+        """Re-arm input after the previous operation has fully unwound.
+
+        Pause sets the process-wide cancellation event. Acquire the same
+        operation lock before clearing it so a canceled storage/drag operation
+        cannot race with resume and send fresh input after the pause boundary.
+        The bounded acquisition keeps a Tk/UI resume callback responsive.
+        """
+        if not self._operation_lock.acquire(timeout=0.25):
+            return False
+        try:
+            self._cancel_event.clear()
+        finally:
+            self._operation_lock.release()
+        return True
 
     def cancel_pending(self) -> None:
         """Interrupt a current/queued input operation without closing streams."""
@@ -184,6 +196,10 @@ class ViiperBackend(ShadowInputBackend):
         if seconds <= 0:
             return not self._cancel_event.is_set()
         return not self._cancel_event.wait(seconds)
+
+    def wait_interruptible(self, seconds: float) -> bool:
+        """Wait for UI settling without hiding cancellation behind sleep."""
+        return self._wait_or_cancel(seconds)
 
     def move_mouse(self, x: int, y: int) -> bool:
         """Move the mouse cursor to an absolute screen position.
@@ -307,13 +323,18 @@ class ViiperBackend(ShadowInputBackend):
         return not self._cancel_event.is_set()
 
     def set_left_button(self, down: bool) -> bool:
-        """Press or release the left mouse button (for drag)."""
+        """Press or release the left mouse button (for drag).
+
+        A cancelled session must still be allowed to send the release report.
+        Otherwise a drag interrupted by focus loss can leave the desktop mouse
+        button logically held until the next full shutdown.
+        """
         with self._operation_lock:
-            if self._cancel_event.is_set():
+            if self._cancel_event.is_set() and down:
                 return False
             self._ensure_connected()
             self._mouse_button(MOUSE_BUTTON_LEFT, down=down)
-        return not self._cancel_event.is_set()
+        return not self._cancel_event.is_set() if down else True
 
     def alt_right_click(self) -> bool:
         """Alt+RMB once, then always wait ``ALT_MOUSE_CLICK_DELAY_S`` (100ms)."""

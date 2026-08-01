@@ -50,9 +50,11 @@ class InputBackend(Protocol):
         self, steps: tuple[tuple[str, int, int], ...]
     ) -> bool: ...
 
-    def begin_session(self) -> None: ...
+    def begin_session(self) -> bool: ...
 
     def cancel_pending(self) -> None: ...
+
+    def wait_interruptible(self, seconds: float) -> bool: ...
 
     def shutdown(self) -> bool: ...
 
@@ -151,11 +153,16 @@ class ShadowInputBackend:
                 time.sleep(delay_ms / 1000.0)
         return True
 
-    def begin_session(self) -> None:
-        return None
+    def begin_session(self) -> bool:
+        return True
 
     def cancel_pending(self) -> None:
         return None
+
+    def wait_interruptible(self, seconds: float) -> bool:
+        """Shadow waits are no-ops but retain the cancellation contract."""
+        del seconds
+        return True
 
     def shutdown(self) -> bool:
         return True

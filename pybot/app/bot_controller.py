@@ -116,9 +116,11 @@ class BotController:
         if self._runtime is not None:
             self._runtime.pause()
 
-    def resume(self) -> None:
-        if self._runtime is not None:
-            self._runtime.resume()
+    def resume(self) -> bool:
+        if self._runtime is None:
+            return False
+        result = self._runtime.resume()
+        return result is not False
 
     def set_search_range_cells(self, cells: int) -> None:
         if self._runtime is not None:

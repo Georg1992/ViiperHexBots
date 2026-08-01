@@ -10,6 +10,9 @@ never re-OCR or re-read process memory.
 
 from __future__ import annotations
 
+# Kept as module symbols for existing storage tests/custom integrations that
+# patch the historical timing dependency; production waits use _wait below.
+import threading
 import time
 import traceback
 
@@ -56,6 +59,26 @@ class ItemsToStorageWorker:
         self._teleport = teleport
         self._vitals = vitals or PlayerVitals()
         self._ui = InventoryAutomation(ctx, input_backend)
+
+    def _wait(self, seconds: float) -> None:
+        """Wait for storage UI settling while honoring input cancellation."""
+        wait = getattr(self._input, "wait_interruptible", None)
+        # Real input backends expose the interruptible wait. Lightweight
+        # custom doubles without it still retain the original UI-settle delay.
+        if callable(wait):
+            completed = wait(seconds)
+        else:
+            stop_event = getattr(self._ctx, "stop_event", None)
+            if isinstance(stop_event, threading.Event):
+                completed = not stop_event.wait(seconds)
+            else:
+                # Keep lightweight/test doubles patchable and preserve their
+                # historical timing without treating MagicMock as stopped.
+                time.sleep(seconds)
+                completed = True
+        stopped = self._ctx.is_stopped()
+        if completed is False or stopped is True:
+            raise InventoryUiError("storage input wait cancelled")
 
     def run(self) -> None:
         ctx = self._ctx
@@ -182,7 +205,7 @@ class ItemsToStorageWorker:
                 f"col={col} row={row} low-left ({aim_x},{aim_y})"
             )
             self._input.move_mouse(ox + aim_x, oy + aim_y)
-            time.sleep(STORAGE_WING_AIM_SETTLE_S)
+            self._wait(STORAGE_WING_AIM_SETTLE_S)
             log(
                 f"[STORAGE] GetFlyWings Alt+RMB deposit "
                 f"col={col} row={row}"
@@ -212,7 +235,7 @@ class ItemsToStorageWorker:
 
         log(f"[STORAGE] Move to first slot of {tab_label} tab ({first_ax},{first_ay})")
         self._input.move_mouse(ox + first_ax, oy + first_ay)
-        time.sleep(STORAGE_WING_AIM_SETTLE_S)
+        self._wait(STORAGE_WING_AIM_SETTLE_S)
 
         for pass_i in range(guard):
             frame = self._ui.capture_client()
@@ -224,7 +247,7 @@ class ItemsToStorageWorker:
             log(f"[STORAGE] ItemsToStorage deposit {tab_label} item from first slot")
             self._ui.alt_rmb_deposit()
             # Let the slot clear/next item move into the first slot before next loop
-            time.sleep(STORAGE_UI_SETTLE_S)
+            self._wait(STORAGE_UI_SETTLE_S)
 
         raise InventoryUiError(
             f"{tab_label}-tab deposit did not finish within guard limit"
@@ -252,16 +275,16 @@ class ItemsToStorageWorker:
         log(f"[STORAGE] click {name} tab")
         ox, oy = self._ui.client_origin()
         self._input.move_mouse(ox + loc[0], oy + loc[1])
-        time.sleep(0.2)
+        self._wait(0.2)
         self._input.left_click()
         self._ui.cursor_off_screen()
-        time.sleep(STORAGE_UI_SETTLE_S)
+        self._wait(STORAGE_UI_SETTLE_S)
 
     def _deposit_inventory_to_storage(self) -> None:
         """Deposit Use / Eqp / Etc tabs."""
         self._deposit_tab_grid(tab_label="Use")
 
-        time.sleep(STORAGE_UI_SETTLE_S)
+        self._wait(STORAGE_UI_SETTLE_S)
         self._select_inventory_tab("eqp")
         self._deposit_tab_grid(tab_label="Eqp")
 
@@ -301,7 +324,7 @@ class ItemsToStorageWorker:
             log("[STORAGE] GetFlyWings Use tab already selected")
 
         log("[STORAGE] GetFlyWings sleep 800ms")
-        time.sleep(0.8)
+        self._wait(0.8)
         log(
             f"[STORAGE] GetFlyWings scan Use grid "
             f"{STORAGE_INV_COLS}x{STORAGE_INV_ROWS} for wings"
@@ -309,7 +332,7 @@ class ItemsToStorageWorker:
         self._deposit_wings_from_use_grid()
 
         log("[STORAGE] GetFlyWings sleep 500ms")
-        time.sleep(0.5)
+        self._wait(0.5)
 
         def find_storage() -> tuple[int, int]:
             frame = self._ui.capture_client()
@@ -331,26 +354,31 @@ class ItemsToStorageWorker:
         )
         ox, oy = self._ui.client_origin()
         self._input.move_mouse(ox + storage_wing[0], oy + storage_wing[1])
-        time.sleep(0.2)
+        self._wait(0.2)
         log("[STORAGE] GetFlyWings sleep 100ms before LMB down")
-        time.sleep(0.1)
+        self._wait(0.1)
         log("[STORAGE] GetFlyWings LMB down")
-        inp.set_left_button(True)
-        log("[STORAGE] GetFlyWings sleep 100ms")
-        time.sleep(0.1)
-        log("[STORAGE] GetFlyWings drag to etc +100,+20 (sleep 200ms)")
-        # LMB held — do not clear cursor (would drag the stack off-screen).
-        self._ui.move_to_template("etc", 100, 20, clear_cursor=False)
-        log("[STORAGE] GetFlyWings LMB up")
-        inp.set_left_button(False)
+        if not inp.set_left_button(True):
+            raise InventoryUiError("failed to start fly wing drag")
+        try:
+            log("[STORAGE] GetFlyWings sleep 100ms")
+            self._wait(0.1)
+            log("[STORAGE] GetFlyWings drag to etc +100,+20 (sleep 200ms)")
+            # LMB held — do not clear cursor (would drag the stack off-screen).
+            self._ui.move_to_template("etc", 100, 20, clear_cursor=False)
+        finally:
+            # Focus loss/stop may interrupt the drag before the normal mouse-up.
+            # Always send the release report so the desktop cannot be left stuck.
+            log("[STORAGE] GetFlyWings LMB up")
+            inp.set_left_button(False)
         log("[STORAGE] GetFlyWings sleep 200ms before type")
-        time.sleep(0.2)
+        self._wait(0.2)
 
         log(f"[STORAGE] GetFlyWings type_text {amount!r} (50ms hold + 50ms/digit)")
         if not inp.type_text(amount):
             raise InventoryUiError(f"failed to type fly wing amount {amount!r}")
         log("[STORAGE] GetFlyWings sleep 200ms before Enter")
-        time.sleep(0.2)
+        self._wait(0.2)
         log("[STORAGE] GetFlyWings Enter confirm (press 50ms)")
         if not inp.key_tap(enter_sc, press_s=0.05, after_s=0.0):
             raise InventoryUiError("failed to confirm fly wing amount (Enter)")
@@ -367,9 +395,9 @@ class ItemsToStorageWorker:
             return
         log = self._ctx.logger.behavior
         try:
-            time.sleep(0.5)
+            self._wait(0.5)
             self._ui.ensure_inventory_open()
-            time.sleep(0.5)
+            self._wait(0.5)
 
             self._ui.select_use_tab()
             self._ui.ensure_storage_open()
@@ -382,15 +410,15 @@ class ItemsToStorageWorker:
                 # After dump we are on Etc; restock-only keeps Use from above.
                 self._restock_fly_wings_from_open_storage(ensure_use_tab=dump)
 
-            time.sleep(0.1)
+            self._wait(0.1)
             self._ui.close_menus()
-            time.sleep(0.5)
+            self._wait(0.5)
         except InventoryUiError:
             try:
                 self._ui.close_menus()
             except InventoryUiError as exc:
                 log(f"[STORAGE] menu close after session: {exc}")
-            time.sleep(0.5)
+            self._wait(0.5)
             raise
 
     def items_to_storage(self) -> None:

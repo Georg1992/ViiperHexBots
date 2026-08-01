@@ -604,17 +604,23 @@ class BotLifecycleManager:
         self._session.write_focus_change("paused (focus lost)")
         self._emit_state(BotState.PAUSED)
 
-    def resume(self) -> None:
+    def resume(self) -> bool:
         if self._state != BotState.PAUSED:
-            return
+            return False
         if self._bot is not None:
-            self._bot.resume()
+            resumed = self._bot.resume()
+            if resumed is False:
+                self._on_log(
+                    "[STATE] Bot resume deferred — input is still unwinding"
+                )
+                return False
         self._state = BotState.RUNNING
         self._arm_focus_grace()
         self._on_log("[STATE] Bot resumed")
         self._session.write_focus_change("resumed")
         self._emit_state(BotState.RUNNING)
         self._root.after(300, self._poll_focus)
+        return True
 
     def set_search_range_cells(self, cells: int) -> None:
         self._hunt_overlay.set_search_range_cells(cells)

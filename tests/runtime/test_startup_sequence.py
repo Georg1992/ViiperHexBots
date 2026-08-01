@@ -22,10 +22,15 @@ class HuntStartupSequenceTests(unittest.TestCase):
         self.assertFalse(sequence.area_clear.is_set())
         self.assertFalse(sequence.buffs_done.is_set())
         self.assertFalse(sequence.timers_done.is_set())
-        self.assertFalse(sequence.is_combat_ready())
+        # Initial combat is allowed to clear a non-empty area before startup
+        # buffs are required.
+        self.assertTrue(sequence.is_combat_ready())
 
         sequence.mark_area_clear()
+        self.assertFalse(sequence.is_combat_ready())
         sequence.mark_buffs_done()
+        self.assertTrue(sequence.is_combat_ready())
+        self.assertFalse(sequence.timers_done.is_set())
         sequence.mark_timers_done()
 
         self.assertTrue(sequence.area_clear.is_set())
@@ -46,7 +51,7 @@ class HuntStartupSequenceTests(unittest.TestCase):
         self.assertFalse(sequence.area_clear.is_set())
         self.assertFalse(sequence.buffs_done.is_set())
         self.assertFalse(sequence.timers_done.is_set())
-        self.assertFalse(sequence.is_combat_ready())
+        self.assertTrue(sequence.is_combat_ready())
 
     def test_unmanaged_new_hunt_keeps_fixture_ready_state(self) -> None:
         sequence = HuntStartupSequence()
@@ -74,10 +79,14 @@ class HuntStartupSequenceTests(unittest.TestCase):
         self.assertFalse(sequence.area_clear.is_set())
         self.assertFalse(sequence.buffs_done.is_set())
         self.assertFalse(sequence.timers_done.is_set())
-        self.assertFalse(gates.should_run_combat())
+        # Combat is available while the new area is being cleared.
+        self.assertTrue(gates.should_run_combat())
 
         sequence.mark_area_clear()
+        self.assertFalse(gates.should_run_combat())
         sequence.mark_buffs_done()
+        self.assertTrue(gates.should_run_combat())
+        self.assertFalse(sequence.timers_done.is_set())
         sequence.mark_timers_done()
         self.assertTrue(gates.should_run_combat())
 

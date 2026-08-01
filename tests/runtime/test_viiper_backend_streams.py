@@ -95,6 +95,20 @@ class ViiperBackendStreamLifetimeTests(unittest.TestCase):
             2,
         )
 
+    def test_cancelled_session_still_releases_left_button(self) -> None:
+        backend = ViiperBackend()
+        kb = MagicMock()
+        mouse = MagicMock()
+        backend._kb_stream = kb
+        backend._mouse_stream = mouse
+        backend._connected = True
+        backend._cancel_event.set()
+        backend._mouse_buttons = 1
+
+        self.assertTrue(backend.set_left_button(False))
+        self.assertEqual(backend._mouse_buttons, 0)
+        mouse.write.assert_called_once()
+
     def test_close_shared_streams_closes_tcp(self) -> None:
         kb = MagicMock()
         mouse = MagicMock()

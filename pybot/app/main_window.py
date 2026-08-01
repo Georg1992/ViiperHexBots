@@ -1429,8 +1429,12 @@ class MainWindow:
     def resume_bot(self) -> None:
         """Resume the bot and restore game window focus."""
         restore_and_activate(self.config.window_id)
-        self.lifecycle.resume()
-        self.log_pipe.log("Bot resumed")
+        if self.lifecycle.resume():
+            self.log_pipe.log("Bot resumed")
+        else:
+            self.log_pipe.log(
+                "Bot resume deferred — input is still unwinding; try Continue again"
+            )
 
     # ══════════════════════════════════════════════════════════════════
     #  CALLBACKS (registered with lifecycle and log pipe)
@@ -1465,7 +1469,7 @@ class MainWindow:
             self._lock_ui(True)
         elif state == BotState.PAUSED:
             self.bot_button.configure(text="Stop Bot")
-            self.bot_status.configure(text="Paused (TAB)")
+            self.bot_status.configure(text="Paused (game focus lost)")
             self.status_indicator.configure(text=" PAUSED ", bg="#f9a825")
             self.continue_button.configure(state=tk.NORMAL)
         elif state == BotState.OFF:

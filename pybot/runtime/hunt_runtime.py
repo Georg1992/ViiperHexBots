@@ -428,15 +428,19 @@ class HuntRuntime:
 
     def _cancel_input(self) -> None:
         """Cancel an in-flight input operation when the backend supports it."""
-        cancel = getattr(self._input_backend, "cancel_pending", None)
+        backend = getattr(self, "_input_backend", None)
+        cancel = getattr(backend, "cancel_pending", None)
         if callable(cancel):
             cancel()
 
-    def _begin_input_session(self) -> None:
+    def _begin_input_session(self) -> bool:
         """Re-arm a reusable input backend for a fresh hunt session."""
-        begin = getattr(self._input_backend, "begin_session", None)
-        if callable(begin):
-            begin()
+        backend = getattr(self, "_input_backend", None)
+        begin = getattr(backend, "begin_session", None)
+        if not callable(begin):
+            return True
+        result = begin()
+        return result is not False
 
     def _shutdown_input(self) -> bool:
         """Release input state while retaining backend compatibility."""
@@ -458,13 +462,27 @@ class HuntRuntime:
         self._ctx.resume_gate.set()
 
     def pause(self) -> None:
+        # Focus loss must interrupt an in-flight VIIPER macro just like Stop.
+        # Otherwise a storage drag/key-chain can continue sending input after
+        # the game is no longer active and keep the shared operation lock busy.
+        self._cancel_input()
         self._ctx.mark_paused()
         self._ctx.logger.behavior("[PYBOT] paused")
 
-    def resume(self) -> None:
+    def resume(self) -> bool:
+        # A pause deliberately leaves the shared cancel event set. Re-arm it
+        # only after the canceled operation has released its lock, so no worker
+        # can send input during the resume transition. The backend uses a
+        # bounded acquisition; the UI thread must never wait indefinitely.
+        if not self._begin_input_session():
+            self._ctx.logger.behavior(
+                "[PYBOT] resume deferred — input operation is still unwinding"
+            )
+            return False
         self._ctx.mark_running()
         self._ctx.discovery_wake.set()
         self._ctx.logger.behavior("[PYBOT] resumed")
+        return True
 
     def set_search_range_cells(self, cells: int) -> None:
         self._ctx.capture.set_search_range_cells(cells)
@@ -548,7 +566,16 @@ class HuntRuntime:
             f"teleport={teleport_button!r}"
         )
 
-        self._begin_input_session()
+        if not self._begin_input_session():
+            ctx.logger.behavior(
+                "[PYBOT] input session could not be re-armed; startup aborted"
+            )
+            ctx.stop_event.set()
+            if self._shutdown_workers():
+                reset_capture_session()
+                self._shutdown_complete.set()
+            return 1
+
         threads = [
             threading.Thread(target=fn, name=name, daemon=True)
             for name, fn in self._workers
@@ -586,12 +613,9 @@ class HuntRuntime:
         if command == "stop":
             self._ctx.stop_event.set()
         elif command == "pause":
-            self._ctx.mark_paused()
-            self._ctx.logger.behavior("[PYBOT] paused")
+            self.pause()
         elif command == "resume":
-            self._ctx.mark_running()
-            self._ctx.discovery_wake.set()
-            self._ctx.logger.behavior("[PYBOT] resumed")
+            self.resume()
 
 
 def main(argv: list[str] | None = None) -> int:
