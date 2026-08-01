@@ -104,6 +104,34 @@ class SitOnLowSpWorker:
         ratio = self._sp_ratio()
         return ratio is not None and ratio >= SIT_RESUME_SP_RATIO
 
+    def _sit_danger_detected(self) -> bool:
+        """Consume damage or detect any active nearby threat at the sit spot."""
+        if self._danger.pop_damage_detected():
+            return True
+        nearby = getattr(self._danger, "has_nearby_threat", None)
+        return callable(nearby) and bool(nearby())
+
+    def _urgent_escape(self, *, reason: str) -> bool:
+        """Immediately escape a damaged or otherwise dangerous sit spot."""
+        # Never send emergency input after an explicit stop/pause. A pause may
+        # arrive between damage polling and this call, so check at the final
+        # boundary as well as in the normal action helpers.
+        if self._ctx.is_stopped() or self._ctx.pause_event.is_set():
+            return False
+        try:
+            escaped = self._teleport.danger_teleport(reason=reason)
+        except Exception:
+            self._ctx.logger.behavior(
+                f"[SIT] urgent danger teleport failed:\n{traceback.format_exc()}"
+            )
+            return False
+        if not escaped:
+            self._ctx.logger.behavior(
+                "[SIT] urgent danger teleport unavailable — "
+                "continuing with safe-place retry"
+            )
+        return bool(escaped)
+
     def run(self) -> None:
         ctx = self._ctx
         ctx.logger.behavior(
@@ -214,10 +242,12 @@ class SitOnLowSpWorker:
         # Damage during teleport/idle clearing means the location is no longer
         # safe. Preserve the event and let _recover_sp clear a new location
         # before trying to sit again.
-        if self._danger.pop_damage_detected():
+        if self._sit_danger_detected():
             ctx.logger.behavior(
-                "[SIT] damage observed during area clear — finding a new spot"
+                "[SIT] danger observed before sitting — urgent escape "
+                "and finding a new spot"
             )
+            self._urgent_escape(reason="sit_spot_danger")
             return "interrupted"
 
         if not self.sit(sit_scan):
@@ -229,9 +259,20 @@ class SitOnLowSpWorker:
             if not self._ok_to_act():
                 return None
 
-            if self._danger.pop_damage_detected():
-                ctx.logger.behavior("[SIT] damage — standing before new spot")
-                if not self.stand(sit_scan):
+            if self._sit_danger_detected():
+                ctx.logger.behavior(
+                    "[SIT] danger — standing and urgently escaping before "
+                    "finding a new spot"
+                )
+                # Damage always wins over SP recovery: leave the seated state
+                # first, then use the emergency teleport path. The outer
+                # recovery loop will clear/idle the new area before sitting.
+                stood = self.stand(sit_scan)
+                # Damage always invalidates this location. Even if the stand
+                # tap reports an interrupted settle, attempt the urgent escape
+                # unless Stop/Pause has explicitly cancelled input.
+                self._urgent_escape(reason="sit_danger")
+                if not stood and (ctx.is_stopped() or ctx.pause_event.is_set()):
                     return None
                 return "interrupted"
 

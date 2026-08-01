@@ -60,14 +60,26 @@ class SkillTimerWorker:
                 if not ctx.should_run_timers():
                     if self._armed:
                         self._armed = False
-                        ctx.logger.behavior("[TIMER] paused (sit/pause)")
-                    ctx.wait_while_stopped_or_paused(0.25)
+                        ctx.logger.behavior("[TIMER] paused (sit/pause/danger/teleport)")
+                    # Discovery suspension and a queued danger request do not
+                    # stop ordinary workers, so the general pause wait would
+                    # return immediately and spin. Use a bounded stop wait for
+                    # those transient safety gates; use the resume gate for
+                    # user pause/sit as before.
+                    if ctx.should_run_workers():
+                        ctx.stop_event.wait(0.25)
+                    else:
+                        ctx.wait_while_stopped_or_paused(0.25)
                     continue
 
-                generation = getattr(ctx, "hunt_generation", 0)
+                generation = int(getattr(ctx, "hunt_generation", 0))
                 if self._startup_cycle_generation != generation:
+                    # A sit/stand transition creates a new hunt generation.
+                    # Re-arm immediately so every configured timer fires once
+                    # for the new hunt instead of waiting for its old interval.
                     self._startup_pressed.clear()
                     self._startup_cycle_generation = generation
+                    self._armed = False
 
                 now = monotonic_ms()
                 if not self._armed:
@@ -84,11 +96,15 @@ class SkillTimerWorker:
                 ]
                 startup_pending = self._startup_generation != generation
                 for timer in due:
+                    if int(getattr(ctx, "hunt_generation", 0)) != generation:
+                        break
                     if not ctx.should_run_timers():
                         break
                     if startup_pending and not self._startup_action_allowed():
                         break
                     if not self._wait_stagger_gap():
+                        break
+                    if int(getattr(ctx, "hunt_generation", 0)) != generation:
                         break
                     if not ctx.should_run_timers():
                         break
@@ -97,6 +113,8 @@ class SkillTimerWorker:
                     pressed = self._input.teleport_key(timer.scan_code)
                     if pressed is False:
                         continue
+                    if int(getattr(ctx, "hunt_generation", 0)) != generation:
+                        break
                     pressed_at = monotonic_ms()
                     self._last_press_ms[timer.scan_code] = pressed_at
                     self._last_any_press_ms = pressed_at
@@ -105,7 +123,7 @@ class SkillTimerWorker:
                 # Release combat only after every normal timer has fired once
                 # for this hunt generation. The generation changes when sit
                 # ends, so the startup sequence repeats on the next hunt.
-                generation = getattr(ctx, "hunt_generation", 0)
+                generation = int(getattr(ctx, "hunt_generation", 0))
                 startup_scans = {timer.scan_code for timer in timers}
                 if (
                     self._startup_generation != generation
@@ -113,7 +131,9 @@ class SkillTimerWorker:
                 ):
                     mark_done = getattr(ctx, "mark_startup_timers_done", None)
                     if callable(mark_done):
-                        mark_done()
+                        completed = mark_done(expected_generation=generation)
+                        if completed is False:
+                            continue
                     self._startup_generation = generation
 
                 now = monotonic_ms()
@@ -140,7 +160,9 @@ class SkillTimerWorker:
         if not buffs:
             mark_done = getattr(self._ctx, "mark_startup_buffs_done", None)
             if callable(mark_done):
-                mark_done()
+                completed = mark_done(expected_generation=generation)
+                if completed is False:
+                    return False
             return True
         event = getattr(self._ctx, "startup_buffs_done", None)
         if event is None or event.is_set():
@@ -149,7 +171,18 @@ class SkillTimerWorker:
             if generation != getattr(self._ctx, "hunt_generation", generation):
                 return False
             if not self._ctx.should_run_timers():
-                self._ctx.wait_while_stopped_or_paused(0.25)
+                # Teleport/danger suspension leaves ordinary workers runnable,
+                # so the general pause wait would return immediately and spin.
+                # User pause/sit still use the resume gate.
+                should_run_workers = getattr(
+                    self._ctx,
+                    "should_run_workers",
+                    None,
+                )
+                if callable(should_run_workers) and should_run_workers():
+                    self._ctx.stop_event.wait(0.25)
+                else:
+                    self._ctx.wait_while_stopped_or_paused(0.25)
                 continue
             if event.wait(0.05):
                 return True

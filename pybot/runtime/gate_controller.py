@@ -64,6 +64,18 @@ class GateController:
             and not self.sitting_event.is_set()
         )
 
+    def should_run_character_state(self) -> bool:
+        """True when visual danger state should continue being sampled.
+
+        Sitting pauses hunt workers, but the sit worker must still see a newly
+        nearby mob and escape. User pause and Stop remain hard barriers.
+        """
+        return (
+            not self.stop_event.is_set()
+            and not self.pause_event.is_set()
+            and not self.discovery_suspend.is_set()
+        )
+
     def should_run_combat(self) -> bool:
         """True when attack may run (workers running and not in storage/heal/TP)."""
         return (
@@ -78,10 +90,14 @@ class GateController:
     def should_run_timers(self) -> bool:
         """True when skill timers may fire.
 
-        Timers keep running during storage and healing. Sitting and the
-        user-pause gate still stop them through ``should_run_workers``.
+        Timers keep running during storage and healing. Sitting, user pause,
+        danger handling, and an in-flight teleport suspend them.
         """
-        return self.should_run_workers()
+        return (
+            self.should_run_workers()
+            and not self.discovery_suspend.is_set()
+            and not self.danger_sit_requested.is_set()
+        )
 
     def should_allow_danger_teleport(self) -> bool:
         """True when danger TP may run.

@@ -159,6 +159,9 @@ class HuntRuntimeContext:
     def should_run_workers(self) -> bool:
         return self.gates.should_run_workers()
 
+    def should_run_character_state(self) -> bool:
+        return self.gates.should_run_character_state()
+
     def should_run_combat(self) -> bool:
         """True when lifecycle gates and per-hunt startup both permit combat."""
         return (
@@ -185,14 +188,34 @@ class HuntRuntimeContext:
     def startup_timers_done(self) -> threading.Event:
         return self.gates.startup.timers_done
 
-    def mark_startup_area_clear(self, clear: bool = True) -> None:
-        self.gates.startup.mark_area_clear(clear)
+    def mark_startup_area_clear(
+        self,
+        clear: bool = True,
+        *,
+        expected_generation: int | None = None,
+    ) -> bool:
+        return self.gates.startup.mark_area_clear(
+            clear,
+            expected_generation=expected_generation,
+        )
 
-    def mark_startup_buffs_done(self) -> None:
-        self.gates.startup.mark_buffs_done()
+    def mark_startup_buffs_done(
+        self,
+        *,
+        expected_generation: int | None = None,
+    ) -> bool:
+        return self.gates.startup.mark_buffs_done(
+            expected_generation=expected_generation,
+        )
 
-    def mark_startup_timers_done(self) -> None:
-        self.gates.startup.mark_timers_done()
+    def mark_startup_timers_done(
+        self,
+        *,
+        expected_generation: int | None = None,
+    ) -> bool:
+        return self.gates.startup.mark_timers_done(
+            expected_generation=expected_generation,
+        )
 
     def should_run_character_actions(self) -> bool:
         """True when a self-targeted action may run without active danger."""
@@ -260,8 +283,16 @@ class HuntRuntimeContext:
     def mark_running(self) -> None:
         self.gates.mark_running()
 
-    def begin_hunt_startup(self) -> None:
-        self.gates.startup.begin()
+    def begin_hunt_startup(
+        self,
+        *,
+        require_buffs: bool = True,
+        require_timers: bool = True,
+    ) -> None:
+        self.gates.startup.begin(
+            require_buffs=require_buffs,
+            require_timers=require_timers,
+        )
 
     def mark_paused(self) -> None:
         self.gates.mark_paused()

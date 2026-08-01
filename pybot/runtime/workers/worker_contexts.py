@@ -118,6 +118,16 @@ class SelfBuffWorkerContext(CanStop, CanLog, HasConfig, Protocol):
     def should_run_combat(self) -> bool: ...
     def should_run_character_actions(self) -> bool: ...
     def should_run_startup_actions(self) -> bool: ...
+    def mark_startup_buffs_done(
+        self,
+        *,
+        expected_generation: int | None = None,
+    ) -> bool: ...
+    def mark_startup_timers_done(
+        self,
+        *,
+        expected_generation: int | None = None,
+    ) -> bool: ...
     def wait_while_combat_blocked(self, timeout_s: float) -> bool: ...
     def character_screen_pos(self) -> tuple[int, int] | None: ...
 
@@ -140,6 +150,11 @@ class SkillTimerWorkerContext(CanStop, CanLog, HasConfig, Protocol):
 
     def should_run_timers(self) -> bool: ...
     def should_run_startup_actions(self) -> bool: ...
+    def mark_startup_buffs_done(
+        self,
+        *,
+        expected_generation: int | None = None,
+    ) -> bool: ...
 
     @property
     def startup_buffs_done(self) -> object: ...
@@ -150,7 +165,11 @@ class SkillTimerWorkerContext(CanStop, CanLog, HasConfig, Protocol):
     @property
     def startup_timers_done(self) -> object: ...
 
-    def mark_startup_timers_done(self) -> None: ...
+    def mark_startup_timers_done(
+        self,
+        *,
+        expected_generation: int | None = None,
+    ) -> bool: ...
 
 
 class HpRestoreWorkerContext(CanStop, CanLog, HasConfig, Protocol):
@@ -169,9 +188,11 @@ class CharacterStateWorkerContext(
 ):
     """Hunt runtime subset consumed by CharacterStateMonitor.
 
-    Runs detection while workers are running (``should_run_workers``).
+    Visual danger sampling continues during sit so the sit worker can escape
+    when a mob appears nearby; Stop and user pause still suspend sampling.
     """
-    pass
+
+    def should_run_character_state(self) -> bool: ...
 
 
 class SitOnLowSpWorkerContext(

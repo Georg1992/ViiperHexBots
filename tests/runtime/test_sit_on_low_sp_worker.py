@@ -64,6 +64,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.teleport.teleport_until_quiet = MagicMock(return_value=True)  # type: ignore[method-assign]
         self.danger = MagicMock(spec=DangerDetector)
         self.danger.pop_damage_detected.return_value = False
+        self.danger.has_nearby_threat.return_value = False
 
     def _worker(self, vitals: PlayerVitals | None = None) -> SitOnLowSpWorker:
         return SitOnLowSpWorker(
@@ -170,10 +171,69 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker = self._worker(_ScriptedVitals([0.40] * 20))
         self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
         self.danger.pop_damage_detected.return_value = True
+        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
 
         self.assertEqual(worker._sit_until_done(82), "interrupted")
         self.input.key_tap.assert_not_called()
+        self.teleport.danger_teleport.assert_called_once_with(
+            reason="sit_spot_danger"
+        )
         self.assertFalse(worker._seated)
+
+    def test_damage_while_seated_stands_before_urgent_teleport(self) -> None:
+        worker = self._worker(_ScriptedVitals([0.40] * 20))
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        self.danger.pop_damage_detected.side_effect = [False, True]
+        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
+        worker._seated = False
+
+        self.assertEqual(worker._sit_until_done(82), "interrupted")
+        self.assertEqual(
+            [call.args[0] for call in self.input.key_tap.call_args_list],
+            [82, 82],
+        )
+        self.teleport.danger_teleport.assert_called_once_with(
+            reason="sit_danger"
+        )
+        self.assertFalse(worker._seated)
+
+    def test_nearby_danger_while_seated_stands_before_urgent_teleport(self) -> None:
+        worker = self._worker(_ScriptedVitals([0.40] * 20))
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        self.danger.pop_damage_detected.return_value = False
+        self.danger.has_nearby_threat.side_effect = [False, True]
+        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+        self.assertEqual(worker._sit_until_done(82), "interrupted")
+        self.assertEqual(
+            [call.args[0] for call in self.input.key_tap.call_args_list],
+            [82, 82],
+        )
+        self.teleport.danger_teleport.assert_called_once_with(
+            reason="sit_danger"
+        )
+        self.assertFalse(worker._seated)
+
+    def test_damage_recovery_finds_new_place_before_sitting_again(self) -> None:
+        # The real recovery loop must see recovered SP after the interrupted
+        # attempt; otherwise it correctly keeps looking for another spot.
+        worker = self._worker(_ScriptedVitals([0.99, 0.99]))
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        worker._sit_until_done = MagicMock(  # type: ignore[method-assign]
+            side_effect=["interrupted", "recovered"]
+        )
+        self.teleport.teleport_to_safe_place = MagicMock(  # type: ignore[method-assign]
+            side_effect=[True, True]
+        )
+        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
+        worker._seated = False
+
+        worker._recover_sp(0.02)
+
+        self.assertEqual(worker._sit_until_done.call_count, 2)
+        self.assertEqual(self.teleport.teleport_to_safe_place.call_count, 2)
+        self.teleport.danger_teleport.assert_not_called()
+        self.assertFalse(self.ctx.sitting_event.is_set())
 
     def test_recovered_requires_sp_still_high(self) -> None:
         worker = self._worker(_ScriptedVitals([0.99, 0.02]))

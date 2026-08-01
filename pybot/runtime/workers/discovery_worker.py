@@ -112,6 +112,11 @@ class DiscoveryWorker:
         if roi is None:
             return
 
+        # Capture the hunt generation before the frame. A sit/stand transition
+        # can happen while detection runs; its result must not unlock the next
+        # hunt's startup sequence.
+        expected_generation = int(getattr(ctx, "hunt_generation", 0))
+
         # One atomic sample before capture so detections, dedup, and absence
         # share one time reference while tracking moves live tracks.
         now_ms = monotonic_ms()
@@ -169,7 +174,11 @@ class DiscoveryWorker:
             hunt_roi=roi,
         )
 
-        if ctx.tracks.area_epoch != area_epoch or ctx.discovery_suspend.is_set():
+        if (
+            ctx.tracks.area_epoch != area_epoch
+            or ctx.discovery_suspend.is_set()
+            or expected_generation != int(getattr(ctx, "hunt_generation", 0))
+        ):
             return
 
         verbose = (
@@ -239,5 +248,8 @@ class DiscoveryWorker:
         # that the first frame has been checked.
         mark_startup_clear = getattr(ctx, "mark_startup_area_clear", None)
         if callable(mark_startup_clear):
-            mark_startup_clear(living_for_clear == 0)
+            mark_startup_clear(
+                living_for_clear == 0,
+                expected_generation=expected_generation,
+            )
 

@@ -328,9 +328,20 @@ def create_runtime_deps(
     logger = _build_logger(config, session_id, behavior_callback)
     detector, tracker = _build_detectors(config)
     ctx = _build_context(config, logger, detector, tracker, overlay)
-    # Every runtime start is a fresh hunt cycle. Buffs must complete before
-    # normal startup timers, and both must complete before combat begins.
-    ctx.begin_hunt_startup()
+    has_buffs = any(
+        buff.scan_code > 0 and buff.delay_ms > 0
+        for buff in config.custom_behavior.buffs
+    )
+    has_timers = any(
+        timer.scan_code and timer.interval_ms > 0
+        for timer in config.skill_timers
+    )
+    # Every runtime start is a fresh hunt cycle. Only configured workers need
+    # their startup milestone replayed after a sit/stand generation reset.
+    ctx.begin_hunt_startup(
+        require_buffs=has_buffs,
+        require_timers=has_timers,
+    )
 
     input_backend: InputBackend = ViiperBackend()
     player_vitals = vitals or PlayerVitals()

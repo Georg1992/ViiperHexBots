@@ -46,33 +46,40 @@ class SelfBuffWorker:
                 f"interval={buff.delay_ms}ms scanCode={buff.scan_code}"
             )
 
-        generation = self._current_generation()
-        if not self._run_startup_sequence(buffs):
-            return
-        mark_buffs_done = getattr(ctx, "mark_startup_buffs_done", None)
-        if callable(mark_buffs_done):
-            mark_buffs_done()
-        if not self._has_normal_timers():
-            mark_timers_done = getattr(ctx, "mark_startup_timers_done", None)
-            if callable(mark_timers_done):
-                mark_timers_done()
-        self._completed_generation = generation
-
         while not ctx.is_stopped():
             try:
                 generation = self._current_generation()
                 if self._completed_generation != generation:
                     self._last_cast_ms.clear()
                     self._last_any_cast_ms = 0
-                    if not self._run_startup_sequence(buffs):
-                        return
+                    if not self._run_startup_sequence(
+                        buffs,
+                        expected_generation=generation,
+                    ):
+                        # A sit/stand transition can change the generation
+                        # while a startup sequence is in progress. Do not
+                        # publish completion for the old hunt; the next loop
+                        # iteration replays the sequence for the new one.
+                        if ctx.is_stopped():
+                            return
+                        continue
+                    if self._current_generation() != generation:
+                        continue
                     mark_buffs_done = getattr(ctx, "mark_startup_buffs_done", None)
                     if callable(mark_buffs_done):
-                        mark_buffs_done()
+                        completed = mark_buffs_done(
+                            expected_generation=generation,
+                        )
+                        if completed is False:
+                            continue
                     if not self._has_normal_timers():
                         mark_timers_done = getattr(ctx, "mark_startup_timers_done", None)
                         if callable(mark_timers_done):
-                            mark_timers_done()
+                            completed = mark_timers_done(
+                                expected_generation=generation,
+                            )
+                            if completed is False:
+                                continue
                     self._completed_generation = generation
 
                 if not ctx.should_run_combat():
@@ -118,10 +125,23 @@ class SelfBuffWorker:
             for timer in getattr(self._ctx.config, "skill_timers", ())
         )
 
-    def _run_startup_sequence(self, buffs: tuple) -> bool:
-        """Cast each assigned buff immediately, in buff1/buff2/buff3 order."""
+    def _run_startup_sequence(
+        self,
+        buffs: tuple,
+        *,
+        expected_generation: int,
+    ) -> bool:
+        """Cast this generation's buffs in configured order.
+
+        A generation change invalidates the sequence immediately. Completion
+        is published by ``run`` only after this method returns successfully and
+        the generation is still the same, preventing stale startup events from
+        unlocking a later hunt.
+        """
         for index, buff in enumerate(buffs):
             while not self._ctx.is_stopped():
+                if self._current_generation() != expected_generation:
+                    return False
                 if not self._startup_action_allowed():
                     resumed = self._ctx.wait_while_combat_blocked(0.25)
                     # Lightweight/test contexts may return immediately while
@@ -132,6 +152,8 @@ class SelfBuffWorker:
                         return False
                     continue
                 if self._cast_buff(buff, startup=True):
+                    if self._current_generation() != expected_generation:
+                        return False
                     break
                 # Missing coordinates and transient input failures are
                 # retryable and must not abandon the hunt-start sequence.
@@ -140,9 +162,13 @@ class SelfBuffWorker:
             else:
                 return False
 
-            if index + 1 < len(buffs) and not self._wait_startup_gap():
+            if index + 1 < len(buffs) and not self._wait_startup_gap(
+                expected_generation=expected_generation,
+            ):
                 return False
-        return True
+            if self._current_generation() != expected_generation:
+                return False
+        return self._current_generation() == expected_generation
 
     def _startup_action_allowed(self) -> bool:
         checker = getattr(self._ctx, "should_run_startup_actions", None)
@@ -156,10 +182,12 @@ class SelfBuffWorker:
             return bool(checker())
         return bool(self._ctx.should_run_combat())
 
-    def _wait_startup_gap(self) -> bool:
-        """Wait one full second after the previous safe buff cast."""
+    def _wait_startup_gap(self, *, expected_generation: int) -> bool:
+        """Wait one full second while remaining in the active hunt."""
         deadline: int | None = None
         while not self._ctx.is_stopped():
+            if self._current_generation() != expected_generation:
+                return False
             if not self._startup_action_allowed():
                 # Danger/fight postpones the next buff; the one-second delay
                 # starts again only once the character is safe.
@@ -172,7 +200,10 @@ class SelfBuffWorker:
                 deadline = monotonic_ms() + int(STARTUP_BUFF_GAP_S * 1000)
             remaining_ms = deadline - monotonic_ms()
             if remaining_ms <= 0:
-                return self._startup_action_allowed()
+                return (
+                    self._current_generation() == expected_generation
+                    and self._startup_action_allowed()
+                )
             if self._ctx.stop_event.wait(min(0.05, remaining_ms / 1000.0)):
                 return False
         return False

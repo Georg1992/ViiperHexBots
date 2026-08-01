@@ -42,8 +42,15 @@ class CharacterState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._data = _CharacterStateData()
+        self._area_generation = 0
 
     # ── Writer (called by CharacterStateMonitor) ──────────────────
+
+    @property
+    def area_generation(self) -> int:
+        """Return the generation of the currently visible area."""
+        with self._lock:
+            return self._area_generation
 
     def publish(
         self,
@@ -55,8 +62,15 @@ class CharacterState:
         nearby_mob_count: int,
         nearby_any_mobs_count: int = 0,
         tick_ms: int,
-    ) -> None:
+        expected_generation: int | None = None,
+    ) -> bool:
+        """Publish state unless a concurrent teleport replaced the area."""
         with self._lock:
+            if (
+                expected_generation is not None
+                and expected_generation != self._area_generation
+            ):
+                return False
             self._data = _CharacterStateData(
                 char_x=char_x,
                 char_y=char_y,
@@ -66,6 +80,7 @@ class CharacterState:
                 nearby_any_mobs_count=nearby_any_mobs_count,
                 tick_ms=tick_ms,
             )
+            return True
 
     def clear_area_threat(self) -> None:
         """Clear surround/nearby flags after teleport area reset.
@@ -74,6 +89,7 @@ class CharacterState:
         looking like danger on the new screen before the next charstate tick.
         """
         with self._lock:
+            self._area_generation += 1
             self._data = _CharacterStateData(
                 char_x=self._data.char_x,
                 char_y=self._data.char_y,

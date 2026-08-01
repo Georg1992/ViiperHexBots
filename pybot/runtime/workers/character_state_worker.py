@@ -40,12 +40,16 @@ class CharacterStateMonitor:
         ctx.logger.behavior("[CHARSTATE] worker started")
         while not ctx.is_stopped():
             try:
-                if not ctx.should_run_workers():
-                    ctx.wait_while_stopped_or_paused(
-                        CHARACTER_STATE_POLL_INTERVAL_S
-                    )
+                if not ctx.should_run_character_state():
+                    # Use a timed stop wait rather than the general worker
+                    # gate: discovery suspension intentionally does not make
+                    # ``should_run_workers`` false, so the latter could spin.
+                    ctx.stop_event.wait(CHARACTER_STATE_POLL_INTERVAL_S)
                     continue
                 self._tick()
+                # Keep visual danger sampling periodic rather than spinning at
+                # full CPU while the sit worker owns the hunt session.
+                ctx.stop_event.wait(CHARACTER_STATE_POLL_INTERVAL_S)
             except Exception:
                 ctx.logger.behavior(
                     f"[CHARSTATE] tick error:\n{traceback.format_exc()}"
@@ -53,6 +57,7 @@ class CharacterStateMonitor:
 
     def _tick(self) -> None:
         ctx = self._ctx
+        expected_generation = self._state.area_generation
 
         # Capture the hunt frame — same ROI as discovery/tracking.
         roi = ctx.capture.get_hunt_roi()
@@ -60,6 +65,11 @@ class CharacterStateMonitor:
             return
         frame = ctx.capture.capture_roi(roi)
         if frame is None or frame.size == 0:
+            return
+        # A danger teleport may begin while capture is in progress. Do not
+        # publish a pre-teleport frame after the teleport has suspended
+        # discovery/character-state sampling and cleared the old threat.
+        if not ctx.should_run_character_state():
             return
 
         now_ms = monotonic_ms()
@@ -94,4 +104,5 @@ class CharacterStateMonitor:
             nearby_mob_count=nearby_count,
             nearby_any_mobs_count=nearby_any,
             tick_ms=now_ms,
+            expected_generation=expected_generation,
         )
