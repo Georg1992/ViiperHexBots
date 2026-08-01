@@ -1,4 +1,4 @@
-"""Surround needs ≥2 nearby tracks; urgent TP is critical-HP only."""
+"""Surround detection and danger-state reset regression tests."""
 
 from __future__ import annotations
 

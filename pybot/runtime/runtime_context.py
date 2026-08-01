@@ -62,6 +62,8 @@ class HuntRuntimeContext:
     gates: GateController = field(default_factory=GateController)
     # Fly-wing count and restock state.
     wings: WingTracker = field(default_factory=WingTracker)
+    # Shared danger observer used by safe character actions (heal/buff).
+    danger_detector: object | None = field(default=None, repr=False)
 
     # ── Event gate convenience properties (delegate to gates) ────
 
@@ -129,6 +131,11 @@ class HuntRuntimeContext:
     def healing_event(self, event: threading.Event) -> None:
         self.gates.healing_event = event
 
+    @property
+    def danger_sit_requested(self) -> threading.Event:
+        """Pending danger-driven sit request raised by DangerDetector."""
+        return self.gates.danger_sit_requested
+
     # ── Wing convenience properties (delegate to wings) ──────────
 
     @property
@@ -153,13 +160,93 @@ class HuntRuntimeContext:
         return self.gates.should_run_workers()
 
     def should_run_combat(self) -> bool:
-        return self.gates.should_run_combat()
+        """True when lifecycle gates and per-hunt startup both permit combat."""
+        return (
+            self.gates.should_run_combat()
+            and self.gates.startup.is_combat_ready()
+        )
 
     def should_run_timers(self) -> bool:
         return self.gates.should_run_timers()
 
+    @property
+    def hunt_generation(self) -> int:
+        return self.gates.startup.generation
+
+    @property
+    def startup_area_clear(self) -> threading.Event:
+        return self.gates.startup.area_clear
+
+    @property
+    def startup_buffs_done(self) -> threading.Event:
+        return self.gates.startup.buffs_done
+
+    @property
+    def startup_timers_done(self) -> threading.Event:
+        return self.gates.startup.timers_done
+
+    def mark_startup_area_clear(self, clear: bool = True) -> None:
+        self.gates.startup.mark_area_clear(clear)
+
+    def mark_startup_buffs_done(self) -> None:
+        self.gates.startup.mark_buffs_done()
+
+    def mark_startup_timers_done(self) -> None:
+        self.gates.startup.mark_timers_done()
+
+    def should_run_character_actions(self) -> bool:
+        """True when a self-targeted action may run without active danger."""
+        if not self.should_run_combat():
+            return False
+        danger = self.danger_detector
+        if danger is None:
+            return True
+        return bool(danger.is_safe_for_heal())
+
+    def should_run_startup_actions(self) -> bool:
+        """True when a new-hunt startup action may run.
+
+        Startup actions run before combat is released, so this deliberately
+        does not depend on ``should_run_combat()``. It does require a clear
+        area and a SAFE danger state; otherwise buffs/timers remain pending.
+        """
+        if (
+            not self.startup_area_clear.is_set()
+            or self.is_stopped()
+            or self.pause_event.is_set()
+            or self.sitting_event.is_set()
+            or self.storage_event.is_set()
+            or self.healing_event.is_set()
+            or self.discovery_suspend.is_set()
+            or self.gates.danger_sit_requested.is_set()
+        ):
+            return False
+        danger = self.danger_detector
+        if danger is not None and not danger.is_safe_for_heal():
+            return False
+        return self.tracks.get_area_clear_candidate().clear
+
     def should_allow_danger_teleport(self) -> bool:
         return self.gates.should_allow_danger_teleport()
+
+    def request_danger_sit(self) -> bool:
+        """Request the sit worker to handle damage danger when a sit key exists.
+
+        A missing sit key must not leave ``danger_sit_requested`` set forever,
+        because that would permanently block combat without a worker able to
+        consume the request.
+        """
+        try:
+            sit_scan = int(getattr(self.config, "sit_on_low_sp_scan_code", 0))
+        except (TypeError, ValueError):
+            sit_scan = 0
+        if sit_scan <= 0:
+            return False
+        self.gates.request_danger_sit()
+        return True
+
+    def pop_danger_sit_request(self) -> bool:
+        return self.gates.pop_danger_sit_request()
 
     def should_run_discovery(self) -> bool:
         return self.gates.should_run_discovery()
@@ -172,6 +259,9 @@ class HuntRuntimeContext:
 
     def mark_running(self) -> None:
         self.gates.mark_running()
+
+    def begin_hunt_startup(self) -> None:
+        self.gates.startup.begin()
 
     def mark_paused(self) -> None:
         self.gates.mark_paused()

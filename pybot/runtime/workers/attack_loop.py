@@ -10,9 +10,9 @@ from pybot.runtime.constants import (
     IDLE_DEAD_ATTACK_COUNT,
     IDLE_UNREACHABLE_ATTACK_COUNT,
     LOG_REPEAT_INTERVAL_MS,
-    SP_IDLE_MAX_OBSERVATION_AGE_MS,
     WORKER_POLL_INTERVAL_S,
 )
+from pybot.runtime.combat_observer import CombatObserver
 from pybot.runtime.hunt_mode import HuntModeController
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.input.input_backend import InputBackend
@@ -39,6 +39,7 @@ class AttackLoop:
         self._vitals = vitals or PlayerVitals()
         self._char_x = char_x
         self._char_y = char_y
+        self._combat_observer = CombatObserver()
         self._last_sp_unknown_log_ms = 0
 
     def run(self) -> None:
@@ -54,9 +55,38 @@ class AttackLoop:
 
                 target_id = self._ctx.policy.select_target(policy_tracks, tick)
                 if target_id:
+                    # Safe self-heal is attempted every attack-loop tick. The
+                    # behavior cooldown prevents duplicate casts when the
+                    # pre-attack or post-kite hook already healed.
+                    defer_heal = getattr(
+                        self._mob_behavior,
+                        "defers_heal_until_after_kite",
+                        lambda: False,
+                    )
+                    if not defer_heal():
+                        heal = getattr(self._mob_behavior, "heal_if_needed", None)
+                        if callable(heal):
+                            try:
+                                hx, hy = self._character_pos()
+                                heal(hx, hy, self._input)
+                            except Exception:
+                                self._ctx.logger.behavior(
+                                    f"[HEAL] self-heal error:\\n{traceback.format_exc()}"
+                                )
                     self._attack_one(target_id, tick)
                     self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
                     continue
+
+                # Also heal while the area is temporarily empty.
+                heal = getattr(self._mob_behavior, "heal_if_needed", None)
+                if callable(heal):
+                    try:
+                        hx, hy = self._character_pos()
+                        heal(hx, hy, self._input)
+                    except Exception:
+                        self._ctx.logger.behavior(
+                            f"[HEAL] idle self-heal error:\\n{traceback.format_exc()}"
+                        )
 
                 self._hunt_mode.on_no_attackable_targets()
                 self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
@@ -73,73 +103,29 @@ class AttackLoop:
             return self._char_x, self._char_y
         return int(pos[0]), int(pos[1])
 
-    def _classify_idle(
+    def _log_unknown_observation(
         self,
         target_id: int,
-        ctx,
+        result,
+        *,
         pre_sp: int | None,
         post_sp: int | None,
-        pre_obs_ms: int,
-        post_obs_ms: int,
-        pre_chg_ms: int,
-        post_chg_ms: int,
-        sample_now: int,
         now_tick: int,
-    ) -> bool | None:
-        """Classify whether the last skill press was an idle (SP unchanged)
-        or a hit (SP dropped), or unknown.
-
-        Returns:
-            True — SP unchanged (idle attack, likely miss).
-            False — SP dropped (skill hit the target).
-            None — Sp not readable or inconclusive; freeze counters.
-
-        Side-effect: logs each unique unknown reason at most every
-        LOG_REPEAT_INTERVAL_MS so the log is not flooded.
-        """
-        if pre_sp is None or post_sp is None or post_obs_ms <= pre_obs_ms:
-            if now_tick - self._last_sp_unknown_log_ms >= LOG_REPEAT_INTERVAL_MS:
-                self._last_sp_unknown_log_ms = now_tick
-                reason = (
-                    "sp-unread"
-                    if pre_sp is None or post_sp is None
-                    else "vitals-stale"
-                )
-                ctx.logger.behavior(
-                    f"[IDLE] path=sp-unknown id={target_id} reason={reason} "
-                    f"pre_sp={pre_sp} post_sp={post_sp} — idle/death counters frozen"
-                )
-            return None
-
-        if post_sp < pre_sp:
-            return False  # SP dropped — skill hit
-
-        if post_sp > pre_sp:
-            if now_tick - self._last_sp_unknown_log_ms >= LOG_REPEAT_INTERVAL_MS:
-                self._last_sp_unknown_log_ms = now_tick
-                ctx.logger.behavior(
-                    f"[IDLE] path=sp-unknown id={target_id} reason=sp-increased "
-                    f"pre_sp={pre_sp} post_sp={post_sp} — idle/death counters frozen"
-                )
-            return None
-
-        # pre_sp == post_sp — same value before and after skill delay.
-        if post_chg_ms > pre_chg_ms:
-            # Value changed away and back within the window — inconclusive.
-            return None
-
-        if sample_now - post_obs_ms > SP_IDLE_MAX_OBSERVATION_AGE_MS:
-            if now_tick - self._last_sp_unknown_log_ms >= LOG_REPEAT_INTERVAL_MS:
-                self._last_sp_unknown_log_ms = now_tick
-                ctx.logger.behavior(
-                    f"[IDLE] path=sp-unknown id={target_id} reason=obs-stale "
-                    f"age_ms={sample_now - post_obs_ms} "
-                    f"pre_sp={pre_sp} post_sp={post_sp} — idle/death counters frozen"
-                )
-            return None
-
-        # Same SP, fresh observation, no value change, recent — not hitting.
-        return True
+        post_observed_ms: int,
+        sample_now_ms: int,
+    ) -> None:
+        """Throttle diagnostics for inconclusive post-attack evidence."""
+        if now_tick - self._last_sp_unknown_log_ms < LOG_REPEAT_INTERVAL_MS:
+            return
+        self._last_sp_unknown_log_ms = now_tick
+        age_text = ""
+        if result.reason == "obs-stale":
+            age_text = f" age_ms={sample_now_ms - post_observed_ms}"
+        self._ctx.logger.behavior(
+            f"[IDLE] path=sp-unknown id={target_id} reason={result.reason}"
+            f"{age_text} pre_sp={pre_sp} post_sp={post_sp} "
+            "— idle/death counters frozen"
+        )
 
     def _attack_one(self, target_id: int, now_tick: int) -> None:
         ctx = self._ctx
@@ -208,16 +194,32 @@ class AttackLoop:
         # Start kiting immediately after the attack input, before the skill
         # delay. This gives movement the full delay window to take effect.
         kite_x, kite_y = char_x, char_y
+        kite_acted = False
         try:
             kite_x, kite_y = self._character_pos()
             all_mobs = ctx.tracks.positions_snapshot()
-            self._mob_behavior.kite_after_attack(
+            kite_acted = bool(self._mob_behavior.kite_after_attack(
                 kite_x, kite_y, self._input, all_mobs=all_mobs,
-            )
+            ))
         except Exception:
             ctx.logger.behavior(
                 f"[ATTACK] kite error id={target_id}:\n{traceback.format_exc()}"
             )
+
+        # Retry safe self-healing only after a successful kite input. A
+        # throttled/failed kite is not a valid healing window while a target
+        # remains active; a successful kite's cooldown suppresses duplicates
+        # when its behavior already healed internally.
+        if kite_acted:
+            heal = getattr(self._mob_behavior, "heal_if_needed", None)
+            if callable(heal):
+                try:
+                    heal(kite_x, kite_y, self._input)
+                except Exception:
+                    ctx.logger.behavior(
+                        f"[HEAL] post-kite fallback error id={target_id}:\n"
+                        f"{traceback.format_exc()}"
+                    )
 
         # Sole inter-skill wait — game applies SP cost; UI may refresh vitals.
         self._ctx.stop_event.wait(ctx.config.skill_delay_ms / 1000.0)
@@ -232,13 +234,26 @@ class AttackLoop:
         # fresh position when deciding whether the target is melee-guarded.
         idle_char_x, idle_char_y = self._character_pos()
 
-        was_idle = self._classify_idle(
-            target_id, ctx,
-            pre_sp, post_sp,
-            pre_obs_ms, post_obs_ms,
-            pre_chg_ms, post_chg_ms,
-            sample_now, now_tick,
+        observation = self._combat_observer.classify_sp(
+            pre_sp=pre_sp,
+            post_sp=post_sp,
+            pre_observed_ms=pre_obs_ms,
+            post_observed_ms=post_obs_ms,
+            pre_changed_ms=pre_chg_ms,
+            post_changed_ms=post_chg_ms,
+            sample_now_ms=sample_now,
         )
+        if observation.was_idle is None:
+            self._log_unknown_observation(
+                target_id,
+                observation,
+                pre_sp=pre_sp,
+                post_sp=post_sp,
+                now_tick=now_tick,
+                post_observed_ms=post_obs_ms,
+                sample_now_ms=sample_now,
+            )
+        was_idle = observation.was_idle
 
         accessible = snap.was_accessible
         blob_stationary = snap.discovery_stationary

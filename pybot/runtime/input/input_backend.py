@@ -13,7 +13,14 @@ class InputBackend(Protocol):
 
     def skill_click(self, scan_code: int) -> bool: ...
 
-    def skill_click_at(self, scan_code: int, x: int, y: int) -> bool: ...
+    def skill_click_at(
+        self,
+        scan_code: int,
+        x: int,
+        y: int,
+        *,
+        move_delay_s: float = 0.05,
+    ) -> bool: ...
 
     def teleport_key(self, scan_code: int) -> bool: ...
 
@@ -66,10 +73,17 @@ class ShadowInputBackend:
             return False
         return True
 
-    def skill_click_at(self, scan_code: int, x: int, y: int) -> bool:
+    def skill_click_at(
+        self,
+        scan_code: int,
+        x: int,
+        y: int,
+        *,
+        move_delay_s: float = 0.05,
+    ) -> bool:
         if scan_code <= 0:
             return False
-        del x, y
+        del x, y, move_delay_s
         return True
 
     def teleport_key(self, scan_code: int) -> bool:

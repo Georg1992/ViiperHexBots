@@ -57,7 +57,7 @@ class CustomMobBehaviorConfigTests(unittest.TestCase):
 
 
 class ConfiguredMobBehaviorTests(unittest.TestCase):
-    def test_kites_after_attack_then_heals_before_next_attack(self) -> None:
+    def test_kites_then_heals_during_delay_and_before_next_attack(self) -> None:
         settings = SimpleNamespace(
             configured=True,
             kiting_tick_ms=1,
@@ -90,6 +90,7 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
                 all_mobs=[(120, 100)],
             )
 
+        self.assertTrue(behavior.defers_heal_until_after_kite())
         self.assertEqual(
             backend.method_calls,
             [
@@ -173,7 +174,94 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
 
 
 class SelfBuffWorkerTests(unittest.TestCase):
-    def test_casts_buff_on_character_after_configured_delay(self) -> None:
+    def test_casts_configured_buffs_in_order_with_one_second_startup_gap(self) -> None:
+        stop = threading.Event()
+        clock = {"ms": 0}
+        safe = {"value": False}
+        casts: list[tuple[int, int, int]] = []
+
+        class StopEvent:
+            def is_set(self) -> bool:
+                return stop.is_set()
+
+            def wait(self, timeout: float) -> bool:
+                clock["ms"] += int(timeout * 1000)
+                if not safe["value"]:
+                    safe["value"] = True
+                return stop.is_set()
+
+        def cast(scan_code: int, x: int, y: int) -> bool:
+            casts.append((scan_code, x, y))
+            if len(casts) == 2:
+                stop.set()
+            return True
+
+        ctx = SimpleNamespace(
+            config=SimpleNamespace(
+                skill_timers=(),
+                custom_behavior=CustomBehaviorRuntime(
+                    buffs=(
+                        SelfBuffRuntime("f1", 59, 1000),
+                        SelfBuffRuntime("f2", 60, 2000),
+                    )
+                )
+            ),
+            logger=SimpleNamespace(behavior=MagicMock()),
+            stop_event=StopEvent(),
+            is_stopped=stop.is_set,
+            should_run_combat=lambda: safe["value"] and not stop.is_set(),
+            wait_while_combat_blocked=lambda _timeout: safe.__setitem__("value", True) or True,
+            character_screen_pos=lambda: (300, 350),
+        )
+
+        with patch(
+            "pybot.runtime.workers.self_buff_worker.monotonic_ms",
+            side_effect=lambda: clock["ms"],
+        ):
+            SelfBuffWorker(ctx, SimpleNamespace(skill_click_at=cast)).run()
+
+        self.assertEqual(casts, [(59, 300, 350), (60, 300, 350)])
+        self.assertEqual(clock["ms"], 1000)
+
+    def test_stops_startup_sequence_while_waiting_for_normal_timers(self) -> None:
+        stop = threading.Event()
+
+        class StopEvent:
+            def is_set(self) -> bool:
+                return stop.is_set()
+
+            def wait(self, _timeout: float) -> bool:
+                stop.set()
+                return True
+
+        class StartupEvent:
+            def wait(self, _timeout: float) -> bool:
+                stop.set()
+                return False
+
+        ctx = SimpleNamespace(
+            config=SimpleNamespace(
+                skill_timers=(SimpleNamespace(scan_code=59, interval_ms=1000),),
+                custom_behavior=CustomBehaviorRuntime(
+                    buffs=(SelfBuffRuntime("f1", 59, 1000),)
+                )
+            ),
+            startup_timers_done=StartupEvent(),
+            logger=SimpleNamespace(behavior=MagicMock()),
+            stop_event=StopEvent(),
+            is_stopped=stop.is_set,
+            should_run_combat=lambda: not stop.is_set(),
+            should_run_startup_actions=lambda: False,
+            wait_while_combat_blocked=lambda _timeout: False,
+            character_screen_pos=lambda: (300, 350),
+        )
+        backend = SimpleNamespace(skill_click_at=MagicMock(return_value=True))
+
+        SelfBuffWorker(ctx, backend).run()
+
+        backend.skill_click_at.assert_not_called()
+
+    def test_casts_buff_on_character_immediately_after_timer_startup(self) -> None:
         stop = threading.Event()
         clock = {"ms": 0}
         casts: list[tuple[int, int, int]] = []
@@ -215,7 +303,7 @@ class SelfBuffWorkerTests(unittest.TestCase):
             SelfBuffWorker(ctx, SimpleNamespace(skill_click_at=cast)).run()
 
         self.assertEqual(casts, [(59, 300, 350)])
-        self.assertEqual(clock["ms"], 1000)
+        self.assertEqual(clock["ms"], 0)
 
 
 if __name__ == "__main__":

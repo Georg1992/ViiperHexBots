@@ -200,10 +200,19 @@ class ViiperBackend(ShadowInputBackend):
             self._skill_click_locked(scan_code)
         return True
 
-    def skill_click_at(self, scan_code: int, x: int, y: int) -> bool:
-        """Move cursor to ``(x, y)``, then skill-key + left-click.
+    def skill_click_at(
+        self,
+        scan_code: int,
+        x: int,
+        y: int,
+        *,
+        move_delay_s: float = 0.05,
+    ) -> bool:
+        """Move cursor to ``(x, y)``, wait, then skill-key + left-click.
 
-        Atomic so nothing can steal the cursor between move and click.
+        Atomic so nothing can steal the cursor between move and click. The
+        optional movement delay lets startup self-buffs use their deliberate
+        200 ms cursor-settle window without changing attack/debuff timing.
         """
         if scan_code <= 0:
             return False
@@ -211,7 +220,8 @@ class ViiperBackend(ShadowInputBackend):
         with self._operation_lock:
             self._ensure_connected()
             user32.SetCursorPos(int(x), int(y))
-            time.sleep(0.05)
+            if move_delay_s > 0:
+                time.sleep(move_delay_s)
             self._skill_click_locked(scan_code)
         return True
 

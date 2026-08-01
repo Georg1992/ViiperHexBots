@@ -14,6 +14,7 @@ import threading
 import time
 
 from pybot.runtime.constants import WORKER_POLL_INTERVAL_S
+from pybot.runtime.startup_sequence import HuntStartupSequence
 
 
 class GateController:
@@ -23,7 +24,7 @@ class GateController:
     healing_event, discovery_wake, discovery_suspend, _sit_storage_lock.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, startup: HuntStartupSequence | None = None) -> None:
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
         self.resume_gate = threading.Event()
@@ -40,6 +41,11 @@ class GateController:
         self._sit_storage_lock = threading.Lock()
         # Monotonic deadline: after teleport settle, heal freely until this time.
         self._post_teleport_heal_until = 0.0
+        # Startup milestones and hunt generations belong to the dedicated
+        # sequence object, not to this general lifecycle gate.
+        self.startup = startup or HuntStartupSequence()
+        # Set by DangerDetector; the sit worker is the sole hunt-breaker.
+        self.danger_sit_requested = threading.Event()
 
     # ── Gate queries ─────────────────────────────────────────────
 
@@ -65,6 +71,8 @@ class GateController:
             and not self.storage_event.is_set()
             and not self.healing_event.is_set()
             and not self.discovery_suspend.is_set()
+            and not self.danger_sit_requested.is_set()
+            and self.startup.is_combat_ready()
         )
 
     def should_run_timers(self) -> bool:
@@ -88,14 +96,22 @@ class GateController:
 
         Heal does not block discovery — tracks stay fresh while topping up HP.
         """
-        return self.should_run_workers() and not self.storage_event.is_set()
+        return (
+            self.should_run_workers()
+            and not self.storage_event.is_set()
+            and not self.danger_sit_requested.is_set()
+        )
 
     def should_run_tracking(self) -> bool:
         """True when tracking may tick (workers running and not storage).
 
         Heal does not block tracking — tracks stay fresh while topping up HP.
         """
-        return self.should_run_workers() and not self.storage_event.is_set()
+        return (
+            self.should_run_workers()
+            and not self.storage_event.is_set()
+            and not self.danger_sit_requested.is_set()
+        )
 
     def _session_held(self) -> bool:
         return (
@@ -125,6 +141,20 @@ class GateController:
         self.pause_event.set()
         self.resume_gate.clear()
 
+    def request_danger_sit(self) -> None:
+        """Ask the sit worker to move safe, sit, recover, and restart hunt."""
+        with self._sit_storage_lock:
+            self.danger_sit_requested.set()
+            self.resume_gate.set()
+
+    def pop_danger_sit_request(self) -> bool:
+        """Consume one pending danger-driven sit request atomically."""
+        with self._sit_storage_lock:
+            if not self.danger_sit_requested.is_set():
+                return False
+            self.danger_sit_requested.clear()
+            return True
+
     # ── Sit lifecycle ────────────────────────────────────────────
 
     def try_begin_sit_ops(self) -> bool:
@@ -145,8 +175,18 @@ class GateController:
         return False
 
     def end_sit_ops(self) -> None:
-        """Release sit pause; restore resume_gate unless user-paused/stopped."""
+        """Release sit pause and begin a fresh hunt cycle.
+
+        Standing after SP recovery is a new hunt start: normal timers fire
+        again, then character buffs replay in order. The generation/event pair
+        lets those independent workers coordinate without relying on thread
+        start order.
+        """
         with self._sit_storage_lock:
+            # Reset the generation and startup milestones first. The sit gate
+            # remains held until this completes, so workers cannot observe a
+            # new hunt with the previous hunt's completion events.
+            self.startup.begin_new_hunt()
             self.sitting_event.clear()
             self._restore_resume_gate()
 

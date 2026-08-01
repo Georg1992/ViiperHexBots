@@ -234,4 +234,10 @@ class DiscoveryWorker:
             added_count=summary.added_count,
             area_epoch=area_epoch,
         )
+        # Startup actions are held until at least one successful discovery
+        # scan confirms an empty area. An empty track store alone is not proof
+        # that the first frame has been checked.
+        mark_startup_clear = getattr(ctx, "mark_startup_area_clear", None)
+        if callable(mark_startup_clear):
+            mark_startup_clear(living_for_clear == 0)
 

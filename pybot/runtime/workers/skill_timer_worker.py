@@ -29,6 +29,9 @@ class SkillTimerWorker:
         self._last_press_ms: dict[int, int] = {}
         self._last_any_press_ms = 0
         self._armed = False
+        self._startup_generation: int | None = None
+        self._startup_cycle_generation: int | None = None
+        self._startup_pressed: set[int] = set()
 
     def run(self) -> None:
         ctx = self._ctx
@@ -49,12 +52,22 @@ class SkillTimerWorker:
 
         while not ctx.is_stopped():
             try:
+                generation = getattr(ctx, "hunt_generation", 0)
+                if not self._wait_for_startup_buffs(generation):
+                    if ctx.is_stopped():
+                        break
+                    continue
                 if not ctx.should_run_timers():
                     if self._armed:
                         self._armed = False
                         ctx.logger.behavior("[TIMER] paused (sit/pause)")
                     ctx.wait_while_stopped_or_paused(0.25)
                     continue
+
+                generation = getattr(ctx, "hunt_generation", 0)
+                if self._startup_cycle_generation != generation:
+                    self._startup_pressed.clear()
+                    self._startup_cycle_generation = generation
 
                 now = monotonic_ms()
                 if not self._armed:
@@ -69,17 +82,39 @@ class SkillTimerWorker:
                     if now - self._last_press_ms.get(timer.scan_code, 0)
                     >= timer.interval_ms
                 ]
+                startup_pending = self._startup_generation != generation
                 for timer in due:
                     if not ctx.should_run_timers():
+                        break
+                    if startup_pending and not self._startup_action_allowed():
                         break
                     if not self._wait_stagger_gap():
                         break
                     if not ctx.should_run_timers():
                         break
-                    self._input.teleport_key(timer.scan_code)
+                    if startup_pending and not self._startup_action_allowed():
+                        break
+                    pressed = self._input.teleport_key(timer.scan_code)
+                    if pressed is False:
+                        continue
                     pressed_at = monotonic_ms()
                     self._last_press_ms[timer.scan_code] = pressed_at
                     self._last_any_press_ms = pressed_at
+                    self._startup_pressed.add(timer.scan_code)
+
+                # Release combat only after every normal timer has fired once
+                # for this hunt generation. The generation changes when sit
+                # ends, so the startup sequence repeats on the next hunt.
+                generation = getattr(ctx, "hunt_generation", 0)
+                startup_scans = {timer.scan_code for timer in timers}
+                if (
+                    self._startup_generation != generation
+                    and startup_scans.issubset(self._startup_pressed)
+                ):
+                    mark_done = getattr(ctx, "mark_startup_timers_done", None)
+                    if callable(mark_done):
+                        mark_done()
+                    self._startup_generation = generation
 
                 now = monotonic_ms()
                 next_wait_ms = 1000
@@ -91,6 +126,34 @@ class SkillTimerWorker:
                 ctx.stop_event.wait(max(0.05, next_wait_ms / 1000.0))
             except Exception:
                 ctx.logger.behavior(f"[TIMER] tick error:\n{traceback.format_exc()}")
+
+    def _startup_action_allowed(self) -> bool:
+        checker = getattr(self._ctx, "should_run_startup_actions", None)
+        if checker is None:
+            return self._ctx.should_run_timers()
+        return bool(checker())
+
+    def _wait_for_startup_buffs(self, generation: int) -> bool:
+        """Wait until character buffs finish before firing normal timers."""
+        custom = getattr(self._ctx.config, "custom_behavior", None)
+        buffs = getattr(custom, "buffs", ())
+        if not buffs:
+            mark_done = getattr(self._ctx, "mark_startup_buffs_done", None)
+            if callable(mark_done):
+                mark_done()
+            return True
+        event = getattr(self._ctx, "startup_buffs_done", None)
+        if event is None or event.is_set():
+            return True
+        while not self._ctx.is_stopped():
+            if generation != getattr(self._ctx, "hunt_generation", generation):
+                return False
+            if not self._ctx.should_run_timers():
+                self._ctx.wait_while_stopped_or_paused(0.25)
+                continue
+            if event.wait(0.05):
+                return True
+        return False
 
     def _arm_timers(self, timers) -> None:
         """Start or restart all timers so they are due immediately (staggered)."""

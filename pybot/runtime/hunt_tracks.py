@@ -23,6 +23,7 @@ from pybot.recognition.rules import (
 
 from pybot.runtime.track_reconciler import DiscoveryReconcileResult, TrackReconciler
 from pybot.runtime.capture.window_roi import HuntRoi
+from pybot.runtime.death_sites import DeathSiteStore
 from pybot.runtime.constants import (
     DISCOVERY_MISS_REMOVE_COUNT,
     IDLE_DEAD_ATTACK_COUNT,
@@ -92,16 +93,20 @@ class HuntTracks:
         self._next_id = 1
         self._area_epoch = 0
         self._discovery_candidates: list[DiscoveryDetection] = []
-        # Recent death positions (x, y, removed_tick) — block rediscovery of
-        # fading corpse heat until deathRediscoveryCooldownMs elapses.
-        self._death_sites: list[tuple[int, int, int]] = []
+        detector_config = self._detector_config()
+        # Corpse-heat suppression is a separate policy store; this aggregate
+        # only coordinates it with track mutations under its own lock.
+        self._death_site_store = DeathSiteStore(
+            radius_px=int(detector_config["deathSiteRadiusPx"]),
+            cooldown_ms=int(detector_config["deathRediscoveryCooldownMs"]),
+        )
 
     def reset(self) -> None:
         with self._lock:
             self._tracks = []
             self._next_id = 1
             self._discovery_candidates = []
-            self._death_sites = []
+            self._death_site_store.clear()
 
     def area_reset(self) -> None:
         with self._lock:
@@ -128,7 +133,7 @@ class HuntTracks:
         self._tracks = []
         self._next_id = 1
         self._discovery_candidates = []
-        self._death_sites = []
+        self._death_site_store.clear()
 
     @property
     def area_epoch(self) -> int:
@@ -308,7 +313,7 @@ class HuntTracks:
                     matched_count=0,
                     added_count=0,
                     removed_count=0,
-                    death_sites_active=len(self._death_sites),
+                    death_sites_active=self._death_site_store.active_count(tick),
                 )
                 return empty
             positions = (
@@ -345,7 +350,7 @@ class HuntTracks:
             kept_candidates: list = []
             death_absorbed = 0
             for detection in result.new_candidates:
-                if self._absorb_into_death_site_locked(
+                if self._death_site_store.absorb_heat(
                     detection.x, detection.y, tick
                 ):
                     death_absorbed += 1
@@ -393,7 +398,6 @@ class HuntTracks:
                 if plain_ids:
                     self._remove_tracks_locked(plain_ids)
 
-            self._prune_death_sites_locked(tick)
             alive_after = sum(1 for t in self._tracks if is_alive(t))
             summary = ReconcileSummary(
                 tracks_before=alive_after + len(remove_ids),
@@ -407,7 +411,7 @@ class HuntTracks:
                 matched_count=result.matched_count + death_absorbed,
                 added_count=len(kept_candidates),
                 removed_count=len(remove_ids),
-                death_sites_active=len(self._death_sites),
+                death_sites_active=self._death_site_store.active_count(tick),
             )
             return summary
 
@@ -747,51 +751,8 @@ class HuntTracks:
             return
         for track in self._tracks:
             if track.id in remove_ids:
-                self._record_death_site_locked(track.x, track.y, now_tick)
+                self._death_site_store.record(track.x, track.y, now_tick)
         self._remove_tracks_locked(remove_ids)
-
-    def _death_rediscovery_cooldown_ms(self) -> int:
-        return int(self._detector_config()["deathRediscoveryCooldownMs"])
-
-    def _death_site_radius_px(self) -> int:
-        return int(self._detector_config()["deathSiteRadiusPx"])
-
-    def _prune_death_sites_locked(self, now_tick: int) -> None:
-        cooldown = self._death_rediscovery_cooldown_ms()
-        self._death_sites = [
-            (x, y, removed_tick)
-            for x, y, removed_tick in self._death_sites
-            if now_tick - removed_tick <= cooldown
-        ]
-
-    def _record_death_site_locked(self, x: int, y: int, removed_tick: int) -> None:
-        self._prune_death_sites_locked(removed_tick)
-        self._death_sites.append((x, y, removed_tick))
-
-    def _absorb_into_death_site_locked(
-        self, x: int, y: int, now_tick: int
-    ) -> bool:
-        """If *(x, y)* is near a death site, refresh that site and return True.
-
-        Follows corpse-heat drift and extends the rediscovery cooldown while
-        the corpse remains visible.
-        """
-        self._prune_death_sites_locked(now_tick)
-        radius = self._death_site_radius_px()
-        radius_sq = radius * radius
-        best_i: int | None = None
-        best_d = 0
-        for i, (sx, sy, _removed) in enumerate(self._death_sites):
-            dx = x - sx
-            dy = y - sy
-            dist = dx * dx + dy * dy
-            if dist <= radius_sq and (best_i is None or dist < best_d):
-                best_i = i
-                best_d = dist
-        if best_i is None:
-            return False
-        self._death_sites[best_i] = (x, y, now_tick)
-        return True
 
     def _dedup_positions_locked(
         self,
@@ -801,7 +762,7 @@ class HuntTracks:
     ) -> list[tuple[int, int]]:
         """Alive-track positions discovery must treat as already known.
 
-        Death sites are absorbed separately via ``_absorb_into_death_site_locked``
+        Death sites are absorbed separately via ``DeathSiteStore``
         (larger radius + cooldown refresh).
         """
         del now_tick

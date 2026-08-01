@@ -124,6 +124,20 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.input.key_tap.assert_not_called()
         self.assertFalse(self.ctx.sitting_event.is_set())
 
+    def test_danger_request_survives_competing_storage_session(self) -> None:
+        worker = self._worker(_ScriptedVitals([]))
+        self.assertTrue(self.ctx.begin_storage_ops())
+        self.ctx.request_danger_sit()
+
+        # The sit worker cannot acquire ownership while storage is active;
+        # attempting recovery must leave the queued danger request intact.
+        worker._recover_sp(1.0, reason="danger", consume_danger_request=True)
+        self.assertTrue(self.ctx.danger_sit_requested.is_set())
+
+        self.ctx.end_storage_ops()
+        self.assertTrue(self.ctx.pop_danger_sit_request())
+        self.assertFalse(self.ctx.danger_sit_requested.is_set())
+
     def test_failed_sit_session_retries_with_gate_held(self) -> None:
         vitals = _ScriptedVitals([0.02] * 50)
         worker = self._worker(vitals)
@@ -150,6 +164,15 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertEqual(worker._sit_until_done(82), "interrupted")
         # enter_sit + leave_sit
         self.assertEqual(self.input.key_tap.call_count, 2)
+        self.assertFalse(worker._seated)
+
+    def test_damage_during_area_clear_rejects_sit_spot(self) -> None:
+        worker = self._worker(_ScriptedVitals([0.40] * 20))
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        self.danger.pop_damage_detected.return_value = True
+
+        self.assertEqual(worker._sit_until_done(82), "interrupted")
+        self.input.key_tap.assert_not_called()
         self.assertFalse(worker._seated)
 
     def test_recovered_requires_sp_still_high(self) -> None:

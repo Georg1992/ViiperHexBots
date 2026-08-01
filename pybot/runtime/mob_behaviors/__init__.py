@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Callable
 
 from pybot.game_state import PlayerVitals
 from pybot.runtime.config import CustomBehaviorRuntime
+from pybot.runtime.constants import HP_RESTORE_COOLDOWN_S
 from pybot.runtime.hunt_tracks import monotonic_ms
 
 if TYPE_CHECKING:
@@ -71,6 +72,10 @@ class MobBehavior:
         all_mobs: list[tuple[int, int]],
     ) -> bool:
         """Run configured pre-attack actions; default is a no-op."""
+        return False
+
+    def defers_heal_until_after_kite(self) -> bool:
+        """Whether healing should wait for the post-attack kite input."""
         return False
 
     def kite_after_attack(
@@ -132,6 +137,11 @@ class ConfiguredMobBehavior(MobBehavior):
         self._danger = danger
         self._legacy_behavior = legacy_behavior
         self._last_kite_ms = 0
+        self._last_heal_ms: int | None = None
+
+    def defers_heal_until_after_kite(self) -> bool:
+        """Keep self-healing after the kite input for configured kiting."""
+        return self._settings.kiting_tick_ms > 0 or self._legacy_behavior is not None
 
     def prepare_target(
         self,
@@ -152,6 +162,34 @@ class ConfiguredMobBehavior(MobBehavior):
             return False
         return mark_debuffed()
 
+    def heal_if_needed(
+        self,
+        char_x: int,
+        char_y: int,
+        input_backend: InputBackend,
+    ) -> bool:
+        hp, hp_max = self._vitals.hp_pair()
+        now = monotonic_ms()
+        if (
+            self._last_heal_ms is not None
+            and now - self._last_heal_ms < int(HP_RESTORE_COOLDOWN_S * 1000)
+        ):
+            return False
+        if (
+            self._settings.heal_scan_code > 0
+            and hp is not None
+            and hp_max is not None
+            and hp < hp_max
+            and self._danger.is_safe_for_heal()
+        ):
+            cast = input_backend.skill_click_at(
+                self._settings.heal_scan_code, char_x, char_y
+            )
+            if cast:
+                self._last_heal_ms = now
+            return cast
+        return False
+
     def before_attack(
         self,
         char_x: int,
@@ -160,18 +198,10 @@ class ConfiguredMobBehavior(MobBehavior):
         *,
         all_mobs: list[tuple[int, int]],
     ) -> bool:
-        del all_mobs
-        hp, hp_max = self._vitals.hp_pair()
-        if (
-            self._settings.heal_scan_code > 0
-            and hp is not None
-            and hp_max is not None
-            and hp < hp_max
-            and self._danger.is_safe_for_heal()
-        ):
-            return input_backend.skill_click_at(
-                self._settings.heal_scan_code, char_x, char_y
-            )
+        # Healing is intentionally never a pre-attack action. It belongs
+        # after a successful kite or in the attack loop's no-target safe-area
+        # branch, where the character is not actively fighting.
+        del char_x, char_y, input_backend, all_mobs
         return False
 
     def kite_after_attack(
@@ -192,13 +222,22 @@ class ConfiguredMobBehavior(MobBehavior):
             )
             if acted:
                 self._last_kite_ms = now
+                # The kite click is the first input in the skill-delay window.
+                # Heal immediately afterwards, while the same delay is still
+                # elapsing, so the next attack does not wait for a separate
+                # healing cycle.
+                self.heal_if_needed(char_x, char_y, input_backend)
             return acted
         if self._legacy_behavior is not None:
             # Keep Anubis's original post-attack kite timing when its cog has
-            # no custom kite interval configured.
-            return self._legacy_behavior.kite_after_attack(
+            # no custom kite interval configured, but preserve the same
+            # post-kite self-heal ordering as configured kiting.
+            acted = self._legacy_behavior.kite_after_attack(
                 char_x, char_y, input_backend, all_mobs=all_mobs
             )
+            if acted:
+                self.heal_if_needed(char_x, char_y, input_backend)
+            return acted
         return False
 
 

@@ -41,6 +41,10 @@ HP_POST_TELEPORT_HEAL_S = 2.0
 
 # Minimum gap between distinct skill-timer key presses when several are due.
 SKILL_TIMER_STAGGER_MS = 500
+# New-hunt character buffs are deliberately spaced by one second.
+STARTUP_BUFF_GAP_S = 1.0
+# Let the cursor settle on the character before a startup self-buff cast.
+STARTUP_BUFF_CURSOR_DELAY_S = 0.2
 # Storage / fly-wings worker (AHK WeightModifier gate is active at >= 50).
 STORAGE_WEIGHT_POLL_INTERVAL_S = 0.25
 STORAGE_WEIGHT_MODIFIER_MIN = 50
@@ -91,6 +95,8 @@ __all__ = [
     "HP_HEAL_DAMAGE_QUIET_S",
     "HP_POST_TELEPORT_HEAL_S",
     "SKILL_TIMER_STAGGER_MS",
+    "STARTUP_BUFF_GAP_S",
+    "STARTUP_BUFF_CURSOR_DELAY_S",
     "STORAGE_WEIGHT_POLL_INTERVAL_S",
     "STORAGE_WEIGHT_MODIFIER_MIN",
     "FLY_WING_WEIGHT",

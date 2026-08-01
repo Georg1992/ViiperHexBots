@@ -269,8 +269,24 @@ def _build_conditional_workers(
 
     if any(t.scan_code and t.interval_ms > 0 for t in ctx.config.skill_timers):
         workers.append(("skill_timer", SkillTimerWorker(ctx, input_backend).run))
-    if ctx.config.custom_behavior.buffs:
+    has_buffs = any(
+        buff.scan_code > 0 and buff.delay_ms > 0
+        for buff in ctx.config.custom_behavior.buffs
+    )
+    has_timers = any(
+        t.scan_code and t.interval_ms > 0
+        for t in ctx.config.skill_timers
+    )
+    if has_buffs:
         workers.append(("custom_buffs", SelfBuffWorker(ctx, input_backend).run))
+    else:
+        # No character buffs means normal timers may start immediately.
+        ctx.mark_startup_buffs_done()
+    if not has_timers:
+        # No normal timers means combat may start after the buff sequence.
+        # SelfBuffWorker also marks this after its final buff when present.
+        if not has_buffs:
+            ctx.mark_startup_timers_done()
     if ctx.config.hp_scan_code > 0:
         workers.append(
             (
@@ -312,26 +328,35 @@ def create_runtime_deps(
     logger = _build_logger(config, session_id, behavior_callback)
     detector, tracker = _build_detectors(config)
     ctx = _build_context(config, logger, detector, tracker, overlay)
+    # Every runtime start is a fresh hunt cycle. Buffs must complete before
+    # normal startup timers, and both must complete before combat begins.
+    ctx.begin_hunt_startup()
 
     input_backend: InputBackend = ViiperBackend()
     player_vitals = vitals or PlayerVitals()
+
+    # Character state is shared by the monitor, danger detector, and every
+    # teleport path. Create it before the controller so successful teleports
+    # can always clear stale visual threat state in production.
+    char_state = CharacterState()
+    char_monitor = CharacterStateMonitor(ctx, char_state)
+
     # Create TeleportController early — every teleport concern lives here.
-    tport = TeleportController(ctx, input_backend, None)
+    tport = TeleportController(
+        ctx, input_backend, None, character_state=char_state,
+    )
     _validate_teleport_mode(config, tport)
 
     hunt_mode = create_hunt_mode(ctx, input_backend, teleport_controller=tport)
     _validate_sp_memory(config)
     _validate_weight_memory(config)
 
-    # Character state monitor — always runs alongside core workers.
-    char_state = CharacterState()
-    char_monitor = CharacterStateMonitor(ctx, char_state)
-
     # Build danger before the configurable behavior because safe self-heal
     # decisions share its threat/teleport observations.
     danger = DangerDetector(
         ctx, tport, char_state, vitals=player_vitals,
     )
+    ctx.danger_detector = danger
     legacy_behavior = get_mob_behavior(config.mob_name)
     if config.custom_behavior.configured:
         mob_behavior = get_configured_mob_behavior(
@@ -354,9 +379,9 @@ def create_runtime_deps(
         character_state=char_state, danger=danger,
     )
 
-    # Wire TeleportController's hunt_mode / charstate now that they exist.
+    # The controller was constructed with the shared CharacterState; only its
+    # hunt-mode callback is resolved after create_hunt_mode().
     tport._hunt_mode = hunt_mode
-    tport._character_state = char_state
 
     return RuntimeDependencies(
         ctx=ctx,

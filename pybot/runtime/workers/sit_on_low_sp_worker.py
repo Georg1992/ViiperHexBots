@@ -116,34 +116,62 @@ class SitOnLowSpWorker:
                 if not ctx.should_run_workers():
                     ctx.wait_while_stopped_or_paused(SIT_SP_POLL_INTERVAL_S)
                     continue
+                if ctx.danger_sit_requested.is_set():
+                    # Keep the request queued until begin_sit_ops() acquires
+                    # ownership. Storage/heal may be holding the session lock;
+                    # consuming first would lose the escape request.
+                    ratio = self._sp_ratio()
+                    self._recover_sp(
+                        ratio if ratio is not None else 1.0,
+                        reason="danger",
+                        consume_danger_request=True,
+                    )
+                    # Storage/heal may still own the session. Avoid a hot
+                    # retry loop while the request remains queued.
+                    if ctx.danger_sit_requested.is_set():
+                        ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
+                    continue
                 ratio = self._sp_ratio()
                 if ratio is None:
                     ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
                     continue
                 if ratio < SIT_LOW_SP_RATIO:
-                    self._recover_sp(ratio)
+                    self._recover_sp(ratio, reason="low_sp")
                 else:
                     ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
             except Exception:
                 ctx.logger.behavior(f"[SIT] tick error:\n{traceback.format_exc()}")
 
-    def _recover_sp(self, low_ratio: float) -> None:
-        """Hold hunt until SP recovers. Failed clear/sit retries in-place."""
+    def _recover_sp(
+        self,
+        low_ratio: float,
+        *,
+        reason: str = "low_sp",
+        consume_danger_request: bool = False,
+    ) -> None:
+        """Break hunt, move safe, sit/recover, then start a fresh hunt."""
         ctx = self._ctx
         sit_scan = ctx.config.sit_on_low_sp_scan_code
         self._seated = False
-        if not ctx.begin_sit_ops():
+        if consume_danger_request:
+            # Danger requests are retried by the outer loop if storage/heal
+            # currently owns the session; never block while holding the queue.
+            if not ctx.try_begin_sit_ops():
+                return
+            # The request is cleared only after sit ownership is held.
+            ctx.pop_danger_sit_request()
+        elif not ctx.begin_sit_ops():
             return
         try:
             ctx.logger.behavior(
-                f"[SIT] low SP ratio={low_ratio:.1%} — hunt paused until "
+                f"[SIT] {reason} session ratio={low_ratio:.1%} — hunt paused until "
                 f"SP>={SIT_RESUME_SP_RATIO:.0%}"
             )
             while not ctx.is_stopped():
                 if not self._ok_to_act():
                     break
 
-                if not self._teleport.teleport_until_quiet(log_tag="SIT"):
+                if not self._teleport.teleport_to_safe_place(log_tag="SIT"):
                     ctx.logger.behavior(
                         "[SIT] area clear stopped — retry (hunt stays paused)"
                     )
@@ -183,7 +211,14 @@ class SitOnLowSpWorker:
     def _sit_until_done(self, sit_scan: int) -> str | None:
         """Sit once → wait SP/damage → stand once."""
         ctx = self._ctx
-        self._danger.pop_damage_detected()
+        # Damage during teleport/idle clearing means the location is no longer
+        # safe. Preserve the event and let _recover_sp clear a new location
+        # before trying to sit again.
+        if self._danger.pop_damage_detected():
+            ctx.logger.behavior(
+                "[SIT] damage observed during area clear — finding a new spot"
+            )
+            return "interrupted"
 
         if not self.sit(sit_scan):
             ctx.logger.behavior("[SIT] sit interrupted — will retry")

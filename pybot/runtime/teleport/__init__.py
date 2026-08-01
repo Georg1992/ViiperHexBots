@@ -5,7 +5,7 @@ Responsibilities
 * **Key selection** — mode/area: creamy TP first, wing key next.
   Danger/critical: wing key when Teleport Key is assigned, else creamy.
 * **Execution** — press teleport key, wait for settle, track wings/overlay.
-* **Danger teleport** — for DangerDetector (critical HP only).
+* **Danger teleport** — for DangerDetector when the danger level is critical.
 * **Area clear** — scan-loop that teleports until discovery sees zero mobs.
 * **Quiet area** — clear + idle + re-scan (for sit/storage workers).
 * **Mode teleport** — discovery-gated teleport with suspend/release (for TeleportStrategy).
@@ -30,11 +30,17 @@ from pybot.runtime.input.input_backend import InputBackend
 class TeleportController:
     """Centralises every teleport concern — key choice, press, settle, cleanup."""
 
-    def __init__(self, ctx, input_backend: InputBackend, hunt_mode) -> None:
+    def __init__(
+        self,
+        ctx,
+        input_backend: InputBackend,
+        hunt_mode,
+        character_state=None,
+    ) -> None:
         self._ctx = ctx
         self._input = input_backend
         self._hunt_mode = hunt_mode
-        self._character_state = None
+        self._character_state = character_state
 
     # ── Key selection ────────────────────────────────────────────
 
@@ -100,13 +106,33 @@ class TeleportController:
             cfg.teleport_duration_ms / 1000.0
         )
         if settled:
-            # Aggro-free window after landing — heal may run immediately.
+            # Every successful teleport starts a new area. Clear both visual
+            # threat flags and recorded damage centrally so danger, mode, and
+            # area-clear teleports all begin in SAFE state.
             self._ctx.mark_post_teleport_heal(HP_POST_TELEPORT_HEAL_S)
+            self._clear_character_threat()
+            danger = getattr(self._ctx, "danger_detector", None)
+            if danger is not None:
+                reset = getattr(danger, "reset_after_teleport", None)
+                if callable(reset):
+                    reset()
         return settled
+
+    # ── Safe-place teleport ──────────────────────────────────────
+
+    def teleport_to_safe_place(self, *, log_tag: str = "SAFE") -> bool:
+        """Move to a quiet area before a sit/recovery session.
+
+        This is the shared escape primitive for sit: it repeatedly teleports
+        and rechecks the area until no living mobs remain through the idle
+        window. It owns discovery suspension and area tracking resets through
+        the existing teleport helpers.
+        """
+        return self.teleport_until_quiet(log_tag=log_tag)
 
     # ── Danger teleport ──────────────────────────────────────────
 
-    def danger_teleport(self, reason: str = "") -> None:
+    def danger_teleport(self, reason: str = "") -> bool:
         """Press the danger teleport key (wing first) and clear tracks after.
 
         Suspends discovery for the claim → key → settle window so a concurrent
@@ -121,16 +147,17 @@ class TeleportController:
                 f"[DANGER] {prefix}no teleport key configured "
                 f"({key_name!r}) — cannot escape"
             )
-            return
+            return False
         ctx.logger.behavior(
             f"[DANGER] {prefix}key={key_name!r} scan={tp} — teleporting"
         )
         ctx.discovery_suspend.set()
         ctx.discovery_wake.clear()
         try:
-            self.teleport_once(scan_code=tp)
+            if not self.teleport_once(scan_code=tp):
+                return False
             ctx.area_reset(reason="danger_teleport")
-            self._clear_character_threat()
+            return True
         finally:
             ctx.discovery_suspend.clear()
             ctx.discovery_wake.set()
@@ -166,7 +193,8 @@ class TeleportController:
             self._ctx.logger.behavior(
                 f"[{log_tag}] discovery living={living} — teleport before UI"
             )
-            self.teleport_once()
+            if not self.teleport_once():
+                return False
             self._reset_tracking(
                 f"{log_tag.lower()}_teleport", log_tag=log_tag
             )
@@ -232,7 +260,6 @@ class TeleportController:
             ctx.policy.reset()
             ctx.validation.log_area_reset("pre_teleport")
             self._hunt_mode.on_area_reset()
-            self._clear_character_threat()
 
             tp_button = self.active_button()
             ctx.logger.behavior(

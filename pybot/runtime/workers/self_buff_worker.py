@@ -1,24 +1,34 @@
-"""Periodic per-mob self-buff casts."""
+"""Periodic per-mob self-buff casts on the character."""
 
 from __future__ import annotations
 
 import traceback
 
-from pybot.runtime.constants import SKILL_TIMER_STAGGER_MS
+from pybot.runtime.constants import (
+    SKILL_TIMER_STAGGER_MS,
+    STARTUP_BUFF_CURSOR_DELAY_S,
+    STARTUP_BUFF_GAP_S,
+)
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.workers.worker_contexts import SelfBuffWorkerContext
 
 
 class SelfBuffWorker:
-    """Cast configured buffs on the character once per configured delay."""
+    """Cast configured buffs on the character on each hunt cycle.
+
+    Assigned character buffs cast first at each hunt start, in UI order,
+    with a one-second gap between casts. Normal skill timers are released only
+    after the full buff sequence completes. Each buff's periodic interval
+    starts at its successful cast, and sitting starts a fresh hunt cycle.
+    """
 
     def __init__(self, ctx: SelfBuffWorkerContext, input_backend: InputBackend) -> None:
         self._ctx = ctx
         self._input = input_backend
         self._last_cast_ms: dict[int, int] = {}
         self._last_any_cast_ms = 0
-        self._armed = False
+        self._completed_generation: int | None = None
 
     def run(self) -> None:
         ctx = self._ctx
@@ -30,30 +40,50 @@ class SelfBuffWorker:
         if not buffs:
             return
 
-        armed_at = monotonic_ms()
         for buff in buffs:
-            self._last_cast_ms[id(buff)] = armed_at
             ctx.logger.behavior(
                 f"[CUSTOM] buff started key={buff.button} "
                 f"interval={buff.delay_ms}ms scanCode={buff.scan_code}"
             )
 
+        generation = self._current_generation()
+        if not self._run_startup_sequence(buffs):
+            return
+        mark_buffs_done = getattr(ctx, "mark_startup_buffs_done", None)
+        if callable(mark_buffs_done):
+            mark_buffs_done()
+        if not self._has_normal_timers():
+            mark_timers_done = getattr(ctx, "mark_startup_timers_done", None)
+            if callable(mark_timers_done):
+                mark_timers_done()
+        self._completed_generation = generation
+
         while not ctx.is_stopped():
             try:
+                generation = self._current_generation()
+                if self._completed_generation != generation:
+                    self._last_cast_ms.clear()
+                    self._last_any_cast_ms = 0
+                    if not self._run_startup_sequence(buffs):
+                        return
+                    mark_buffs_done = getattr(ctx, "mark_startup_buffs_done", None)
+                    if callable(mark_buffs_done):
+                        mark_buffs_done()
+                    if not self._has_normal_timers():
+                        mark_timers_done = getattr(ctx, "mark_startup_timers_done", None)
+                        if callable(mark_timers_done):
+                            mark_timers_done()
+                    self._completed_generation = generation
+
                 if not ctx.should_run_combat():
-                    self._armed = False
+                    # Combat-only gates (healing, storage, danger teleport)
+                    # pause casting but do not reset elapsed buff intervals.
+                    # A sit session is different: its generation change above
+                    # explicitly replays the startup sequence for the new hunt.
                     ctx.wait_while_combat_blocked(0.25)
                     continue
 
                 now = monotonic_ms()
-                if not self._armed:
-                    # Resume each configured delay from the moment combat is
-                    # available again; never fire immediately on gate release.
-                    armed_at = monotonic_ms()
-                    for buff in buffs:
-                        self._last_cast_ms[id(buff)] = armed_at
-                    self._armed = True
-                    now = armed_at
 
                 due = [
                     buff
@@ -61,22 +91,11 @@ class SelfBuffWorker:
                     if now - self._last_cast_ms[id(buff)] >= buff.delay_ms
                 ]
                 for buff in due:
-                    if not ctx.should_run_combat():
+                    if not self._character_action_allowed():
                         break
                     if not self._wait_stagger_gap():
                         break
-                    pos = ctx.character_screen_pos()
-                    if pos is None or not ctx.should_run_combat():
-                        break
-                    cx, cy = int(pos[0]), int(pos[1])
-                    if self._input.skill_click_at(buff.scan_code, cx, cy):
-                        cast_at = monotonic_ms()
-                        self._last_cast_ms[id(buff)] = cast_at
-                        self._last_any_cast_ms = cast_at
-                        ctx.logger.behavior(
-                            f"[CUSTOM] buff cast key={buff.button} at=({cx},{cy})"
-                        )
-                    if ctx.is_stopped():
+                    if not self._cast_buff(buff):
                         break
 
                 if ctx.is_stopped():
@@ -90,14 +109,133 @@ class SelfBuffWorker:
             except Exception:
                 ctx.logger.behavior(f"[CUSTOM] buff tick error:\n{traceback.format_exc()}")
 
+    def _current_generation(self) -> int:
+        return int(getattr(self._ctx, "hunt_generation", 0))
+
+    def _has_normal_timers(self) -> bool:
+        return any(
+            timer.scan_code and timer.interval_ms > 0
+            for timer in getattr(self._ctx.config, "skill_timers", ())
+        )
+
+    def _run_startup_sequence(self, buffs: tuple) -> bool:
+        """Cast each assigned buff immediately, in buff1/buff2/buff3 order."""
+        for index, buff in enumerate(buffs):
+            while not self._ctx.is_stopped():
+                if not self._startup_action_allowed():
+                    resumed = self._ctx.wait_while_combat_blocked(0.25)
+                    # Lightweight/test contexts may return immediately while
+                    # still blocked; poll stop_event only on interruption so
+                    # a blocked startup cannot spin forever without adding
+                    # delay after a successful wake.
+                    if not resumed and self._ctx.stop_event.wait(0.05):
+                        return False
+                    continue
+                if self._cast_buff(buff, startup=True):
+                    break
+                # Missing coordinates and transient input failures are
+                # retryable and must not abandon the hunt-start sequence.
+                if self._ctx.stop_event.wait(0.05):
+                    return False
+            else:
+                return False
+
+            if index + 1 < len(buffs) and not self._wait_startup_gap():
+                return False
+        return True
+
+    def _startup_action_allowed(self) -> bool:
+        checker = getattr(self._ctx, "should_run_startup_actions", None)
+        if checker is not None:
+            return bool(checker())
+        return self._character_action_allowed()
+
+    def _character_action_allowed(self) -> bool:
+        checker = getattr(self._ctx, "should_run_character_actions", None)
+        if checker is not None:
+            return bool(checker())
+        return bool(self._ctx.should_run_combat())
+
+    def _wait_startup_gap(self) -> bool:
+        """Wait one full second after the previous safe buff cast."""
+        deadline: int | None = None
+        while not self._ctx.is_stopped():
+            if not self._startup_action_allowed():
+                # Danger/fight postpones the next buff; the one-second delay
+                # starts again only once the character is safe.
+                deadline = None
+                resumed = self._ctx.wait_while_combat_blocked(0.25)
+                if not resumed and self._ctx.stop_event.wait(0.05):
+                    return False
+                continue
+            if deadline is None:
+                deadline = monotonic_ms() + int(STARTUP_BUFF_GAP_S * 1000)
+            remaining_ms = deadline - monotonic_ms()
+            if remaining_ms <= 0:
+                return self._startup_action_allowed()
+            if self._ctx.stop_event.wait(min(0.05, remaining_ms / 1000.0)):
+                return False
+        return False
+
     def _wait_stagger_gap(self) -> bool:
-        ctx = self._ctx
+        """Preserve the normal input gap between periodic buff casts."""
         if self._last_any_cast_ms <= 0:
-            return ctx.should_run_combat()
-        gap = monotonic_ms() - self._last_any_cast_ms
-        if gap >= SKILL_TIMER_STAGGER_MS:
+            return self._character_action_allowed()
+        while not self._ctx.is_stopped():
+            if not self._character_action_allowed():
+                self._ctx.wait_while_combat_blocked(0.25)
+                continue
+            gap_ms = monotonic_ms() - self._last_any_cast_ms
+            if gap_ms >= SKILL_TIMER_STAGGER_MS:
+                return True
+            if self._ctx.stop_event.wait(
+                max(0.0, (SKILL_TIMER_STAGGER_MS - gap_ms) / 1000.0)
+            ):
+                return False
+        return False
+
+    def _cast_buff(self, buff, *, startup: bool = False) -> bool:
+        ctx = self._ctx
+        try:
+            allowed = self._startup_action_allowed() if startup else self._character_action_allowed()
+            if not allowed:
+                return False
+            pos = ctx.character_screen_pos()
+            if pos is None:
+                return False
+            cx, cy = int(pos[0]), int(pos[1])
+            if startup:
+                allowed = self._startup_action_allowed()
+            else:
+                allowed = self._character_action_allowed()
+            if not allowed:
+                return False
+            if startup:
+                try:
+                    cast = self._input.skill_click_at(
+                        buff.scan_code,
+                        cx,
+                        cy,
+                        move_delay_s=STARTUP_BUFF_CURSOR_DELAY_S,
+                    )
+                except TypeError:
+                    # Keep lightweight test/custom backends compatible with
+                    # the older three-argument protocol.
+                    cast = self._input.skill_click_at(buff.scan_code, cx, cy)
+            else:
+                cast = self._input.skill_click_at(buff.scan_code, cx, cy)
+            if not cast:
+                return False
+            cast_at = monotonic_ms()
+            self._last_cast_ms[id(buff)] = cast_at
+            self._last_any_cast_ms = cast_at
+            ctx.logger.behavior(
+                f"[CUSTOM] buff cast key={buff.button} at=({cx},{cy})"
+            )
             return True
-        remaining_s = (SKILL_TIMER_STAGGER_MS - gap) / 1000.0
-        if ctx.stop_event.wait(max(0.0, remaining_s)):
+        except Exception:
+            ctx.logger.behavior(
+                f"[CUSTOM] buff cast failed key={buff.button}:\n"
+                f"{traceback.format_exc()}"
+            )
             return False
-        return ctx.should_run_combat()
