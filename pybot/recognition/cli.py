@@ -19,10 +19,12 @@ from pybot.recognition.detector.detector import MobDetector, load_detector_confi
 from pybot.recognition.detection_response import (
     apply_scale_calibration,
     build_detect_response,
-    candidate_to_json,  # noqa: F401 - retained as a public CLI compatibility export
     parse_request_scale_range,
 )
+from pybot.recognition.detection_response import candidate_to_json
 from pybot.recognition.spr_reader import SprReader
+
+__all__ = ["candidate_to_json"]
 
 
 def parse_roi(value: str) -> tuple[int, int, int, int]:

@@ -35,8 +35,8 @@ class AttackLoop:
         self._ctx = ctx
         self._hunt_mode = hunt_mode
         self._input = input_backend
-        self._mob_behavior = mob_behavior or MobBehavior()
-        self._vitals = vitals or PlayerVitals()
+        self._mob_behavior = MobBehavior() if mob_behavior is None else mob_behavior
+        self._vitals = PlayerVitals() if vitals is None else vitals
         self._char_x = char_x
         self._char_y = char_y
         self._combat_observer = CombatObserver()

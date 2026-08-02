@@ -43,7 +43,7 @@ class GateController:
         self._post_teleport_heal_until = 0.0
         # Startup milestones and hunt generations belong to the dedicated
         # sequence object, not to this general lifecycle gate.
-        self.startup = startup or HuntStartupSequence()
+        self.startup = HuntStartupSequence() if startup is None else startup
         # Set by DangerDetector; the sit worker is the sole hunt-breaker.
         self.danger_sit_requested = threading.Event()
         # A seated toggle could not be undone during worker cleanup. Runtime

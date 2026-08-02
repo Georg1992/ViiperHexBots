@@ -14,7 +14,10 @@ be simplified without tests and evidence.
 - Fix the deferred `exc` closure in `BotLifecycleManager.init_viiper()`.
 - Remove confirmed unused imports and locals reported by static analysis.
 - Keep legacy configuration and compatibility paths unless their callers and
-  migration coverage are removed deliberately.
+  migration coverage are removed deliberately. Dependency defaults must use
+  explicit ``None`` checks; never select a main implementation by truthiness.
+- Do not use process-name fallbacks for destructive lifecycle operations: only
+  terminate a process that this manager owns.
 
 ### Runtime architecture
 
@@ -91,6 +94,9 @@ reprocessing.
 - [x] Phase 4 implementation and validation (pure status-display formatting/comparison extracted from `MainWindow`; full panel extraction deferred to avoid risky UI churn).
 - [x] Phase 5 review/low-risk implementation (detector complexity reviewed; pure CLI response/calibration transformations extracted; no speculative detector split; static cleanup completed).
 - [x] Final validation and review (Python 315 passed/2 skipped; Go test and vet passed; compileall and pyflakes clean).
+- [x] Deterministic fallback audit (explicit dependency defaults, no arbitrary
+  VIIPER process kill fallback, and compatibility fallback behavior retained
+  only where lightweight contexts require it).
 
 ## Deferred deliberately
 

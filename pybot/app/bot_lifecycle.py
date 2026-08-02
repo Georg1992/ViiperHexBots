@@ -64,10 +64,12 @@ class BotLifecycleManager:
         self._mob_catalog = mob_catalog
         self._session = session
         self._viiper = viiper
-        self._hunt_overlay = hunt_overlay or Win32HuntOverlay()
-        self._vitals = vitals or PlayerVitals()
+        self._hunt_overlay = (
+            Win32HuntOverlay() if hunt_overlay is None else hunt_overlay
+        )
+        self._vitals = PlayerVitals() if vitals is None else vitals
         self._on_state_change = on_state_change
-        self._on_log = on_log or (lambda _: None)
+        self._on_log = (lambda _: None) if on_log is None else on_log
         self._on_input_ready_call = on_input_ready
         self._on_exit_requested_call = on_exit_requested
 

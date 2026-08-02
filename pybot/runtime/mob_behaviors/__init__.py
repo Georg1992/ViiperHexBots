@@ -250,9 +250,10 @@ def get_configured_mob_behavior(
 
 
 def get_mob_behavior(mob_name: str) -> MobBehavior:
-    """Return the :class:`MobBehavior` for *mob_name*, or the default no-op."""
+    """Return the registered behavior, or one explicit default no-op."""
     key = mob_name.strip().lower()
-    return _BEHAVIOR_REGISTRY.get(key, MobBehavior())
+    behavior = _BEHAVIOR_REGISTRY.get(key)
+    return MobBehavior() if behavior is None else behavior
 
 
 def mob_has_custom_behavior(mob_name: str) -> bool:

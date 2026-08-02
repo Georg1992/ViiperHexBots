@@ -42,7 +42,9 @@ class ClientProfile:
 
 
 def list_client_profiles(project_root: Path | None = None) -> list[str]:
-    clients_dir = (project_root or PROJECT_ROOT) / "clients"
+    clients_dir = (
+        PROJECT_ROOT if project_root is None else project_root
+    ) / "clients"
     if not clients_dir.is_dir():
         return ["Generic"]
     names = sorted(path.stem for path in clients_dir.glob("*.json"))
@@ -79,7 +81,7 @@ def load_client_profile(
     profile_name: str,
     project_root: Path | None = None,
 ) -> ClientProfile | None:
-    root = project_root or PROJECT_ROOT
+    root = PROJECT_ROOT if project_root is None else project_root
     path = root / "clients" / f"{profile_name}.json"
     if not path.is_file():
         return None

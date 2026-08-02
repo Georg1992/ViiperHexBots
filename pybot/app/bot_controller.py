@@ -28,8 +28,8 @@ class BotController:
         self._app_config = app_config
         self._session_id = session_id
         self._on_log = on_log
-        self._overlay = overlay or NullOverlay()
-        self._vitals = vitals or PlayerVitals()
+        self._overlay = NullOverlay() if overlay is None else overlay
+        self._vitals = PlayerVitals() if vitals is None else vitals
         self._runtime: HuntRuntime | None = None
         self._thread: threading.Thread | None = None
 

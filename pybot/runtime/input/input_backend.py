@@ -23,8 +23,9 @@ def perform_if_allowed(
     normal input timing and cancellation behavior.
     """
     # A runtime context can make the lifecycle check and action one atomic
-    # ownership boundary. This is the important path for workers; the backend
-    # fallback below still protects callers that do not have a context.
+    # ownership boundary. Inspect the type rather than the instance so
+    # MagicMock/lightweight doubles cannot fabricate a lifecycle method and
+    # silently alter the admission contract.
     admit = getattr(type(lifecycle), "perform_input_if_allowed", None)
     if lifecycle is not None and callable(admit):
         return lifecycle.perform_input_if_allowed(allowed, action)

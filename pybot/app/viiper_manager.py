@@ -47,9 +47,11 @@ class ViiperManager:
         on_log: LogFn | None = None,
         on_status: Callable[[str, str], None] | None = None,
     ) -> None:
-        self._root = project_root or PROJECT_ROOT
-        self._on_log = on_log or (lambda _msg: None)
-        self._on_status = on_status or (lambda _title, _hint: None)
+        self._root = PROJECT_ROOT if project_root is None else project_root
+        self._on_log = (lambda _msg: None) if on_log is None else on_log
+        self._on_status = (
+            (lambda _title, _hint: None) if on_status is None else on_status
+        )
 
         # VIIPER server state
         self._server_proc: subprocess.Popen | None = None
@@ -276,14 +278,8 @@ class ViiperManager:
                 pass
             self._server_proc = None
             return
-        # Fallback: kill any viiper.exe
-        try:
-            subprocess.Popen(
-                ["taskkill", "/IM", "viiper.exe", "/F"],
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-        except OSError:
-            pass
+        # No tracked process means the manager connected to an already-running
+        # server. Never kill an unrelated viiper.exe by process name.
 
     def _log(self, message: str) -> None:
         self._on_log(message)

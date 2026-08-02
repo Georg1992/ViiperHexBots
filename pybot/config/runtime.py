@@ -12,7 +12,6 @@ from pybot.mobs.catalog import resolve_mob_descriptor_name
 from pybot.paths import CONFIG_PATH, SESSIONS_DIR
 from pybot.runtime.constants import (
     CELL_SIZE_PX,
-    DEFAULT_SEARCH_RANGE_CELLS,
     HUNT_DISCOVERY_INTERVAL_MS,
 )
 from pybot.runtime.input.scan_codes import key_name_to_scan_code
@@ -168,6 +167,13 @@ def hunt_runtime_config_from_settings(
                     delay_ms=max(1, int(delay_s)) * 1000,
                 )
             )
+    search_range_cells = int(settings.search_range)
+    if not 9 <= search_range_cells <= 16:
+        raise ValueError(
+            "Search range must be between 9 and 16 cells "
+            f"(got {search_range_cells})."
+        )
+
     custom_behavior = CustomBehaviorRuntime(
         configured=resolved_mob_name.strip().lower()
         in settings.mob_custom_settings,
@@ -183,7 +189,7 @@ def hunt_runtime_config_from_settings(
         config_path=settings.config_path,
         hwnd=hwnd,
         mob_name=resolved_mob_name,
-        hunt_mode=hunt_mode or settings.hunt_mode,
+        hunt_mode=settings.hunt_mode if hunt_mode is None else hunt_mode,
         skill_delay_ms=max(200, settings.skill_delay),
         skill_button=settings.skill_button,
         skill_scan_code=key_name_to_scan_code(settings.skill_button),
@@ -191,7 +197,7 @@ def hunt_runtime_config_from_settings(
         teleport_scan_code=key_name_to_scan_code(settings.teleport_button),
         creamy_tp_button=settings.creamy_tp_button,
         creamy_tp_scan_code=key_name_to_scan_code(settings.creamy_tp_button),
-        search_range_cells=settings.search_range or DEFAULT_SEARCH_RANGE_CELLS,
+        search_range_cells=search_range_cells,
         cell_size_px=CELL_SIZE_PX,
         discovery_interval_ms=HUNT_DISCOVERY_INTERVAL_MS,
         teleport_duration_ms=settings.teleport_delay,

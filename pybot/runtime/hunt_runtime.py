@@ -164,7 +164,7 @@ def _build_context(
         tracker=tracker,
         validation=validation,
         control=control,
-        overlay=overlay or NullOverlay(),
+        overlay=NullOverlay() if overlay is None else overlay,
     )
 
 
@@ -339,7 +339,7 @@ def create_runtime_deps(
         )
 
         input_backend: InputBackend = ViiperBackend()
-        player_vitals = vitals or PlayerVitals()
+        player_vitals = PlayerVitals() if vitals is None else vitals
 
         # Create TeleportController early — every teleport concern lives here.
         tport = TeleportController(ctx, input_backend, None)

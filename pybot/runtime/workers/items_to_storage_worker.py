@@ -62,7 +62,7 @@ class ItemsToStorageWorker:
         self._ctx = ctx
         self._input = input_backend
         self._teleport = teleport
-        self._vitals = vitals or PlayerVitals()
+        self._vitals = PlayerVitals() if vitals is None else vitals
         self._ui = InventoryAutomation(ctx, input_backend)
 
     def _wait(self, seconds: float) -> None:

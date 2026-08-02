@@ -80,8 +80,12 @@ class DetectorSession:
         detector_config: dict | None = None,
         use_sprite_grf: bool = False,
     ) -> None:
-        root = project_root or PROJECT_ROOT
-        config = detector_config if detector_config is not None else load_detector_config()
+        root = PROJECT_ROOT if project_root is None else project_root
+        config = (
+            load_detector_config()
+            if detector_config is None
+            else detector_config
+        )
         self._mob_name = mob_name.lower()
         self._detector = MobDetector(root, config, use_sprite_grf=use_sprite_grf)
         self._lock = threading.RLock()
