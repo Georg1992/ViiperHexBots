@@ -34,8 +34,6 @@ from pybot.runtime.mob_behaviors import (
 )
 from pybot.runtime.danger_detector import DangerDetector
 from pybot.runtime.teleport import TeleportController
-from pybot.runtime.character_state import CharacterState
-from pybot.runtime.workers.character_state_worker import CharacterStateMonitor
 from pybot.game_state import PlayerVitals
 
 from pybot.runtime.workers.discovery_worker import DiscoveryWorker
@@ -224,7 +222,6 @@ def _build_core_workers(
     tport: TeleportController,
     player_vitals: PlayerVitals,
     mob_behavior,
-    character_state: CharacterState,
     danger: DangerDetector | None = None,
 ) -> tuple[list[tuple[str, Callable[[], None]]], DangerDetector]:
     """Build always-running workers: danger, coord, discovery, attack.
@@ -238,9 +235,7 @@ def _build_core_workers(
     char_x = roi.x + roi.w // 2 if roi else 0
     char_y = roi.y + roi.h // 2 if roi else 0
     if danger is None:
-        danger = DangerDetector(
-            ctx, character_state, vitals=player_vitals,
-        )
+        danger = DangerDetector(ctx, vitals=player_vitals)
     attack = AttackLoop(
         ctx, hunt_mode, input_backend,
         mob_behavior=mob_behavior,
@@ -261,7 +256,6 @@ def _build_conditional_workers(
     input_backend: InputBackend,
     tport: TeleportController,
     player_vitals: PlayerVitals,
-    character_state: CharacterState,
     danger: DangerDetector | None = None,
 ) -> list[tuple[str, Callable[[], None]]]:
     """Build optional workers: skill timer, hp restore, sit, storage."""
@@ -347,16 +341,8 @@ def create_runtime_deps(
         input_backend: InputBackend = ViiperBackend()
         player_vitals = vitals or PlayerVitals()
 
-        # Character state is shared by the monitor, danger detector, and every
-        # teleport path. Create it before the controller so successful teleports
-        # can always clear stale visual threat state in production.
-        char_state = CharacterState()
-        char_monitor = CharacterStateMonitor(ctx, char_state)
-
         # Create TeleportController early — every teleport concern lives here.
-        tport = TeleportController(
-            ctx, input_backend, None, character_state=char_state,
-        )
+        tport = TeleportController(ctx, input_backend, None)
         _validate_teleport_mode(config, tport)
 
         hunt_mode = create_hunt_mode(ctx, input_backend, teleport_controller=tport)
@@ -365,9 +351,7 @@ def create_runtime_deps(
 
         # Build danger before the configurable behavior because safe self-heal
         # decisions share its threat/teleport observations.
-        danger = DangerDetector(
-            ctx, char_state, vitals=player_vitals,
-        )
+        danger = DangerDetector(ctx, vitals=player_vitals)
         ctx.danger_detector = danger
         legacy_behavior = get_mob_behavior(config.mob_name)
         if config.custom_behavior.configured:
@@ -382,17 +366,14 @@ def create_runtime_deps(
 
         core_workers, danger = _build_core_workers(
             ctx, hunt_mode, input_backend, tport, player_vitals, mob_behavior,
-            character_state=char_state, danger=danger,
+            danger=danger,
         )
-        core_workers.append(("charstate", char_monitor.run))
-
         conditional_workers = _build_conditional_workers(
             ctx, input_backend, tport, player_vitals,
-            character_state=char_state, danger=danger,
+            danger=danger,
         )
 
-        # The controller was constructed with the shared CharacterState; only its
-        # hunt-mode callback is resolved after create_hunt_mode().
+        # The controller's hunt-mode callback is resolved after create_hunt_mode().
         tport._hunt_mode = hunt_mode
 
         return RuntimeDependencies(

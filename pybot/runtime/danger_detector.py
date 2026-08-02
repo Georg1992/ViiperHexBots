@@ -1,11 +1,7 @@
-"""DangerDetector — isolated danger observer.
+"""DangerDetector — isolated HP damage observer.
 
-Runs in its own worker thread.  Polls ``PlayerVitals`` for HP and
-reads ``CharacterState`` for surround / nearby mobs.
-
-* Any HP drop → record recent damage and queue one danger-sit request
-* Nearby mobs remain a healing threat for healing decisions; the sit worker
-  owns the escape sequence
+Runs in its own worker thread. Any observed HP drop records damage and queues
+one danger-sit request. Danger decisions rely only on received HP damage.
 """
 
 from __future__ import annotations
@@ -13,22 +9,19 @@ from __future__ import annotations
 import threading
 import time
 from enum import IntEnum
-from typing import TYPE_CHECKING
 
+from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import (
     HP_HEAL_DAMAGE_QUIET_S,
     WORKER_POLL_INTERVAL_S,
 )
 
-if TYPE_CHECKING:
-    from pybot.game_state import PlayerVitals
-    from pybot.runtime.character_state import CharacterState
-
 CRITICAL_HP_RATIO = 0.5
+CRITICAL_DAMAGE_RATIO = 0.2
 
 
 class DangerLevel(IntEnum):
-    """Current character threat level, ordered from safe to critical."""
+    """Current damage level, ordered from safe to critical."""
 
     SAFE = 0
     DANGER = 1
@@ -36,20 +29,15 @@ class DangerLevel(IntEnum):
 
 
 class DangerDetector:
-    """Observes HP and CharacterState; the sit worker owns danger escape."""
+    """Observes HP damage; the sit worker owns danger escape."""
 
-    def __init__(
-        self,
-        ctx,
-        character_state: CharacterState,
-        vitals: PlayerVitals,
-    ) -> None:
+    def __init__(self, ctx, vitals: PlayerVitals) -> None:
         self._ctx = ctx
-        self._character_state = character_state
         self._vitals = vitals
         self._prev_hp: int | None = None
         self._damage_lock = threading.Lock()
         self._last_damage_mono: float | None = None
+        self._last_damage_ratio: float | None = None
 
     def run(self) -> None:
         """Ongoing loop: poll HP and sleep until stopped."""
@@ -67,45 +55,53 @@ class DangerDetector:
                 return
 
             if self._prev_hp is not None and hp < self._prev_hp:
+                previous_hp = self._prev_hp
                 self._last_damage_mono = time.monotonic()
+                self._last_damage_ratio = (
+                    (previous_hp - hp) / previous_hp
+                    if previous_hp > 0
+                    else None
+                )
                 damage_seen = True
             self._prev_hp = hp
 
         if damage_seen:
             # Raise the sole sit/danger signal after releasing the damage lock.
-            # The sit worker can then safely contend for the session boundary.
             request = getattr(self._ctx, "request_danger_sit", None)
             if callable(request):
                 request()
 
     def danger_level(self) -> DangerLevel:
-        """Return SAFE, DANGER, or CRITICAL from the current shared state.
+        """Return SAFE, DANGER, or CRITICAL using received damage only.
 
-        Recent damage is required for CRITICAL. Surround + damage and HP below
-        50% + damage are both critical. Any remaining recent damage or visible
-        nearby threat is DANGER; only neither condition is SAFE.
+        Critical danger requires recent damage plus either HP below 50% or a
+        per-tick HP loss greater than 20% of the previous HP sample.
         """
         hp, hp_max = self._vitals.hp_pair()
         damaged = self.has_recent_damage(HP_HEAL_DAMAGE_QUIET_S)
-        surrounded = bool(self._character_state.is_surrounded)
+        with self._damage_lock:
+            critical_damage = (
+                self._last_damage_ratio is not None
+                and self._last_damage_ratio > CRITICAL_DAMAGE_RATIO
+            )
         critical_hp = (
             hp is not None
             and hp_max is not None
             and hp_max > 0
             and hp / hp_max < CRITICAL_HP_RATIO
         )
-        if damaged and (surrounded or critical_hp):
+        if damaged and (critical_damage or critical_hp):
             return DangerLevel.CRITICAL
-        if damaged or self.has_nearby_threat():
+        if damaged:
             return DangerLevel.DANGER
         return DangerLevel.SAFE
 
     def reset_after_teleport(self, tp_start_mono: float | None = None) -> None:
         """Forget pre-teleport damage without consuming sit requests.
 
-        When called with the teleport start time, damage recorded during the
-        settle window is retained. With no timestamp, clear the current sample
-        for direct/manual area resets.
+        The current HP becomes the new baseline so the first sample after a
+        teleport is not mistaken for damage merely because the area changed.
+        Damage observed during the settle window is preserved.
         """
         with self._damage_lock:
             if (
@@ -114,24 +110,14 @@ class DangerDetector:
                 and self._last_damage_mono >= tp_start_mono
             ):
                 return
+            hp, _hp_max = self._vitals.hp_pair()
+            self._prev_hp = hp
             self._last_damage_mono = None
+            self._last_damage_ratio = None
 
-    def has_nearby_threat(self) -> bool:
-        """True when any mob is near the character (tracks or visual)."""
-        state = self._character_state
-        return (
-            bool(state.is_surrounded)
-            or int(state.nearby_mob_count) > 0
-            or int(state.nearby_any_mobs_count) > 0
-        )
 
     def is_safe_for_heal(self) -> bool:
-        """True when a self-heal may run without an active nearby threat.
-
-        The post-teleport grace window only permits healing when the landing
-        area is still clear. An active nearby threat or recent damage always
-        blocks healing, because urgent teleport has priority.
-        """
+        """True when a self-heal may run without recent damage."""
         if self._ctx.discovery_suspend.is_set():
             return False
         return self.danger_level() is DangerLevel.SAFE

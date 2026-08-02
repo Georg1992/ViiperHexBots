@@ -186,21 +186,6 @@ class HuntStartupSequenceTests(unittest.TestCase):
         self.assertFalse(gates.should_run_combat())
         gates.end_sit_ops()
 
-    def test_character_state_sampling_continues_during_sit_only(self) -> None:
-        gates = GateController()
-        self.assertTrue(gates.should_run_character_state())
-
-        self.assertTrue(gates.try_begin_sit_ops())
-        self.assertTrue(gates.should_run_character_state())
-
-        gates.mark_paused()
-        self.assertFalse(gates.should_run_character_state())
-        gates.mark_running()
-        self.assertTrue(gates.should_run_character_state())
-
-        gates.stop_event.set()
-        self.assertFalse(gates.should_run_character_state())
-
     def test_gate_resets_startup_before_releasing_sit_gate(self) -> None:
         sequence = HuntStartupSequence()
         sequence.begin()

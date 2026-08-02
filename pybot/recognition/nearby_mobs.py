@@ -1,7 +1,7 @@
 """Count non-character sprites near the player in a hunt frame.
 
-Used by ``CharacterStateMonitor`` to publish ``nearby_any_mobs_count``.
-``DangerDetector`` only reads that published count — it does not run CV.
+Used by visual debugging tools to inspect sprite blobs near the player.
+The runtime danger detector relies only on received HP damage.
 """
 
 from __future__ import annotations

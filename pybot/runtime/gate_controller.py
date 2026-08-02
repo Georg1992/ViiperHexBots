@@ -67,18 +67,6 @@ class GateController:
             and not self.sitting_event.is_set()
         )
 
-    def should_run_character_state(self) -> bool:
-        """True when visual danger state should continue being sampled.
-
-        Sitting pauses hunt workers, but the sit worker must still see a newly
-        nearby mob and escape. User pause and Stop remain hard barriers.
-        """
-        return (
-            not self.stop_event.is_set()
-            and not self.pause_event.is_set()
-            and not self.discovery_suspend.is_set()
-        )
-
     def should_run_combat(self) -> bool:
         """True when attack may run (workers running and not in storage/heal/TP)."""
         return (

@@ -179,22 +179,6 @@ class HpRestoreWorkerContext(CanStop, CanLog, HasConfig, Protocol):
     def wait_while_stopped_or_paused(self, timeout_s: float) -> bool: ...
 
 
-class CharacterStateWorkerContext(
-    CanStop,
-    CanLog,
-    CanCapture,
-    CanTrack,
-    Protocol,
-):
-    """Hunt runtime subset consumed by CharacterStateMonitor.
-
-    Visual danger sampling continues during sit so the sit worker can escape
-    when a mob appears nearby; Stop and user pause still suspend sampling.
-    """
-
-    def should_run_character_state(self) -> bool: ...
-
-
 class SitOnLowSpWorkerContext(
     CanStop,
     CanLog,

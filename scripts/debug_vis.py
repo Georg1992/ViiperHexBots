@@ -687,7 +687,7 @@ def render_nearby_mobs_viz(frame: np.ndarray) -> np.ndarray:
 
 
 def render_player_roi(frame: np.ndarray) -> np.ndarray:
-    """Visualize the center player ROI used by CharacterStateMonitor.
+    """Visualize the center player ROI used by the recognition tools.
 
     Returns a composite image showing the full frame with the ROI marked
     and a scaled crop of the player region.

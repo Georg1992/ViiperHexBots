@@ -190,9 +190,6 @@ class HuntRuntimeContext:
     def should_run_workers(self) -> bool:
         return self.gates.should_run_workers()
 
-    def should_run_character_state(self) -> bool:
-        return self.gates.should_run_character_state()
-
     def should_run_combat(self) -> bool:
         """True when lifecycle gates and per-hunt startup both permit combat."""
         return (

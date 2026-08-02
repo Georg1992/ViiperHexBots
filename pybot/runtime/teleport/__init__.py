@@ -38,12 +38,10 @@ class TeleportController:
         ctx,
         input_backend: InputBackend,
         hunt_mode,
-        character_state=None,
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
         self._hunt_mode = hunt_mode
-        self._character_state = character_state
 
     # ── Key selection ────────────────────────────────────────────
 
@@ -110,11 +108,10 @@ class TeleportController:
             cfg.teleport_duration_ms / 1000.0
         )
         if settled:
-            # Every successful teleport starts a new area. Clear visual threat
-            # flags and only the damage observed before this teleport. Damage
-            # recorded during settle remains a fresh danger signal.
+            # Every successful teleport starts a new area. Clear only damage
+            # observed before this teleport. Damage recorded during settle
+            # remains a fresh danger signal.
             self._ctx.mark_post_teleport_heal(HP_POST_TELEPORT_HEAL_S)
-            self._clear_character_threat()
             danger = getattr(self._ctx, "danger_detector", None)
             if danger is not None:
                 reset = getattr(danger, "reset_after_teleport", None)
@@ -125,14 +122,27 @@ class TeleportController:
     # ── Safe-place teleport ──────────────────────────────────────
 
     def teleport_to_safe_place(self, *, log_tag: str = "SAFE") -> bool:
-        """Move to a quiet area before a sit/recovery session.
+        """Move to a quiet area before a storage/recovery UI session.
 
-        This is the shared escape primitive for sit: it repeatedly teleports
-        and rechecks the area until no living mobs remain through the idle
-        window. It owns discovery suspension and area tracking resets through
-        the existing teleport helpers.
+        This is the shared escape primitive for storage: it repeatedly
+        teleports and rechecks the area until no living mobs remain through
+        the idle window. It owns discovery suspension and area tracking resets
+        through the existing teleport helpers.
         """
         return self.teleport_until_quiet(log_tag=log_tag)
+
+    def teleport_once_for_sit(self, *, log_tag: str = "SIT") -> bool:
+        """Teleport exactly once before sitting to recover SP.
+
+        Low-SP recovery must not keep searching for a perfectly empty screen:
+        one fresh area is enough, then the sit worker owns the spot. Reset all
+        stale area state after the single teleport so the next hunt generation
+        cannot act on tracks from the previous screen.
+        """
+        if not self.teleport_once():
+            return False
+        self._reset_tracking(f"{log_tag.lower()}_teleport", log_tag=log_tag)
+        return True
 
     # ── Danger teleport ──────────────────────────────────────────
 
@@ -333,12 +343,6 @@ class TeleportController:
         ctx = self._ctx
         ctx.area_reset(reason)
         self._hunt_mode.on_area_reset()
-        self._clear_character_threat()
         ctx.overlay.set_track_stats(track_count=0, alive_count=0)
         ctx.overlay.set_track_positions([])
         ctx.logger.behavior(f"[{log_tag}] tracking reset reason={reason}")
-
-    def _clear_character_threat(self) -> None:
-        state = self._character_state
-        if state is not None:
-            state.clear_area_threat()

@@ -255,6 +255,7 @@ class SitOnLowSpWorker:
         elif not ctx.begin_sit_ops():
             return
         escape_first = reason == "danger"
+        teleported_for_session = False
         try:
             ctx.logger.behavior(
                 f"[SIT] {reason} session ratio={low_ratio:.1%} — hunt paused until "
@@ -293,6 +294,7 @@ class SitOnLowSpWorker:
                         ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
                         continue
                     escape_first = False
+                    teleported_for_session = True
 
                 # A fresh damage event raised while the urgent escape was in
                 # flight takes priority over normal quiet-area searching.
@@ -300,12 +302,14 @@ class SitOnLowSpWorker:
                     escape_first = True
                     continue
 
-                if not self._teleport.teleport_to_safe_place(log_tag="SIT"):
-                    ctx.logger.behavior(
-                        "[SIT] area clear stopped — retry (hunt stays paused)"
-                    )
-                    ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
-                    continue
+                if not teleported_for_session:
+                    if not self._teleport.teleport_once_for_sit(log_tag="SIT"):
+                        ctx.logger.behavior(
+                            "[SIT] teleport stopped — retry (hunt stays paused)"
+                        )
+                        ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
+                        continue
+                    teleported_for_session = True
 
                 outcome = self._sit_until_done(sit_scan)
                 if outcome == "recovered" and self._sp_recovered():
@@ -324,9 +328,13 @@ class SitOnLowSpWorker:
 
                 if outcome == "interrupted":
                     # _sit_until_done already stood and performed the urgent
-                    # teleport. The next iteration only searches for a quiet
-                    # place; it never sends a second urgent teleport.
+                    # teleport. Sit directly in that new area; do not send a
+                    # second normal teleport during the same recovery session.
                     escape_first = False
+                    # The interrupted result is only returned after an urgent
+                    # escape succeeds; that escape is this session's one
+                    # teleport.
+                    teleported_for_session = True
                     reason = "low_sp"
                     ctx.logger.behavior(
                         "[SIT] interrupted — new sit spot (hunt stays paused)"

@@ -7,8 +7,8 @@ from unittest.mock import MagicMock
 
 from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import HP_RESTORE_RATIO
-from pybot.runtime.character_state import CharacterState
 from pybot.runtime.danger_detector import (
+    CRITICAL_DAMAGE_RATIO,
     CRITICAL_HP_RATIO,
     DangerDetector,
     DangerLevel,
@@ -104,23 +104,14 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.teleport = MagicMock()
         self.input = MagicMock()
         self.vitals = PlayerVitals()
-        self.character_state = MagicMock()
-        self.character_state.is_surrounded = False
-        self.character_state.nearby_mob_count = 0
-        self.character_state.nearby_any_mobs_count = 0
-        self.danger = DangerDetector(
-            self.ctx, self.character_state, vitals=self.vitals
-        )
+        self.danger = DangerDetector(self.ctx, vitals=self.vitals)
 
-    def test_critical_ratio_is_internal_half(self) -> None:
+    def test_critical_ratios_are_internal_thresholds(self) -> None:
         self.assertEqual(CRITICAL_HP_RATIO, 0.5)
+        self.assertEqual(CRITICAL_DAMAGE_RATIO, 0.2)
 
     def test_danger_level_transitions_safe_danger_critical(self) -> None:
         self.assertEqual(self.danger.danger_level(), DangerLevel.SAFE)
-
-        self.character_state.nearby_any_mobs_count = 1
-        self.assertEqual(self.danger.danger_level(), DangerLevel.DANGER)
-        self.character_state.nearby_any_mobs_count = 0
 
         self.vitals.publish_hp(90, 100)
         self.danger._poll_hp()
@@ -128,13 +119,34 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.danger._poll_hp()
         self.assertEqual(self.danger.danger_level(), DangerLevel.DANGER)
 
-        self.character_state.is_surrounded = True
-        self.assertEqual(self.danger.danger_level(), DangerLevel.CRITICAL)
 
     def test_low_hp_damage_is_critical(self) -> None:
         self.vitals.publish_hp(80, 100)
         self.danger._poll_hp()
         self.vitals.publish_hp(40, 100)
+        self.danger._poll_hp()
+        self.assertEqual(self.danger.danger_level(), DangerLevel.CRITICAL)
+
+    def test_drop_greater_than_twenty_percent_of_previous_tick_is_critical(self) -> None:
+        self.vitals.publish_hp(150, 200)
+        self.danger._poll_hp()
+        # 22% of the previous tick's 150 HP; current/max is still 58.5%.
+        self.vitals.publish_hp(117, 200)
+        self.danger._poll_hp()
+        self.assertEqual(self.danger.danger_level(), DangerLevel.CRITICAL)
+
+    def test_drop_of_exactly_twenty_percent_is_not_critical(self) -> None:
+        self.vitals.publish_hp(150, 200)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(120, 200)
+        self.danger._poll_hp()
+        self.assertEqual(self.danger.danger_level(), DangerLevel.DANGER)
+
+    def test_drop_uses_previous_hp_not_hp_max_for_ratio(self) -> None:
+        self.vitals.publish_hp(300, 1000)
+        self.danger._poll_hp()
+        # 90/300 = 30% of previous HP, despite only 9% of max HP.
+        self.vitals.publish_hp(210, 1000)
         self.danger._poll_hp()
         self.assertEqual(self.danger.danger_level(), DangerLevel.CRITICAL)
 
@@ -146,15 +158,6 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.assertTrue(self.ctx.danger_sit_requested.is_set())
         self.teleport.danger_teleport.assert_not_called()
         self.assertFalse(hasattr(self.danger, "pop_heal_until_full_requested"))
-
-    def test_surrounded_recent_damage_requests_sit_even_above_critical_hp(self) -> None:
-        self.character_state.is_surrounded = True
-        self.vitals.publish_hp(90, 100)
-        self.danger._poll_hp()
-        self.vitals.publish_hp(80, 100)
-        self.danger._poll_hp()
-        self.assertTrue(self.ctx.danger_sit_requested.is_set())
-        self.teleport.danger_teleport.assert_not_called()
 
     def test_critical_hp_without_recent_damage_does_not_teleport(self) -> None:
         # A low-HP snapshot establishes the baseline; it is not an attack.
@@ -193,19 +196,6 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.teleport.danger_teleport.assert_not_called()
         self.assertTrue(self.danger.has_recent_damage(1.0))
 
-    def test_surround_without_damage_does_not_urgent_teleport(self) -> None:
-        self.character_state.is_surrounded = True
-        self.character_state.surrounded_reason = "above+below"
-        self.teleport.danger_teleport.assert_not_called()
-
-    def test_nearby_mobs_are_heal_threat(self) -> None:
-        self.assertFalse(self.danger.has_nearby_threat())
-        self.character_state.nearby_any_mobs_count = 2
-        self.assertTrue(self.danger.has_nearby_threat())
-        self.character_state.nearby_any_mobs_count = 0
-        self.character_state.nearby_mob_count = 1
-        self.assertTrue(self.danger.has_nearby_threat())
-
     def test_recent_damage_is_time_based(self) -> None:
         self.ctx.mark_paused()
         self.vitals.publish_hp(80, 100)
@@ -217,15 +207,13 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.teleport.danger_teleport.assert_not_called()
 
     def test_reset_after_teleport_returns_to_safe(self) -> None:
-        self.character_state.is_surrounded = True
         self.vitals.publish_hp(90, 100)
         self.danger._poll_hp()
         self.vitals.publish_hp(80, 100)
         self.danger._poll_hp()
-        self.assertEqual(self.danger.danger_level(), DangerLevel.CRITICAL)
+        self.assertEqual(self.danger.danger_level(), DangerLevel.DANGER)
 
         self.danger.reset_after_teleport()
-        self.character_state.is_surrounded = False
         self.assertEqual(self.danger.danger_level(), DangerLevel.SAFE)
         # Resetting damage classification does not consume the sit request;
         # the sit worker owns that event.
@@ -247,30 +235,32 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.assertTrue(self.danger.has_recent_damage(1.0))
         self.assertEqual(self.danger.danger_level(), DangerLevel.DANGER)
 
+    def test_reset_after_teleport_rebaselines_first_post_teleport_sample(self) -> None:
+        self.vitals.publish_hp(90, 100)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(80, 100)
+        self.danger._poll_hp()
+        self.assertTrue(self.ctx.pop_danger_sit_request())
+
+        self.danger.reset_after_teleport()
+        self.danger._poll_hp()  # Same HP on the first sample after landing.
+
+        self.assertFalse(self.danger.has_recent_damage(1.0))
+        self.assertEqual(self.danger.danger_level(), DangerLevel.SAFE)
+        self.assertFalse(self.ctx.danger_sit_requested.is_set())
+
     def test_damage_danger_keeps_sit_request_until_sit_worker_consumes_it(self) -> None:
-        self.character_state.is_surrounded = True
         self.vitals.publish_hp(90, 100)
         self.danger._poll_hp()
         self.vitals.publish_hp(80, 100)
         self.danger._poll_hp()
 
-        self.assertEqual(self.danger.danger_level(), DangerLevel.CRITICAL)
+        self.assertEqual(self.danger.danger_level(), DangerLevel.DANGER)
         self.assertTrue(self.ctx.danger_sit_requested.is_set())
         self.assertFalse(self.teleport.danger_teleport.called)
 
         self.assertTrue(self.ctx.pop_danger_sit_request())
         self.assertFalse(self.ctx.danger_sit_requested.is_set())
-
-    def test_post_teleport_window_does_not_override_active_threat_for_heal(self) -> None:
-        self.ctx.mark_post_teleport_heal(10.0)
-        self.character_state.nearby_any_mobs_count = 1
-        self.assertFalse(self.danger.is_safe_for_heal())
-        self.character_state.nearby_any_mobs_count = 0
-        self.vitals.publish_hp(90, 100)
-        self.danger._poll_hp()
-        self.vitals.publish_hp(80, 100)
-        self.danger._poll_hp()
-        self.assertFalse(self.danger.is_safe_for_heal())
 
     def test_damage_danger_requests_sit_during_heal_ops(self) -> None:
         self.assertTrue(self.ctx.begin_heal_ops())
@@ -291,20 +281,8 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.ctx.discovery_suspend.clear()
         self.assertTrue(self.ctx.should_run_combat())
 
-    def test_successful_teleport_clears_visual_and_damage_danger(self) -> None:
-        state = CharacterState()
-        state.publish(
-            char_x=10,
-            char_y=20,
-            is_surrounded=True,
-            surrounded_reason="left+right",
-            nearby_mob_count=2,
-            nearby_any_mobs_count=2,
-            tick_ms=1,
-        )
-        danger = DangerDetector(
-            self.ctx, state, vitals=self.vitals,
-        )
+    def test_successful_teleport_clears_damage_danger(self) -> None:
+        danger = DangerDetector(self.ctx, vitals=self.vitals)
         self.vitals.publish_hp(90, 100)
         danger._poll_hp()
         self.vitals.publish_hp(80, 100)
@@ -314,35 +292,18 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.ctx.config.teleport_button = "q"
         self.ctx.config.teleport_duration_ms = 10
         self.ctx.danger_detector = danger
-        tport = TeleportController(
-            self.ctx, self.input, MagicMock(), character_state=state,
-        )
+        tport = TeleportController(self.ctx, self.input, MagicMock())
 
         self.assertTrue(tport.teleport_once(scan_code=16))
-        self.assertFalse(state.is_surrounded)
-        self.assertEqual(state.nearby_mob_count, 0)
         self.assertEqual(danger.danger_level(), DangerLevel.SAFE)
         # Teleport reset clears the old HP sample, but does not consume the
-        # sit request owned by the danger/sit lifecycle. The sit worker must
-        # still handle the damage event after the area transition.
+        # sit request owned by the danger/sit lifecycle.
         self.assertTrue(self.ctx.danger_sit_requested.is_set())
         self.assertTrue(self.ctx.pop_danger_sit_request())
         self.assertFalse(self.ctx.danger_sit_requested.is_set())
 
-    def test_danger_teleport_resets_area_and_danger_state(self) -> None:
-        state = CharacterState()
-        state.publish(
-            char_x=10,
-            char_y=20,
-            is_surrounded=True,
-            surrounded_reason="left+right",
-            nearby_mob_count=2,
-            nearby_any_mobs_count=2,
-            tick_ms=1,
-        )
-        danger = DangerDetector(
-            self.ctx, state, vitals=self.vitals,
-        )
+    def test_danger_teleport_resets_damage_state(self) -> None:
+        danger = DangerDetector(self.ctx, vitals=self.vitals)
         self.vitals.publish_hp(90, 100)
         danger._poll_hp()
         self.vitals.publish_hp(80, 100)
@@ -352,29 +313,14 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.ctx.config.teleport_button = "q"
         self.ctx.config.teleport_duration_ms = 10
         self.ctx.danger_detector = danger
-        tport = TeleportController(
-            self.ctx, self.input, MagicMock(), character_state=state,
-        )
+        tport = TeleportController(self.ctx, self.input, MagicMock())
 
-        self.assertTrue(tport.danger_teleport(reason="surrounded_damage"))
+        self.assertTrue(tport.danger_teleport(reason="damage"))
         self.ctx.tracks.area_reset.assert_called_once_with()
-        self.assertFalse(state.is_surrounded)
         self.assertEqual(danger.danger_level(), DangerLevel.SAFE)
 
-    def test_failed_teleport_preserves_visual_and_damage_danger(self) -> None:
-        state = CharacterState()
-        state.publish(
-            char_x=10,
-            char_y=20,
-            is_surrounded=True,
-            surrounded_reason="left+right",
-            nearby_mob_count=2,
-            nearby_any_mobs_count=2,
-            tick_ms=1,
-        )
-        danger = DangerDetector(
-            self.ctx, state, vitals=self.vitals,
-        )
+    def test_failed_teleport_preserves_damage_danger(self) -> None:
+        danger = DangerDetector(self.ctx, vitals=self.vitals)
         self.vitals.publish_hp(90, 100)
         danger._poll_hp()
         self.vitals.publish_hp(80, 100)
@@ -385,14 +331,10 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.ctx.config.teleport_duration_ms = 10
         self.ctx.gates.wait_unless_stopped = MagicMock(return_value=False)
         self.ctx.danger_detector = danger
-        tport = TeleportController(
-            self.ctx, self.input, MagicMock(), character_state=state,
-        )
+        tport = TeleportController(self.ctx, self.input, MagicMock())
 
         self.assertFalse(tport.teleport_once(scan_code=16))
-        self.assertTrue(state.is_surrounded)
-        self.assertEqual(state.nearby_mob_count, 2)
-        self.assertEqual(danger.danger_level(), DangerLevel.CRITICAL)
+        self.assertEqual(danger.danger_level(), DangerLevel.DANGER)
         self.assertTrue(self.ctx.danger_sit_requested.is_set())
 
     def test_danger_teleport_blocked_during_storage(self) -> None:
