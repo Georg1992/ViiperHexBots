@@ -263,6 +263,13 @@ class HuntRuntimeContext:
             return True
         return bool(danger.is_safe_for_heal())
 
+    def should_run_heal_actions(self) -> bool:
+        """True when healing is allowed in the post-teleport safety window."""
+        return (
+            self.should_run_character_actions()
+            and self.in_post_teleport_heal_window()
+        )
+
     def should_run_startup_actions(self) -> bool:
         """True when a new-hunt startup action may run.
 

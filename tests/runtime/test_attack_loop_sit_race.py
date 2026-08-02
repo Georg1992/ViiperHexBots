@@ -71,6 +71,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx.config = SimpleNamespace(skill_scan_code=16, skill_delay_ms=1)
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
+        ctx.should_run_heal_actions.return_value = True
         ctx.is_stopped.side_effect = [False, False, True]
         ctx.tracks.tracks_for_policy.return_value = []
         ctx.policy.select_target.side_effect = [1, None]
@@ -91,6 +92,34 @@ class AttackLoopSitRaceTests(unittest.TestCase):
 
         self.assertEqual(mob_behavior.heal_if_needed.call_count, 2)
         mob_behavior.heal_if_needed.assert_any_call(100, 100, loop._input)
+        self.assertEqual(ctx.should_run_heal_actions.call_count, 2)
+        loop._attack_one.assert_called_once_with(1, unittest.mock.ANY)
+
+    def test_run_blocks_custom_healing_outside_post_teleport_window(self) -> None:
+        ctx = MagicMock()
+        ctx.config = SimpleNamespace(skill_scan_code=16, skill_delay_ms=1)
+        ctx.logger = MagicMock()
+        ctx.should_run_combat.return_value = True
+        ctx.should_run_heal_actions.return_value = False
+        ctx.is_stopped.side_effect = [False, False, True]
+        ctx.tracks.tracks_for_policy.return_value = []
+        ctx.policy.select_target.side_effect = [1, None]
+        ctx.stop_event = MagicMock()
+        ctx.character_screen_pos.return_value = (100, 100)
+
+        mob_behavior = MagicMock()
+        loop = AttackLoop(
+            ctx,
+            MagicMock(),
+            MagicMock(),
+            mob_behavior=mob_behavior,
+            vitals=PlayerVitals(),
+        )
+        loop._attack_one = MagicMock()
+
+        loop.run()
+
+        mob_behavior.heal_if_needed.assert_not_called()
         loop._attack_one.assert_called_once_with(1, unittest.mock.ANY)
 
     def test_attack_kites_before_sit_blocks_combat_during_skill_delay(self) -> None:

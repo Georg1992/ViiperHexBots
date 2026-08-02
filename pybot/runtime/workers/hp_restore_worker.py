@@ -46,6 +46,22 @@ class HpRestoreWorker:
                     ctx.wait_while_stopped_or_paused(HP_RESTORE_POLL_S)
                     continue
 
+                # HP-item healing is allowed only in the explicit post-
+                # teleport safety window; never consume a heal item during a
+                # live hunt/fight.
+                can_heal = getattr(
+                    ctx, "should_run_heal_actions", None
+                )
+                if callable(can_heal):
+                    in_heal_window = bool(can_heal())
+                else:
+                    in_heal_window = bool(
+                        getattr(ctx, "in_post_teleport_heal_window", lambda: False)()
+                    ) and bool(ctx.should_run_workers())
+                if not in_heal_window:
+                    ctx.stop_event.wait(HP_RESTORE_POLL_S)
+                    continue
+
                 ratio = self._hp_ratio()
                 if ratio is None or ratio >= HP_RESTORE_RATIO:
                     ctx.stop_event.wait(HP_RESTORE_POLL_S)

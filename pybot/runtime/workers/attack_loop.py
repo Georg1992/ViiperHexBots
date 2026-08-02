@@ -65,8 +65,12 @@ class AttackLoop:
                                 self._input,
                                 getattr(
                                     self._ctx,
-                                    "should_run_character_actions",
-                                    self._ctx.should_run_combat,
+                                    "should_run_heal_actions",
+                                    getattr(
+                                        self._ctx,
+                                        "should_run_character_actions",
+                                        self._ctx.should_run_combat,
+                                    ),
                                 ),
                                 lambda: bool(heal(hx, hy, self._input)),
                                 lifecycle=self._ctx,
@@ -88,8 +92,12 @@ class AttackLoop:
                             self._input,
                             getattr(
                                 self._ctx,
-                                "should_run_character_actions",
-                                self._ctx.should_run_combat,
+                                "should_run_heal_actions",
+                                getattr(
+                                    self._ctx,
+                                    "should_run_character_actions",
+                                    self._ctx.should_run_combat,
+                                ),
                             ),
                             lambda: bool(heal(hx, hy, self._input)),
                             lifecycle=self._ctx,

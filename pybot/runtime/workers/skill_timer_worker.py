@@ -1,8 +1,9 @@
 """Periodic skill timer key presses — one worker for all configured timers.
 
 Timers press the key only (no mouse click), same as teleport_key.
-Paused while sitting/user-paused; on hunt resume they re-arm and fire
-again with ``SKILL_TIMER_STAGGER_MS`` between presses when several are due.
+Paused while sitting/user-paused/teleporting. Teleport pause preserves
+elapsed intervals; a new hunt generation (for example after sit recovery)
+re-arms startup casts with ``SKILL_TIMER_STAGGER_MS`` staggering.
 Storage sessions do not pause timers (combat only), so keys are not re-armed.
 """
 
@@ -31,6 +32,7 @@ class SkillTimerWorker:
         self._armed = False
         self._startup_generation: int | None = None
         self._startup_cycle_generation: int | None = None
+        self._armed_generation: int | None = None
         self._startup_pressed: set[int] = set()
 
     def run(self) -> None:
@@ -83,7 +85,13 @@ class SkillTimerWorker:
 
                 now = monotonic_ms()
                 if not self._armed:
-                    self._arm_timers(timers)
+                    # Teleport suspension pauses the worker without creating a
+                    # new hunt. Preserve elapsed timer time across that pause;
+                    # only a genuinely new hunt generation re-arms timers from
+                    # zero for its startup cast.
+                    if self._armed_generation != generation:
+                        self._arm_timers(timers)
+                        self._armed_generation = generation
                     self._armed = True
                     ctx.logger.behavior("[TIMER] armed (hunt running)")
                     now = monotonic_ms()
@@ -194,7 +202,7 @@ class SkillTimerWorker:
         return False
 
     def _arm_timers(self, timers) -> None:
-        """Start or restart all timers so they are due immediately (staggered)."""
+        """Start timers for a new hunt so each configured key is due once."""
         for timer in timers:
             self._last_press_ms[timer.scan_code] = 0
         self._last_any_press_ms = 0

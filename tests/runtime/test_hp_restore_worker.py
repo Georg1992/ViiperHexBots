@@ -46,8 +46,9 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self._worker().run()
         self.input.key_tap.assert_not_called()
 
-    def test_presses_hp_item_key_when_below_fifty_percent(self) -> None:
+    def test_presses_hp_item_key_when_below_fifty_percent_after_teleport(self) -> None:
         self.vitals.publish_hp(49, 100)
+        self.ctx.mark_post_teleport_heal(10.0)
 
         def stop_after_press(scan: int, *, after_s: float) -> bool:
             self.assertEqual(scan, 59)
@@ -60,6 +61,17 @@ class HpRestoreWorkerTests(unittest.TestCase):
 
         self.input.key_tap.assert_called_once_with(59, after_s=0.0)
         self.assertLess(49 / 100, HP_RESTORE_RATIO)
+
+    def test_does_not_heal_during_active_hunt_even_when_hp_is_low(self) -> None:
+        self.vitals.publish_hp(40, 100)
+
+        def stop_soon(*_args, **_kwargs) -> bool:
+            self.ctx.stop_event.set()
+            return False
+
+        self.ctx.stop_event.wait = stop_soon  # type: ignore[method-assign]
+        self._worker().run()
+        self.input.key_tap.assert_not_called()
 
     def test_does_not_press_hp_item_key_at_or_above_fifty_percent(self) -> None:
         self.vitals.publish_hp(50, 100)
@@ -74,6 +86,7 @@ class HpRestoreWorkerTests(unittest.TestCase):
 
     def test_item_worker_does_not_use_skill_click(self) -> None:
         self.vitals.publish_hp(40, 100)
+        self.ctx.mark_post_teleport_heal(10.0)
 
         def stop_after_press(*_args, **_kwargs) -> bool:
             self.ctx.stop_event.set()

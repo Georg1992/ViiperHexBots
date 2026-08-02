@@ -119,6 +119,64 @@ class SkillTimerWorkerTests(unittest.TestCase):
         self.assertEqual(len(arm_logs), 1)
         self.assertEqual(pause_logs, [])
 
+    def test_teleport_pause_preserves_180_second_timer(self) -> None:
+        timers = (
+            SkillTimerRuntime(button="s", scan_code=31, interval_ms=180_000),
+        )
+        stop = threading.Event()
+        presses: list[tuple[int, int]] = []
+        clock = {"ms": 100_000}
+        running = {"ok": True}
+        suspended = {"value": False}
+        generation = {"value": 0}
+
+        def teleport_key(scan_code: int) -> None:
+            presses.append((scan_code, clock["ms"]))
+            if len(presses) == 1:
+                suspended["value"] = True
+            else:
+                stop.set()
+
+        def should_run_timers() -> bool:
+            return running["ok"] and not suspended["value"] and not stop.is_set()
+
+        def wait_paused(timeout_s: float) -> bool:
+            clock["ms"] += int(round(timeout_s * 1000))
+            return should_run_timers()
+
+        def stop_wait(timeout_s: float) -> bool:
+            # The worker uses this path while discovery_suspend is active.
+            clock["ms"] += int(round(timeout_s * 1000))
+            if suspended["value"]:
+                suspended["value"] = False
+                stop.set()
+            return stop.is_set()
+
+        ctx = SimpleNamespace(
+            config=SimpleNamespace(skill_timers=timers),
+            logger=SimpleNamespace(behavior=MagicMock()),
+            stop_event=SimpleNamespace(
+                wait=stop_wait,
+                is_set=stop.is_set,
+                set=stop.set,
+            ),
+            resume_gate=threading.Event(),
+            is_stopped=stop.is_set,
+            should_run_workers=lambda: running["ok"] and not stop.is_set(),
+            should_run_timers=should_run_timers,
+            wait_while_stopped_or_paused=wait_paused,
+            hunt_generation=0,
+        )
+        worker = SkillTimerWorker(ctx, SimpleNamespace(teleport_key=teleport_key))
+
+        with patch(
+            "pybot.runtime.workers.skill_timer_worker.monotonic_ms",
+            side_effect=lambda: clock["ms"],
+        ):
+            worker.run()
+
+        self.assertEqual([scan for scan, _at in presses], [31])
+
     def test_disarm_on_sit_then_rearm_on_resume(self) -> None:
         timers = (
             SkillTimerRuntime(button="f1", scan_code=59, interval_ms=60_000),
@@ -127,6 +185,7 @@ class SkillTimerWorkerTests(unittest.TestCase):
         presses: list[int] = []
         clock = {"ms": 0}
         running = {"ok": True}
+        ctx_ref: dict[str, SimpleNamespace] = {}
 
         def teleport_key(scan_code: int) -> None:
             presses.append((scan_code, clock["ms"]))
@@ -142,6 +201,7 @@ class SkillTimerWorkerTests(unittest.TestCase):
             # Sit pause tick: resume hunting and advance clock.
             if not running["ok"]:
                 running["ok"] = True
+                ctx_ref["ctx"].hunt_generation = 1
                 clock["ms"] += 10_000
             else:
                 clock["ms"] += int(round(timeout_s * 1000))
@@ -164,7 +224,9 @@ class SkillTimerWorkerTests(unittest.TestCase):
             should_run_workers=should_run,
             should_run_timers=should_run,
             wait_while_stopped_or_paused=wait_paused,
+            hunt_generation=0,
         )
+        ctx_ref["ctx"] = ctx
         worker = SkillTimerWorker(ctx, SimpleNamespace(teleport_key=teleport_key))
 
         with patch(
@@ -174,7 +236,7 @@ class SkillTimerWorkerTests(unittest.TestCase):
             worker.run()
 
         self.assertEqual([p[0] for p in presses], [59, 59])
-        # Second press happens after re-arm (due immediately), not after 60s.
+        # A sit creates a new hunt generation, so startup re-arm is immediate.
         self.assertLess(presses[1][1] - presses[0][1], 60_000)
         pause_logs = [
             call.args[0]
