@@ -75,12 +75,27 @@ class HpRestoreWorker:
                 ctx.logger.behavior(
                     f"[HP] item key={cfg.hp_button!r} ratio={ratio:.1%}"
                 )
-                if perform_if_allowed(
-                    self._input,
-                    ctx.should_run_workers,
-                    lambda: self._input.key_tap(scan, after_s=0.0),
-                    lifecycle=ctx,
-                ):
+                # Recheck the same heal-specific admission predicate at the
+                # input boundary. A danger/teleport transition may claim the
+                # lifecycle after the preflight window check; the broad worker
+                # gate alone would still allow a stale HP press.
+                perform_heal = getattr(type(ctx), "perform_heal_if_allowed", None)
+                if callable(perform_heal):
+                    healed = bool(
+                        ctx.perform_heal_if_allowed(
+                            ctx.should_run_heal_actions,
+                            lambda: self._input.key_tap(scan, after_s=0.0),
+                            cooldown_s=HP_RESTORE_COOLDOWN_S,
+                        )
+                    )
+                else:
+                    healed = perform_if_allowed(
+                        self._input,
+                        ctx.should_run_heal_actions,
+                        lambda: self._input.key_tap(scan, after_s=0.0),
+                        lifecycle=ctx,
+                    )
+                if healed:
                     self._last_press_mono = time.monotonic()
                     ctx.stop_event.wait(HP_RESTORE_COOLDOWN_S)
                 else:

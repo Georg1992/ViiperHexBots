@@ -353,6 +353,32 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertTrue(self.ctx.critical_danger_requested.is_set())
         self.ctx.sitting_event.clear()
 
+    def test_critical_escape_waits_while_paused_without_repeating_teleport(self) -> None:
+        self.ctx.request_critical_danger()
+        self.ctx.mark_paused()
+        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
+        escape = CriticalDangerWorker(self.ctx, self.teleport)
+
+        self.assertFalse(escape.process_pending())
+        self.assertFalse(escape.process_pending())
+        self.teleport.danger_teleport.assert_not_called()
+        self.assertTrue(self.ctx.critical_danger_requested.is_set())
+
+        self.ctx.mark_running()
+        self.assertTrue(escape.process_pending())
+        self.teleport.danger_teleport.assert_called_once_with(reason="critical_hunt")
+        self.assertFalse(self.ctx.critical_danger_requested.is_set())
+
+    def test_critical_escape_does_not_send_input_after_stop(self) -> None:
+        self.ctx.request_critical_danger()
+        self.ctx.stop_event.set()
+        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
+        escape = CriticalDangerWorker(self.ctx, self.teleport)
+
+        self.assertFalse(escape.process_pending())
+        self.teleport.danger_teleport.assert_not_called()
+        self.assertTrue(self.ctx.critical_danger_requested.is_set())
+
     def test_damage_during_sp_recovery_teleports_then_sits_again(self) -> None:
         worker = self._worker(_ScriptedVitals([0.02, 0.02, 0.99, 0.99]))
         self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]

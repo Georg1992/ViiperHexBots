@@ -79,6 +79,9 @@ class HuntRuntimeConfig:
     sit_on_low_sp_scan_code: int = 0
     use_sprite_grf: bool = False
     client_profile: str = "Generic"
+    # Minimum seconds to remain in a mode-teleported area before another
+    # empty-area teleport is allowed. A value of zero preserves fixture behavior.
+    time_on_location_s: int = 0
 
 
 def resolve_mob_name(
@@ -220,6 +223,7 @@ def hunt_runtime_config_from_settings(
         sit_on_low_sp_scan_code=key_name_to_scan_code(settings.sit_on_low_sp_button),
         use_sprite_grf=settings.use_sprite_grf,
         client_profile=settings.client_profile,
+        time_on_location_s=max(0, int(settings.time_on_location)),
     )
 
 

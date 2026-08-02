@@ -55,6 +55,15 @@ class CustomMobBehaviorConfigTests(unittest.TestCase):
         self.assertEqual(config.custom_behavior.buffs[0].scan_code, 59)
         self.assertEqual(config.custom_behavior.buffs[0].delay_ms, 12_000)
 
+    def test_runtime_propagates_time_on_location(self) -> None:
+        settings = AppSettings(time_on_location=17)
+        with patch(
+            "pybot.config.runtime.resolve_mob_descriptor_name",
+            return_value="horn",
+        ):
+            config = hunt_runtime_config_from_settings(settings)
+        self.assertEqual(config.time_on_location_s, 17)
+
 
 class ConfiguredMobBehaviorTests(unittest.TestCase):
     def test_kiting_does_not_cast_heal(self) -> None:

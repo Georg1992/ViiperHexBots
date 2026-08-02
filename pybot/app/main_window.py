@@ -7,6 +7,9 @@ Thread-safe log dispatch    → :mod:`pybot.app.log_pipe`
 
 from __future__ import annotations
 
+import copy
+import queue
+from dataclasses import replace
 import threading
 import time
 import tkinter as tk
@@ -22,6 +25,8 @@ from pybot.app.overlay import StatusPanelOverlay, Win32HuntOverlay
 from pybot.game_state import GameMemoryPoller, MemorySnapshot, PlayerVitals
 from pybot.app.session_log import AppSessionLog
 from pybot.app.status_display import format_pair, status_panel_numbers
+from pybot.app.status_panel_worker import StatusPanelReadResult, read_status_panel_snapshot
+from pybot.app.ui_work_queue import UiWorkQueue
 from pybot.app.startup_splash import preload_mob_descriptors
 from pybot.app.viiper_manager import ViiperManager
 from pybot.app.win32_util import (
@@ -52,15 +57,7 @@ from pybot.config.schema import (
 from pybot.mobs.catalog import load_mob_catalog
 from pybot.runtime.mob_behaviors import mob_has_custom_behavior
 from pybot.runtime.input.scan_codes import keysym_to_key_name
-from pybot.recognition.capture import capture_region
-from pybot.recognition.ui.status_panel import (
-    PANEL_HEIGHT,
-    PANEL_WIDTH,
-    StatusPanelValues,
-    find_status_panel,
-    read_status_panel,
-    verify_status_panel_at,
-)
+from pybot.recognition.ui.status_panel import StatusPanelValues
 
 MEMORY_POLL_MS = 500
 # Searching for the Basic Info header.
@@ -125,6 +122,23 @@ class MainWindow:
         self._memory_poller = GameMemoryPoller()
         self._memory_poll_after_id: str | None = None
         self._status_panel_poll_after_id: str | None = None
+        # Unbounded put_nowait is intentional: a worker completion callback must
+        # never be dropped while its pending flag is set.
+        self._ui_callback_queue: queue.Queue[callable] = queue.Queue()
+        self._memory_results: queue.Queue[tuple[int, int, MemorySnapshot]] = queue.Queue(maxsize=1)
+        self._status_results: queue.Queue[StatusPanelReadResult] = queue.Queue(maxsize=1)
+        self._memory_request_pending = False
+        self._memory_request_generation = 0
+        self._status_request_pending = False
+        self._status_request_generation = 0
+        self._exit_requested = False
+        self._memory_work = UiWorkQueue(name="ui-memory-reader")
+        self._status_work = UiWorkQueue(name="ui-status-reader")
+        self._config_work = UiWorkQueue(name="ui-config-writer")
+        self._shutdown_work = UiWorkQueue(name="ui-shutdown")
+        self._shutdown_cleanup_pending = False
+        self._resume_work = UiWorkQueue(name="ui-resume")
+        self._resume_pending = False
         self._status_panel_confirmed: StatusPanelValues | None = None
         self._status_panel_max_read_at = 0.0
         # Last known Basic Info origin — anchors the open-panel prompt.
@@ -239,6 +253,42 @@ class MainWindow:
             self._apply_ui_settings()
         self._fit_window_to_content()
 
+    def _post_ui_callback(self, callback) -> None:
+        """Queue a UI callback without calling Tk from a worker thread."""
+        self._ui_callback_queue.put_nowait(callback)
+
+    def _drain_ui_callbacks(self) -> None:
+        processed = 0
+        try:
+            while processed < 20:
+                callback = self._ui_callback_queue.get_nowait()
+                callback()
+                processed += 1
+        except queue.Empty:
+            pass
+        finally:
+            try:
+                if self.root.winfo_exists():
+                    self.root.after(50, self._drain_ui_callbacks)
+            except tk.TclError:
+                pass
+
+    def _save_config_async(self) -> None:
+        """Persist a snapshot off the Tk thread; never block a widget callback."""
+        snapshot = copy.deepcopy(self.config)
+
+        def _save() -> None:
+            try:
+                snapshot.save()
+            except Exception as exc:
+                self._post_ui_callback(
+                    lambda exc=exc: self.log_pipe.log(
+                        f"[UI] Settings save failed: {exc}"
+                    )
+                )
+
+        self._config_work.submit(_save)
+
     def _browse_mob_assets(self) -> None:
         if not self._can_import_mob():
             return
@@ -297,10 +347,12 @@ class MainWindow:
                 entry = import_mob_from_paths([spr, act], overwrite=overwrite)
             except Exception as exc:
                 err = exc
-                self.root.after(0, lambda: self._mob_import_failed(err))
+                self._post_ui_callback(lambda err=err: self._mob_import_failed(err))
                 return
             stem_ready = entry.descriptor_name
-            self.root.after(0, lambda: self._mob_import_succeeded(stem_ready))
+            self._post_ui_callback(
+                lambda stem_ready=stem_ready: self._mob_import_succeeded(stem_ready)
+            )
 
         threading.Thread(target=_worker, name="mob-import", daemon=True).start()
 
@@ -724,6 +776,7 @@ class MainWindow:
         self._update_search_label()
         self._schedule_memory_poll()
         self._schedule_status_panel_poll()
+        self.root.after(50, self._drain_ui_callbacks)
         self._settings_apply_enabled = True
 
     def _key_entry(
@@ -785,7 +838,7 @@ class MainWindow:
 
         def _apply(settings: MobCustomSettings) -> None:
             self.config.mob_custom_settings[key] = settings
-            self.config.save()
+            self._save_config_async()
             self.log_pipe.log(f"[MOB] custom behavior saved: {mob_name}")
 
         MobBehaviorDialog(
@@ -998,15 +1051,25 @@ class MainWindow:
         self.config.last_session_process = entry.process
         self.window_info.configure(text=entry.display_text)
         self._memory_poller.reset()
-        self._refresh_memory_stats()
-        self._refresh_status_panel_overlay()
+        self._memory_request_generation += 1
+        self._memory_request_pending = False
+        self._status_request_generation += 1
+        self._status_request_pending = False
+        self._reset_status_panel_tracking()
+        self._request_memory_stats()
+        self._request_status_panel_overlay()
         if self._settings_apply_enabled:
-            self.config.save()
+            self._save_config_async()
 
     def on_client_changed(self, *_event) -> None:
         self.config.client_profile = self.client_combo.get()
         self._sync_memory_reading_from_profile()
         self._memory_poller.reset()
+        self._memory_request_generation += 1
+        self._memory_request_pending = False
+        self._status_request_generation += 1
+        self._status_request_pending = False
+        self._reset_status_panel_tracking()
         memory = "on" if self.config.use_memory_reading else "off"
         if self.config.use_memory_reading:
             source = "memory (HP from status panel)"
@@ -1016,10 +1079,10 @@ class MainWindow:
             f"Client profile: {self.config.client_profile} "
             f"(memory reading {memory}, stats from {source})"
         )
-        self._refresh_memory_stats()
-        self._refresh_status_panel_overlay()
+        self._request_memory_stats()
+        self._request_status_panel_overlay()
         if self._settings_apply_enabled:
-            self.config.save()
+            self._save_config_async()
 
     def _sync_memory_reading_from_profile(self) -> None:
         """Memory reading follows the profile: Generic off, server profiles on."""
@@ -1067,9 +1130,11 @@ class MainWindow:
             text=self._format_pair(values.weight, values.weight_max)
         )
 
-    def _refresh_memory_stats(self) -> None:
+    def _request_memory_stats(self) -> None:
+        """Request process-memory reads without running Win32 I/O on Tk."""
+        if self._memory_request_pending:
+            return
         if not self.config.use_memory_reading:
-            # Generic: Name has no memory source; SP/Weight come from vision.
             self.memory_name.configure(text="—")
             return
         profile = load_client_profile(self.config.client_profile)
@@ -1086,8 +1151,56 @@ class MainWindow:
             self.memory_weight.configure(text="—")
             self.vitals.clear_sp()
             return
-        snap = self._memory_poller.read(hwnd, profile.memory)
-        self._apply_memory_snapshot(snap)
+
+        self._memory_request_pending = True
+        self._memory_request_generation += 1
+        generation = self._memory_request_generation
+
+        def _read() -> None:
+            try:
+                snap = self._memory_poller.read(hwnd, profile.memory)
+            except Exception as exc:
+                self._post_ui_callback(
+                    lambda exc=exc, generation=generation: self._memory_read_failed(
+                        hwnd, generation, exc
+                    )
+                )
+                return
+            try:
+                self._memory_results.put_nowait((hwnd, generation, snap))
+            except queue.Full:
+                try:
+                    self._memory_results.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._memory_results.put_nowait((hwnd, generation, snap))
+                except queue.Full:
+                    pass
+            self._post_ui_callback(self._consume_memory_result)
+
+        if not self._memory_work.submit(_read):
+            self._memory_request_pending = False
+
+    def _memory_read_failed(
+        self, hwnd: int, generation: int, exc: Exception
+    ) -> None:
+        if generation != self._memory_request_generation:
+            return
+        self._memory_request_pending = False
+        if hwnd == self.config.window_id:
+            self.log_pipe.log(f"[UI] Memory read failed: {exc}")
+
+    def _consume_memory_result(self) -> None:
+        try:
+            hwnd, generation, snap = self._memory_results.get_nowait()
+        except queue.Empty:
+            return
+        if generation != self._memory_request_generation:
+            return
+        self._memory_request_pending = False
+        if hwnd == self.config.window_id and self.config.use_memory_reading:
+            self._apply_memory_snapshot(snap)
 
     def _schedule_memory_poll(self) -> None:
         if self._memory_poll_after_id is not None:
@@ -1100,7 +1213,7 @@ class MainWindow:
         def _tick() -> None:
             self._memory_poll_after_id = None
             try:
-                self._refresh_memory_stats()
+                self._request_memory_stats()
             finally:
                 if self.root.winfo_exists():
                     self._memory_poll_after_id = self.root.after(
@@ -1168,103 +1281,104 @@ class MainWindow:
         if self._panel_owns_sp_weight():
             self._apply_status_panel_stats(values)
 
-    def _refresh_status_panel_overlay(self) -> int:
-        """Each tick: find Basic Info header, then read or show open-panel.
-
-        HP is always OCR'd on the full-refresh cadence (including when memory
-        supplies SP/Weight). SP/Weight currents still refresh every tick.
-
-        - Header missing → clear vision-backed labels, show open-panel prompt
-        - Header found → read values and show under the panel
-        - Full current+max (incl. HP OCR) every ``STATUS_PANEL_MAX_REFRESH_S``
-        - Fast poll reuses the locked origin with a local header verify and a
-          panel-sized capture (avoids full-client template match every 200 ms)
-        - Digit read failure while the header is still present keeps the last
-          good values (transient OCR noise ≠ panel closed)
-
-        Overlay stays visible (no hide/show flash). Both states use the same
-        slot under the panel so header/digit ROIs stay uncovered.
-        """
+    def _request_status_panel_overlay(self) -> int:
+        """Request capture/OCR off the Tk thread and return the next poll delay."""
+        self._consume_status_panel_result()
+        if self._status_request_pending:
+            return STATUS_PANEL_VALUE_MS
         hwnd = self.config.window_id
-        if not hwnd or not window_exists(hwnd) or not is_window_active(hwnd):
-            self._status_panel_overlay.hide()
-            return STATUS_PANEL_SEARCH_MS
-
-        client = client_rect_screen(hwnd)
-        if client is None:
-            self._reset_status_panel_tracking()
-            self._status_panel_overlay.hide()
-            self._clear_status_panel_ui()
-            return STATUS_PANEL_SEARCH_MS
-
-        left, top, width, height = client
         confirmed = self._status_panel_confirmed
         now = time.monotonic()
         refresh_max = (
             confirmed is None
             or now - self._status_panel_max_read_at >= STATUS_PANEL_MAX_REFRESH_S
         )
+        self._status_request_pending = True
+        self._status_request_generation += 1
+        generation = self._status_request_generation
 
-        if not refresh_max:
-            assert confirmed is not None
-            ox, oy = confirmed.panel_origin
-            panel_in_client = (
-                ox >= 0
-                and oy >= 0
-                and ox + PANEL_WIDTH <= width
-                and oy + PANEL_HEIGHT <= height
-            )
-            if panel_in_client:
-                panel_frame = capture_region(
-                    left + ox, top + oy, PANEL_WIDTH, PANEL_HEIGHT
+        def _read() -> None:
+            try:
+                result = read_status_panel_snapshot(
+                    hwnd, confirmed, refresh_max=refresh_max
                 )
-                if panel_frame is not None and panel_frame.size > 0:
-                    if verify_status_panel_at(panel_frame, (0, 0)):
-                        values = read_status_panel(
-                            panel_frame,
-                            origin=(0, 0),
-                            skip_hp=True,
-                            previous=confirmed,
-                        )
-                        if values is None:
-                            # Panel still open; keep last good vitals.
-                            return STATUS_PANEL_VALUE_MS
-                        values = StatusPanelValues(
-                            hp=values.hp,
-                            hp_max=values.hp_max,
-                            sp=values.sp,
-                            sp_max=values.sp_max,
-                            weight=values.weight,
-                            weight_max=values.weight_max,
-                            panel_origin=(ox, oy),
-                        )
-                        self._commit_status_panel(
-                            values, client_left=left, client_top=top
-                        )
-                        return STATUS_PANEL_VALUE_MS
-            # Locked origin stale/moved — fall through to a full-client locate.
+                result = replace(result, generation=generation)
+            except Exception as exc:
+                self._post_ui_callback(
+                    lambda exc=exc, generation=generation: self._status_read_failed(
+                        hwnd, generation, exc
+                    )
+                )
+                return
+            try:
+                self._status_results.put_nowait(result)
+            except queue.Full:
+                try:
+                    self._status_results.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._status_results.put_nowait(result)
+                except queue.Full:
+                    pass
+            self._post_ui_callback(self._consume_status_panel_result)
 
-        frame = capture_region(left, top, width, height)
-        if frame is None or frame.size == 0:
-            self._show_panel_missing(client_left=left, client_top=top)
-            return STATUS_PANEL_SEARCH_MS
+        if not self._status_work.submit(_read):
+            self._status_request_pending = False
+        return STATUS_PANEL_VALUE_MS if confirmed is not None else STATUS_PANEL_SEARCH_MS
 
-        origin = find_status_panel(frame)
-        if origin is None:
-            self._show_panel_missing(client_left=left, client_top=top)
-            return STATUS_PANEL_SEARCH_MS
+    def _status_read_failed(
+        self, hwnd: int, generation: int, exc: Exception
+    ) -> None:
+        if generation != self._status_request_generation:
+            # A newer capture owns the pending flag now. Ignore this late
+            # failure without releasing or overwriting the newer request.
+            return
+        self._status_request_pending = False
+        if hwnd == self.config.window_id:
+            self.log_pipe.log(f"[UI] Status-panel read failed: {exc}")
 
-        values = read_status_panel(frame, origin=origin)
-        if values is None:
-            if confirmed is not None:
-                # Header matched but digits failed — do not clear locked vitals.
-                return STATUS_PANEL_VALUE_MS
-            self._show_panel_missing(client_left=left, client_top=top)
-            return STATUS_PANEL_SEARCH_MS
-
-        self._status_panel_max_read_at = now
-        self._commit_status_panel(values, client_left=left, client_top=top)
-        return STATUS_PANEL_VALUE_MS
+    def _consume_status_panel_result(self) -> None:
+        try:
+            result = self._status_results.get_nowait()
+        except queue.Empty:
+            return
+        if result.generation != self._status_request_generation:
+            # A newer capture owns the pending flag now. Ignore this late
+            # result without releasing or overwriting the newer request.
+            return
+        self._status_request_pending = False
+        if result.hwnd != self.config.window_id:
+            return
+        if result.state == "inactive":
+            self._status_panel_overlay.hide()
+            return
+        if result.state == "client_missing":
+            self._reset_status_panel_tracking()
+            self._status_panel_overlay.hide()
+            self._clear_status_panel_ui()
+            return
+        if result.state == "panel_missing":
+            self._show_panel_missing(
+                client_left=result.client_left,
+                client_top=result.client_top,
+            )
+            return
+        if result.state == "panel_open_digits_missing":
+            if self._status_panel_confirmed is None:
+                self._show_panel_missing(
+                    client_left=result.client_left,
+                    client_top=result.client_top,
+                )
+            return
+        if result.values is not None:
+            if result.full_refresh:
+                self._status_panel_max_read_at = time.monotonic()
+            self._commit_status_panel(
+                result.values,
+                client_left=result.client_left,
+                client_top=result.client_top,
+            )
 
     def _schedule_status_panel_poll(self) -> None:
         if self._status_panel_poll_after_id is not None:
@@ -1278,7 +1392,7 @@ class MainWindow:
             self._status_panel_poll_after_id = None
             delay = STATUS_PANEL_SEARCH_MS
             try:
-                delay = self._refresh_status_panel_overlay()
+                delay = self._request_status_panel_overlay()
             finally:
                 if self.root.winfo_exists():
                     self._status_panel_poll_after_id = self.root.after(
@@ -1323,7 +1437,7 @@ class MainWindow:
             return
         try:
             self._sync_config_from_ui()
-            self.config.save()
+            self._save_config_async()
         except ValueError:
             # Incomplete numeric field while typing; wait for a valid edit.
             return
@@ -1384,7 +1498,7 @@ class MainWindow:
 
         try:
             self._sync_config_from_ui()
-            self.config.save()
+            self._save_config_async()
         except ValueError as exc:
             messagebox.showerror(
                 "Invalid Settings",
@@ -1417,8 +1531,28 @@ class MainWindow:
         self.log_pipe.log("Bot stopped (VIIPER still running)")
 
     def resume_bot(self) -> None:
-        """Resume the bot and restore game window focus."""
-        restore_and_activate(self.config.window_id)
+        """Restore focus asynchronously, then resume on the Tk thread."""
+        if self._resume_pending:
+            return
+        self._resume_pending = True
+        hwnd = self.config.window_id
+
+        def _restore() -> None:
+            try:
+                restore_and_activate(hwnd)
+            except Exception as exc:
+                self._post_ui_callback(lambda exc=exc: self._finish_resume(exc))
+                return
+            self._post_ui_callback(self._finish_resume)
+
+        if not self._resume_work.submit(_restore):
+            self._resume_pending = False
+
+    def _finish_resume(self, error: Exception | None = None) -> None:
+        self._resume_pending = False
+        if error is not None:
+            self.log_pipe.log(f"[UI] Could not restore game focus: {error}")
+            return
         if self.lifecycle.resume():
             self.log_pipe.log("Bot resumed")
         else:
@@ -1525,36 +1659,71 @@ class MainWindow:
     # ══════════════════════════════════════════════════════════════════
 
     def on_exit(self) -> None:
-        """Clean shutdown of bot, VIIPER, hotkey, and session."""
+        """Begin shutdown without joining or tearing down services on Tk."""
+        if self._exit_requested:
+            return
+        self._exit_requested = True
         self._apply_ui_settings()
         if self.lifecycle.state != BotState.OFF:
             self.stop_bot()
-        shutdown_complete = self.lifecycle.await_shutdown(
-            timeout=DEFAULT_STOP_JOIN_TIMEOUT_S + 1.0
-        )
-        if not shutdown_complete:
-            self.log_pipe.log(
-                "[STATE] Shutdown still in progress; keeping VIIPER and UI alive "
-                "to avoid racing live workers"
-            )
-            return
-        if self._memory_poll_after_id is not None:
-            try:
-                self.root.after_cancel(self._memory_poll_after_id)
-            except tk.TclError:
-                pass
-            self._memory_poll_after_id = None
-        if self._status_panel_poll_after_id is not None:
-            try:
-                self.root.after_cancel(self._status_panel_poll_after_id)
-            except tk.TclError:
-                pass
-            self._status_panel_poll_after_id = None
-        self._status_panel_overlay.destroy()
+        self.bot_button.configure(state=tk.DISABLED, text="Closing...")
         self.log_pipe.log("Closing bot and stopping VIIPER...")
-        self.viiper.shutdown()
-        self.session.end("user exit")
+        self._poll_shutdown()
+
+    def _poll_shutdown(self) -> None:
+        """Keep Tk responsive while lifecycle workers unwind."""
+        if not self.lifecycle.shutdown_ready:
+            self.root.after(50, self._poll_shutdown)
+            return
+        if not self._shutdown_cleanup_pending:
+            self._shutdown_cleanup_pending = True
+
+            def _cleanup() -> None:
+                try:
+                    self.viiper.shutdown()
+                    self.session.end("user exit")
+                except Exception as exc:
+                    self._post_ui_callback(
+                        lambda exc=exc: self.log_pipe.log(
+                            f"[UI] Shutdown cleanup failed: {exc}"
+                        )
+                    )
+                finally:
+                    self._post_ui_callback(self._finish_exit)
+
+            if not self._shutdown_work.submit(_cleanup):
+                self._shutdown_cleanup_pending = False
+                self.root.after(50, self._poll_shutdown)
+            return
+        # The worker posts _finish_exit; this branch only keeps the callback
+        # chain alive if a custom queue implementation delays delivery.
+        self.root.after(50, self._poll_shutdown)
+
+    def _finish_exit(self) -> None:
+        """Close auxiliary workers, then destroy Tk after they drain."""
+        if not self._exit_requested:
+            return
+        self._status_panel_overlay.destroy()
         self.hotkey_manager.destroy()
+        self._memory_work.close()
+        self._status_work.close()
+        self._config_work.close()
+        self._shutdown_work.close()
+        self._resume_work.close()
+        self._poll_auxiliary_shutdown()
+
+    def _poll_auxiliary_shutdown(self) -> None:
+        """Wait for accepted UI work without blocking Tk."""
+        queues = (
+            self._memory_work,
+            self._status_work,
+            self._config_work,
+            self._shutdown_work,
+            self._resume_work,
+        )
+        if not all(work.idle for work in queues):
+            self.root.after(25, self._poll_auxiliary_shutdown)
+            return
         self.root.destroy()
 
     def run(self) -> None:

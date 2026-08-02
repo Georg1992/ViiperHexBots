@@ -34,6 +34,7 @@ class SkillTimerWorker:
         self._startup_cycle_generation: int | None = None
         self._armed_generation: int | None = None
         self._startup_pressed: set[int] = set()
+        self._startup_block_logged: set[tuple[int, int]] = set()
 
     def run(self) -> None:
         ctx = self._ctx
@@ -50,7 +51,7 @@ class SkillTimerWorker:
                 f"[TIMER] started key={timer.button} interval={timer.interval_ms}ms "
                 f"scanCode={timer.scan_code}"
             )
-            self._last_press_ms[timer.scan_code] = 0
+            self._last_press_ms[timer.scan_code] = -timer.interval_ms
 
         while not ctx.is_stopped():
             try:
@@ -80,6 +81,7 @@ class SkillTimerWorker:
                     # Re-arm immediately so every configured timer fires once
                     # for the new hunt instead of waiting for its old interval.
                     self._startup_pressed.clear()
+                    self._startup_block_logged.clear()
                     self._startup_cycle_generation = generation
                     self._armed = False
 
@@ -108,8 +110,6 @@ class SkillTimerWorker:
                         break
                     if not ctx.should_run_timers():
                         break
-                    if startup_pending and not self._startup_action_allowed():
-                        break
                     if not self._wait_stagger_gap():
                         break
                     if int(getattr(ctx, "hunt_generation", 0)) != generation:
@@ -117,6 +117,14 @@ class SkillTimerWorker:
                     if not ctx.should_run_timers():
                         break
                     if startup_pending and not self._startup_action_allowed():
+                        block_key = (generation, timer.scan_code)
+                        if block_key not in self._startup_block_logged:
+                            self._startup_block_logged.add(block_key)
+                            ctx.logger.behavior(
+                                f"[TIMER] key blocked key={timer.button} "
+                                f"scanCode={timer.scan_code} "
+                                f"reason={self._startup_block_reason()}"
+                            )
                         break
                     pressed = perform_if_allowed(
                         self._input,
@@ -125,7 +133,15 @@ class SkillTimerWorker:
                         lifecycle=ctx,
                     )
                     if pressed is False:
+                        ctx.logger.behavior(
+                            f"[TIMER] key rejected key={timer.button} "
+                            f"scanCode={timer.scan_code}"
+                        )
                         continue
+                    ctx.logger.behavior(
+                        f"[TIMER] key executed key={timer.button} "
+                        f"scanCode={timer.scan_code}"
+                    )
                     if int(getattr(ctx, "hunt_generation", 0)) != generation:
                         break
                     pressed_at = monotonic_ms()
@@ -159,6 +175,22 @@ class SkillTimerWorker:
                 ctx.stop_event.wait(max(0.05, next_wait_ms / 1000.0))
             except Exception:
                 ctx.logger.behavior(f"[TIMER] tick error:\n{traceback.format_exc()}")
+
+    def _startup_block_reason(self) -> str:
+        """Describe the first startup milestone currently blocking a timer."""
+        ctx = self._ctx
+        area = getattr(ctx, "startup_area_clear", None)
+        if area is not None and not area.is_set():
+            return "area_clear"
+        buffs = getattr(ctx, "startup_buffs_done", None)
+        if buffs is not None and not buffs.is_set():
+            return "buffs_pending"
+        timers = getattr(ctx, "startup_timers_done", None)
+        if timers is not None and not timers.is_set():
+            return "timers_pending"
+        if not ctx.should_run_timers():
+            return "lifecycle"
+        return "danger_or_character_safety"
 
     def _startup_action_allowed(self) -> bool:
         checker = getattr(self._ctx, "should_run_startup_actions", None)
@@ -204,7 +236,7 @@ class SkillTimerWorker:
     def _arm_timers(self, timers) -> None:
         """Start timers for a new hunt so each configured key is due once."""
         for timer in timers:
-            self._last_press_ms[timer.scan_code] = 0
+            self._last_press_ms[timer.scan_code] = -timer.interval_ms
         self._last_any_press_ms = 0
 
     def _wait_stagger_gap(self) -> bool:

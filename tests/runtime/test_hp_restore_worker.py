@@ -96,6 +96,41 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self._worker().run()
         self.input.skill_click_at.assert_not_called()
 
+    def test_heal_gate_is_rechecked_at_input_boundary(self) -> None:
+        self.vitals.publish_hp(40, 100)
+        self.ctx.mark_post_teleport_heal(10.0)
+        self.ctx.should_run_heal_actions = MagicMock(side_effect=[True, False])
+
+        def stop_after_rejection(*_args, **_kwargs) -> bool:
+            self.ctx.stop_event.set()
+            return False
+
+        self.ctx.stop_event.wait = stop_after_rejection  # type: ignore[method-assign]
+        self._worker().run()
+
+        self.input.key_tap.assert_not_called()
+        self.assertEqual(self.ctx.should_run_heal_actions.call_count, 2)
+
+    def test_shared_heal_admission_allows_only_one_worker_action(self) -> None:
+        self.ctx.mark_post_teleport_heal(10.0)
+        actions: list[str] = []
+
+        self.assertTrue(
+            self.ctx.perform_heal_if_allowed(
+                lambda: True,
+                lambda: actions.append("custom") or True,
+                cooldown_s=60.0,
+            )
+        )
+        self.assertFalse(
+            self.ctx.perform_heal_if_allowed(
+                lambda: True,
+                lambda: actions.append("item") or True,
+                cooldown_s=60.0,
+            )
+        )
+        self.assertEqual(actions, ["custom"])
+
 
 class DangerTeleportPriorityTests(unittest.TestCase):
     def setUp(self) -> None:

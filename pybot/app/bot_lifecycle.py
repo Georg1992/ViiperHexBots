@@ -107,6 +107,22 @@ class BotLifecycleManager:
         """True while a prior hunt is still unwinding its worker threads."""
         return self._stopping
 
+    @property
+    def shutdown_ready(self) -> bool:
+        """True when lifecycle workers no longer need a shutdown join."""
+        with self._ownership_lock:
+            return not (
+                self._stopping
+                or (
+                    self._start_thread is not None
+                    and self._start_thread.is_alive()
+                )
+                or (
+                    self._stop_joiner is not None
+                    and self._stop_joiner.is_alive()
+                )
+            )
+
     def _post_to_main(self, callback: Callable[[], None]) -> None:
         self._main_queue.put_nowait(callback)
 

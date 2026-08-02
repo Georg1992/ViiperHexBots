@@ -39,6 +39,9 @@ class GateController:
         # Set while heal-until-full — combat idles; discovery/tracking/timers keep running.
         self.healing_event = threading.Event()
         self._sit_storage_lock = threading.Lock()
+        # Shared cooldown for every HP-healing input path. Custom mob healing
+        # and the HP-item worker must not both decide to heal in one window.
+        self._last_heal_action_mono = 0.0
         # Monotonic deadline: after teleport settle, heal freely until this time.
         self._post_teleport_heal_until = 0.0
         # Startup milestones and hunt generations belong to the dedicated
@@ -169,6 +172,20 @@ class GateController:
             # Existing input workers treat only an explicit False as a
             # rejected action; lightweight backends commonly return None.
             return result is not False
+
+    def perform_heal_if_allowed(self, allowed, action, *, cooldown_s: float = 1.0) -> bool:
+        """Admit one healing input and share its cooldown across workers."""
+        with self._sit_storage_lock:
+            if not allowed():
+                return False
+            now = time.monotonic()
+            if now - self._last_heal_action_mono < max(0.0, cooldown_s):
+                return False
+            result = action()
+            if result is not False:
+                self._last_heal_action_mono = time.monotonic()
+                return True
+            return False
 
     def request_danger_sit(self) -> None:
         """Ask the sit worker to move safe, sit, recover, and restart hunt."""

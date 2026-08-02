@@ -55,57 +55,16 @@ class AttackLoop:
 
                 target_id = self._ctx.policy.select_target(policy_tracks, tick)
                 if target_id:
-                    # Safe self-heal is attempted before the attack. Kiting
-                    # only handles movement and never casts self-targeted skills.
-                    heal = getattr(self._mob_behavior, "heal_if_needed", None)
-                    if callable(heal):
-                        try:
-                            hx, hy = self._character_pos()
-                            perform_if_allowed(
-                                self._input,
-                                getattr(
-                                    self._ctx,
-                                    "should_run_heal_actions",
-                                    getattr(
-                                        self._ctx,
-                                        "should_run_character_actions",
-                                        self._ctx.should_run_combat,
-                                    ),
-                                ),
-                                lambda: bool(heal(hx, hy, self._input)),
-                                lifecycle=self._ctx,
-                            )
-                        except Exception:
-                            self._ctx.logger.behavior(
-                                f"[HEAL] self-heal error:\\n{traceback.format_exc()}"
-                            )
+                    # Safe self-heal is attempted before the attack. The
+                    # shared admission helper serializes it with the HP-item
+                    # worker and applies one cooldown to both paths.
+                    self._attempt_heal()
                     self._attack_one(target_id, tick)
                     self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
                     continue
 
                 # Also heal while the area is temporarily empty.
-                heal = getattr(self._mob_behavior, "heal_if_needed", None)
-                if callable(heal):
-                    try:
-                        hx, hy = self._character_pos()
-                        perform_if_allowed(
-                            self._input,
-                            getattr(
-                                self._ctx,
-                                "should_run_heal_actions",
-                                getattr(
-                                    self._ctx,
-                                    "should_run_character_actions",
-                                    self._ctx.should_run_combat,
-                                ),
-                            ),
-                            lambda: bool(heal(hx, hy, self._input)),
-                            lifecycle=self._ctx,
-                        )
-                    except Exception:
-                        self._ctx.logger.behavior(
-                            f"[HEAL] idle self-heal error:\\n{traceback.format_exc()}"
-                        )
+                self._attempt_heal()
 
                 self._hunt_mode.on_no_attackable_targets()
                 self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
@@ -114,6 +73,41 @@ class AttackLoop:
                     f"[ATTACK] CRASH:\n{traceback.format_exc()}"
                 )
                 break
+
+    def _attempt_heal(self) -> None:
+        """Attempt one custom heal through the shared heal admission gate."""
+        heal = getattr(self._mob_behavior, "heal_if_needed", None)
+        if not callable(heal):
+            return
+        try:
+            hx, hy = self._character_pos()
+            allowed = getattr(
+                self._ctx,
+                "should_run_heal_actions",
+                getattr(
+                    self._ctx,
+                    "should_run_character_actions",
+                    self._ctx.should_run_combat,
+                ),
+            )
+            admit = getattr(type(self._ctx), "perform_heal_if_allowed", None)
+            if callable(admit):
+                self._ctx.perform_heal_if_allowed(
+                    allowed,
+                    lambda: bool(heal(hx, hy, self._input)),
+                    cooldown_s=1.0,
+                )
+            else:
+                perform_if_allowed(
+                    self._input,
+                    allowed,
+                    lambda: bool(heal(hx, hy, self._input)),
+                    lifecycle=self._ctx,
+                )
+        except Exception:
+            self._ctx.logger.behavior(
+                f"[HEAL] self-heal error:\\n{traceback.format_exc()}"
+            )
 
     def _character_pos(self) -> tuple[int, int]:
         """Screen position used for the melee-range idle guard."""

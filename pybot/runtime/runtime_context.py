@@ -206,8 +206,22 @@ class HuntRuntimeContext:
         """Admit one short input action against session transitions."""
         return self.gates.perform_input_if_allowed(allowed, action)
 
+    def perform_heal_if_allowed(self, allowed, action, *, cooldown_s: float = 1.0) -> bool:
+        """Admit healing through the shared cross-worker cooldown."""
+        return self.gates.perform_heal_if_allowed(
+            allowed, action, cooldown_s=cooldown_s
+        )
+
     def should_run_timers(self) -> bool:
         return self.gates.should_run_timers()
+
+    def should_run_mode_transitions(self) -> bool:
+        """True when a teleport transition may claim the hunt input boundary."""
+        return (
+            self.should_run_combat()
+            and self.startup_buffs_done.is_set()
+            and self.startup_timers_done.is_set()
+        )
 
     @property
     def hunt_generation(self) -> int:

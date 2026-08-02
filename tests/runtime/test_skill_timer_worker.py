@@ -55,6 +55,45 @@ class SkillTimerWorkerTests(unittest.TestCase):
         self.assertEqual(len(waits), 1)
         self.assertAlmostEqual(waits[0], SKILL_TIMER_STAGGER_MS / 1000.0, places=3)
 
+    def test_long_timer_is_due_immediately_even_with_low_monotonic_uptime(self) -> None:
+        timers = (
+            SkillTimerRuntime(button="s", scan_code=31, interval_ms=180_000),
+        )
+        stop = threading.Event()
+        presses: list[int] = []
+        clock = {"ms": 1_000}
+
+        def teleport_key(scan_code: int) -> None:
+            presses.append(scan_code)
+            stop.set()
+
+        def wait_paused(_timeout_s: float) -> bool:
+            return stop.is_set()
+
+        ctx = SimpleNamespace(
+            config=SimpleNamespace(skill_timers=timers),
+            logger=SimpleNamespace(behavior=MagicMock()),
+            stop_event=stop,
+            resume_gate=threading.Event(),
+            is_stopped=stop.is_set,
+            should_run_workers=lambda: not stop.is_set(),
+            should_run_timers=lambda: not stop.is_set(),
+            wait_while_stopped_or_paused=wait_paused,
+        )
+        worker = SkillTimerWorker(ctx, SimpleNamespace(teleport_key=teleport_key))
+
+        with patch(
+            "pybot.runtime.workers.skill_timer_worker.monotonic_ms",
+            side_effect=lambda: clock["ms"],
+        ):
+            worker.run()
+
+        self.assertEqual(presses, [31])
+        self.assertTrue(
+            any("key executed key=s scanCode=31" in call.args[0]
+                for call in ctx.logger.behavior.call_args_list)
+        )
+
     def test_healing_does_not_disarm_or_rearm_timers(self) -> None:
         timers = (
             SkillTimerRuntime(button="f1", scan_code=59, interval_ms=10),

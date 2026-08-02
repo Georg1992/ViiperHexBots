@@ -16,6 +16,11 @@ class CriticalDangerWorker:
     def process_pending(self) -> bool:
         """Handle one pending critical escape; return whether it succeeded."""
         ctx = self._ctx
+        # Stop and focus-loss pause must not turn an interrupted teleport into
+        # a retry loop or admit emergency input after shutdown begins. Leave the
+        # request queued for a later resume when paused.
+        if ctx.is_stopped() or ctx.pause_event.is_set():
+            return False
         if ctx.sitting_event.is_set() or ctx.storage_event.is_set():
             return False
         if not ctx.critical_danger_requested.is_set():
@@ -23,11 +28,20 @@ class CriticalDangerWorker:
         if not ctx.try_begin_sit_ops():
             return False
         try:
+            # Re-check after claiming the gate because focus can be lost between
+            # the initial check and the ownership transition.
+            if ctx.pause_event.is_set():
+                return False
             # Consume both mirrored requests before teleport. A seated session
             # cannot claim this path because it already holds the sit gate.
             if not ctx.pop_critical_danger():
                 return False
             ctx.pop_danger_sit_request()
+            # Pause may arrive while consuming the mirrored requests. Restore
+            # the critical request without sending input during focus loss.
+            if ctx.pause_event.is_set():
+                ctx.request_critical_danger()
+                return False
             escaped = False
             try:
                 escaped = bool(

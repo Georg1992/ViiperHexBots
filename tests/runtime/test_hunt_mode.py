@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import unittest
 from unittest.mock import MagicMock
 
@@ -80,6 +81,121 @@ class HuntModeTests(unittest.TestCase):
         teleported = self.mode.on_no_attackable_targets()
         self.assertFalse(teleported)
         self.assertEqual(self.tracks.get_track_count(), 0)
+
+    def test_does_not_teleport_when_startup_gate_changes_before_commit(self) -> None:
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=self.tracks.area_epoch,
+        )
+        self.ctx.gates.startup.begin(require_buffs=True, require_timers=True)
+        self.ctx.gates.startup.mark_area_clear()
+        self.ctx.gates.startup.mark_buffs_done()
+        self.ctx.gates.startup.mark_timers_done()
+        self.ctx.gates.startup.timers_done.clear()
+        self.ctx.should_run_combat = MagicMock(side_effect=[True, False])
+
+        # The first check admits the stale no-target decision; the final
+        # admission check must observe that startup timers became pending.
+        self.assertFalse(self.mode.on_no_attackable_targets())
+        self.assertEqual(self.tracks.area_epoch, 0)
+
+    def test_mode_teleport_shares_lifecycle_admission_boundary(self) -> None:
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=self.tracks.area_epoch,
+        )
+        teleport = self.mode._strategy._teleport
+        teleport.mode_teleport = MagicMock(return_value=True)
+
+        self.ctx.gates._sit_storage_lock.acquire()
+        try:
+            result: list[bool] = []
+            thread = threading.Thread(
+                target=lambda: result.append(self.mode.on_no_attackable_targets()),
+                daemon=True,
+            )
+            thread.start()
+            thread.join(timeout=0.05)
+            self.assertTrue(thread.is_alive())
+        finally:
+            self.ctx.gates._sit_storage_lock.release()
+
+        thread.join(timeout=1.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result, [True])
+        teleport.mode_teleport.assert_called_once_with()
+
+    def test_minimum_location_dwell_blocks_teleport_storm(self) -> None:
+        self.config = make_config(time_on_location_s=10)
+        self.ctx = HuntRuntimeContext(
+            config=self.config,
+            logger=self.logger,
+            tracks=self.tracks,
+            policy=HuntPolicy(),
+            capture=MagicMock(spec=HuntWindowCapture),
+            detector=self.detector,
+            tracker=self.detector,
+            validation=HuntValidationLogger(self.logger, self.tracks, enabled=False),
+            control=RuntimeControl(None),
+        )
+        self.mode = create_hunt_mode(
+            self.ctx,
+            ShadowInputBackend(),
+            teleport_controller=_make_tport(self.ctx, ShadowInputBackend()),
+        )
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=self.tracks.area_epoch,
+        )
+        self.assertTrue(self.mode.on_no_attackable_targets())
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=self.tracks.area_epoch,
+        )
+        self.assertFalse(self.mode.on_no_attackable_targets())
+
+    def test_concurrent_no_target_calls_claim_only_one_dwell_slot(self) -> None:
+        self.config = make_config(time_on_location_s=10)
+        self.ctx = HuntRuntimeContext(
+            config=self.config,
+            logger=self.logger,
+            tracks=self.tracks,
+            policy=HuntPolicy(),
+            capture=MagicMock(spec=HuntWindowCapture),
+            detector=self.detector,
+            tracker=self.detector,
+            validation=HuntValidationLogger(self.logger, self.tracks, enabled=False),
+            control=RuntimeControl(None),
+        )
+        self.mode = create_hunt_mode(
+            self.ctx,
+            ShadowInputBackend(),
+            teleport_controller=_make_tport(self.ctx, ShadowInputBackend()),
+        )
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=self.tracks.area_epoch,
+        )
+        teleport = self.mode._strategy._teleport
+        teleport.mode_teleport = MagicMock(return_value=True)
+        results: list[bool] = []
+        threads = [
+            threading.Thread(
+                target=lambda: results.append(self.mode.on_no_attackable_targets())
+            )
+            for _ in range(2)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=1.0)
+        self.assertEqual(sorted(results), [False, True])
+        teleport.mode_teleport.assert_called_once_with()
 
     def test_shadow_teleport_on_area_clear(self) -> None:
         self.mode.note_discovery_scan_completed(
