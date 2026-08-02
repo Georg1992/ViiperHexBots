@@ -120,15 +120,15 @@ class AttackLoopSitRaceTests(unittest.TestCase):
             vitals=vitals,
         )
 
-        # The attack starts movement immediately; the later gate check only
-        # prevents idle classification when sit claims combat during the delay.
+        # A sit claim that is already visible at the final admission boundary
+        # must reject the stale attack and its follow-up kite entirely.
         ctx.should_run_combat.side_effect = None
         ctx.should_run_combat.return_value = False
         loop._attack_one(1, 1)
 
-        input_backend.skill_click_at.assert_called_once_with(16, 10, 20)
-        mob_behavior.kite_after_attack.assert_called_once()
-        self.assertEqual(events, ["attack", "kite", "delay"])
+        input_backend.skill_click_at.assert_not_called()
+        mob_behavior.kite_after_attack.assert_not_called()
+        self.assertEqual(events, [])
         mob_behavior.heal_if_needed.assert_not_called()
 
 

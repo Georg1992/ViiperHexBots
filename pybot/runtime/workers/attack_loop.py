@@ -15,7 +15,7 @@ from pybot.runtime.constants import (
 from pybot.runtime.combat_observer import CombatObserver
 from pybot.runtime.hunt_mode import HuntModeController
 from pybot.runtime.hunt_tracks import monotonic_ms
-from pybot.runtime.input.input_backend import InputBackend
+from pybot.runtime.input.input_backend import InputBackend, perform_if_allowed
 from pybot.runtime.mob_behaviors import MobBehavior
 from pybot.runtime.workers.worker_contexts import AttackLoopContext
 
@@ -61,7 +61,16 @@ class AttackLoop:
                     if callable(heal):
                         try:
                             hx, hy = self._character_pos()
-                            heal(hx, hy, self._input)
+                            perform_if_allowed(
+                                self._input,
+                                getattr(
+                                    self._ctx,
+                                    "should_run_character_actions",
+                                    self._ctx.should_run_combat,
+                                ),
+                                lambda: bool(heal(hx, hy, self._input)),
+                                lifecycle=self._ctx,
+                            )
                         except Exception:
                             self._ctx.logger.behavior(
                                 f"[HEAL] self-heal error:\\n{traceback.format_exc()}"
@@ -75,7 +84,16 @@ class AttackLoop:
                 if callable(heal):
                     try:
                         hx, hy = self._character_pos()
-                        heal(hx, hy, self._input)
+                        perform_if_allowed(
+                            self._input,
+                            getattr(
+                                self._ctx,
+                                "should_run_character_actions",
+                                self._ctx.should_run_combat,
+                            ),
+                            lambda: bool(heal(hx, hy, self._input)),
+                            lifecycle=self._ctx,
+                        )
                     except Exception:
                         self._ctx.logger.behavior(
                             f"[HEAL] idle self-heal error:\\n{traceback.format_exc()}"
@@ -135,13 +153,18 @@ class AttackLoop:
         # first attack. Failed input leaves the flag unset so the next cycle
         # can retry instead of attacking an unprepared target.
         try:
-            prepared = self._mob_behavior.prepare_target(
-                target_id,
-                click_x,
-                click_y,
+            prepared = perform_if_allowed(
                 self._input,
-                target_debuffed=getattr(snap, "debuff_applied", False),
-                mark_debuffed=lambda: ctx.tracks.mark_debuff_applied(target_id),
+                ctx.should_run_combat,
+                lambda: self._mob_behavior.prepare_target(
+                    target_id,
+                    click_x,
+                    click_y,
+                    self._input,
+                    target_debuffed=getattr(snap, "debuff_applied", False),
+                    mark_debuffed=lambda: ctx.tracks.mark_debuff_applied(target_id),
+                ),
+                lifecycle=ctx,
             )
         except Exception:
             ctx.logger.behavior(
@@ -158,8 +181,13 @@ class AttackLoop:
         # another worker's self-cast or storage action.
         try:
             all_mobs = ctx.tracks.positions_snapshot()
-            self._mob_behavior.before_attack(
-                char_x, char_y, self._input, all_mobs=all_mobs,
+            perform_if_allowed(
+                self._input,
+                ctx.should_run_combat,
+                lambda: self._mob_behavior.before_attack(
+                    char_x, char_y, self._input, all_mobs=all_mobs,
+                ),
+                lifecycle=ctx,
             )
         except Exception:
             ctx.logger.behavior(
@@ -174,8 +202,13 @@ class AttackLoop:
             # Atomic target move + skill key + click. This prevents a periodic
             # self-buff or heal worker from stealing the cursor between move
             # and attack input.
-            attack_started = self._input.skill_click_at(
-                ctx.config.skill_scan_code, click_x, click_y
+            attack_started = perform_if_allowed(
+                self._input,
+                ctx.should_run_combat,
+                lambda: self._input.skill_click_at(
+                    ctx.config.skill_scan_code, click_x, click_y
+                ),
+                lifecycle=ctx,
             )
         except Exception:
             ctx.logger.behavior(
@@ -190,8 +223,13 @@ class AttackLoop:
         try:
             kite_x, kite_y = self._character_pos()
             all_mobs = ctx.tracks.positions_snapshot()
-            self._mob_behavior.kite_after_attack(
-                kite_x, kite_y, self._input, all_mobs=all_mobs,
+            perform_if_allowed(
+                self._input,
+                ctx.should_run_combat,
+                lambda: self._mob_behavior.kite_after_attack(
+                    kite_x, kite_y, self._input, all_mobs=all_mobs,
+                ),
+                lifecycle=ctx,
             )
         except Exception:
             ctx.logger.behavior(

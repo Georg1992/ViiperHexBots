@@ -200,6 +200,10 @@ class HuntRuntimeContext:
             and self.gates.startup.is_combat_ready()
         )
 
+    def perform_input_if_allowed(self, allowed, action) -> bool:
+        """Admit one short input action against session transitions."""
+        return self.gates.perform_input_if_allowed(allowed, action)
+
     def should_run_timers(self) -> bool:
         return self.gates.should_run_timers()
 

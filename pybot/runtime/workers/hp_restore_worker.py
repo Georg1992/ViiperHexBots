@@ -11,7 +11,7 @@ from pybot.runtime.constants import (
     HP_RESTORE_POLL_S,
     HP_RESTORE_RATIO,
 )
-from pybot.runtime.input.input_backend import InputBackend
+from pybot.runtime.input.input_backend import InputBackend, perform_if_allowed
 from pybot.runtime.workers.worker_contexts import HpRestoreWorkerContext
 
 
@@ -59,7 +59,12 @@ class HpRestoreWorker:
                 ctx.logger.behavior(
                     f"[HP] item key={cfg.hp_button!r} ratio={ratio:.1%}"
                 )
-                if self._input.key_tap(scan, after_s=0.0):
+                if perform_if_allowed(
+                    self._input,
+                    ctx.should_run_workers,
+                    lambda: self._input.key_tap(scan, after_s=0.0),
+                    lifecycle=ctx,
+                ):
                     self._last_press_mono = time.monotonic()
                     ctx.stop_event.wait(HP_RESTORE_COOLDOWN_S)
                 else:

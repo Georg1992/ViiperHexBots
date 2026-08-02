@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import ctypes
+import threading
 import unittest
 from unittest.mock import MagicMock
+
+from pybot.runtime.gate_controller import GateController
 
 from pybot.runtime.runtime_context import HuntRuntimeContext
 
@@ -37,6 +40,42 @@ class SitHuntGateRaceTests(unittest.TestCase):
         ctx.pause_event.clear()
         self.assertTrue(ctx.wait_while_user_paused(0.05))
         self.assertFalse(ctx.should_run_workers())
+
+    def test_input_admission_serializes_sit_claim(self) -> None:
+        gates = GateController()
+        action_started = threading.Event()
+        release_action = threading.Event()
+        sit_claimed = threading.Event()
+        result: list[bool] = []
+
+        def action() -> bool:
+            action_started.set()
+            release_action.wait(1.0)
+            return True
+
+        input_thread = threading.Thread(
+            target=lambda: gates.perform_input_if_allowed(lambda: True, action),
+            daemon=True,
+        )
+        input_thread.start()
+        self.assertTrue(action_started.wait(1.0))
+
+        def claim_sit() -> None:
+            result.append(gates.try_begin_sit_ops())
+            sit_claimed.set()
+
+        sit_thread = threading.Thread(target=claim_sit, daemon=True)
+        sit_thread.start()
+        self.assertFalse(sit_claimed.wait(0.05))
+
+        release_action.set()
+        input_thread.join(timeout=1.0)
+        sit_thread.join(timeout=1.0)
+
+        self.assertFalse(input_thread.is_alive())
+        self.assertFalse(sit_thread.is_alive())
+        self.assertEqual(result, [True])
+        self.assertTrue(gates.sitting_event.is_set())
 
     def test_run_refuses_when_worker_threads_still_alive(self) -> None:
         ctx = MagicMock()

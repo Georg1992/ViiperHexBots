@@ -3,7 +3,38 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Protocol
+
+
+
+def perform_if_allowed(
+    backend: "InputBackend",
+    allowed: Callable[[], bool],
+    action: Callable[[], bool],
+    *,
+    lifecycle=None,
+) -> bool:
+    """Run one input action only when its lifecycle gate still admits it.
+
+    Runtime contexts evaluate the predicate under the existing session
+    ownership lock; lightweight callers use the same check-before-action
+    contract without adding synchronization. The action itself owns its
+    normal input timing and cancellation behavior.
+    """
+    # A runtime context can make the lifecycle check and action one atomic
+    # ownership boundary. This is the important path for workers; the backend
+    # fallback below still protects callers that do not have a context.
+    admit = getattr(type(lifecycle), "perform_input_if_allowed", None)
+    if lifecycle is not None and callable(admit):
+        return lifecycle.perform_input_if_allowed(allowed, action)
+
+    if not allowed():
+        return False
+    result = action()
+    # Existing worker contracts reject only an explicit False. Lightweight
+    # test/custom backends historically return None for successful input.
+    return result is not False
 
 
 class InputBackend(Protocol):

@@ -168,18 +168,23 @@ class SitOnLowSpWorker:
         return ratio is not None and ratio >= SIT_RESUME_SP_RATIO
 
     def _sit_danger_detected(self) -> bool:
-        """Consume damage or detect any active nearby threat at the sit spot."""
-        if self._danger.pop_damage_detected():
-            return True
-        nearby = getattr(self._danger, "has_nearby_threat", None)
-        return callable(nearby) and bool(nearby())
+        """Consume a danger request raised by an observed HP drop.
+
+        Nearby mobs alone are not an attack signal: they can be present while
+        the character is safely sitting. The danger detector queues this event
+        only after seeing HP decrease, so the sit worker remains the sole owner
+        of the resulting escape sequence.
+        """
+        return self._ctx.pop_danger_sit_request()
 
     def _urgent_escape(self, *, reason: str) -> bool:
-        """Immediately escape a damaged or otherwise dangerous sit spot."""
-        # Never send emergency input after an explicit stop/pause. A pause may
-        # arrive between damage polling and this call, so check at the final
-        # boundary as well as in the normal action helpers.
-        if self._ctx.is_stopped() or self._ctx.pause_event.is_set():
+        """Escape danger, retaining the request until teleport succeeds."""
+        # Never send emergency input after an explicit stop. A pause keeps the
+        # request pending so resume can retry it before hunting continues.
+        if self._ctx.is_stopped():
+            return False
+        if self._ctx.pause_event.is_set():
+            self._ctx.request_danger_sit()
             return False
         try:
             escaped = self._teleport.danger_teleport(reason=reason)
@@ -190,9 +195,12 @@ class SitOnLowSpWorker:
             return False
         if not escaped:
             self._ctx.logger.behavior(
-                "[SIT] urgent danger teleport unavailable — "
-                "continuing with safe-place retry"
+                "[SIT] urgent danger teleport unavailable — retrying before "
+                "safe-place search"
             )
+        # A successful teleport resets the old damage sample, but it must not
+        # clear a request raised by a newer HP drop during teleport settle.
+        # The sit session consumed the request it owns before calling here.
         return bool(escaped)
 
     def run(self) -> None:
@@ -208,17 +216,13 @@ class SitOnLowSpWorker:
                     ctx.wait_while_stopped_or_paused(SIT_SP_POLL_INTERVAL_S)
                     continue
                 if ctx.danger_sit_requested.is_set():
-                    # Keep the request queued until begin_sit_ops() acquires
-                    # ownership. Storage/heal may be holding the session lock;
-                    # consuming first would lose the escape request.
+                    # The request remains set until this worker owns the sit
+                    # session. Storage/heal may be using the input boundary.
                     ratio = self._sp_ratio()
                     self._recover_sp(
                         ratio if ratio is not None else 1.0,
                         reason="danger",
-                        consume_danger_request=True,
                     )
-                    # Storage/heal may still own the session. Avoid a hot
-                    # retry loop while the request remains queued.
                     if ctx.danger_sit_requested.is_set():
                         ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
                     continue
@@ -238,20 +242,19 @@ class SitOnLowSpWorker:
         low_ratio: float,
         *,
         reason: str = "low_sp",
-        consume_danger_request: bool = False,
     ) -> None:
         """Break hunt, move safe, sit/recover, then start a fresh hunt."""
         ctx = self._ctx
         sit_scan = ctx.config.sit_on_low_sp_scan_code
-        if consume_danger_request:
-            # Danger requests are retried by the outer loop if storage/heal
-            # currently owns the session; never block while holding the queue.
+        if reason == "danger":
+            # Do not consume the request until the session is ours. If another
+            # session owns the input boundary, the outer loop retries later.
             if not ctx.try_begin_sit_ops():
                 return
-            # The request is cleared only after sit ownership is held.
             ctx.pop_danger_sit_request()
         elif not ctx.begin_sit_ops():
             return
+        escape_first = reason == "danger"
         try:
             ctx.logger.behavior(
                 f"[SIT] {reason} session ratio={low_ratio:.1%} — hunt paused until "
@@ -268,6 +271,33 @@ class SitOnLowSpWorker:
                 if self._seated:
                     if not self.stand(sit_scan):
                         ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
+                    continue
+
+                # A pause/input interruption may happen after SP has already
+                # recovered. Do not start another teleport/sit cycle; the
+                # character is standing here, so the hunt can resume directly.
+                if not escape_first and self._sp_recovered():
+                    ratio = self._sp_ratio()
+                    ctx.logger.behavior(
+                        f"[SIT] SP recovered during retry ratio={ratio:.1%} "
+                        "— resuming hunt"
+                    )
+                    break
+
+                if escape_first:
+                    # Damage interrupted hunting or a previous sit attempt.
+                    # Escape first, then use the same quiet-area search as low
+                    # SP recovery. A failed escape leaves the request handled;
+                    # the safe-place loop still retries while hunting is held.
+                    if not self._urgent_escape(reason="sit_danger_request"):
+                        ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
+                        continue
+                    escape_first = False
+
+                # A fresh damage event raised while the urgent escape was in
+                # flight takes priority over normal quiet-area searching.
+                if ctx.danger_sit_requested.is_set():
+                    escape_first = True
                     continue
 
                 if not self._teleport.teleport_to_safe_place(log_tag="SIT"):
@@ -293,11 +323,30 @@ class SitOnLowSpWorker:
                     continue
 
                 if outcome == "interrupted":
+                    # _sit_until_done already stood and performed the urgent
+                    # teleport. The next iteration only searches for a quiet
+                    # place; it never sends a second urgent teleport.
+                    escape_first = False
+                    reason = "low_sp"
                     ctx.logger.behavior(
                         "[SIT] interrupted — new sit spot (hunt stays paused)"
                     )
                     continue
 
+                if outcome == "danger_escape_failed":
+                    # Stay in the danger phase until the urgent escape succeeds;
+                    # never search for a sit spot from the unsafe area.
+                    reason = "danger"
+                    escape_first = True
+                    ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
+                    continue
+
+                if ctx.danger_sit_requested.is_set():
+                    # A failed stand re-queued danger. Once the stand succeeds,
+                    # the next action must still be the urgent escape—not a
+                    # quiet-area search from the old location.
+                    reason = "danger"
+                    escape_first = True
                 ctx.logger.behavior(
                     "[SIT] session incomplete — retry (hunt stays paused)"
                 )
@@ -348,14 +397,15 @@ class SitOnLowSpWorker:
         """Sit once → wait SP/damage → stand once."""
         ctx = self._ctx
         # Damage during teleport/idle clearing means the location is no longer
-        # safe. Preserve the event and let _recover_sp clear a new location
-        # before trying to sit again.
+        # safe. The queued request is consumed here and the caller finds a new
+        # location before trying to sit again.
         if self._sit_danger_detected():
             ctx.logger.behavior(
                 "[SIT] danger observed before sitting — urgent escape "
                 "and finding a new spot"
             )
-            self._urgent_escape(reason="sit_spot_danger")
+            if not self._urgent_escape(reason="sit_spot_danger"):
+                return "danger_escape_failed"
             return "interrupted"
 
         if not self.sit(sit_scan):
@@ -381,8 +431,13 @@ class SitOnLowSpWorker:
                 # before moving to another area. An accepted toggle remains
                 # authoritative even if its settle wait was interrupted.
                 if not stood:
+                    # _sit_danger_detected() may have consumed the only queued
+                    # event. Keep danger pending until the seated toggle is
+                    # successfully undone and escape can run.
+                    ctx.request_danger_sit()
                     return None
-                self._urgent_escape(reason="sit_danger")
+                if not self._urgent_escape(reason="sit_danger"):
+                    return "danger_escape_failed"
                 return "interrupted"
 
             ratio = self._sp_ratio()

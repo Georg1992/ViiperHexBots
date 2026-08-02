@@ -5,18 +5,21 @@ Responsibilities
 * **Key selection** — mode/area: creamy TP first, wing key next.
   Danger/critical: wing key when Teleport Key is assigned, else creamy.
 * **Execution** — press teleport key, wait for settle, track wings/overlay.
-* **Danger teleport** — for DangerDetector when the danger level is critical.
+* **Danger teleport** — the sit worker's urgent escape primitive.
 * **Area clear** — scan-loop that teleports until discovery sees zero mobs.
 * **Quiet area** — clear + idle + re-scan (for sit/storage workers).
 * **Mode teleport** — discovery-gated teleport with suspend/release (for TeleportStrategy).
 
 Usage
 -----
-Create once per hunt session and inject into DangerDetector, workers,
-and the TeleportStrategy.
+Create once per hunt session and inject into workers and the
+TeleportStrategy. DangerDetector only observes HP/visual state; the sit worker
+owns danger escape.
 """
 
 from __future__ import annotations
+
+import time
 
 from pybot.runtime.constants import (
     HP_POST_TELEPORT_HEAL_S,
@@ -93,6 +96,7 @@ class TeleportController:
         tp = int(scan_code) if scan_code is not None else self.active_scan_code()
         if tp <= 0:
             return False
+        teleport_started = time.monotonic()
         try:
             self._input.teleport_key(tp)
         except Exception as exc:
@@ -106,16 +110,16 @@ class TeleportController:
             cfg.teleport_duration_ms / 1000.0
         )
         if settled:
-            # Every successful teleport starts a new area. Clear both visual
-            # threat flags and recorded damage centrally so danger, mode, and
-            # area-clear teleports all begin in SAFE state.
+            # Every successful teleport starts a new area. Clear visual threat
+            # flags and only the damage observed before this teleport. Damage
+            # recorded during settle remains a fresh danger signal.
             self._ctx.mark_post_teleport_heal(HP_POST_TELEPORT_HEAL_S)
             self._clear_character_threat()
             danger = getattr(self._ctx, "danger_detector", None)
             if danger is not None:
                 reset = getattr(danger, "reset_after_teleport", None)
                 if callable(reset):
-                    reset()
+                    reset(teleport_started)
         return settled
 
     # ── Safe-place teleport ──────────────────────────────────────
@@ -200,25 +204,58 @@ class TeleportController:
             )
         return False
 
+    def _danger_request_is_set(self) -> bool | None:
+        """Return danger state when the context exposes a real boolean event."""
+        event = getattr(self._ctx, "danger_sit_requested", None)
+        is_set = getattr(event, "is_set", None)
+        if not callable(is_set):
+            return None
+        try:
+            value = is_set()
+        except Exception:
+            return None
+        # MagicMock/lightweight contexts return a mock here, not a boolean.
+        # Treat those as contexts without an interruptible danger event.
+        return value if type(value) is bool else None
+
     def teleport_until_quiet(
         self,
         log_tag: str,
         idle_s: float = SIT_IDLE_BEFORE_SIT_S,
     ) -> bool:
-        """Clear area, idle, then re-scan.
-
-        A single clear snapshot is not enough: mobs can walk into ROI (or first
-        become detectable) during the post-clear idle before sit/storage UI.
-
-        Returns ``True`` when still clear after the idle window.
-        """
+        """Clear area, idle, then re-scan, aborting promptly for danger."""
         while not self._ctx.is_stopped():
+            if self._danger_request_is_set() is True:
+                return False
             if not self.teleport_until_clear(log_tag=log_tag):
                 return False
             self._ctx.logger.behavior(
                 f"[{log_tag}] area clear — idle {idle_s:.0f}s before proceed"
             )
-            if not self._ctx.wait_unless_stopped(idle_s):
+
+            danger_is_real = self._danger_request_is_set() is not None
+            deadline = time.monotonic() + idle_s
+            while True:
+                if self._danger_request_is_set() is True:
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                # Real runtime events are checked at the worker cadence so a
+                # damage request cannot wait through the whole idle window.
+                # Legacy/lightweight contexts retain their single wait call.
+                if not danger_is_real:
+                    # Lightweight test/custom contexts do not expose a real
+                    # danger event. Preserve their original single blocking
+                    # wait, then continue to the mandatory post-idle scan.
+                    if not self._ctx.wait_unless_stopped(idle_s):
+                        return False
+                    break
+                wait_s = min(SIT_SP_POLL_INTERVAL_S, remaining)
+                if not self._ctx.wait_unless_stopped(wait_s):
+                    return False
+
+            if self._danger_request_is_set() is True:
                 return False
             living = self._scan_living_count()
             if living is None:

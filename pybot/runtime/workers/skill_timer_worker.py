@@ -12,7 +12,7 @@ import traceback
 
 from pybot.runtime.constants import SKILL_TIMER_STAGGER_MS
 from pybot.runtime.hunt_tracks import monotonic_ms
-from pybot.runtime.input.input_backend import InputBackend
+from pybot.runtime.input.input_backend import InputBackend, perform_if_allowed
 from pybot.runtime.workers.worker_contexts import SkillTimerWorkerContext
 
 
@@ -110,7 +110,12 @@ class SkillTimerWorker:
                         break
                     if startup_pending and not self._startup_action_allowed():
                         break
-                    pressed = self._input.teleport_key(timer.scan_code)
+                    pressed = perform_if_allowed(
+                        self._input,
+                        ctx.should_run_timers,
+                        lambda: self._input.teleport_key(timer.scan_code),
+                        lifecycle=ctx,
+                    )
                     if pressed is False:
                         continue
                     if int(getattr(ctx, "hunt_generation", 0)) != generation:

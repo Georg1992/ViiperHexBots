@@ -10,7 +10,7 @@ from pybot.runtime.constants import (
     STARTUP_BUFF_GAP_S,
 )
 from pybot.runtime.hunt_tracks import monotonic_ms
-from pybot.runtime.input.input_backend import InputBackend
+from pybot.runtime.input.input_backend import InputBackend, perform_if_allowed
 from pybot.runtime.workers.worker_contexts import SelfBuffWorkerContext
 
 
@@ -241,20 +241,27 @@ class SelfBuffWorker:
                 allowed = self._character_action_allowed()
             if not allowed:
                 return False
-            if startup:
-                try:
-                    cast = self._input.skill_click_at(
-                        buff.scan_code,
-                        cx,
-                        cy,
-                        move_delay_s=STARTUP_BUFF_CURSOR_DELAY_S,
-                    )
-                except TypeError:
-                    # Keep lightweight test/custom backends compatible with
-                    # the older three-argument protocol.
-                    cast = self._input.skill_click_at(buff.scan_code, cx, cy)
-            else:
-                cast = self._input.skill_click_at(buff.scan_code, cx, cy)
+            def cast_action() -> bool:
+                if startup:
+                    try:
+                        return bool(self._input.skill_click_at(
+                            buff.scan_code,
+                            cx,
+                            cy,
+                            move_delay_s=STARTUP_BUFF_CURSOR_DELAY_S,
+                        ))
+                    except TypeError:
+                        # Keep lightweight test/custom backends compatible with
+                        # the older three-argument protocol.
+                        return bool(self._input.skill_click_at(buff.scan_code, cx, cy))
+                return bool(self._input.skill_click_at(buff.scan_code, cx, cy))
+
+            cast = perform_if_allowed(
+                self._input,
+                self._startup_action_allowed if startup else self._character_action_allowed,
+                cast_action,
+                lifecycle=ctx,
+            )
             if not cast:
                 return False
             cast_at = monotonic_ms()

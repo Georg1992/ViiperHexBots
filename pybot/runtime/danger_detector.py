@@ -3,11 +3,9 @@
 Runs in its own worker thread.  Polls ``PlayerVitals`` for HP and
 reads ``CharacterState`` for surround / nearby mobs.
 
-* Any HP drop → record damage (sit/heal consumers)
-* Any HP drop → record recent damage
-* Surrounded + recent damage, or HP below 50% + recent damage → urgent
-  danger teleport (when allowed)
-* Nearby mobs remain a healing threat even when they do not qualify for TP
+* Any HP drop → record recent damage and queue one danger-sit request
+* Nearby mobs remain a healing threat for healing decisions; the sit worker
+  owns the escape sequence
 """
 
 from __future__ import annotations
@@ -24,7 +22,6 @@ from pybot.runtime.constants import (
 
 if TYPE_CHECKING:
     from pybot.game_state import PlayerVitals
-    from pybot.runtime.teleport import TeleportController
     from pybot.runtime.character_state import CharacterState
 
 CRITICAL_HP_RATIO = 0.5
@@ -39,33 +36,30 @@ class DangerLevel(IntEnum):
 
 
 class DangerDetector:
-    """Observes HP and CharacterState; urgent TP requires fresh damage."""
+    """Observes HP and CharacterState; the sit worker owns danger escape."""
 
     def __init__(
         self,
         ctx,
-        teleport: TeleportController,
         character_state: CharacterState,
         vitals: PlayerVitals,
     ) -> None:
         self._ctx = ctx
-        self._teleport = teleport
         self._character_state = character_state
         self._vitals = vitals
         self._prev_hp: int | None = None
         self._damage_lock = threading.Lock()
-        self._damage_detected: bool = False
         self._last_damage_mono: float | None = None
 
     def run(self) -> None:
-        """Ongoing loop: poll HP, check urgent danger, sleep."""
+        """Ongoing loop: poll HP and sleep until stopped."""
         while not self._ctx.is_stopped():
             self._poll_hp()
-            self._check_urgent_danger()
             self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
 
     def _poll_hp(self) -> None:
-        """Read HP from shared vitals and record every HP drop as damage."""
+        """Read HP and queue one danger request for each observed drop."""
+        damage_seen = False
         with self._damage_lock:
             hp, _hp_max = self._vitals.hp_pair()
             if hp is None:
@@ -73,29 +67,16 @@ class DangerDetector:
                 return
 
             if self._prev_hp is not None and hp < self._prev_hp:
-                self._damage_detected = True
                 self._last_damage_mono = time.monotonic()
+                damage_seen = True
             self._prev_hp = hp
 
-    def _check_urgent_danger(self) -> None:
-        """Ask the sit worker to escape any danger and restart the hunt.
-
-        Sitting is the single hunt-break path. The sit worker owns the safe
-        teleport, sit/stand toggle, SP recovery, and generation restart; this
-        observer only raises the request and never teleports independently.
-        """
-        if not self._ctx.should_run_workers():
-            return
-        # A nearby mob by itself is ordinary combat, not a reason to break
-        # the hunt. Danger-driven sitting is damage-based only; every recent
-        # HP drop is handed to the sit worker, which decides how to reach a
-        # safe place and recover SP. Critical level still has the same
-        # damage+surround/low-HP semantics for callers that inspect it.
-        if not self.has_recent_damage(HP_HEAL_DAMAGE_QUIET_S):
-            return
-        request = getattr(self._ctx, "request_danger_sit", None)
-        if callable(request):
-            request()
+        if damage_seen:
+            # Raise the sole sit/danger signal after releasing the damage lock.
+            # The sit worker can then safely contend for the session boundary.
+            request = getattr(self._ctx, "request_danger_sit", None)
+            if callable(request):
+                request()
 
     def danger_level(self) -> DangerLevel:
         """Return SAFE, DANGER, or CRITICAL from the current shared state.
@@ -119,13 +100,21 @@ class DangerDetector:
             return DangerLevel.DANGER
         return DangerLevel.SAFE
 
-    def reset_after_teleport(self) -> None:
-        """Forget damage state after a successful teleport into a new area."""
+    def reset_after_teleport(self, tp_start_mono: float | None = None) -> None:
+        """Forget pre-teleport damage without consuming sit requests.
+
+        When called with the teleport start time, damage recorded during the
+        settle window is retained. With no timestamp, clear the current sample
+        for direct/manual area resets.
+        """
         with self._damage_lock:
-            hp, _hp_max = self._vitals.hp_pair()
-            self._damage_detected = False
+            if (
+                tp_start_mono is not None
+                and self._last_damage_mono is not None
+                and self._last_damage_mono >= tp_start_mono
+            ):
+                return
             self._last_damage_mono = None
-            self._prev_hp = hp
 
     def has_nearby_threat(self) -> bool:
         """True when any mob is near the character (tracks or visual)."""
@@ -153,11 +142,3 @@ class DangerDetector:
             if self._last_damage_mono is None:
                 return False
             return (time.monotonic() - self._last_damage_mono) < within_s
-
-    def pop_damage_detected(self) -> bool:
-        """Return and clear the damage-detected flag for consumers (sit worker)."""
-        with self._damage_lock:
-            if self._damage_detected:
-                self._damage_detected = False
-                return True
-            return False

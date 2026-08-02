@@ -239,7 +239,7 @@ def _build_core_workers(
     char_y = roi.y + roi.h // 2 if roi else 0
     if danger is None:
         danger = DangerDetector(
-            ctx, tport, character_state, vitals=player_vitals,
+            ctx, character_state, vitals=player_vitals,
         )
     attack = AttackLoop(
         ctx, hunt_mode, input_backend,
@@ -326,82 +326,100 @@ def create_runtime_deps(
     construction is independently readable and testable.
     """
     logger = _build_logger(config, session_id, behavior_callback)
-    detector, tracker = _build_detectors(config)
-    ctx = _build_context(config, logger, detector, tracker, overlay)
-    has_buffs = any(
-        buff.scan_code > 0 and buff.delay_ms > 0
-        for buff in config.custom_behavior.buffs
-    )
-    has_timers = any(
-        timer.scan_code and timer.interval_ms > 0
-        for timer in config.skill_timers
-    )
-    # Every runtime start is a fresh hunt cycle. Only configured workers need
-    # their startup milestone replayed after a sit/stand generation reset.
-    ctx.begin_hunt_startup(
-        require_buffs=has_buffs,
-        require_timers=has_timers,
-    )
-
-    input_backend: InputBackend = ViiperBackend()
-    player_vitals = vitals or PlayerVitals()
-
-    # Character state is shared by the monitor, danger detector, and every
-    # teleport path. Create it before the controller so successful teleports
-    # can always clear stale visual threat state in production.
-    char_state = CharacterState()
-    char_monitor = CharacterStateMonitor(ctx, char_state)
-
-    # Create TeleportController early — every teleport concern lives here.
-    tport = TeleportController(
-        ctx, input_backend, None, character_state=char_state,
-    )
-    _validate_teleport_mode(config, tport)
-
-    hunt_mode = create_hunt_mode(ctx, input_backend, teleport_controller=tport)
-    _validate_sp_memory(config)
-    _validate_weight_memory(config)
-
-    # Build danger before the configurable behavior because safe self-heal
-    # decisions share its threat/teleport observations.
-    danger = DangerDetector(
-        ctx, tport, char_state, vitals=player_vitals,
-    )
-    ctx.danger_detector = danger
-    legacy_behavior = get_mob_behavior(config.mob_name)
-    if config.custom_behavior.configured:
-        mob_behavior = get_configured_mob_behavior(
-            config.custom_behavior,
-            player_vitals,
-            danger,
-            legacy_behavior=legacy_behavior,
+    try:
+        detector, tracker = _build_detectors(config)
+        ctx = _build_context(config, logger, detector, tracker, overlay)
+        has_buffs = any(
+            buff.scan_code > 0 and buff.delay_ms > 0
+            for buff in config.custom_behavior.buffs
         )
-    else:
-        mob_behavior = legacy_behavior
+        has_timers = any(
+            timer.scan_code and timer.interval_ms > 0
+            for timer in config.skill_timers
+        )
+        # Every runtime start is a fresh hunt cycle. Only configured workers need
+        # their startup milestone replayed after a sit/stand generation reset.
+        ctx.begin_hunt_startup(
+            require_buffs=has_buffs,
+            require_timers=has_timers,
+        )
 
-    core_workers, danger = _build_core_workers(
-        ctx, hunt_mode, input_backend, tport, player_vitals, mob_behavior,
-        character_state=char_state, danger=danger,
-    )
-    core_workers.append(("charstate", char_monitor.run))
+        input_backend: InputBackend = ViiperBackend()
+        player_vitals = vitals or PlayerVitals()
 
-    conditional_workers = _build_conditional_workers(
-        ctx, input_backend, tport, player_vitals,
-        character_state=char_state, danger=danger,
-    )
+        # Character state is shared by the monitor, danger detector, and every
+        # teleport path. Create it before the controller so successful teleports
+        # can always clear stale visual threat state in production.
+        char_state = CharacterState()
+        char_monitor = CharacterStateMonitor(ctx, char_state)
 
-    # The controller was constructed with the shared CharacterState; only its
-    # hunt-mode callback is resolved after create_hunt_mode().
-    tport._hunt_mode = hunt_mode
+        # Create TeleportController early — every teleport concern lives here.
+        tport = TeleportController(
+            ctx, input_backend, None, character_state=char_state,
+        )
+        _validate_teleport_mode(config, tport)
 
-    return RuntimeDependencies(
-        ctx=ctx,
-        input_backend=input_backend,
-        hunt_mode=hunt_mode,
-        logger=logger,
-        teleport_controller=tport,
-        workers=core_workers + conditional_workers,
-    )
+        hunt_mode = create_hunt_mode(ctx, input_backend, teleport_controller=tport)
+        _validate_sp_memory(config)
+        _validate_weight_memory(config)
+
+        # Build danger before the configurable behavior because safe self-heal
+        # decisions share its threat/teleport observations.
+        danger = DangerDetector(
+            ctx, char_state, vitals=player_vitals,
+        )
+        ctx.danger_detector = danger
+        legacy_behavior = get_mob_behavior(config.mob_name)
+        if config.custom_behavior.configured:
+            mob_behavior = get_configured_mob_behavior(
+                config.custom_behavior,
+                player_vitals,
+                danger,
+                legacy_behavior=legacy_behavior,
+            )
+        else:
+            mob_behavior = legacy_behavior
+
+        core_workers, danger = _build_core_workers(
+            ctx, hunt_mode, input_backend, tport, player_vitals, mob_behavior,
+            character_state=char_state, danger=danger,
+        )
+        core_workers.append(("charstate", char_monitor.run))
+
+        conditional_workers = _build_conditional_workers(
+            ctx, input_backend, tport, player_vitals,
+            character_state=char_state, danger=danger,
+        )
+
+        # The controller was constructed with the shared CharacterState; only its
+        # hunt-mode callback is resolved after create_hunt_mode().
+        tport._hunt_mode = hunt_mode
+
+        return RuntimeDependencies(
+            ctx=ctx,
+            input_backend=input_backend,
+            hunt_mode=hunt_mode,
+            logger=logger,
+            teleport_controller=tport,
+            workers=core_workers + conditional_workers,
+        )
+    except BaseException:
+        # The logger owns a live QueueListener as soon as it is constructed.
+        # If any later dependency/validation step fails, no HuntRuntime exists
+        # to close it, so release it at this ownership boundary. Cleanup must
+        # not replace the original construction error.
+        try:
+            logger.close()
+        except BaseException:
+            pass
+        try:
+            reset_capture_session()
+        except BaseException:
+            pass
+        raise
+
+
+
 
 
 class HuntRuntime:
@@ -474,6 +492,39 @@ class HuntRuntime:
             return True
         result = shutdown()
         return result is not False
+
+    def _cleanup_failed_startup(self) -> bool:
+        """Best-effort cleanup for any exception before the run loop starts."""
+        ctx = self._ctx
+        try:
+            ctx.stop_event.set()
+        except BaseException:
+            pass
+        for event_name in ("discovery_wake", "resume_gate"):
+            try:
+                getattr(ctx, event_name).set()
+            except BaseException:
+                pass
+
+        try:
+            clean_shutdown = self._shutdown_workers()
+        except BaseException:
+            clean_shutdown = False
+
+        logger_closed = False
+        if clean_shutdown:
+            try:
+                logger_closed = self._close_logger()
+            except BaseException:
+                logger_closed = False
+        if clean_shutdown and logger_closed:
+            try:
+                reset_capture_session()
+            except BaseException:
+                return False
+            self._shutdown_complete.set()
+            return True
+        return False
 
     def stop(self) -> None:
         # Cancel input first so workers blocked inside a composite key/mouse
@@ -588,42 +639,47 @@ class HuntRuntime:
             except (ValueError, OSError):
                 pass
 
-        roi = ctx.capture.get_hunt_roi()
-        roi_text = f"{roi.x},{roi.y} {roi.w}x{roi.h}" if roi else "unavailable"
-        reset_capture_session()
-        ctx.logger.behavior(
-            f"[PYBOT] hunt runtime start mob={ctx.config.mob_name} hwnd={ctx.config.hwnd} "
-            f"mode={ctx.config.hunt_mode} roi={roi_text}"
-        )
-        teleport_button = (
-            self._teleport.active_button() if self._teleport is not None else ""
-        )
-        ctx.logger.behavior(
-            f"[MODE] active={ctx.config.hunt_mode} "
-            f"skill={ctx.config.skill_button} "
-            f"teleport={teleport_button!r}"
-        )
-
-        if not self._begin_input_session():
+        try:
+            roi = ctx.capture.get_hunt_roi()
+            roi_text = f"{roi.x},{roi.y} {roi.w}x{roi.h}" if roi else "unavailable"
+            reset_capture_session()
             ctx.logger.behavior(
-                "[PYBOT] input session could not be re-armed; startup aborted"
+                f"[PYBOT] hunt runtime start mob={ctx.config.mob_name} hwnd={ctx.config.hwnd} "
+                f"mode={ctx.config.hunt_mode} roi={roi_text}"
             )
-            ctx.stop_event.set()
-            clean_shutdown = self._shutdown_workers()
-            logger_closed = self._close_logger() if clean_shutdown else False
-            if clean_shutdown and logger_closed:
-                reset_capture_session()
-                self._shutdown_complete.set()
-            return 1
+            teleport_button = (
+                self._teleport.active_button() if self._teleport is not None else ""
+            )
+            ctx.logger.behavior(
+                f"[MODE] active={ctx.config.hunt_mode} "
+                f"skill={ctx.config.skill_button} "
+                f"teleport={teleport_button!r}"
+            )
 
-        threads = [
-            threading.Thread(target=fn, name=name, daemon=True)
-            for name, fn in self._workers
-        ]
-        self._worker_threads = threads
+            if not self._begin_input_session():
+                ctx.logger.behavior(
+                    "[PYBOT] input session could not be re-armed; startup aborted"
+                )
+                self._cleanup_failed_startup()
+                return 1
 
-        for thread in threads:
-            thread.start()
+            threads = [
+                threading.Thread(target=fn, name=name, daemon=True)
+                for name, fn in self._workers
+            ]
+            self._worker_threads = threads
+
+            for thread in threads:
+                thread.start()
+        except BaseException:
+            # A failure anywhere before the control loop starts—including
+            # capture setup, logging, input re-arm, thread construction, or a
+            # later Thread.start()—must release anything already acquired.
+            # Cleanup is deliberately best-effort so the original exception is
+            # preserved for the caller and the runtime remains non-restartable
+            # when ownership could not be fully released.
+            self._cleanup_failed_startup()
+            raise
 
         ctx.discovery_wake.set()
 

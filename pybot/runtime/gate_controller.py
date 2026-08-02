@@ -160,6 +160,22 @@ class GateController:
         self.pause_event.set()
         self.resume_gate.clear()
 
+    def perform_input_if_allowed(self, allowed, action) -> bool:
+        """Admit one short hunt input action against session transitions.
+
+        The existing session lock is also the ownership boundary for sit,
+        storage, and healing. Hold it only for the final gate check and the
+        already-atomic input operation; callers perform capture and waits
+        outside this method.
+        """
+        with self._sit_storage_lock:
+            if not allowed():
+                return False
+            result = action()
+            # Existing input workers treat only an explicit False as a
+            # rejected action; lightweight backends commonly return None.
+            return result is not False
+
     def request_danger_sit(self) -> None:
         """Ask the sit worker to move safe, sit, recover, and restart hunt."""
         with self._sit_storage_lock:
