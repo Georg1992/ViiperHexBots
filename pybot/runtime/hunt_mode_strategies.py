@@ -227,8 +227,13 @@ class TeleportStrategy(HuntModeStrategy):
                 reason = "pending_candidates"
             else:
                 reason = "discovery_not_clear"
-            # Don't sit on the 1s discovery cadence — ask for a scan now.
-            if not ctx.discovery_suspend.is_set():
+            # Discovery does not consume pending candidates; tracking does.
+            # Waking discovery here can starve tracking in a tight no-target
+            # loop and leave the area permanently blocked from teleporting.
+            if (
+                reason != "pending_candidates"
+                and not ctx.discovery_suspend.is_set()
+            ):
                 ctx.discovery_wake.set()
             self._log_no_target_blocked(reason)
             self._log_no_target("wait", reason, context)
