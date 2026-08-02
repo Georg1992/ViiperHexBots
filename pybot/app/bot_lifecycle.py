@@ -127,8 +127,9 @@ class BotLifecycleManager:
         try:
             self._viiper.start()
         except (FileNotFoundError, RuntimeError) as exc:
+            error_text = str(exc)
             self._post_to_main(
-                lambda: messagebox.showerror("ViiperHexBots", str(exc)),
+                lambda: messagebox.showerror("ViiperHexBots", error_text),
             )
             if self._on_exit_requested_call:
                 self._post_to_main(self._on_exit_requested_call)
@@ -147,7 +148,6 @@ class BotLifecycleManager:
             self._start_cancelled = True
             start_thread = self._start_thread
             stop_joiner = self._stop_joiner
-            stopping = self._stopping
             bot = self._bot
         deadline = time.monotonic() + timeout
         if start_thread is not None and start_thread.is_alive():

@@ -309,6 +309,33 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.teleport.teleport_once_for_sit.assert_not_called()
         self.assertFalse(self.ctx.danger_sit_requested.is_set())
 
+    def test_damage_during_escape_settle_is_consumed_once(self) -> None:
+        worker = self._worker(_ScriptedVitals([0.02, 0.02, 0.99, 0.99]))
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        self.ctx.request_danger_sit()
+        worker._sit_until_done = MagicMock(return_value="recovered")  # type: ignore[method-assign]
+
+        def escape_and_report_damage(*, reason: str) -> bool:
+            if self.teleport.danger_teleport.call_count == 1:
+                # Simulate a new HP drop observed while the first escape is
+                # settling. It must cause one new escape, not an infinite loop.
+                self.ctx.request_danger_sit()
+            return True
+
+        self.teleport.danger_teleport = MagicMock(  # type: ignore[method-assign]
+            side_effect=escape_and_report_damage
+        )
+
+        worker._recover_sp(0.02, reason="danger")
+
+        self.assertEqual(self.teleport.danger_teleport.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["reason"] for call in self.teleport.danger_teleport.call_args_list],
+            ["sit_danger_request", "sit_danger_request"],
+        )
+        self.assertFalse(self.ctx.danger_sit_requested.is_set())
+        worker._sit_until_done.assert_called_once_with(82)
+
     def test_damage_recovery_sits_in_urgent_escape_area_without_extra_teleport(self) -> None:
         worker = self._worker(_ScriptedVitals([0.02, 0.02, 0.99, 0.99]))
         self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]

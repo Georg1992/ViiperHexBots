@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import ctypes
 import threading
-import time
 
 from pybot.runtime.constants import (
     ALT_MOUSE_CLICK_DELAY_S,

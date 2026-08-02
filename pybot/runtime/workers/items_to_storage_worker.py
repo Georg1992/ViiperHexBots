@@ -10,8 +10,8 @@ never re-OCR or re-read process memory.
 
 from __future__ import annotations
 
-# Kept as module symbols for existing storage tests/custom integrations that
-# patch the historical timing dependency; production waits use _wait below.
+# Keep the historical timing imports/module patch points for storage tests and
+# custom integrations; production waits use _wait below.
 import threading
 import time
 import traceback
@@ -22,9 +22,9 @@ from pybot.recognition.ui.inventory import (
     find_storage_wing,
     find_template,
     find_wings_in_use_grid,
-    is_inventory_open,
+    is_inventory_open,  # noqa: F401 - retained compatibility patch point
     require_inventory_panel,
-    slot_contains_template as _slot_contains_template,
+    slot_contains_template as _slot_contains_template,  # noqa: F401 - compatibility
     slot_looks_empty,
 )
 from pybot.recognition.ui.inventory_automation import InventoryAutomation
@@ -41,6 +41,11 @@ from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.input.scan_codes import key_name_to_scan_code
 from pybot.runtime.teleport import TeleportController
 from pybot.runtime.workers.worker_contexts import ItemsToStorageWorkerContext
+
+# These names remain module-level compatibility patch points for storage tests
+# and external integrations, even though InventoryAutomation owns production UI
+# calls. Listing them explicitly also documents why static analyzers see no use.
+__all__ = ["ItemsToStorageWorker", "is_inventory_open", "_slot_contains_template"]
 
 
 class ItemsToStorageWorker:

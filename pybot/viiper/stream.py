@@ -10,7 +10,6 @@ feedback (rumble, LEDs, etc.).
 from __future__ import annotations
 
 import socket
-from typing import Callable
 
 
 class DeviceStream:

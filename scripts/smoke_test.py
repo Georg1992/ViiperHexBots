@@ -85,8 +85,6 @@ check("viiper_stream",
 # ── Phase 2: Struct/type instantiation ──────────────────────────
 print("\n=== Phase 2: Struct instantiation ===")
 import ctypes
-from ctypes import wintypes
-
 from pybot.app.overlay.win32_overlay import WNDCLASSW, PAINTSTRUCT
 from pybot.app.win32_util import WINDOWPLACEMENT
 

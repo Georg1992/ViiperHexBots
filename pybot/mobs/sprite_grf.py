@@ -16,7 +16,6 @@ import tempfile
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
 
 
 # GRF archive constants.

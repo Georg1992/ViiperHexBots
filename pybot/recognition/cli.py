@@ -16,6 +16,12 @@ from pybot.recognition.capture import capture_region
 from pybot.recognition.detector.debug_renderer import save_debug_bundle
 from pybot.recognition.detector.descriptors.descriptor_builder import DescriptorBuilder
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
+from pybot.recognition.detection_response import (
+    apply_scale_calibration,
+    build_detect_response,
+    candidate_to_json,  # noqa: F401 - retained as a public CLI compatibility export
+    parse_request_scale_range,
+)
 from pybot.recognition.spr_reader import SprReader
 
 
@@ -36,17 +42,6 @@ def parse_scale_range(value: str) -> tuple[float, float]:
     return low, high
 
 
-def apply_scale_calibration(config: dict, scale_range: tuple[float, float] | None, enforce_size_gate: bool) -> dict:
-    calibrated = dict(config)
-    if scale_range is not None:
-        low, high = scale_range
-        mid = (low + high) / 2.0
-        calibrated["scales"] = [low, mid, high]
-        calibrated["centerScales"] = [low, mid, high]
-    calibrated["enforceObjectSizeGate"] = enforce_size_gate
-    return calibrated
-
-
 def emit_json(payload: dict, output_path: Path | None = None) -> None:
     text = json.dumps(payload, separators=(",", ":"))
     if output_path is not None:
@@ -55,25 +50,6 @@ def emit_json(payload: dict, output_path: Path | None = None) -> None:
         tmp_path.write_text(text, encoding="utf-8")
         tmp_path.replace(output_path)
     print(text)
-
-
-def candidate_to_json(candidate, screen_offset: tuple[int, int]) -> dict:
-    ox, oy = screen_offset
-    payload = candidate.to_dict()
-    x, y, w, h = candidate.bbox
-    payload.update(
-        {
-            "x": x + ox,
-            "y": y + oy,
-            "width": w,
-            "height": h,
-            "centerX": candidate.center_x + ox,
-            "centerY": candidate.center_y + oy,
-            "confidence": round(candidate.final_score, 4),
-            "living": candidate.accepted,
-        }
-    )
-    return payload
 
 
 def _load_frame(args: argparse.Namespace) -> tuple[object, tuple[int, int], int]:
@@ -96,43 +72,6 @@ def cmd_build_descriptor(args: argparse.Namespace) -> int:
     descriptor = builder.build(args.mob.lower(), force=args.force)
     print(json.dumps({"ok": True, "descriptor": descriptor.to_dict()}, indent=2))
     return 0
-
-
-def build_detect_response(
-    result,
-    screen_offset: tuple[int, int],
-    *,
-    pipeline: str,
-    session_id: str = "",
-    scale_range: tuple[float, float] | None = None,
-    enforce_size_gate: bool = False,
-) -> dict:
-    accepted_json = [candidate_to_json(candidate, screen_offset) for candidate in result.accepted]
-    if pipeline == "scan":
-        accepted_json = [item for item in accepted_json if item.get("living")]
-    return {
-        "ok": True,
-        "pipeline": pipeline,
-        "sessionId": session_id,
-        "scaleCalibration": {
-            "status": "locked" if scale_range else "discovering",
-            "range": list(scale_range) if scale_range else None,
-            "sizeGate": bool(enforce_size_gate),
-        },
-        "candidateCount": len(result.candidates),
-        "acceptedCount": len(result.accepted),
-        "elapsedS": round(result.elapsed_s, 4),
-        "candidates": accepted_json,
-    }
-
-
-def parse_request_scale_range(value) -> tuple[float, float] | None:
-    if value is None:
-        return None
-    if isinstance(value, (list, tuple)) and len(value) == 2:
-        low, high = float(value[0]), float(value[1])
-        return (min(low, high), max(low, high))
-    return None
 
 
 def run_detect_request(detector: MobDetector, config: dict, request: dict) -> dict:
@@ -250,7 +189,6 @@ def cmd_detect(args: argparse.Namespace) -> int:
         config = apply_scale_calibration(config, args.scale_range, args.enforce_size_gate)
         detector = MobDetector(PROJECT_ROOT, config)
         result = detector.detect(frame, args.mob.lower())
-        accepted_json = [candidate_to_json(candidate, screen_offset) for candidate in result.accepted]
         if args.debug:
             label = Path(args.image).name if args.image else "live_capture"
             debug_root = PROJECT_ROOT / config["debugOutputDir"]

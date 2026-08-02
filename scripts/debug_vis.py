@@ -636,7 +636,7 @@ def render_nearby_mobs_viz(frame: np.ndarray) -> np.ndarray:
     cv2.putText(full, "Nearby Mob ROI", (nx1, min(ny2 + 20, full.shape[0] - 4)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 220, 0), 1)
     cv2.putText(
-        full, f"ROIs: 128x192  |  250x250",
+        full, "ROIs: 128x192  |  250x250",
         (8, full.shape[0] - 10),
         cv2.FONT_HERSHEY_SIMPLEX, 0.40, (220, 220, 220), 1,
     )
@@ -892,7 +892,7 @@ def render_status_panel_rois(fixture_name: str) -> np.ndarray:
 
     frame = cv2.imread(str(fixture_path))
     if frame is None:
-        return _text_block([f"Status panel fixture not found:", str(fixture_path)])
+        return _text_block(["Status panel fixture not found:", str(fixture_path)])
 
     origin = find_status_panel(frame)
     if origin is None:

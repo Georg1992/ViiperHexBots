@@ -423,24 +423,24 @@ class HuntRuntime:
         return self._shutdown_complete.is_set()
 
     def retry_shutdown(self) -> bool:
-        """Retry bounded cleanup after the runtime thread has returned.
-
-        A worker can outlive the control loop's first shutdown budget. Keep the
-        runtime object as the owner and allow the controller's later stop
-        attempt to join those workers without starting a second worker set.
-        """
+        """Retry bounded cleanup after the runtime thread has returned."""
         if self._shutdown_complete.is_set():
             return True
+        return self._finalize_shutdown()
+
+    def _finalize_shutdown(self) -> bool:
+        """Join workers and release session resources at one ownership boundary."""
         clean_shutdown = self._shutdown_workers()
         logger_closed = self._close_logger() if clean_shutdown else False
         if clean_shutdown and logger_closed:
             reset_capture_session()
             self._shutdown_complete.set()
-        elif clean_shutdown and not logger_closed:
+            return True
+        if clean_shutdown and not logger_closed:
             self._ctx.logger.behavior(
                 "[PYBOT] shutdown incomplete; logger writer is still active"
             )
-        return clean_shutdown and logger_closed
+        return False
 
     def _close_logger(self) -> bool:
         """Release the async logger owned by this runtime session."""
@@ -674,16 +674,7 @@ class HuntRuntime:
                 ctx.stop_event.wait(0.25)
         finally:
             ctx.logger.behavior("[PYBOT] hunt runtime stopped")
-            clean_shutdown = self._shutdown_workers()
-            logger_closed = self._close_logger() if clean_shutdown else False
-            if clean_shutdown and logger_closed:
-                reset_capture_session()
-                self._shutdown_complete.set()
-            elif clean_shutdown and not logger_closed:
-                ctx.logger.behavior(
-                    "[PYBOT] shutdown incomplete; logger writer is still active"
-                )
-            else:
+            if not self._finalize_shutdown():
                 ctx.logger.behavior(
                     "[PYBOT] runtime remains owned because shutdown was incomplete"
                 )

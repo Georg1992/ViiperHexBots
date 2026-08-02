@@ -21,6 +21,7 @@ from pybot.app.log_pipe import LogPipe
 from pybot.app.overlay import StatusPanelOverlay, Win32HuntOverlay
 from pybot.game_state import GameMemoryPoller, MemorySnapshot, PlayerVitals
 from pybot.app.session_log import AppSessionLog
+from pybot.app.status_display import format_pair, status_panel_numbers
 from pybot.app.startup_splash import preload_mob_descriptors
 from pybot.app.viiper_manager import ViiperManager
 from pybot.app.win32_util import (
@@ -1030,13 +1031,8 @@ class MainWindow:
 
     @staticmethod
     def _format_pair(current: int | None, maximum: int | None) -> str:
-        if current is None and maximum is None:
-            return "—"
-        if maximum is None:
-            return str(current)
-        if current is None:
-            return f"—/{maximum}"
-        return f"{current}/{maximum}"
+        """Compatibility wrapper around the pure status display helper."""
+        return format_pair(current, maximum)
 
     def _clear_vision_stats(self, placeholder: str = "—") -> None:
         """Clear vision-backed labels (HP always; SP/Weight when panel owns them)."""
@@ -1125,14 +1121,8 @@ class MainWindow:
     def _status_panel_numbers(
         values: StatusPanelValues,
     ) -> tuple[int, int, int, int, int | None, int | None]:
-        return (
-            values.hp,
-            values.hp_max,
-            values.sp,
-            values.sp_max,
-            values.weight,
-            values.weight_max,
-        )
+        """Compatibility wrapper around the pure status display helper."""
+        return status_panel_numbers(values)
 
     def _show_panel_missing(
         self,

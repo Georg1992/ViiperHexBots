@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from pybot.runtime.session_lifecycle import SessionLifecycle
 from pybot._protocols import (
     CanAreaReset,
     CanCapture,
@@ -184,6 +185,7 @@ class SitOnLowSpWorkerContext(
     CanLog,
     HasConfig,
     CanWakeDiscovery,
+    SessionLifecycle,
     Protocol,
 ):
     """Hunt runtime subset consumed by SitOnLowSpWorker.
@@ -219,6 +221,7 @@ class ItemsToStorageWorkerContext(
     CanOverlay,
     CanWakeDiscovery,
     CanAreaReset,
+    SessionLifecycle,
     Protocol,
 ):
     """Hunt runtime subset consumed by ItemsToStorageWorker."""

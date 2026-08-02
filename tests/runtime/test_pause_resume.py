@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from pybot.app.bot_lifecycle import BotLifecycleManager, BotState
 from pybot.runtime.hunt_runtime import HuntRuntime
@@ -223,6 +223,26 @@ class DiscoveryWorkerPauseTests(unittest.TestCase):
 
 
 class BotLifecyclePauseTests(unittest.TestCase):
+    def test_init_viiper_queues_error_text_without_deferred_exception_name_error(self) -> None:
+        root = MagicMock()
+        root.after = MagicMock()
+        viiper = MagicMock()
+        viiper.start.side_effect = RuntimeError("VIIPER unavailable")
+        lifecycle = BotLifecycleManager(
+            root=root,
+            config=MagicMock(),
+            mob_catalog=[],
+            session=MagicMock(),
+            viiper=viiper,
+        )
+
+        with patch("pybot.app.bot_lifecycle.messagebox.showerror") as showerror:
+            lifecycle.init_viiper()
+            callback = lifecycle._main_queue.get_nowait()
+            callback()
+
+        showerror.assert_called_once_with("ViiperHexBots", "VIIPER unavailable")
+
     def test_resume_keeps_existing_runtime(self) -> None:
         root = MagicMock()
         root.after = MagicMock()

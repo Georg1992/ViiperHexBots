@@ -132,7 +132,7 @@ class InventoryAutomation:
         self.cursor_off_screen()
         try:
             return fn()
-        except InventoryUiError as exc:
+        except InventoryUiError:
             self.cursor_off_screen()
             return fn()
 

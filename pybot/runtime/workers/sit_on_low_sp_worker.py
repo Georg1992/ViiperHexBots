@@ -298,7 +298,10 @@ class SitOnLowSpWorker:
 
                 # A fresh damage event raised while the urgent escape was in
                 # flight takes priority over normal quiet-area searching.
-                if ctx.danger_sit_requested.is_set():
+                if self._sit_danger_detected():
+                    # Consume fresh damage before retrying. Leaving this event
+                    # set replays one request forever after an urgent escape,
+                    # especially when damage arrives during teleport settle.
                     escape_first = True
                     continue
 
@@ -349,9 +352,9 @@ class SitOnLowSpWorker:
                     ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
                     continue
 
-                if ctx.danger_sit_requested.is_set():
-                    # A failed stand re-queued danger. Once the stand succeeds,
-                    # the next action must still be the urgent escape—not a
+                if self._sit_danger_detected():
+                    # A failed stand re-queued danger. Consume it only after
+                    # the stand path has completed, then escape before any
                     # quiet-area search from the old location.
                     reason = "danger"
                     escape_first = True

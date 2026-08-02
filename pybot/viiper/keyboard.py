@@ -13,7 +13,6 @@ Wire format (server → client)::
 
 from __future__ import annotations
 
-import struct
 
 # ── Modifier key bitmasks ──────────────────────────────────────────────
 MOD_LEFT_CTRL = 0x01

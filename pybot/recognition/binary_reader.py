@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import struct
-from typing import Tuple
 
 
 class BinaryReader:

@@ -1,6 +1,9 @@
-"""Hunt mode controller — thin delegator to Strategy pattern implementations.
+"""Hunt mode controller — thin delegator to strategy implementations.
 
-Modes (teleport / hybrid / walk) are implemented as separate strategy classes
+Modes (teleport / hybrid / walk) are implemented as separate strategy classes.
+``teleport`` is the active area-changing mode, ``walk`` waits without
+teleporting, and ``hybrid`` is intentionally a documented placeholder that
+waits without teleporting until a product behavior is specified.
 in :mod:`pybot.runtime.hunt_mode_strategies`.  The controller simply
 forwards calls to the active strategy, keeping the OCP clean:
 new modes require only a new strategy class, no controller changes.
@@ -72,7 +75,7 @@ def create_hunt_mode(
     Selects the strategy based on ``ctx.config.hunt_mode``:
 
     * ``"teleport"`` → :class:`TeleportStrategy`
-    * ``"hybrid"`` → :class:`HybridStrategy` (placeholder)
+    * ``"hybrid"`` → :class:`HybridStrategy` (documented placeholder; waits)
     * ``"walk"`` → :class:`WalkStrategy`
     """
     mode = ctx.config.hunt_mode
