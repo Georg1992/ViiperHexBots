@@ -265,11 +265,20 @@ class SitOnLowSpWorker:
                 if not self._ok_to_act():
                     break
 
-                # A previous interrupted attempt may have sent the sit toggle
-                # but failed its settle wait. Never teleport or press sit again
-                # while that logical seated state is still owned by this
-                # worker; stand first, retrying while the session is held.
+                # A normal sit-toggle interruption must be cleaned up by
+                # standing before retrying. A damage escape is different: it
+                # must retry teleport directly while still seated, never press
+                # the toggle just to escape.
                 if self._seated:
+                    if escape_first:
+                        if self._urgent_escape(reason="sit_danger"):
+                            self._seated = False
+                            ctx.logger.behavior(
+                                "[SIT] danger escape succeeded while seated"
+                            )
+                            break
+                        ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
+                        continue
                     if not self.stand(sit_scan):
                         ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
                     continue
@@ -330,13 +339,10 @@ class SitOnLowSpWorker:
                     continue
 
                 if outcome == "interrupted":
-                    # _sit_until_done already stood and performed the urgent
-                    # teleport. Sit directly in that new area; do not send a
-                    # second normal teleport during the same recovery session.
+                    # A normal recovery interruption uses the new area for a
+                    # follow-up sit. Damage escape has its own terminal result
+                    # below and must not re-enter the sit/stand cycle.
                     escape_first = False
-                    # The interrupted result is only returned after an urgent
-                    # escape succeeds; that escape is this session's one
-                    # teleport.
                     teleported_for_session = True
                     reason = "low_sp"
                     ctx.logger.behavior(
@@ -344,9 +350,19 @@ class SitOnLowSpWorker:
                     )
                     continue
 
+                if outcome == "danger_escaped":
+                    # Damage while seated is handled by one direct emergency
+                    # teleport. Do not stand, sit again, or continue the SP
+                    # recovery cycle after escaping.
+                    ctx.logger.behavior(
+                        "[SIT] danger escaped — recovery session ended"
+                    )
+                    break
+
                 if outcome == "danger_escape_failed":
                     # Stay in the danger phase until the urgent escape succeeds;
-                    # never search for a sit spot from the unsafe area.
+                    # retry directly while seated and never stand as part of
+                    # this emergency path.
                     reason = "danger"
                     escape_first = True
                     ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
@@ -430,26 +446,19 @@ class SitOnLowSpWorker:
 
             if self._sit_danger_detected():
                 ctx.logger.behavior(
-                    "[SIT] danger — standing and urgently escaping before "
-                    "finding a new spot"
+                    "[SIT] danger — urgently escaping without stand toggle"
                 )
-                # Damage always wins over SP recovery: leave the seated state
-                # first, then use the emergency teleport path. The outer
-                # recovery loop will clear/idle the new area before sitting.
-                stood = self.stand(sit_scan)
-                # Never teleport while the stand toggle was rejected: the
-                # worker still owns a seated state and must retry standing
-                # before moving to another area. An accepted toggle remains
-                # authoritative even if its settle wait was interrupted.
-                if not stood:
-                    # _sit_danger_detected() may have consumed the only queued
-                    # event. Keep danger pending until the seated toggle is
-                    # successfully undone and escape can run.
-                    ctx.request_danger_sit()
-                    return None
+                # Damage is an emergency escape, not normal SP recovery. Do
+                # not press the sit/stand toggle here: teleport immediately
+                # and preserve the logical seated state until the new area is
+                # settled. This avoids an unnecessary input delay and prevents
+                # a second toggle from accidentally seating the character.
                 if not self._urgent_escape(reason="sit_danger"):
                     return "danger_escape_failed"
-                return "interrupted"
+                # Teleport ends this seated recovery session. Do not let the
+                # recovery loop send a redundant stand or sit toggle afterward.
+                self._seated = False
+                return "danger_escaped"
 
             ratio = self._sp_ratio()
             if ratio is not None and ratio >= SIT_RESUME_SP_RATIO:

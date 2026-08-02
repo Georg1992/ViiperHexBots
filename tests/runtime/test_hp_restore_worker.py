@@ -159,6 +159,22 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.teleport.danger_teleport.assert_not_called()
         self.assertFalse(hasattr(self.danger, "pop_heal_until_full_requested"))
 
+    def test_unreadable_hp_sample_preserves_damage_baseline(self) -> None:
+        # Sitting can briefly make the HP source unavailable. Preserve the
+        # previous sample so the next valid lower value still reports damage.
+        self.vitals.publish_hp(90, 100)
+        self.danger._poll_hp()
+
+        self.vitals.publish_hp(None, None)
+        self.danger._poll_hp()
+        self.assertEqual(self.danger._prev_hp, 90)
+
+        self.vitals.publish_hp(80, 100)
+        self.danger._poll_hp()
+
+        self.assertTrue(self.ctx.danger_sit_requested.is_set())
+        self.assertTrue(self.danger.has_recent_damage(1.0))
+
     def test_critical_hp_without_recent_damage_does_not_teleport(self) -> None:
         # A low-HP snapshot establishes the baseline; it is not an attack.
         self.vitals.publish_hp(40, 100)

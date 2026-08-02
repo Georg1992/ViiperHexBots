@@ -51,7 +51,9 @@ class DangerDetector:
         with self._damage_lock:
             hp, _hp_max = self._vitals.hp_pair()
             if hp is None:
-                self._prev_hp = None
+                # A transient unreadable HP sample must not erase the last
+                # known baseline. Otherwise the next valid lower sample is
+                # treated as a new baseline and damage while sitting is lost.
                 return
 
             if self._prev_hp is not None and hp < self._prev_hp:

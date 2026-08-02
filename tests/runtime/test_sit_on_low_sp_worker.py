@@ -229,9 +229,9 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker = self._worker(_ScriptedVitals([0.40] * 20))
         self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
         self.ctx.pop_danger_sit_request = MagicMock(side_effect=[False, True])  # type: ignore[method-assign]
-        self.assertEqual(worker._sit_until_done(82), "interrupted")
-        # enter_sit + leave_sit
-        self.assertEqual(self.input.toggle_key.call_count, 2)
+        self.assertEqual(worker._sit_until_done(82), "danger_escaped")
+        # Only enter_sit is sent. Damage escape must not press stand.
+        self.assertEqual(self.input.toggle_key.call_count, 1)
         self.assertFalse(worker._seated)
 
     def test_damage_during_area_clear_rejects_sit_spot(self) -> None:
@@ -254,30 +254,74 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
         worker._seated = False
 
-        self.assertEqual(worker._sit_until_done(82), "interrupted")
+        self.assertEqual(worker._sit_until_done(82), "danger_escaped")
         self.assertEqual(
             [call.args[0] for call in self.input.toggle_key.call_args_list],
-            [82, 82],
+            [82],
         )
         self.teleport.danger_teleport.assert_called_once_with(
             reason="sit_danger"
         )
         self.assertFalse(worker._seated)
 
-    def test_stand_failure_requeues_danger_before_retrying_escape(self) -> None:
+    def test_unreadable_hp_then_damage_while_seated_triggers_teleport(self) -> None:
+        """A transient HP read gap must not swallow seated damage escape."""
+        vitals = PlayerVitals()
+        danger = DangerDetector(self.ctx, vitals=vitals)
+        self.ctx.danger_detector = danger
+        worker = self._worker(vitals)
+        worker._danger = danger
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        self.input.toggle_key.return_value = True
+        self.input.teleport_key.return_value = True
+
+        vitals.publish_hp(90, 100)
+        danger._poll_hp()
+        original_sp_pair = vitals.sp_pair
+        damage_injected = False
+
+        def sp_pair_with_damage() -> tuple[int | None, int | None]:
+            nonlocal damage_injected
+            if not damage_injected:
+                damage_injected = True
+                # The first SP read occurs after the worker has pressed sit.
+                # Simulate an unreadable HP sample followed by real damage.
+                vitals.publish_hp(None, None)
+                danger._poll_hp()
+                vitals.publish_hp(80, 100)
+                danger._poll_hp()
+            return original_sp_pair()
+
+        vitals.sp_pair = sp_pair_with_damage  # type: ignore[method-assign]
+
+        self.assertEqual(worker._sit_until_done(82), "danger_escaped")
+        # The character sits once, then damage causes a direct teleport with
+        # no stand/second-toggle input.
+        self.input.toggle_key.assert_called_once_with(82)
+        self.input.teleport_key.assert_called_once_with(16)
+        self.assertFalse(worker._seated)
+
+    def test_failed_danger_escape_retries_without_stand_toggle(self) -> None:
         worker = self._worker(_ScriptedVitals([0.40] * 20))
         self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
         self.ctx.pop_danger_sit_request = MagicMock(  # type: ignore[method-assign]
             side_effect=[False, True]
         )
-        self.ctx.request_danger_sit = MagicMock(return_value=True)  # type: ignore[method-assign]
         worker._seated = True
-        self.input.toggle_key.return_value = False
+        self.teleport.danger_teleport = MagicMock(side_effect=[False, True])  # type: ignore[method-assign]
 
-        self.assertIsNone(worker._sit_until_done(82))
-        self.ctx.request_danger_sit.assert_called_once_with()
+        self.assertEqual(worker._sit_until_done(82), "danger_escape_failed")
+        self.assertEqual(self.teleport.danger_teleport.call_count, 1)
+        self.assertEqual(self.input.toggle_key.call_count, 0)
         self.assertTrue(worker._seated)
-        self.input.teleport_key.assert_not_called()
+
+        # The recovery loop owns the retry and still must not press stand.
+        self.ctx.pop_danger_sit_request.side_effect = None
+        self.ctx.pop_danger_sit_request.return_value = False
+        worker._recover_sp(0.40, reason="danger")
+        self.assertEqual(self.teleport.danger_teleport.call_count, 2)
+        self.assertEqual(self.input.toggle_key.call_count, 0)
+        self.assertFalse(worker._seated)
 
     def test_danger_request_escapes_once_then_searches_safe_place(self) -> None:
         worker = self._worker(_ScriptedVitals([0.99, 0.99]))
