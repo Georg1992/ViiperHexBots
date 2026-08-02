@@ -182,7 +182,6 @@ def load_settings(path: Path | None = None) -> AppSettings:
         mob_custom_settings=_load_mob_custom_settings(parser),
         search_range=parser.getint("Settings", "SearchRange", fallback=16),
         hunt_mode=parser.get("Settings", "HuntMode", fallback="teleport"),
-        time_on_location=parser.getint("Settings", "TimeOnLocation", fallback=20),
         weight_modifier=parser.getint("Settings", "WeightModifier", fallback=80),
         take_fly_wings=parser.getint("Settings", "TakeFlyWings", fallback=0) == 1,
         fly_wings_amount=parser.getint("Settings", "FlyWingsAmount", fallback=100),
@@ -241,7 +240,6 @@ def save_settings(settings: AppSettings) -> None:
     _ensure_section(parser, "Settings")
     parser["Settings"]["SearchRange"] = str(settings.search_range)
     parser["Settings"]["HuntMode"] = settings.hunt_mode
-    parser["Settings"]["TimeOnLocation"] = str(settings.time_on_location)
     parser["Settings"]["WeightModifier"] = str(settings.weight_modifier)
     parser["Settings"]["TakeFlyWings"] = "1" if settings.take_fly_wings else "0"
     parser["Settings"]["FlyWingsAmount"] = str(settings.fly_wings_amount)

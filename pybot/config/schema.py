@@ -60,7 +60,6 @@ class AppSettings:
 
     search_range: int = 16
     hunt_mode: str = "teleport"
-    time_on_location: int = 20
     weight_modifier: int = 80
     take_fly_wings: bool = False
     fly_wings_amount: int = 100

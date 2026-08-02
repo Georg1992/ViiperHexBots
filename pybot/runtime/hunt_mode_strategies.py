@@ -204,10 +204,6 @@ class TeleportStrategy(HuntModeStrategy):
     ) -> None:
         super().__init__(ctx, input_backend)
         self._teleport = teleport_controller
-        # ``TimeOnLocation`` is a minimum dwell after a successful mode
-        # teleport. It prevents empty/loading frames from becoming a rapid
-        # teleport storm. Urgent danger teleports do not use this strategy.
-        self._last_mode_teleport_ms = 0
 
     def _handle_no_targets_impl(self) -> bool:
         ctx = self._ctx
@@ -265,23 +261,13 @@ class TeleportStrategy(HuntModeStrategy):
             self._log_no_target("wait", "no_teleport_key", context)
             return False
 
-        dwell_s = max(0, int(getattr(ctx.config, "time_on_location_s", 0)))
         self._log_no_target("teleport", "area_clear", context)
 
         def commit_mode_teleport() -> bool:
             # This callback runs under the same lifecycle lock as the final
-            # transition admission. Keep the dwell check and timestamp claim
-            # inside it so two concurrent no-target decisions cannot both pass.
-            if dwell_s > 0 and self._last_mode_teleport_ms > 0:
-                elapsed_ms = monotonic_ms() - self._last_mode_teleport_ms
-                if elapsed_ms < dwell_s * 1000:
-                    self._log_no_target_blocked("minimum_dwell")
-                    self._log_no_target("wait", "minimum_dwell", context)
-                    return False
-            teleported = bool(self._teleport.mode_teleport())
-            if teleported:
-                self._last_mode_teleport_ms = monotonic_ms()
-            return teleported
+            # transition admission so a concurrent no-target decision cannot
+            # slip a second teleport past the transition boundary.
+            return bool(self._teleport.mode_teleport())
 
         admit = getattr(type(ctx), "perform_input_if_allowed", None)
         if callable(admit):
