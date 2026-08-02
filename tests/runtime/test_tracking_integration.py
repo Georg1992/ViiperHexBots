@@ -10,7 +10,7 @@ import cv2
 from pybot.runtime.capture.window_roi import HuntRoi
 from pybot.recognition.fixtures import default_horn_fixture
 from pybot.recognition.rules import DiscoveryDetection
-from pybot.runtime.config import HuntRuntimeConfig
+from pybot.config.runtime import HuntRuntimeConfig
 from pybot.runtime.control import RuntimeControl
 from pybot.runtime.hunt_mode import create_hunt_mode
 from pybot.runtime.hunt_policy import HuntPolicy

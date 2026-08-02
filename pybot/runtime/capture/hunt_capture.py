@@ -9,7 +9,7 @@ from ctypes import wintypes
 import numpy as np
 
 from pybot.runtime.capture.window_roi import HuntRoi, hunt_roi_from_client_rect
-from pybot.runtime.config import HuntRuntimeConfig
+from pybot.config.runtime import HuntRuntimeConfig
 
 user32 = None
 

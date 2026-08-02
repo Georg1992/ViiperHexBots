@@ -29,7 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from pybot.runtime.capture.hunt_capture import HuntWindowCapture
-from pybot.runtime.config import HuntRuntimeConfig
+from pybot.config.runtime import HuntRuntimeConfig
 from pybot.runtime.control import RuntimeControl
 from pybot.runtime.gate_controller import GateController
 from pybot.runtime.hunt_policy import HuntPolicy

@@ -14,7 +14,7 @@ import threading
 from typing import Protocol
 
 from pybot.runtime.capture.hunt_capture import HuntWindowCapture
-from pybot.runtime.config import HuntRuntimeConfig
+from pybot.config.runtime import HuntRuntimeConfig
 from pybot.runtime.hunt_policy import HuntPolicy
 from pybot.runtime.hunt_tracks import HuntTracks
 from pybot.runtime.logging import HuntLogger

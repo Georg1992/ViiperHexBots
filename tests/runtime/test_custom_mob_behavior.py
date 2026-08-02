@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 from pybot.config.runtime import hunt_runtime_config_from_settings
 from pybot.config.schema import AppSettings, MobCustomSettings
 from pybot.game_state import PlayerVitals
-from pybot.runtime.config import SelfBuffRuntime, CustomBehaviorRuntime
+from pybot.config.runtime import SelfBuffRuntime, CustomBehaviorRuntime
 from pybot.runtime.mob_behaviors import (
     AnubisBehavior,
     ConfiguredMobBehavior,

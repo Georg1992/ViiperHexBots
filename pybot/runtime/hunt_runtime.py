@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pybot.runtime.capture.hunt_capture import HuntWindowCapture
-from pybot.runtime.config import load_runtime_config
+from pybot.config.runtime import load_runtime_config
 from pybot.runtime.control import RuntimeControl
 from pybot.runtime.hunt_mode import HuntModeController, create_hunt_mode
 from pybot.runtime.hunt_policy import HuntPolicy

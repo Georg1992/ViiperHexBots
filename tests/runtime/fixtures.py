@@ -6,7 +6,7 @@ import numpy as np
 
 from pybot.runtime.capture.window_roi import HuntRoi
 from pybot.paths import PROJECT_ROOT
-from pybot.runtime.config import HuntRuntimeConfig
+from pybot.config.runtime import HuntRuntimeConfig
 from pybot.runtime.detection.detector_session import DetectorSession
 
 

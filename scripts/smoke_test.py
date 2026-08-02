@@ -23,7 +23,7 @@ check("overlay (with WNDCLASSW, PAINTSTRUCT, lpfnWndProc cast)",
     lambda: __import__("pybot.app.overlay.win32_overlay", fromlist=["create"]))
 
 check("config",
-    lambda: __import__("pybot.runtime.config", fromlist=["load_runtime_config"]))
+    lambda: __import__("pybot.config.runtime", fromlist=["load_runtime_config"]))
 
 check("hunt_runtime",
     lambda: __import__("pybot.runtime.hunt_runtime", fromlist=["create_runtime_deps", "HuntRuntime"]))
@@ -107,7 +107,7 @@ check("WNDCLASSW() with real callback",
 
 # ── Phase 3: Runtime deps creation ─────────────────────────────
 print("\n=== Phase 3: create_runtime_deps ===")
-from pybot.runtime.config import load_runtime_config
+from pybot.config.runtime import load_runtime_config
 from pybot.runtime.hunt_runtime import create_runtime_deps
 
 check("load_runtime_config(empty)",

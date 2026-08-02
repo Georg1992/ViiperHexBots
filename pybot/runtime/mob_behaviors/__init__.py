@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable
 
 from pybot.game_state import PlayerVitals
-from pybot.runtime.config import CustomBehaviorRuntime
+from pybot.config.runtime import CustomBehaviorRuntime
 from pybot.runtime.constants import HP_RESTORE_COOLDOWN_S
 from pybot.runtime.hunt_tracks import monotonic_ms
 
