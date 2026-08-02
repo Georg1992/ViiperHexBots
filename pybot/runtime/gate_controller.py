@@ -44,8 +44,12 @@ class GateController:
         # Startup milestones and hunt generations belong to the dedicated
         # sequence object, not to this general lifecycle gate.
         self.startup = HuntStartupSequence() if startup is None else startup
-        # Set by DangerDetector; the sit worker is the sole hunt-breaker.
+        # Set by DangerDetector for any HP drop; the sit worker owns seated
+        # damage and filters ordinary hunting hits.
         self.danger_sit_requested = threading.Event()
+        # Independent critical-danger signal so hunting can escape even when
+        # low-SP sitting is disabled or no sit key is configured.
+        self.critical_danger_requested = threading.Event()
         # A seated toggle could not be undone during worker cleanup. Runtime
         # shutdown must retry this before releasing input ownership.
         self.sit_cleanup_unresolved = threading.Event()
@@ -75,6 +79,7 @@ class GateController:
             and not self.healing_event.is_set()
             and not self.discovery_suspend.is_set()
             and not self.danger_sit_requested.is_set()
+            and not self.critical_danger_requested.is_set()
             and self.startup.is_combat_ready()
         )
 
@@ -88,6 +93,7 @@ class GateController:
             self.should_run_workers()
             and not self.discovery_suspend.is_set()
             and not self.danger_sit_requested.is_set()
+            and not self.critical_danger_requested.is_set()
         )
 
     def should_allow_danger_teleport(self) -> bool:
@@ -176,6 +182,20 @@ class GateController:
             if not self.danger_sit_requested.is_set():
                 return False
             self.danger_sit_requested.clear()
+            return True
+
+    def request_critical_danger(self) -> None:
+        """Queue a critical hunting escape independent of sit configuration."""
+        with self._sit_storage_lock:
+            self.critical_danger_requested.set()
+            self.resume_gate.set()
+
+    def pop_critical_danger(self) -> bool:
+        """Consume one pending critical hunting escape atomically."""
+        with self._sit_storage_lock:
+            if not self.critical_danger_requested.is_set():
+                return False
+            self.critical_danger_requested.clear()
             return True
 
     # ── Sit lifecycle ────────────────────────────────────────────

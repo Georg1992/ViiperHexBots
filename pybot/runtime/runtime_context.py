@@ -139,8 +139,13 @@ class HuntRuntimeContext:
 
     @property
     def danger_sit_requested(self) -> threading.Event:
-        """Pending danger-driven sit request raised by DangerDetector."""
+        """Pending seated-damage request raised by DangerDetector."""
         return self.gates.danger_sit_requested
+
+    @property
+    def critical_danger_requested(self) -> threading.Event:
+        """Pending critical hunting escape request."""
+        return self.gates.critical_danger_requested
 
     @property
     def sit_cleanup_unresolved(self) -> threading.Event:
@@ -274,6 +279,7 @@ class HuntRuntimeContext:
             or self.healing_event.is_set()
             or self.discovery_suspend.is_set()
             or self.gates.danger_sit_requested.is_set()
+            or self.gates.critical_danger_requested.is_set()
         ):
             return False
         danger = self.danger_detector
@@ -302,6 +308,12 @@ class HuntRuntimeContext:
 
     def pop_danger_sit_request(self) -> bool:
         return self.gates.pop_danger_sit_request()
+
+    def request_critical_danger(self) -> None:
+        self.gates.request_critical_danger()
+
+    def pop_critical_danger(self) -> bool:
+        return self.gates.pop_critical_danger()
 
     def should_run_discovery(self) -> bool:
         return self.gates.should_run_discovery()

@@ -51,6 +51,7 @@ from pybot.runtime.constants import (
 from pybot.runtime.workers.items_to_storage_worker import ItemsToStorageWorker
 from pybot.runtime.workers.sit_on_low_sp_worker import SitOnLowSpWorker
 from pybot.runtime.workers.hp_restore_worker import HpRestoreWorker
+from pybot.runtime.workers.critical_danger_worker import CriticalDangerWorker
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="ViiperHexBots Python hunt runtime")
     sub = parser.add_subparsers(dest="command")
@@ -224,7 +225,7 @@ def _build_core_workers(
     mob_behavior,
     danger: DangerDetector | None = None,
 ) -> tuple[list[tuple[str, Callable[[], None]]], DangerDetector]:
-    """Build always-running workers: danger, coord, discovery, attack.
+    """Build always-running workers: danger, critical escape, coord, discovery, attack.
 
     Returns ``(workers, danger_detector)`` so callers can reuse the
     DangerDetector instance for sit-worker injection.
@@ -242,8 +243,10 @@ def _build_core_workers(
         vitals=player_vitals,
         char_x=char_x, char_y=char_y,
     )
+    critical_escape = CriticalDangerWorker(ctx, tport)
     workers = [
         ("danger", danger.run),
+        ("critical_danger", critical_escape.run),
         ("coord", tracking.run),
         ("discovery", discovery.run),
         ("attack", attack.run),

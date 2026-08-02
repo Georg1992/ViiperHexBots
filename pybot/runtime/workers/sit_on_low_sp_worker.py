@@ -24,7 +24,7 @@ from pybot.runtime.constants import (
     SIT_SP_POLL_INTERVAL_S,
     SIT_STAND_RESUME_DELAY_S,
 )
-from pybot.runtime.danger_detector import DangerDetector
+from pybot.runtime.danger_detector import DangerDetector, DangerLevel
 from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.teleport import TeleportController
 from pybot.runtime.workers.worker_contexts import SitOnLowSpWorkerContext
@@ -177,6 +177,48 @@ class SitOnLowSpWorker:
         """
         return self._ctx.pop_danger_sit_request()
 
+    def _hunting_danger_is_critical(self) -> bool | None:
+        """Return whether a pending hunting damage event warrants teleport.
+
+        The detector queues every HP drop so damage can interrupt a seated
+        recovery session. While hunting, ordinary damage is intentionally
+        ignored; only the detector's CRITICAL classification may escape.
+        """
+        try:
+            return self._danger.danger_level() is DangerLevel.CRITICAL
+        except Exception:
+            self._ctx.logger.behavior(
+                "[DANGER] critical check failed — keeping hunt in place"
+            )
+            return None
+
+    def _handle_hunting_danger(self) -> None:
+        """Consume hunting damage; teleport only for critical danger."""
+        ctx = self._ctx
+        critical = self._hunting_danger_is_critical()
+        if critical is None:
+            # A detector failure must fail closed: never resume combat while a
+            # damage request cannot be classified safely.
+            ctx.logger.behavior(
+                "[DANGER] damage classification unavailable — request retained"
+            )
+            return
+        # The independent critical-danger worker owns hunting teleports. This
+        # sit worker only consumes ordinary mirrored requests; the critical
+        # request remains for the escape worker.
+        if not critical:
+            ctx.pop_danger_sit_request()
+        else:
+            ctx.logger.behavior(
+                "[DANGER] critical hunting damage — delegated to escape worker"
+            )
+        if not critical:
+            # Ordinary hits must not claim the sit gate: doing so would reset
+            # hunt startup/buff state on every attack.
+            ctx.logger.behavior(
+                "[DANGER] ordinary hunting damage — no teleport"
+            )
+
     def _urgent_escape(self, *, reason: str) -> bool:
         """Escape danger, retaining the request until teleport succeeds."""
         # Never send emergency input after an explicit stop. A pause keeps the
@@ -216,13 +258,10 @@ class SitOnLowSpWorker:
                     ctx.wait_while_stopped_or_paused(SIT_SP_POLL_INTERVAL_S)
                     continue
                 if ctx.danger_sit_requested.is_set():
-                    # The request remains set until this worker owns the sit
-                    # session. Storage/heal may be using the input boundary.
-                    ratio = self._sp_ratio()
-                    self._recover_sp(
-                        ratio if ratio is not None else 1.0,
-                        reason="danger",
-                    )
+                    # Every HP drop is queued so a seated session can escape
+                    # immediately. While hunting, only CRITICAL damage may
+                    # teleport; ordinary hits are consumed without recovery.
+                    self._handle_hunting_danger()
                     if ctx.danger_sit_requested.is_set():
                         ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
                     continue
@@ -351,13 +390,16 @@ class SitOnLowSpWorker:
                     continue
 
                 if outcome == "danger_escaped":
-                    # Damage while seated is handled by one direct emergency
-                    # teleport. Do not stand, sit again, or continue the SP
-                    # recovery cycle after escaping.
+                    # Damage while seated is an interruption, not the end of
+                    # SP recovery. The emergency teleport already moved to a
+                    # new area, so sit again there without another teleport.
+                    escape_first = False
+                    teleported_for_session = True
+                    reason = "low_sp"
                     ctx.logger.behavior(
-                        "[SIT] danger escaped — recovery session ended"
+                        "[SIT] danger escaped — sitting again for SP recovery"
                     )
-                    break
+                    continue
 
                 if outcome == "danger_escape_failed":
                     # Stay in the danger phase until the urgent escape succeeds;
@@ -427,6 +469,13 @@ class SitOnLowSpWorker:
         # safe. The queued request is consumed here and the caller finds a new
         # location before trying to sit again.
         if self._sit_danger_detected():
+            # This seated recovery owns the damage event. Clear a mirrored
+            # critical hunting request that may have been raised in the small
+            # race immediately before the sit gate was acquired, otherwise the
+            # independent critical worker could duplicate the escape later.
+            pop_critical = getattr(ctx, "pop_critical_danger", None)
+            if callable(pop_critical):
+                pop_critical()
             ctx.logger.behavior(
                 "[SIT] danger observed before sitting — urgent escape "
                 "and finding a new spot"
@@ -445,6 +494,11 @@ class SitOnLowSpWorker:
                 return None
 
             if self._sit_danger_detected():
+                # A seated session owns any damage request; prevent a mirrored
+                # critical hunting request from escaping a second time.
+                pop_critical = getattr(ctx, "pop_critical_danger", None)
+                if callable(pop_critical):
+                    pop_critical()
                 ctx.logger.behavior(
                     "[SIT] danger — urgently escaping without stand toggle"
                 )

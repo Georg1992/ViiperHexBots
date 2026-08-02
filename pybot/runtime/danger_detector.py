@@ -68,10 +68,23 @@ class DangerDetector:
             self._prev_hp = hp
 
         if damage_seen:
-            # Raise the sole sit/danger signal after releasing the damage lock.
+            # Queue every damage event for an active seated recovery session.
+            # Critical damage also gets its own independent hunting escape
+            # signal, so critical protection does not depend on sit being
+            # enabled or configured.
             request = getattr(self._ctx, "request_danger_sit", None)
             if callable(request):
                 request()
+            sitting = getattr(self._ctx, "sitting_event", None)
+            is_sitting = bool(
+                sitting is not None
+                and callable(getattr(sitting, "is_set", None))
+                and sitting.is_set()
+            )
+            if not is_sitting and self.danger_level() is DangerLevel.CRITICAL:
+                request_critical = getattr(self._ctx, "request_critical_danger", None)
+                if callable(request_critical):
+                    request_critical()
 
     def danger_level(self) -> DangerLevel:
         """Return SAFE, DANGER, or CRITICAL using received damage only.

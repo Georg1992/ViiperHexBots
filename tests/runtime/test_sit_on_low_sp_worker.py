@@ -12,9 +12,10 @@ from pybot.runtime.constants import (
     SIT_LOW_SP_RATIO,
     SIT_RESUME_SP_RATIO,
 )
-from pybot.runtime.danger_detector import DangerDetector
+from pybot.runtime.danger_detector import DangerDetector, DangerLevel
 from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.runtime_context import HuntRuntimeContext
+from pybot.runtime.workers.critical_danger_worker import CriticalDangerWorker
 from pybot.runtime.workers.sit_on_low_sp_worker import SitOnLowSpWorker
 
 
@@ -300,6 +301,83 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.input.toggle_key.assert_called_once_with(82)
         self.input.teleport_key.assert_called_once_with(16)
         self.assertFalse(worker._seated)
+
+    def test_ordinary_hunting_damage_is_consumed_without_teleport(self) -> None:
+        worker = self._worker(_ScriptedVitals([]))
+        self.ctx.request_danger_sit()
+        self.danger.danger_level.return_value = DangerLevel.DANGER
+        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+        worker._handle_hunting_danger()
+
+        self.teleport.danger_teleport.assert_not_called()
+        self.assertFalse(self.ctx.danger_sit_requested.is_set())
+        self.assertFalse(self.ctx.sitting_event.is_set())
+
+    def test_critical_hunting_damage_teleports_without_sp_regeneration(self) -> None:
+        worker = self._worker(_ScriptedVitals([]))
+        self.ctx.request_danger_sit()
+        self.ctx.request_critical_danger()
+        self.danger.danger_level.return_value = DangerLevel.CRITICAL
+        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
+        escape = CriticalDangerWorker(self.ctx, self.teleport)
+
+        worker._handle_hunting_danger()
+        escape.process_pending()
+
+        self.teleport.danger_teleport.assert_called_once_with(reason="critical_hunt")
+        self.assertFalse(self.ctx.sitting_event.is_set())
+
+    def test_critical_hunting_escape_retries_after_failed_teleport(self) -> None:
+        self.ctx.request_critical_danger()
+        self.teleport.danger_teleport = MagicMock(  # type: ignore[method-assign]
+            side_effect=[False, True]
+        )
+        escape = CriticalDangerWorker(self.ctx, self.teleport)
+
+        self.assertFalse(escape.process_pending())
+        self.assertTrue(self.ctx.critical_danger_requested.is_set())
+        self.assertTrue(escape.process_pending())
+
+        self.assertEqual(self.teleport.danger_teleport.call_count, 2)
+        self.assertFalse(self.ctx.critical_danger_requested.is_set())
+
+    def test_critical_escape_waits_while_sitting(self) -> None:
+        self.ctx.request_critical_danger()
+        self.ctx.sitting_event.set()
+        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
+        escape = CriticalDangerWorker(self.ctx, self.teleport)
+
+        self.assertFalse(escape.process_pending())
+        self.teleport.danger_teleport.assert_not_called()
+        self.assertTrue(self.ctx.critical_danger_requested.is_set())
+        self.ctx.sitting_event.clear()
+
+    def test_damage_during_sp_recovery_teleports_then_sits_again(self) -> None:
+        worker = self._worker(_ScriptedVitals([0.02, 0.02, 0.99, 0.99]))
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        def recovery_side_effect(_scan: int) -> str:
+            if worker._sit_until_done.call_count == 1:
+                worker._seated = False
+                return "danger_escaped"
+            return "recovered"
+
+        worker._sit_until_done = MagicMock(  # type: ignore[method-assign]
+            side_effect=recovery_side_effect
+        )
+        self.teleport.teleport_once_for_sit = MagicMock(return_value=True)  # type: ignore[method-assign]
+        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
+        worker._seated = True
+
+        worker._recover_sp(0.02)
+
+        self.teleport.danger_teleport.assert_not_called()
+        worker._sit_until_done.assert_has_calls([
+            unittest.mock.call(82),
+            unittest.mock.call(82),
+        ])
+        self.assertEqual(worker._sit_until_done.call_count, 2)
+        self.assertFalse(self.ctx.sitting_event.is_set())
 
     def test_failed_danger_escape_retries_without_stand_toggle(self) -> None:
         worker = self._worker(_ScriptedVitals([0.40] * 20))
