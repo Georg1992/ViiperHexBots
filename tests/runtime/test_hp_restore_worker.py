@@ -157,9 +157,26 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.teleport.danger_teleport.assert_not_called()
 
     def test_critical_hp_without_recent_damage_does_not_teleport(self) -> None:
+        # A low-HP snapshot establishes the baseline; it is not an attack.
         self.vitals.publish_hp(40, 100)
         self.danger._poll_hp()
         self.teleport.danger_teleport.assert_not_called()
+
+    def test_repeated_low_hp_without_new_damage_never_requeues_danger(self) -> None:
+        # Polling the same low HP repeatedly must not produce an infinite
+        # sequence of danger teleports.
+        self.vitals.publish_hp(40, 100)
+        self.danger._poll_hp()
+        self.danger._poll_hp()
+        self.danger._poll_hp()
+
+        self.assertFalse(self.ctx.danger_sit_requested.is_set())
+        self.teleport.danger_teleport.assert_not_called()
+
+        # One actual decrease is the only event that queues danger.
+        self.vitals.publish_hp(39, 100)
+        self.danger._poll_hp()
+        self.assertTrue(self.ctx.danger_sit_requested.is_set())
 
     def test_exactly_fifty_percent_is_not_critical(self) -> None:
         self.vitals.publish_hp(80, 100)
