@@ -11,6 +11,7 @@ from pybot.config.runtime import hunt_runtime_config_from_settings
 from pybot.config.schema import AppSettings, MobCustomSettings
 from pybot.game_state import PlayerVitals
 from pybot.config.runtime import SelfBuffRuntime, CustomBehaviorRuntime
+from pybot.runtime.gate_controller import CharacterActionGate
 from pybot.runtime.mob_behaviors import (
     AnubisBehavior,
     ConfiguredMobBehavior,
@@ -208,6 +209,7 @@ class SelfBuffWorkerTests(unittest.TestCase):
             should_run_combat=lambda: safe["value"] and not stop.is_set(),
             wait_while_combat_blocked=lambda _timeout: safe.__setitem__("value", True) or True,
             character_screen_pos=lambda: (300, 350),
+            character_action_gate=CharacterActionGate(),
         )
 
         with patch(
@@ -250,6 +252,7 @@ class SelfBuffWorkerTests(unittest.TestCase):
             should_run_startup_actions=lambda: False,
             wait_while_combat_blocked=lambda _timeout: False,
             character_screen_pos=lambda: (300, 350),
+            character_action_gate=CharacterActionGate(),
         )
         backend = SimpleNamespace(skill_click_at=MagicMock(return_value=True))
 
@@ -290,6 +293,7 @@ class SelfBuffWorkerTests(unittest.TestCase):
             should_run_combat=lambda: not stop.is_set(),
             wait_while_combat_blocked=lambda _timeout: not stop.is_set(),
             character_screen_pos=lambda: (300, 350),
+            character_action_gate=CharacterActionGate(),
         )
 
         with patch(
@@ -300,6 +304,59 @@ class SelfBuffWorkerTests(unittest.TestCase):
 
         self.assertEqual(casts, [(59, 300, 350)])
         self.assertEqual(clock["ms"], 0)
+
+    def test_periodic_buff_casts_under_shared_burst_flag(self) -> None:
+        """A periodic buff cast claims buff priority on the shared gate."""
+        stop = threading.Event()
+        clock = {"ms": 0}
+        safe = {"value": True}
+        gate = CharacterActionGate()
+        casts: list[tuple[int, int, int]] = []
+        burst_at_cast: list[bool] = []
+
+        class StopEvent:
+            def is_set(self) -> bool:
+                return stop.is_set()
+
+            def wait(self, timeout: float) -> bool:
+                clock["ms"] += int(timeout * 1000)
+                if len(casts) >= 2:
+                    stop.set()
+                return stop.is_set()
+
+        def cast(scan_code: int, x: int, y: int) -> bool:
+            burst_at_cast.append(gate.buff_burst_active())
+            casts.append((scan_code, x, y))
+            return True
+
+        ctx = SimpleNamespace(
+            config=SimpleNamespace(
+                skill_timers=(),
+                custom_behavior=CustomBehaviorRuntime(
+                    buffs=(SelfBuffRuntime("f1", 59, 1000),)
+                )
+            ),
+            logger=SimpleNamespace(behavior=MagicMock()),
+            stop_event=StopEvent(),
+            is_stopped=stop.is_set,
+            should_run_combat=lambda: safe["value"] and not stop.is_set(),
+            wait_while_combat_blocked=lambda _timeout: safe["value"],
+            character_screen_pos=lambda: (300, 350),
+            character_action_gate=gate,
+        )
+
+        with patch(
+            "pybot.runtime.workers.self_buff_worker.monotonic_ms",
+            side_effect=lambda: clock["ms"],
+        ):
+            SelfBuffWorker(ctx, SimpleNamespace(skill_click_at=cast)).run()
+
+        # Startup cast (no burst) + one periodic re-cast (burst held).
+        self.assertEqual(len(casts), 2)
+        self.assertFalse(burst_at_cast[0])
+        self.assertTrue(burst_at_cast[1])
+        # The burst is released once the due-buff loop finishes.
+        self.assertFalse(gate.buff_burst_active())
 
 
 if __name__ == "__main__":

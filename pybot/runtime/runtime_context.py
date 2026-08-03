@@ -143,6 +143,11 @@ class HuntRuntimeContext:
         return self.gates.danger_sit_requested
 
     @property
+    def character_action_gate(self) -> object:
+        """Shared stagger + buff priority between buff casts and timer presses."""
+        return self.gates.character_action_gate
+
+    @property
     def critical_danger_requested(self) -> threading.Event:
         """Pending critical hunting escape request."""
         return self.gates.critical_danger_requested

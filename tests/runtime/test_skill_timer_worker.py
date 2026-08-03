@@ -1,4 +1,4 @@
-"""Skill timer stagger and sit/pause re-arm behavior."""
+"""Skill timer stagger, buff-priority, and sit/pause re-arm behavior."""
 
 from __future__ import annotations
 
@@ -9,7 +9,26 @@ from unittest.mock import MagicMock, patch
 
 from pybot.config.runtime import SkillTimerRuntime
 from pybot.runtime.constants import SKILL_TIMER_STAGGER_MS
+from pybot.runtime.gate_controller import CharacterActionGate
 from pybot.runtime.workers.skill_timer_worker import SkillTimerWorker
+
+
+class ClockStopEvent:
+    """Stop event that advances a fake monotonic clock on each wait."""
+
+    def __init__(self, stop: threading.Event, clock: dict) -> None:
+        self._stop = stop
+        self._clock = clock
+
+    def is_set(self) -> bool:
+        return self._stop.is_set()
+
+    def wait(self, timeout_s: float) -> bool:
+        self._clock["ms"] += int(round(timeout_s * 1000))
+        return self._stop.is_set()
+
+    def set(self) -> None:
+        self._stop.set()
 
 
 class SkillTimerWorkerTests(unittest.TestCase):
@@ -19,29 +38,24 @@ class SkillTimerWorkerTests(unittest.TestCase):
             SkillTimerRuntime(button="f2", scan_code=60, interval_ms=60_000),
         )
         stop = threading.Event()
-        presses: list[int] = []
+        presses: list[tuple[int, int]] = []
         clock = {"ms": 1_000_000}
-        waits: list[float] = []
 
         def teleport_key(scan_code: int) -> None:
-            presses.append(scan_code)
+            presses.append((scan_code, clock["ms"]))
             if len(presses) >= 2:
                 stop.set()
-
-        def wait_paused(timeout_s: float) -> bool:
-            waits.append(timeout_s)
-            clock["ms"] += int(round(timeout_s * 1000))
-            return not stop.is_set()
 
         ctx = SimpleNamespace(
             config=SimpleNamespace(skill_timers=timers),
             logger=SimpleNamespace(behavior=MagicMock()),
-            stop_event=stop,
+            stop_event=ClockStopEvent(stop, clock),
             resume_gate=threading.Event(),
             is_stopped=stop.is_set,
             should_run_workers=lambda: not stop.is_set(),
             should_run_timers=lambda: not stop.is_set(),
-            wait_while_stopped_or_paused=wait_paused,
+            wait_while_stopped_or_paused=lambda _t: not stop.is_set(),
+            character_action_gate=CharacterActionGate(),
         )
         worker = SkillTimerWorker(ctx, SimpleNamespace(teleport_key=teleport_key))
 
@@ -51,9 +65,63 @@ class SkillTimerWorkerTests(unittest.TestCase):
         ):
             worker.run()
 
-        self.assertEqual(presses, [59, 60])
-        self.assertEqual(len(waits), 1)
-        self.assertAlmostEqual(waits[0], SKILL_TIMER_STAGGER_MS / 1000.0, places=3)
+        self.assertEqual([p[0] for p in presses], [59, 60])
+        # The shared stagger window separated the two presses.
+        self.assertGreaterEqual(
+            presses[1][1] - presses[0][1],
+            SKILL_TIMER_STAGGER_MS,
+        )
+
+    def test_timer_yields_while_buff_burst_is_active(self) -> None:
+        """A due timer must not press while the buff worker owns the slot."""
+        timers = (
+            SkillTimerRuntime(button="s", scan_code=31, interval_ms=1_000),
+        )
+        gate = CharacterActionGate()
+        gate.begin_buff_burst()
+        stop = threading.Event()
+        presses: list[tuple[int, int]] = []
+        clock = {"ms": 1_000_000}
+        ticks = {"n": 0}
+
+        def teleport_key(scan_code: int) -> None:
+            presses.append((scan_code, clock["ms"]))
+            stop.set()
+
+        def stop_wait(timeout_s: float) -> bool:
+            clock["ms"] += int(round(timeout_s * 1000))
+            ticks["n"] += 1
+            # Buff worker finishes its burst after a few poll slices.
+            if ticks["n"] >= 3:
+                gate.end_buff_burst()
+            return stop.is_set()
+
+        ctx = SimpleNamespace(
+            config=SimpleNamespace(skill_timers=timers),
+            logger=SimpleNamespace(behavior=MagicMock()),
+            stop_event=SimpleNamespace(
+                wait=stop_wait,
+                is_set=stop.is_set,
+                set=stop.set,
+            ),
+            resume_gate=threading.Event(),
+            is_stopped=stop.is_set,
+            should_run_workers=lambda: not stop.is_set(),
+            should_run_timers=lambda: not stop.is_set(),
+            wait_while_stopped_or_paused=lambda _t: not stop.is_set(),
+            character_action_gate=gate,
+        )
+        worker = SkillTimerWorker(ctx, SimpleNamespace(teleport_key=teleport_key))
+
+        with patch(
+            "pybot.runtime.workers.skill_timer_worker.monotonic_ms",
+            side_effect=lambda: clock["ms"],
+        ):
+            worker.run()
+
+        self.assertEqual([p[0] for p in presses], [31])
+        # The press only happened after the buff burst cleared.
+        self.assertGreaterEqual(ticks["n"], 3)
 
     def test_long_timer_is_due_immediately_even_with_low_monotonic_uptime(self) -> None:
         timers = (
@@ -79,6 +147,7 @@ class SkillTimerWorkerTests(unittest.TestCase):
             should_run_workers=lambda: not stop.is_set(),
             should_run_timers=lambda: not stop.is_set(),
             wait_while_stopped_or_paused=wait_paused,
+            character_action_gate=CharacterActionGate(),
         )
         worker = SkillTimerWorker(ctx, SimpleNamespace(teleport_key=teleport_key))
 
@@ -130,6 +199,7 @@ class SkillTimerWorkerTests(unittest.TestCase):
             should_run_workers=gates.should_run_workers,
             should_run_timers=gates.should_run_timers,
             wait_while_stopped_or_paused=lambda _timeout: gates.should_run_workers(),
+            character_action_gate=gates.character_action_gate,
         )
         worker = SkillTimerWorker(ctx, SimpleNamespace(teleport_key=teleport_key))
 
@@ -205,6 +275,7 @@ class SkillTimerWorkerTests(unittest.TestCase):
             should_run_timers=should_run_timers,
             wait_while_stopped_or_paused=wait_paused,
             hunt_generation=0,
+            character_action_gate=CharacterActionGate(),
         )
         worker = SkillTimerWorker(ctx, SimpleNamespace(teleport_key=teleport_key))
 
@@ -221,7 +292,7 @@ class SkillTimerWorkerTests(unittest.TestCase):
             SkillTimerRuntime(button="f1", scan_code=59, interval_ms=60_000),
         )
         stop = threading.Event()
-        presses: list[int] = []
+        presses: list[tuple[int, int]] = []
         clock = {"ms": 0}
         running = {"ok": True}
         ctx_ref: dict[str, SimpleNamespace] = {}
@@ -264,6 +335,7 @@ class SkillTimerWorkerTests(unittest.TestCase):
             should_run_timers=should_run,
             wait_while_stopped_or_paused=wait_paused,
             hunt_generation=0,
+            character_action_gate=CharacterActionGate(),
         )
         ctx_ref["ctx"] = ctx
         worker = SkillTimerWorker(ctx, SimpleNamespace(teleport_key=teleport_key))

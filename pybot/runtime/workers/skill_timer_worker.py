@@ -5,13 +5,16 @@ Paused while sitting/user-paused/teleporting. Teleport pause preserves
 elapsed intervals; a new hunt generation (for example after sit recovery)
 re-arms startup casts with ``SKILL_TIMER_STAGGER_MS`` staggering.
 Storage sessions do not pause timers (combat only), so keys are not re-armed.
+
+Timer presses share the :class:`~pybot.runtime.gate_controller.CharacterActionGate`
+with character buff casts: buffs claim the slot first (a buff burst makes
+timers yield), and a single stagger window spaces every keypress.
 """
 
 from __future__ import annotations
 
 import traceback
 
-from pybot.runtime.constants import SKILL_TIMER_STAGGER_MS
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.input.input_backend import InputBackend, perform_if_allowed
 from pybot.runtime.workers.worker_contexts import SkillTimerWorkerContext
@@ -28,7 +31,6 @@ class SkillTimerWorker:
         self._ctx = ctx
         self._input = input_backend
         self._last_press_ms: dict[int, int] = {}
-        self._last_any_press_ms = 0
         self._armed = False
         self._startup_generation: int | None = None
         self._startup_cycle_generation: int | None = None
@@ -110,12 +112,9 @@ class SkillTimerWorker:
                         break
                     if not ctx.should_run_timers():
                         break
-                    if not self._wait_stagger_gap():
-                        break
-                    if int(getattr(ctx, "hunt_generation", 0)) != generation:
-                        break
-                    if not ctx.should_run_timers():
-                        break
+                    # A blocked startup cast must not burn the shared stagger
+                    # slot: check admission before claiming so the gate stays
+                    # free for buffs while area-clear/danger holds the timer.
                     if startup_pending and not self._startup_action_allowed():
                         block_key = (generation, timer.scan_code)
                         if block_key not in self._startup_block_logged:
@@ -125,6 +124,12 @@ class SkillTimerWorker:
                                 f"scanCode={timer.scan_code} "
                                 f"reason={self._startup_block_reason()}"
                             )
+                        break
+                    if not self._wait_stagger_gap():
+                        break
+                    if int(getattr(ctx, "hunt_generation", 0)) != generation:
+                        break
+                    if not ctx.should_run_timers():
                         break
                     pressed = perform_if_allowed(
                         self._input,
@@ -146,7 +151,9 @@ class SkillTimerWorker:
                         break
                     pressed_at = monotonic_ms()
                     self._last_press_ms[timer.scan_code] = pressed_at
-                    self._last_any_press_ms = pressed_at
+                    # Record on the shared gate so buff casts and other timer
+                    # presses wait out the stagger window from this keypress.
+                    self._ctx.character_action_gate.note_action(pressed_at)
                     self._startup_pressed.add(timer.scan_code)
 
                 # Release combat only after every normal timer has fired once
@@ -237,20 +244,29 @@ class SkillTimerWorker:
         """Start timers for a new hunt so each configured key is due once."""
         for timer in timers:
             self._last_press_ms[timer.scan_code] = -timer.interval_ms
-        self._last_any_press_ms = 0
 
     def _wait_stagger_gap(self) -> bool:
-        """Ensure ``SKILL_TIMER_STAGGER_MS`` since the last timer press.
+        """Ensure the shared buff/timer keypress slot is open before a press.
 
-        Returns False if hunt stopped/paused/sitting before the gap elapsed.
+        Buffs win priority: while a buff burst is pending, timer presses
+        yield even if the stagger window has elapsed. Otherwise waits out
+        the shared ``SKILL_TIMER_STAGGER_MS`` window since the last buff cast
+        or timer press. Returns False if hunt stopped/paused/sitting first.
         """
         ctx = self._ctx
-        if self._last_any_press_ms <= 0:
-            return ctx.should_run_workers()
-        now = monotonic_ms()
-        gap = now - self._last_any_press_ms
-        if gap >= SKILL_TIMER_STAGGER_MS:
-            return True
-        return ctx.wait_while_stopped_or_paused(
-            (SKILL_TIMER_STAGGER_MS - gap) / 1000.0,
-        )
+        gate = ctx.character_action_gate
+        while not ctx.is_stopped():
+            if not ctx.should_run_timers():
+                return False
+            now = monotonic_ms()
+            if gate.try_claim(is_buff=False, now_ms=now):
+                return True
+            remaining_ms = gate.stagger_remaining_ms(now)
+            if remaining_ms <= 0:
+                # A buff burst holds the slot; poll until it clears.
+                if ctx.stop_event.wait(0.05):
+                    return False
+                continue
+            if ctx.stop_event.wait(remaining_ms / 1000.0):
+                return False
+        return False

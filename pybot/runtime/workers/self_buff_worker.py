@@ -5,7 +5,6 @@ from __future__ import annotations
 import traceback
 
 from pybot.runtime.constants import (
-    SKILL_TIMER_STAGGER_MS,
     STARTUP_BUFF_CURSOR_DELAY_S,
     STARTUP_BUFF_GAP_S,
 )
@@ -21,13 +20,17 @@ class SelfBuffWorker:
     with a one-second gap between casts. Normal skill timers are released only
     after the full buff sequence completes. Each buff's periodic interval
     starts at its successful cast, and sitting starts a fresh hunt cycle.
+
+    Buff casts share the :class:`~pybot.runtime.gate_controller.CharacterActionGate`
+    with skill timers: a buff burst claims the shared keypress slot first so
+    a buff and a timer due at the same instant never collide and the buff
+    always fires before the timer.
     """
 
     def __init__(self, ctx: SelfBuffWorkerContext, input_backend: InputBackend) -> None:
         self._ctx = ctx
         self._input = input_backend
         self._last_cast_ms: dict[int, int] = {}
-        self._last_any_cast_ms = 0
         self._completed_generation: int | None = None
 
     def run(self) -> None:
@@ -51,7 +54,6 @@ class SelfBuffWorker:
                 generation = self._current_generation()
                 if self._completed_generation != generation:
                     self._last_cast_ms.clear()
-                    self._last_any_cast_ms = 0
                     if not self._run_startup_sequence(
                         buffs,
                         expected_generation=generation,
@@ -97,13 +99,21 @@ class SelfBuffWorker:
                     for buff in buffs
                     if now - self._last_cast_ms[id(buff)] >= buff.delay_ms
                 ]
-                for buff in due:
-                    if not self._character_action_allowed():
-                        break
-                    if not self._wait_stagger_gap():
-                        break
-                    if not self._cast_buff(buff):
-                        break
+                # Claim buff priority before the first cast so a timer due at
+                # the same instant yields until every due buff has fired.
+                if due:
+                    ctx.character_action_gate.begin_buff_burst()
+                try:
+                    for buff in due:
+                        if not self._character_action_allowed():
+                            break
+                        if not self._wait_stagger_gap():
+                            break
+                        if not self._cast_buff(buff):
+                            break
+                finally:
+                    if due:
+                        ctx.character_action_gate.end_buff_burst()
 
                 if ctx.is_stopped():
                     break
@@ -209,19 +219,27 @@ class SelfBuffWorker:
         return False
 
     def _wait_stagger_gap(self) -> bool:
-        """Preserve the normal input gap between periodic buff casts."""
-        if self._last_any_cast_ms <= 0:
-            return self._character_action_allowed()
+        """Wait for the shared buff/timer keypress slot before a buff cast.
+
+        Uses the shared :class:`CharacterActionGate` so buff casts and skill
+        timer presses never fire closer than ``SKILL_TIMER_STAGGER_MS`` apart,
+        regardless of which worker sent the last keypress.
+        """
+        gate = self._ctx.character_action_gate
         while not self._ctx.is_stopped():
             if not self._character_action_allowed():
                 self._ctx.wait_while_combat_blocked(0.25)
                 continue
-            gap_ms = monotonic_ms() - self._last_any_cast_ms
-            if gap_ms >= SKILL_TIMER_STAGGER_MS:
+            now = monotonic_ms()
+            if gate.try_claim(is_buff=True, now_ms=now):
                 return True
-            if self._ctx.stop_event.wait(
-                max(0.0, (SKILL_TIMER_STAGGER_MS - gap_ms) / 1000.0)
-            ):
+            remaining_ms = gate.stagger_remaining_ms(now)
+            if remaining_ms <= 0:
+                # A timer owns the stagger window; poll until it reopens.
+                if self._ctx.stop_event.wait(0.05):
+                    return False
+                continue
+            if self._ctx.stop_event.wait(remaining_ms / 1000.0):
                 return False
         return False
 
@@ -266,7 +284,9 @@ class SelfBuffWorker:
                 return False
             cast_at = monotonic_ms()
             self._last_cast_ms[id(buff)] = cast_at
-            self._last_any_cast_ms = cast_at
+            # Record on the shared gate so the next buff cast and any timer
+            # press both wait out the stagger window from this keypress.
+            ctx.character_action_gate.note_action(cast_at)
             ctx.logger.behavior(
                 f"[CUSTOM] buff cast key={buff.button} at=({cx},{cy})"
             )

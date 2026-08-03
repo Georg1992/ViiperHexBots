@@ -13,8 +13,75 @@ from __future__ import annotations
 import threading
 import time
 
-from pybot.runtime.constants import WORKER_POLL_INTERVAL_S
+from pybot.runtime.constants import (
+    SKILL_TIMER_STAGGER_MS,
+    WORKER_POLL_INTERVAL_S,
+)
 from pybot.runtime.startup_sequence import HuntStartupSequence
+
+
+class CharacterActionGate:
+    """Shared 500ms stagger + buff priority across buff casts and timer presses.
+
+    SelfBuffWorker and SkillTimerWorker run on independent threads with no
+    shared scheduling. When a buff and a timer come due in the same instant
+    (for example three 240s configs syncing up), this gate makes them
+    cooperate: a single stagger window spaces every character keypress, and
+    a ``buff burst`` signal makes timers yield while buffs are casting so
+    buffs fire first.
+
+    Priority is best-effort: the buff worker raises its burst flag before
+    claiming the slot, and timer claims are refused while it is up, so a
+    simultaneous due-time race is overwhelmingly won by the buff. There is
+    still a microsecond window where a timer claim beats the flag raise;
+    both workers then simply space out by the shared stagger window.
+    """
+
+    def __init__(self, stagger_ms: int = SKILL_TIMER_STAGGER_MS) -> None:
+        self._lock = threading.Lock()
+        self._stagger_ms = max(0, int(stagger_ms))
+        # 0 means "no prior action yet" — the first ever claim is always open.
+        self._last_action_ms = 0
+        self._buff_burst_active = False
+
+    def note_action(self, now_ms: int) -> None:
+        """Record a completed buff/timer keypress time."""
+        with self._lock:
+            if now_ms > self._last_action_ms:
+                self._last_action_ms = now_ms
+
+    def try_claim(self, *, is_buff: bool, now_ms: int) -> bool:
+        """Atomically claim the next character-keypress slot if it is open.
+
+        A slot is open when the shared stagger window has elapsed since the
+        last buff/timer keypress and (for timers) no buff burst is pending.
+        A successful claim records ``now_ms`` as the new shared last-action
+        time so the other worker waits out the window.
+        """
+        with self._lock:
+            if not is_buff and self._buff_burst_active:
+                return False
+            if self._last_action_ms and now_ms - self._last_action_ms < self._stagger_ms:
+                return False
+            self._last_action_ms = now_ms
+            return True
+
+    def stagger_remaining_ms(self, now_ms: int) -> int:
+        """Milliseconds until the shared stagger window reopens (0 if open)."""
+        with self._lock:
+            if not self._last_action_ms:
+                return 0
+            return max(0, self._stagger_ms - (now_ms - self._last_action_ms))
+
+    def begin_buff_burst(self) -> None:
+        """Mark a buff burst (due buffs about to cast) so timers yield."""
+        with self._lock:
+            self._buff_burst_active = True
+
+    def end_buff_burst(self) -> None:
+        """Clear the buff burst after all due buffs cast or the burst aborts."""
+        with self._lock:
+            self._buff_burst_active = False
 
 
 class GateController:
@@ -44,6 +111,9 @@ class GateController:
         self._last_heal_action_mono = 0.0
         # Monotonic deadline: after teleport settle, heal freely until this time.
         self._post_teleport_heal_until = 0.0
+        # Shared stagger + buff priority between buff casts and skill-timer
+        # presses (both are character keypresses on separate threads).
+        self.character_action_gate = CharacterActionGate()
         # Startup milestones and hunt generations belong to the dedicated
         # sequence object, not to this general lifecycle gate.
         self.startup = HuntStartupSequence() if startup is None else startup
