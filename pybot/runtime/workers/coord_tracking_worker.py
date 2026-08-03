@@ -64,6 +64,12 @@ class CoordTrackingWorker:
 
     def _tick(self) -> None:
         ctx = self._ctx
+        # ``run()`` checks this gate, but the detector can raise a critical
+        # escape request immediately afterward. Re-check at the tick boundary
+        # so a candidate from the old screen cannot be ingested while the
+        # escape worker owns the transition.
+        if not ctx.should_run_tracking():
+            return
         if not ctx.capture.is_valid():
             return
         roi = ctx.capture.get_hunt_roi()
@@ -77,6 +83,15 @@ class CoordTrackingWorker:
         # on the current fresh frame at exact coordinates.
         candidates = ctx.tracks.get_and_clear_new_candidates()
 
+        if not ctx.should_run_tracking():
+            # Keep candidates pending for the current epoch. A successful
+            # danger teleport clears them in area_reset; a failed escape can
+            # retry without losing the discovery result.
+            ctx.tracks.requeue_discovery_candidates(
+                candidates, expected_epoch=area_epoch,
+            )
+            return
+
         # Skip if nothing to do
         if not alive_tracks and not candidates:
             self._update_overlay(now_ms)
@@ -85,13 +100,20 @@ class CoordTrackingWorker:
         frame = ctx.capture.capture_roi(roi)
         if frame is None or frame.size == 0:
             if candidates:
-                ctx.tracks.requeue_discovery_candidates(candidates)
+                ctx.tracks.requeue_discovery_candidates(
+                    candidates, expected_epoch=area_epoch,
+                )
             if now_ms - self._last_empty_frame_log_ms >= LOG_REPEAT_INTERVAL_MS:
                 self._last_empty_frame_log_ms = now_ms
                 ctx.logger.behavior("[COORD] capture returned empty frame")
             return
 
         # ── Step 1: Create tracks from discovery candidates ──────────────
+        if candidates and not ctx.should_run_tracking():
+            ctx.tracks.requeue_discovery_candidates(
+                candidates, expected_epoch=area_epoch,
+            )
+            return
         if candidates:
             new_count = self._process_discovery_candidates(
                 candidates, frame, roi, now_ms, area_epoch,
@@ -243,11 +265,23 @@ class CoordTrackingWorker:
 
         batch = ctx.tracker.track_locals_frame(frame, roi, snaps)
         if not batch.ok or len(batch.results) != len(pending):
-            ctx.tracks.requeue_discovery_candidates(pending)
+            ctx.tracks.requeue_discovery_candidates(
+                pending, expected_epoch=area_epoch,
+            )
             return 0
 
         created = 0
-        for candidate, result in zip(pending, batch.results, strict=True):
+        for index, (candidate, result) in enumerate(
+            zip(pending, batch.results, strict=True)
+        ):
+            if not ctx.should_run_tracking():
+                # Do not create any more old-area tracks after danger ownership
+                # changes. The pending suffix remains available only if the
+                # escape fails; a successful area reset clears it atomically.
+                ctx.tracks.requeue_discovery_candidates(
+                    pending[index:], expected_epoch=area_epoch,
+                )
+                return created
             cx, cy = candidate.x, candidate.y
             # Prefer the fresh local-follow hit; if the mob moved/occluded,
             # still create at the discovery point so mode TP cannot claim

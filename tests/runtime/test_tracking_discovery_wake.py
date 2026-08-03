@@ -55,6 +55,37 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         # Coord worker never removes tracks; death worker owns removal.
         self.assertIsNotNone(self.tracks.get_track_by_id(track.id))
 
+    def test_critical_escape_gate_does_not_ingest_old_candidates(self) -> None:
+        """A candidate queued before danger TP must not become a stale track."""
+        from pybot.recognition.rules import DiscoveryDetection
+
+        self.ctx.config.mob_name = "horn"
+        self.ctx.config.use_sprite_grf = True
+        self.ctx.critical_danger_requested = threading.Event()
+        self.ctx.should_run_tracking.side_effect = (
+            lambda: not self.ctx.critical_danger_requested.is_set()
+        )
+        self.tracks.process_discovery_scan(
+            [
+                DiscoveryDetection(
+                    x=100,
+                    y=100,
+                    confidence=0.8,
+                    candidate_scale=0.9,
+                    living=True,
+                )
+            ],
+            mob_name="horn",
+            now_tick=1,
+        )
+        self.assertTrue(self.tracks.has_pending_discovery_candidates())
+
+        self.ctx.critical_danger_requested.set()
+        self.worker._tick()
+
+        self.assertEqual(self.tracks.get_track_count(), 0)
+        self.assertTrue(self.tracks.has_pending_discovery_candidates())
+
     def test_local_miss_wakes_discovery_and_keeps_track(self) -> None:
         track = self.tracks.create_track(
             "horn", 100, 100, 0.8, 0.9, now_tick=1

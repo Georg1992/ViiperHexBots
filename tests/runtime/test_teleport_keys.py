@@ -1,4 +1,4 @@
-"""Teleport key selection: mode uses creamy-first; danger uses wing-first."""
+"""Teleport key selection: mode/SAFE danger use creamy-first; urgent danger uses wing-first."""
 
 from __future__ import annotations
 
@@ -64,6 +64,30 @@ class TeleportKeySelectionTests(unittest.TestCase):
         self.tport.danger_teleport(reason="critical_hp")
         self.input.teleport_key.assert_called_once_with(17)
         self.ctx.note_teleport_for_wings.assert_not_called()
+
+    def test_safe_danger_teleport_prefers_creamy_when_assigned(self) -> None:
+        """Recovery-session escapes use the safe key (creamy / save point)."""
+        self.tport.danger_teleport(
+            reason="sit_danger",
+            prefer_safe_key=True,
+        )
+        self.input.teleport_key.assert_called_once_with(17)
+        self.ctx.note_teleport_for_wings.assert_not_called()
+
+    def test_safe_danger_teleport_falls_back_to_wing_without_creamy(self) -> None:
+        self.ctx.config.creamy_tp_scan_code = 0
+        self.ctx.config.creamy_tp_button = ""
+        self.tport.danger_teleport(
+            reason="sit_danger",
+            prefer_safe_key=True,
+        )
+        self.input.teleport_key.assert_called_once_with(16)
+        self.ctx.note_teleport_for_wings.assert_called_once()
+
+    def test_urgent_danger_teleport_still_prefers_wing(self) -> None:
+        """Hunting critical escapes keep the urgent random fly wing."""
+        self.tport.danger_teleport(reason="critical_hunt")
+        self.input.teleport_key.assert_called_once_with(16)
 
     def test_mode_teleport_once_uses_creamy_and_does_not_count_wing(self) -> None:
         self.assertTrue(self.tport.teleport_once())

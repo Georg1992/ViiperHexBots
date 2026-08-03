@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import time
 import traceback
+from contextlib import nullcontext
 
 from pybot.recognition.rules import DiscoveryDetection
 from pybot.runtime.constants import LOG_REPEAT_INTERVAL_MS, WORKER_POLL_INTERVAL_S
@@ -147,7 +148,6 @@ class DiscoveryWorker:
         self._scan_count += 1
 
         filtered = filter_scan_candidates(scan.detections)
-        ctx.overlay.set_scan_living(len(filtered))
 
         detections = [
             DiscoveryDetection(
@@ -166,92 +166,102 @@ class DiscoveryWorker:
         # process_discovery_scan matches detections, marks absence, handles
         # removal factors, and publishes new candidates for tracking to create
         # on its next fresh frame at exact coordinates.
-        summary = ctx.tracks.process_discovery_scan(
-            detections,
-            mob_name=ctx.config.mob_name,
-            now_tick=now_ms,
-            existing_positions=existing_positions,
-            existing_track_positions=existing_track_positions,
-            area_epoch=area_epoch,
-            hunt_roi=roi,
-        )
-
-        if (
-            ctx.tracks.area_epoch != area_epoch
-            or ctx.discovery_suspend.is_set()
-            or expected_generation != int(getattr(ctx, "hunt_generation", 0))
-        ):
-            return
-
-        verbose = (
-            summary.added_count > 0
-            or summary.removed_count > 0
-            or self._scan_count <= 3
-            or self._scan_count % 20 == 0
-            or summary.death_sites_active > 0
-        )
-        if verbose:
-            ctx.validation.log_discovery_scan(
-                raw_count=scan.raw_count,
-                filtered_count=len(filtered),
-                duration_ms=scan.duration_ms,
-                summary=summary,
-            )
-            ctx.logger.behavior(
-                f"[DISCOVERY] scan#{self._scan_count} "
-                f"raw={scan.raw_count} filtered={len(filtered)} "
-                f"added={summary.added_count} removed={summary.removed_count} "
-                f"matched={summary.matched_count} "
-                f"death_sites={summary.death_sites_active} "
-                f"tracks={ctx.tracks.get_track_count()}"
+        # Commit track mutations and all derived state under the same boundary
+        # as area reset. This establishes one lock order: transition boundary
+        # first, then HuntTracks' internal lock. It prevents a discovery scan
+        # from holding track state while reset waits for the transition lock.
+        transition_lock = getattr(ctx, "area_transition_lock", None)
+        guard = nullcontext() if transition_lock is None else transition_lock
+        with guard:
+            summary = ctx.tracks.process_discovery_scan(
+                detections,
+                mob_name=ctx.config.mob_name,
+                now_tick=now_ms,
+                existing_positions=existing_positions,
+                existing_track_positions=existing_track_positions,
+                area_epoch=area_epoch,
+                hunt_roi=roi,
             )
 
-        if summary.removed_out_of_range_ids:
-            ctx.logger.behavior(
-                f"[DISCOVERY] path=out-of-range "
-                f"ids={summary.removed_out_of_range_ids}"
-            )
-        if summary.removed_discovery_miss_ids:
-            ctx.logger.behavior(
-                f"[DISCOVERY] path=miss-2 "
-                f"ids={summary.removed_discovery_miss_ids}"
-            )
-        # Detections seen but nothing new created while death sites are active —
-        # likely corpse heat matched a death site.
-        # sprite.grf removes death animations — no corpse heat to block.
-        if not ctx.config.use_sprite_grf and (
-            len(filtered) > 0
-            and summary.added_count == 0
-            and summary.alive_after == 0
-            and summary.death_sites_active > 0
-        ):
-            ctx.logger.behavior(
-                f"[DEATH] path=death-site-block "
-                f"detections={len(filtered)} matched={summary.matched_count} "
-                f"death_sites={summary.death_sites_active} "
-                f"— no new track (corpse heat held by death site)"
-            )
+            # A scan that began on the old screen must fail closed before it can
+            # publish any observable state.
+            if (
+                ctx.tracks.area_epoch != area_epoch
+                or ctx.discovery_suspend.is_set()
+                or expected_generation != int(getattr(ctx, "hunt_generation", 0))
+            ):
+                return
 
-        # Teleport clear = nothing attackable (no alive tracks, no new candidates).
-        # Corpse heat held only by death sites must not block teleport — sites are
-        # screen-local and wiped when we leave the area.
-        living_for_clear = (
-            0
-            if summary.alive_after == 0 and summary.added_count == 0
-            else max(len(filtered), summary.alive_after)
-        )
-        self._hunt_mode.note_discovery_scan_completed(
-            living_count=living_for_clear,
-            added_count=summary.added_count,
-            area_epoch=area_epoch,
-        )
-        # Startup actions are held until at least one successful discovery
-        # scan confirms an empty area. An empty track store alone is not proof
-        # that the first frame has been checked.
-        mark_startup_clear = getattr(ctx, "mark_startup_area_clear", None)
-        if callable(mark_startup_clear):
-            mark_startup_clear(
-                living_for_clear == 0,
-                expected_generation=expected_generation,
+            ctx.overlay.set_scan_living(len(filtered))
+            verbose = (
+                summary.added_count > 0
+                or summary.removed_count > 0
+                or self._scan_count <= 3
+                or self._scan_count % 20 == 0
+                or summary.death_sites_active > 0
             )
+            if verbose:
+                ctx.validation.log_discovery_scan(
+                    raw_count=scan.raw_count,
+                    filtered_count=len(filtered),
+                    duration_ms=scan.duration_ms,
+                    summary=summary,
+                )
+                ctx.logger.behavior(
+                    f"[DISCOVERY] scan#{self._scan_count} "
+                    f"raw={scan.raw_count} filtered={len(filtered)} "
+                    f"added={summary.added_count} removed={summary.removed_count} "
+                    f"matched={summary.matched_count} "
+                    f"death_sites={summary.death_sites_active} "
+                    f"tracks={ctx.tracks.get_track_count()}"
+                )
+
+            if summary.removed_out_of_range_ids:
+                ctx.logger.behavior(
+                    f"[DISCOVERY] path=out-of-range "
+                    f"ids={summary.removed_out_of_range_ids}"
+                )
+            if summary.removed_discovery_miss_ids:
+                ctx.logger.behavior(
+                    f"[DISCOVERY] path=miss-2 "
+                    f"ids={summary.removed_discovery_miss_ids}"
+                )
+            # Detections seen but nothing new created while death sites are active —
+            # likely corpse heat matched a death site.
+            # sprite.grf removes death animations — no corpse heat to block.
+            if not ctx.config.use_sprite_grf and (
+                len(filtered) > 0
+                and summary.added_count == 0
+                and summary.alive_after == 0
+                and summary.death_sites_active > 0
+            ):
+                ctx.logger.behavior(
+                    f"[DEATH] path=death-site-block "
+                    f"detections={len(filtered)} matched={summary.matched_count} "
+                    f"death_sites={summary.death_sites_active} "
+                    f"— no new track (corpse heat held by death site)"
+                )
+
+            # Teleport clear = nothing attackable (no alive tracks, no new candidates).
+            # Corpse heat held only by death sites must not block teleport — sites are
+            # screen-local and wiped when we leave the area.
+            living_for_clear = (
+                0
+                if summary.alive_after == 0 and summary.added_count == 0
+                else max(len(filtered), summary.alive_after)
+            )
+            self._hunt_mode.note_discovery_scan_completed(
+                living_count=living_for_clear,
+                added_count=summary.added_count,
+                area_epoch=area_epoch,
+            )
+            # Startup actions are held until at least one successful discovery
+            # scan confirms an empty area. An empty track store alone is not proof
+            # that the first frame has been checked.
+            mark_startup_clear = getattr(ctx, "mark_startup_area_clear", None)
+            if callable(mark_startup_clear):
+                mark_startup_clear(
+                    living_for_clear == 0,
+                    expected_generation=expected_generation,
+                )
 

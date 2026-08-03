@@ -84,7 +84,7 @@ class HpRestoreWorker:
                     healed = bool(
                         ctx.perform_heal_if_allowed(
                             ctx.should_run_heal_actions,
-                            lambda: self._input.key_tap(scan, after_s=0.0),
+                            lambda: self._press_if_still_needed(scan),
                             cooldown_s=HP_RESTORE_COOLDOWN_S,
                         )
                     )
@@ -92,7 +92,7 @@ class HpRestoreWorker:
                     healed = perform_if_allowed(
                         self._input,
                         ctx.should_run_heal_actions,
-                        lambda: self._input.key_tap(scan, after_s=0.0),
+                        lambda: self._press_if_still_needed(scan),
                         lifecycle=ctx,
                     )
                 if healed:
@@ -104,6 +104,18 @@ class HpRestoreWorker:
                 ctx.logger.behavior(f"[HP] tick error:\n{traceback.format_exc()}")
                 if ctx.stop_event.wait(0.25):
                     break
+
+    def _press_if_still_needed(self, scan: int) -> bool:
+        """Recheck HP immediately before sending the item key.
+
+        The worker performs a preflight ratio check before entering the shared
+        admission gate. HP can become full between that check and the admitted
+        action, so the input boundary must fail closed as well.
+        """
+        ratio = self._hp_ratio()
+        if ratio is None or ratio >= HP_RESTORE_RATIO:
+            return False
+        return bool(self._input.key_tap(scan, after_s=0.0))
 
     def _hp_ratio(self) -> float | None:
         """Return HP/max HP, or None when the shared vitals are unavailable."""

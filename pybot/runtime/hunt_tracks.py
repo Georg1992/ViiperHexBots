@@ -262,12 +262,24 @@ class HuntTracks:
             return candidates
 
     def requeue_discovery_candidates(
-        self, candidates: list[DiscoveryDetection]
+        self,
+        candidates: list[DiscoveryDetection],
+        *,
+        expected_epoch: int | None = None,
     ) -> None:
-        """Put candidates back when tracking could not process them (e.g. empty frame)."""
+        """Put candidates back only if they still belong to the current area.
+
+        A tracker may pop candidates, then lose the capture race to a danger
+        teleport before it can process them. In that case requeueing would
+        move old-screen detections into the new screen. An epoch supplied by
+        the pop operation makes this handoff fail closed; legacy callers that
+        omit it retain the normal current-area behavior.
+        """
         if not candidates:
             return
         with self._lock:
+            if expected_epoch is not None and expected_epoch != self._area_epoch:
+                return
             self._merge_candidates_locked(candidates)
 
     def process_discovery_scan(

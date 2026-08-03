@@ -15,20 +15,19 @@ class HuntStartupSequenceTests(unittest.TestCase):
         self.assertTrue(sequence.is_combat_ready())
         self.assertEqual(sequence.generation, 0)
 
-    def test_begin_requires_area_buffs_and_timers_for_production_startup(self) -> None:
+    def test_begin_trusts_safe_start_and_gates_combat_on_startup_actions(self) -> None:
         sequence = HuntStartupSequence()
         sequence.begin()
 
-        self.assertFalse(sequence.area_clear.is_set())
+        # A fresh hunt is trusted to start at a safe location: the area is
+        # considered clear immediately, so startup buffs/timers are not held
+        # back by the first discovery scan.
+        self.assertTrue(sequence.area_clear.is_set())
         self.assertFalse(sequence.buffs_done.is_set())
         self.assertFalse(sequence.timers_done.is_set())
-        # The initial area may be populated, so combat remains available for
-        # the first clear pass. Once clear is confirmed, startup buffs and
-        # timer casts gate combat before the normal hunt proceeds.
-        self.assertTrue(sequence.is_combat_ready())
-
-        sequence.mark_area_clear()
+        # With the area trusted clear, combat waits for buffs then timers.
         self.assertFalse(sequence.is_combat_ready())
+
         sequence.mark_buffs_done()
         self.assertFalse(sequence.is_combat_ready())
         self.assertFalse(sequence.timers_done.is_set())
@@ -36,6 +35,23 @@ class HuntStartupSequenceTests(unittest.TestCase):
 
         self.assertTrue(sequence.area_clear.is_set())
         self.assertTrue(sequence.buffs_done.is_set())
+        self.assertTrue(sequence.is_combat_ready())
+
+    def test_begin_area_downgrade_reopens_combat_for_populated_start(self) -> None:
+        sequence = HuntStartupSequence()
+        sequence.begin()
+        self.assertTrue(sequence.area_clear.is_set())
+
+        # The first scan finds mobs: the trusted-clear milestone downgrades
+        # and combat reopens so the hunt can clear the populated area.
+        self.assertTrue(sequence.mark_area_clear(False))
+        self.assertFalse(sequence.area_clear.is_set())
+        self.assertTrue(sequence.is_combat_ready())
+
+        sequence.mark_area_clear()
+        self.assertFalse(sequence.is_combat_ready())
+        sequence.mark_buffs_done()
+        sequence.mark_timers_done()
         self.assertTrue(sequence.is_combat_ready())
 
     def test_new_hunt_advances_generation_and_clears_milestones_together(self) -> None:

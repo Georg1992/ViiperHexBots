@@ -20,6 +20,7 @@ owns danger escape.
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 
 from pybot.runtime.constants import (
     HP_POST_TELEPORT_HEAL_S,
@@ -146,16 +147,32 @@ class TeleportController:
 
     # ── Danger teleport ──────────────────────────────────────────
 
-    def danger_teleport(self, reason: str = "") -> bool:
-        """Press the danger teleport key (wing first) and clear tracks after.
+    def danger_teleport(
+        self,
+        reason: str = "",
+        *,
+        prefer_safe_key: bool = False,
+    ) -> bool:
+        """Press the danger teleport key and clear tracks after.
 
         Suspends discovery for the claim → key → settle window so a concurrent
         scan cannot confirm clear on a loading frame.
+
+        ``prefer_safe_key`` selects the same key used for sit/storage placement
+        (creamy / save point first) instead of the urgent random fly wing. A
+        seated recovery escape must land somewhere the character can sit; the
+        random wing can drop it back next to mobs and cause repeated
+        escape→sit cycles. The hunting critical escape keeps the random wing
+        to break combat immediately.
         """
         ctx = self._ctx
         prefix = f"{reason} " if reason else ""
-        tp = self.danger_scan_code()
-        key_name = self.danger_button() or "(unset)"
+        if prefer_safe_key:
+            tp = self.active_scan_code()
+            key_name = self.active_button() or "(unset)"
+        else:
+            tp = self.danger_scan_code()
+            key_name = self.danger_button() or "(unset)"
         if tp <= 0:
             ctx.logger.behavior(
                 f"[DANGER] {prefix}no teleport key configured "
@@ -167,16 +184,22 @@ class TeleportController:
         )
         ctx.discovery_suspend.set()
         ctx.discovery_wake.clear()
+        transition_lock = getattr(ctx, "area_transition_lock", None)
+        if transition_lock is None:
+            transition_lock = nullcontext()
         try:
-            if not self.teleport_once(scan_code=tp):
-                return False
-            # Danger teleports start a new hunt area just like normal mode
-            # teleports. Reset both the track epoch and the strategy's
-            # discovery confirmation; otherwise the strategy can carry a
-            # pre-teleport clear result into the new screen.
-            ctx.area_reset(reason="danger_teleport")
-            self._hunt_mode.on_area_reset()
-            return True
+            # Hold the lifecycle boundary through input, settle, and reset.
+            # No-target decisions cannot observe the old strategy state while
+            # the critical worker is already in the danger transition.
+            with transition_lock:
+                if not self.teleport_once(scan_code=tp):
+                    return False
+                # Publish the strategy marker and track epoch as one lifecycle
+                # transaction. The lock is re-entrant because ctx.area_reset
+                # also protects direct callers with the same boundary.
+                self._hunt_mode.on_area_reset()
+                ctx.area_reset(reason="danger_teleport")
+                return True
         finally:
             ctx.discovery_suspend.clear()
             ctx.discovery_wake.set()
@@ -304,22 +327,27 @@ class TeleportController:
         ctx.discovery_wake.clear()
 
         try:
-            # Claim under the tracks lock before input so a concurrent discovery
-            # reconcile cannot spawn tracks into the area we are leaving.
-            if not ctx.tracks.try_claim_clear_for_teleport():
-                return False
+            transition_lock = getattr(ctx, "area_transition_lock", None)
+            if transition_lock is None:
+                transition_lock = nullcontext()
+            with transition_lock:
+                # Claim under the tracks lock before input so a concurrent
+                # discovery reconcile cannot spawn tracks into the area we are
+                # leaving. The strategy reset stays in this same transaction.
+                if not ctx.tracks.try_claim_clear_for_teleport():
+                    return False
 
-            ctx.policy.reset()
-            ctx.validation.log_area_reset("pre_teleport")
-            self._hunt_mode.on_area_reset()
+                ctx.policy.reset()
+                ctx.validation.log_area_reset("pre_teleport")
+                self._hunt_mode.on_area_reset()
 
-            tp_button = self.active_button()
-            ctx.logger.behavior(
-                f"[MODE] teleport key={tp_button!r} "
-                f"wingsExhausted={ctx.fly_wings_exhausted}"
-            )
-            ok = self.teleport_once()
-            return ok
+                tp_button = self.active_button()
+                ctx.logger.behavior(
+                    f"[MODE] teleport key={tp_button!r} "
+                    f"wingsExhausted={ctx.fly_wings_exhausted}"
+                )
+                ok = self.teleport_once()
+                return ok
         finally:
             ctx.discovery_suspend.clear()
             ctx.discovery_wake.set()
@@ -346,8 +374,14 @@ class TeleportController:
     def _reset_tracking(self, reason: str, *, log_tag: str) -> None:
         """Clear tracks/policy/overlay and hunt-mode flags after teleport."""
         ctx = self._ctx
-        ctx.area_reset(reason)
-        self._hunt_mode.on_area_reset()
+        transition_lock = getattr(ctx, "area_transition_lock", None)
+        if transition_lock is None:
+            self._hunt_mode.on_area_reset()
+            ctx.area_reset(reason)
+        else:
+            with transition_lock:
+                self._hunt_mode.on_area_reset()
+                ctx.area_reset(reason)
         ctx.overlay.set_track_stats(track_count=0, alive_count=0)
         ctx.overlay.set_track_positions([])
         ctx.logger.behavior(f"[{log_tag}] tracking reset reason={reason}")

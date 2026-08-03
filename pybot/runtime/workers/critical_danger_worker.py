@@ -25,16 +25,28 @@ class CriticalDangerWorker:
             return False
         if not ctx.critical_danger_requested.is_set():
             return False
-        if not ctx.try_begin_sit_ops():
+        claim_critical = getattr(ctx, "try_begin_critical_escape_ops", None)
+        if callable(claim_critical):
+            if not claim_critical():
+                return False
+        elif not ctx.try_begin_sit_ops():
             return False
         try:
             # Re-check after claiming the gate because focus can be lost between
             # the initial check and the ownership transition.
             if ctx.pause_event.is_set():
                 return False
+            # Compatibility contexts may not expose the atomic critical claim.
+            # Claim the explicit escape phase before consuming the event.
+            begin_escape = getattr(ctx, "begin_danger_escape", None)
+            if not callable(claim_critical) and callable(begin_escape):
+                if not begin_escape():
+                    return False
             # Consume both mirrored requests before teleport. A seated session
             # cannot claim this path because it already holds the sit gate.
             if not ctx.pop_critical_danger():
+                if not callable(claim_critical) and callable(begin_escape):
+                    ctx.end_danger_escape()
                 return False
             ctx.pop_danger_sit_request()
             # Pause may arrive while consuming the mirrored requests. Restore
@@ -61,7 +73,14 @@ class CriticalDangerWorker:
             ctx.request_critical_danger()
             return False
         finally:
-            ctx.end_sit_ops()
+            end_critical = getattr(ctx, "end_critical_escape_ops", None)
+            if callable(end_critical):
+                end_critical()
+            else:
+                end_escape = getattr(ctx, "end_danger_escape", None)
+                if callable(end_escape):
+                    end_escape()
+                ctx.end_sit_ops()
 
     def run(self) -> None:
         ctx = self._ctx

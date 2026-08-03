@@ -68,13 +68,48 @@ class DangerDetector:
             self._prev_hp = hp
 
         if damage_seen:
-            # Queue every damage event for an active seated recovery session.
+            # Queue damage for an active seated recovery session only.
             # Critical damage also gets its own independent hunting escape
             # signal, so critical protection does not depend on sit being
             # enabled or configured.
             level = self.danger_level()
+            # A danger-sit request belongs only to an already-owned seated
+            # recovery session. While hunting, ordinary damage must not enter
+            # the sit worker at all: the independent critical event is the
+            # sole owner of a hunting escape. The previous unconditional
+            # request made every small HP loss block combat and caused the sit
+            # worker to run immediately after a critical teleport.
+            sitting = getattr(self._ctx, "sitting_event", None)
+            suspend = getattr(self._ctx, "discovery_suspend", None)
+            escape = getattr(self._ctx, "danger_escape_active", None)
+            is_sitting = False
+            is_teleporting = False
+            is_escaping = False
+            is_set = getattr(sitting, "is_set", None)
+            if callable(is_set):
+                value = is_set()
+                is_sitting = type(value) is bool and value
+            suspend_is_set = getattr(suspend, "is_set", None)
+            if callable(suspend_is_set):
+                value = suspend_is_set()
+                is_teleporting = type(value) is bool and value
+            escape_is_set = getattr(escape, "is_set", None)
+            if callable(escape_is_set):
+                value = escape_is_set()
+                is_escaping = type(value) is bool and value
             request = getattr(self._ctx, "request_danger_sit", None)
-            sit_queued = bool(request()) if callable(request) else False
+            # During an escape teleport, ``sitting_event`` is deliberately held
+            # as an input gate. It does not mean the character entered SP
+            # recovery. Never turn damage sampled during teleport settle into a
+            # new sit session; the critical/urgent owner already owns escape.
+            sit_queued = bool(
+                request()
+                if is_sitting
+                and not is_teleporting
+                and not is_escaping
+                and callable(request)
+                else False
+            )
             critical_queued = False
             # Critical damage must remain queued even while a sit/teleport
             # gate is held. The critical worker temporarily holds

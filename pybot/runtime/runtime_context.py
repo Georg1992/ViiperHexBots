@@ -153,6 +153,16 @@ class HuntRuntimeContext:
         return self.gates.critical_danger_requested
 
     @property
+    def danger_escape_active(self) -> threading.Event:
+        """True while an urgent danger escape owns the transition."""
+        return self.gates.danger_escape_active
+
+    @property
+    def area_transition_lock(self):
+        """Serialize area reset, discovery commit, and no-target decisions."""
+        return self.gates.area_transition_lock
+
+    @property
     def sit_cleanup_unresolved(self) -> threading.Event:
         """True when a seated toggle still needs shutdown cleanup."""
         return self.gates.sit_cleanup_unresolved
@@ -218,7 +228,19 @@ class HuntRuntimeContext:
         )
 
     def should_run_timers(self) -> bool:
-        return self.gates.should_run_timers()
+        """True when skill timers may fire (lifecycle + no active danger).
+
+        Timers keep running during storage and healing, but must never press
+        a key while the character is taking damage. The lifecycle gate alone
+        only knows about queued escape requests; the shared danger detector
+        adds the recent-damage safety window used by buffs and heals.
+        """
+        if not self.gates.should_run_timers():
+            return False
+        danger = self.danger_detector
+        if danger is None:
+            return True
+        return bool(danger.is_safe_for_heal())
 
     def should_run_mode_transitions(self) -> bool:
         """True when a teleport transition may claim the hunt input boundary."""
@@ -293,8 +315,11 @@ class HuntRuntimeContext:
         """True when a new-hunt startup action may run.
 
         Startup actions run before combat is released, so this deliberately
-        does not depend on ``should_run_combat()``. It does require a clear
-        area and a SAFE danger state; otherwise buffs/timers remain pending.
+        does not depend on ``should_run_combat()``. A fresh hunt is trusted to
+        start at a safe location (``area_clear`` is pre-satisfied by
+        ``begin``); recovered hunts wait for a scan to confirm the landing
+        area. Actions also require a SAFE danger state; otherwise buffs/timers
+        remain pending.
         """
         if (
             not self.startup_area_clear.is_set()
@@ -340,6 +365,18 @@ class HuntRuntimeContext:
 
     def pop_critical_danger(self) -> bool:
         return self.gates.pop_critical_danger()
+
+    def begin_danger_escape(self) -> bool:
+        return self.gates.begin_danger_escape()
+
+    def try_begin_critical_escape_ops(self) -> bool:
+        return self.gates.try_begin_critical_escape_ops()
+
+    def end_danger_escape(self) -> None:
+        self.gates.end_danger_escape()
+
+    def end_critical_escape_ops(self) -> None:
+        self.gates.end_critical_escape_ops()
 
     def should_run_discovery(self) -> bool:
         return self.gates.should_run_discovery()
@@ -444,6 +481,10 @@ class HuntRuntimeContext:
         return roi.x + roi.w // 2, roi.y + roi.h // 2
 
     def area_reset(self, reason: str = "area_reset") -> None:
-        self.tracks.area_reset()
-        self.policy.reset()
-        self.validation.log_area_reset(reason)
+        # Keep direct callers safe too; TeleportController additionally holds
+        # this lock while resetting the strategy marker so the complete area
+        # transition is one coherent lifecycle boundary.
+        with self.gates.area_transition_lock:
+            self.tracks.area_reset()
+            self.policy.reset()
+            self.validation.log_area_reset(reason)

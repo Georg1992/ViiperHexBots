@@ -115,6 +115,10 @@ class GateController:
         # Set while heal-until-full — combat idles; discovery/tracking/timers keep running.
         self.healing_event = threading.Event()
         self._sit_storage_lock = threading.Lock()
+        # Serializes area transitions with discovery's commit boundary and
+        # no-target decisions. Capture/detection may run outside this lock;
+        # state publication and reset are one deterministic transaction.
+        self.area_transition_lock = threading.RLock()
         # Shared cooldown for every HP-healing input path. Custom mob healing
         # and the HP-item worker must not both decide to heal in one window.
         self._last_heal_action_mono = 0.0
@@ -132,6 +136,10 @@ class GateController:
         # Independent critical-danger signal so hunting can escape even when
         # low-SP sitting is disabled or no sit key is configured.
         self.critical_danger_requested = threading.Event()
+        # True from escape ownership claim through teleport settle. This is
+        # intentionally separate from sitting_event: the critical worker holds
+        # the sit gate for input exclusion but is not doing SP recovery.
+        self.danger_escape_active = threading.Event()
         # A seated toggle could not be undone during worker cleanup. Runtime
         # shutdown must retry this before releasing input ownership.
         self.sit_cleanup_unresolved = threading.Event()
@@ -198,19 +206,20 @@ class GateController:
         )
 
     def should_run_tracking(self) -> bool:
-        """True when tracking may tick (workers running and not storage).
+        """True when tracking may tick outside an owned session transition.
 
-        Tracking is deliberately independent of combat/danger requests. A
-        pending danger event blocks attacks and discovery, but local tracking
-        must keep its last-known mobs fresh until the escape lifecycle owns the
-        area reset. This prevents a danger request from starving the tracker
-        and making the next hunt look stale.
+        Tracking may continue during healing, but it must stop as soon as a
+        sit/danger session owns the character or a teleport transition is in
+        flight. Otherwise it can ingest a pre-teleport discovery candidate
+        between the critical worker claiming the gate and the area reset.
         """
         return (
-            not self.stop_event.is_set()
-            and not self.pause_event.is_set()
+            self.should_run_workers()
             and not self.storage_event.is_set()
             and not self.discovery_suspend.is_set()
+            and not self.danger_sit_requested.is_set()
+            and not self.critical_danger_requested.is_set()
+            and not self.danger_escape_active.is_set()
         )
 
     def _session_held(self) -> bool:
@@ -299,6 +308,47 @@ class GateController:
             self.critical_danger_requested.clear()
             return True
 
+    def begin_danger_escape(self) -> bool:
+        """Claim an urgent escape from an already-owned session."""
+        with self._sit_storage_lock:
+            if self.danger_escape_active.is_set():
+                return False
+            self.danger_escape_active.set()
+            return True
+
+    def try_begin_critical_escape_ops(self) -> bool:
+        """Atomically claim the critical escape and its input gate.
+
+        The critical worker is not an SP-recovery session. Claim both markers
+        under one lock so HP polling cannot see ``sitting_event`` alone and
+        enqueue a sit request in the pre-teleport window.
+        """
+        with self._sit_storage_lock:
+            if self._session_held() or self.danger_escape_active.is_set():
+                return False
+            self.danger_escape_active.set()
+            self.sitting_event.set()
+            self.resume_gate.clear()
+            return True
+
+    def end_danger_escape(self) -> None:
+        """Release the explicit danger-escape phase after teleport handling."""
+        with self._sit_storage_lock:
+            self.danger_escape_active.clear()
+
+    def end_critical_escape_ops(self) -> None:
+        """Release a critical escape without starting a sit/hunt generation.
+
+        Critical danger temporarily borrows the input exclusion gate, but it is
+        not SP recovery. Calling ``end_sit_ops`` here would re-arm startup
+        milestones and make the attack loop appear stale after a successful
+        danger teleport.
+        """
+        with self._sit_storage_lock:
+            self.danger_escape_active.clear()
+            self.sitting_event.clear()
+            self._restore_resume_gate()
+
     # ── Sit lifecycle ────────────────────────────────────────────
 
     def try_begin_sit_ops(self) -> bool:
@@ -324,7 +374,8 @@ class GateController:
         Standing after SP recovery is a new hunt start: normal timers fire
         again, then character buffs replay in order. The generation/event pair
         lets those independent workers coordinate without relying on thread
-        start order.
+        start order. Discovery is explicitly woken after the new generation is
+        published so the resumed hunt does not wait for the full cadence.
         """
         with self._sit_storage_lock:
             # Reset the generation and startup milestones first. The sit gate
@@ -333,6 +384,10 @@ class GateController:
             self.startup.begin_new_hunt()
             self.sitting_event.clear()
             self._restore_resume_gate()
+        # The discovery worker may be asleep in its cadence wait while the sit
+        # session owns the worker gate. Wake it only after the gate and startup
+        # generation are coherent, making the first post-recovery scan prompt.
+        self.discovery_wake.set()
 
     def mark_sit_cleanup_unresolved(self) -> None:
         """Keep runtime ownership until a seated state is explicitly undone."""

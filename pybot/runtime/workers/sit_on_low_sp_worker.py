@@ -220,7 +220,14 @@ class SitOnLowSpWorker:
             )
 
     def _urgent_escape(self, *, reason: str) -> bool:
-        """Escape danger, retaining the request until teleport succeeds."""
+        """Escape danger, retaining the request until teleport succeeds.
+
+        Recovery-session escapes use the safe teleport key (creamy / save point
+        first — the same key as the sit placement). The urgent random fly wing
+        can drop the character back next to mobs, so a seated recovery would
+        re-escape forever instead of completing SP recovery. The independent
+        critical hunting escape keeps the random wing.
+        """
         # Never send emergency input after an explicit stop. A pause keeps the
         # request pending so resume can retry it before hunting continues.
         if self._ctx.is_stopped():
@@ -228,18 +235,32 @@ class SitOnLowSpWorker:
         if self._ctx.pause_event.is_set():
             self._ctx.request_danger_sit()
             return False
-        try:
-            escaped = self._teleport.danger_teleport(reason=reason)
-        except Exception:
-            self._ctx.logger.behavior(
-                f"[SIT] urgent danger teleport failed:\n{traceback.format_exc()}"
-            )
+        begin_escape = getattr(self._ctx, "begin_danger_escape", None)
+        escape_owned = bool(begin_escape()) if callable(begin_escape) else False
+        if callable(begin_escape) and not escape_owned:
             return False
-        if not escaped:
-            self._ctx.logger.behavior(
-                "[SIT] urgent danger teleport unavailable — retrying before "
-                "safe-place search"
-            )
+        try:
+            try:
+                escaped = self._teleport.danger_teleport(
+                    reason=reason,
+                    prefer_safe_key=True,
+                )
+            except Exception:
+                self._ctx.logger.behavior(
+                    f"[SIT] urgent danger teleport failed:\n{traceback.format_exc()}"
+                )
+                return False
+            if not escaped:
+                self._ctx.logger.behavior(
+                    "[SIT] urgent danger teleport unavailable — retrying before "
+                    "safe-place search"
+                )
+            return bool(escaped)
+        finally:
+            if escape_owned:
+                end_escape = getattr(self._ctx, "end_danger_escape", None)
+                if callable(end_escape):
+                    end_escape()
         # A successful teleport resets the old damage sample, but it must not
         # clear a request raised by a newer HP drop during teleport settle.
         # The sit session consumed the request it owns before calling here.

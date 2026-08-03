@@ -180,6 +180,13 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.input.toggle_key.assert_not_called()
         self.assertFalse(self.ctx.sitting_event.is_set())
 
+    def test_end_sit_ops_wakes_discovery_after_generation_reset(self) -> None:
+        self.ctx.discovery_wake.clear()
+        self.ctx.begin_sit_ops()
+        self.ctx.end_sit_ops()
+        self.assertTrue(self.ctx.discovery_wake.is_set())
+        self.assertFalse(self.ctx.sitting_event.is_set())
+
     def test_low_sp_recovery_teleports_once_then_sits(self) -> None:
         worker = self._worker(_ScriptedVitals([0.02, 0.99]))
         self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
@@ -244,7 +251,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertEqual(worker._sit_until_done(82), "interrupted")
         self.input.toggle_key.assert_not_called()
         self.teleport.danger_teleport.assert_called_once_with(
-            reason="sit_spot_danger"
+            reason="sit_spot_danger",
+            prefer_safe_key=True,
         )
         self.assertFalse(worker._seated)
 
@@ -261,7 +269,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             [82],
         )
         self.teleport.danger_teleport.assert_called_once_with(
-            reason="sit_danger"
+            reason="sit_danger",
+            prefer_safe_key=True,
         )
         self.assertFalse(worker._seated)
 
@@ -286,7 +295,9 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             if not damage_injected:
                 damage_injected = True
                 # The first SP read occurs after the worker has pressed sit.
-                # Simulate an unreadable HP sample followed by real damage.
+                # Mark the seated session as the owner before simulating an
+                # unreadable HP sample followed by real damage.
+                self.ctx.sitting_event.set()
                 vitals.publish_hp(None, None)
                 danger._poll_hp()
                 vitals.publish_hp(80, 100)
@@ -297,9 +308,10 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
 
         self.assertEqual(worker._sit_until_done(82), "danger_escaped")
         # The character sits once, then damage causes a direct teleport with
-        # no stand/second-toggle input.
+        # no stand/second-toggle input. The seated escape uses the safe
+        # creamy / save-point key (17), not the random fly wing (16).
         self.input.toggle_key.assert_called_once_with(82)
-        self.input.teleport_key.assert_called_once_with(16)
+        self.input.teleport_key.assert_called_once_with(17)
         self.assertFalse(worker._seated)
 
     def test_ordinary_hunting_damage_is_consumed_without_teleport(self) -> None:
@@ -439,7 +451,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker._recover_sp(0.02, reason="danger")
 
         self.teleport.danger_teleport.assert_called_once_with(
-            reason="sit_danger_request"
+            reason="sit_danger_request",
+            prefer_safe_key=True,
         )
         self.teleport.teleport_once_for_sit.assert_not_called()
         self.assertFalse(self.ctx.danger_sit_requested.is_set())
@@ -465,7 +478,11 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.request_danger_sit()
         worker._sit_until_done = MagicMock(return_value="recovered")  # type: ignore[method-assign]
 
-        def escape_and_report_damage(*, reason: str) -> bool:
+        def escape_and_report_damage(
+            *,
+            reason: str,
+            prefer_safe_key: bool = False,
+        ) -> bool:
             if self.teleport.danger_teleport.call_count == 1:
                 # Simulate a new HP drop observed while the first escape is
                 # settling. It must cause one new escape, not an infinite loop.
@@ -500,7 +517,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker._recover_sp(0.02, reason="danger")
 
         self.teleport.danger_teleport.assert_called_once_with(
-            reason="sit_danger_request"
+            reason="sit_danger_request",
+            prefer_safe_key=True,
         )
         self.teleport.teleport_once_for_sit.assert_not_called()
         self.assertEqual(worker._sit_until_done.call_count, 2)

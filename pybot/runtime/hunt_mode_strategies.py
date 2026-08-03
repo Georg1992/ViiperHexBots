@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import threading
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 
 from pybot.runtime.constants import LOG_REPEAT_INTERVAL_MS
 from pybot.runtime.hunt_tracks import monotonic_ms
@@ -53,9 +54,12 @@ class HuntModeStrategy(ABC):
         # epoch while holding this lock creates a lock-order inversion with a
         # discovery/reset race and can freeze all workers (and the UI polling
         # thread that asks for these properties).
-        current_epoch = self._ctx.tracks.area_epoch
-        with self._lock:
-            return self._discovery_area_epoch == current_epoch
+        transition_lock = getattr(self._ctx, "area_transition_lock", None)
+        guard = nullcontext() if transition_lock is None else transition_lock
+        with guard:
+            current_epoch = self._ctx.tracks.area_epoch
+            with self._lock:
+                return self._discovery_area_epoch == current_epoch
 
 
     @property
@@ -70,14 +74,17 @@ class HuntModeStrategy(ABC):
         """
         # Never acquire the strategy lock before reading the track epoch; see
         # ``discovery_since_reset`` for the lock-order contract.
-        current_epoch = self._ctx.tracks.area_epoch
-        with self._lock:
-            if not (
-                self._discovery_confirmed_clear
-                and self._discovery_area_epoch == current_epoch
-            ):
-                return False
-        return not self._ctx.tracks.has_pending_discovery_candidates()
+        transition_lock = getattr(self._ctx, "area_transition_lock", None)
+        guard = nullcontext() if transition_lock is None else transition_lock
+        with guard:
+            current_epoch = self._ctx.tracks.area_epoch
+            with self._lock:
+                if not (
+                    self._discovery_confirmed_clear
+                    and self._discovery_area_epoch == current_epoch
+                ):
+                    return False
+            return not self._ctx.tracks.has_pending_discovery_candidates()
 
     def on_area_reset(self) -> None:
         """Reset per-area state (discovery flag, log throttles).
@@ -103,15 +110,21 @@ class HuntModeStrategy(ABC):
     ) -> None:
         """Record a successful discovery scan for *area_epoch*."""
         del added_count
-        # ``HuntTracks.area_epoch`` has its own lock. Sample it before taking
-        # ``self._lock`` so a concurrent area reset cannot deadlock discovery
-        # against the teleport reset callback.
-        current_epoch = self._ctx.tracks.area_epoch
-        with self._lock:
-            if area_epoch != current_epoch:
-                return
-            self._discovery_area_epoch = area_epoch
-            self._discovery_confirmed_clear = living_count == 0
+        # Serialize publication with area reset. The scan itself may run
+        # outside this boundary, but its result must not write the previous
+        # screen's discovery marker after a reset has started.
+        transition_lock = getattr(self._ctx, "area_transition_lock", None)
+        guard = nullcontext() if transition_lock is None else transition_lock
+        with guard:
+            # ``HuntTracks.area_epoch`` has its own lock. Sample it before
+            # taking ``self._lock`` so the established lock ordering remains
+            # track state, then strategy state.
+            current_epoch = self._ctx.tracks.area_epoch
+            with self._lock:
+                if area_epoch != current_epoch:
+                    return
+                self._discovery_area_epoch = area_epoch
+                self._discovery_confirmed_clear = living_count == 0
 
     def note_discovery_scan_failed(self, reason: str) -> None:
         """Record a failed discovery scan."""
@@ -138,18 +151,25 @@ class HuntModeStrategy(ABC):
             True if the bot took a mode-specific action (teleport, etc.).
         """
         ctx = self._ctx
-        # Defense-in-depth: attack already gates on should_run_combat; skip
-        # mode actions while pause/sit/storage would block combat anyway.
-        if not ctx.should_run_combat():
-            self._log_no_target("skip", "bot_not_running")
-            return False
+        # The area epoch and the strategy discovery marker are separate stores.
+        # Serialize their readers with teleport/reset publication so a no-target
+        # decision cannot combine a new screen id with the previous area's
+        # discovery state.
+        transition_lock = getattr(ctx, "area_transition_lock", None)
+        guard = nullcontext() if transition_lock is None else transition_lock
+        with guard:
+            # Defense-in-depth: attack already gates on should_run_combat; skip
+            # mode actions while pause/sit/storage would block combat anyway.
+            if not ctx.should_run_combat():
+                self._log_no_target("skip", "bot_not_running")
+                return False
 
-        now = monotonic_ms()
-        if ctx.tracks.has_alive_tracks(now):
-            self._log_no_target("wait", "alive_tracks")
-            return False
+            now = monotonic_ms()
+            if ctx.tracks.has_alive_tracks(now):
+                self._log_no_target("wait", "alive_tracks")
+                return False
 
-        return self._handle_no_targets_impl()
+            return self._handle_no_targets_impl()
 
     @abstractmethod
     def _handle_no_targets_impl(self) -> bool:
