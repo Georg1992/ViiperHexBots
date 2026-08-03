@@ -275,6 +275,8 @@ class SitOnLowSpWorker:
                     ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
             except Exception:
                 ctx.logger.behavior(f"[SIT] tick error:\n{traceback.format_exc()}")
+                if ctx.stop_event.wait(0.25):
+                    break
 
     def _recover_sp(
         self,
@@ -291,6 +293,12 @@ class SitOnLowSpWorker:
             if not ctx.try_begin_sit_ops():
                 return
             ctx.pop_danger_sit_request()
+            # The sit worker owns this danger escape, so consume the mirrored
+            # critical request as well. Otherwise the independent escape
+            # worker can issue a duplicate teleport after this session ends.
+            pop_critical = getattr(ctx, "pop_critical_danger", None)
+            if callable(pop_critical):
+                pop_critical()
         elif not ctx.begin_sit_ops():
             return
         escape_first = reason == "danger"

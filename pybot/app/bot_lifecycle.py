@@ -84,6 +84,18 @@ class BotLifecycleManager:
         self._start_thread: threading.Thread | None = None
         self._start_cancelled = False
         self._start_generation = 0
+        # A queued finish callback still owns a just-launched bot until Tk
+        # consumes it. Prevent restart/exit from outrunning that handoff.
+        self._pending_start_callbacks = 0
+        # Failed startup sessions are closed by the bot's stop joiner. Keep the
+        # ownership marker across bounded retry attempts so cleanup cannot be
+        # lost when the first stop attempt yields.
+        self._failed_start_session_owner: BotController | None = None
+        # Stale terminal callbacks can hand a bot to an independent cleanup
+        # joiner when a newer lifecycle owner already exists. Track those bots
+        # so application exit cannot outrun their cleanup.
+        self._orphan_cleanup_bots: set[BotController] = set()
+        self._orphan_cleanup_threads: set[threading.Thread] = set()
         # Bumped when a new hunt owns the overlay so a late stop-joiner cannot
         # destroy the overlay of a newer start.
         self._overlay_epoch = 0
@@ -107,6 +119,25 @@ class BotLifecycleManager:
         """True while a prior hunt is still unwinding its worker threads."""
         return self._stopping
 
+    def retry_shutdown_cleanup(self) -> None:
+        """Retry stale startup cleanup without blocking the Tk thread."""
+        with self._ownership_lock:
+            retry_bots = [
+                bot
+                for bot in self._orphan_cleanup_bots
+                if not any(
+                    thread.is_alive()
+                    for thread in self._orphan_cleanup_threads
+                )
+            ]
+        for bot in retry_bots:
+            with self._ownership_lock:
+                self._orphan_cleanup_bots.discard(bot)
+            self._start_orphan_stop_joiner(
+                bot,
+                end_session=self._failed_start_session_owner is bot,
+            )
+
     @property
     def shutdown_ready(self) -> bool:
         """True when lifecycle workers no longer need a shutdown join."""
@@ -121,6 +152,9 @@ class BotLifecycleManager:
                     self._stop_joiner is not None
                     and self._stop_joiner.is_alive()
                 )
+                or self._pending_start_callbacks > 0
+                or self._failed_start_session_owner is not None
+                or bool(self._orphan_cleanup_bots)
             )
 
     def _post_to_main(self, callback: Callable[[], None]) -> None:
@@ -187,7 +221,11 @@ class BotLifecycleManager:
             bot = self._bot
             epoch = self._overlay_epoch
         if needs_retry and bot is not None and time.monotonic() < deadline:
-            self._start_stop_joiner(bot, overlay_epoch=epoch)
+            self._start_stop_joiner(
+                bot,
+                overlay_epoch=epoch,
+                end_session=self._failed_start_session_owner is bot,
+            )
             with self._ownership_lock:
                 retry_joiner = self._stop_joiner
             if retry_joiner is not None:
@@ -205,6 +243,9 @@ class BotLifecycleManager:
                     and self._stop_joiner.is_alive()
                 )
                 or self._stopping
+                or self._pending_start_callbacks > 0
+                or self._failed_start_session_owner is not None
+                or bool(self._orphan_cleanup_bots)
             )
 
     def _is_current_start(self, generation: int) -> bool:
@@ -282,6 +323,21 @@ class BotLifecycleManager:
                     "[STATE] Start refused — previous hunt is still stopping"
                 )
                 return False
+            if self._pending_start_callbacks > 0:
+                self._on_log(
+                    "[STATE] Start refused — previous startup callback is pending"
+                )
+                return False
+            if self._failed_start_session_owner is not None:
+                self._on_log(
+                    "[STATE] Start refused — previous startup session is still owned"
+                )
+                return False
+            if self._orphan_cleanup_bots:
+                self._on_log(
+                    "[STATE] Start refused — stale startup cleanup is still running"
+                )
+                return False
 
             self._start_cancelled = False
             self._start_generation += 1
@@ -293,6 +349,9 @@ class BotLifecycleManager:
 
         def _run_start() -> None:
             posted_terminal = False
+            startup_session_opened = False
+            session_cleanup_transferred = False
+            bot: BotController | None = None
             try:
                 self._on_log("[STATE] Start: waiting for prior hunt to exit")
                 if not self._await_prior_stop_joiner():
@@ -310,6 +369,7 @@ class BotLifecycleManager:
 
                 restore_and_activate(config_snapshot.window_id)
                 self._session.open(session_id=session_id)
+                startup_session_opened = True
                 if not self._is_current_start(generation):
                     return
 
@@ -328,6 +388,9 @@ class BotLifecycleManager:
                     overlay=runtime_overlay,
                     vitals=self._vitals,
                 )
+                with self._ownership_lock:
+                    if startup_session_opened:
+                        self._failed_start_session_owner = bot
                 if not self._is_current_start(generation):
                     return
 
@@ -336,38 +399,134 @@ class BotLifecycleManager:
                 if not self._is_current_start(generation):
                     pending = self._bot_shutdown_pending(bot)
                     if pending:
-                        self._bot = bot
+                        with self._ownership_lock:
+                            self._bot = bot
                         bot.request_stop()
-                        self._start_stop_joiner(bot, destroy_overlay=False)
+                        self._start_stop_joiner(
+                            bot,
+                            destroy_overlay=False,
+                            end_session=startup_session_opened,
+                        )
+                        session_cleanup_transferred = startup_session_opened
+                    elif startup_session_opened:
+                        self._close_failed_start_session(
+                            bot, "bot start superseded"
+                        )
                     return
 
+                with self._ownership_lock:
+                    self._pending_start_callbacks += 1
                 self._post_to_main(
-                    lambda: self._finish_start(
-                        bot,
-                        config_snapshot=config_snapshot,
-                        session_id=session_id,
-                        generation=generation,
+                    lambda: self._consume_start_callback(
+                        lambda: self._finish_start(
+                            bot,
+                            config_snapshot=config_snapshot,
+                            session_id=session_id,
+                            generation=generation,
+                        )
                     ),
                 )
                 posted_terminal = True
             except Exception as exc:
+                # Startup may have created a controller/runtime before failing
+                # (including a Thread.start failure). Do not report OFF while
+                # that object still owns workers or input; hand it to the same
+                # bounded stop joiner used by normal Stop.
+                pending = bot is not None and self._bot_shutdown_pending(bot)
+                cleanup_started = False
+                if pending and bot is not None:
+                    try:
+                        with self._ownership_lock:
+                            self._bot = bot
+                        bot.request_stop()
+                        self._start_stop_joiner(
+                            bot,
+                            destroy_overlay=False,
+                            end_session=startup_session_opened,
+                        )
+                        session_cleanup_transferred = startup_session_opened
+                        cleanup_started = True
+                    except Exception as cleanup_exc:
+                        # Retain ownership even if the first cleanup handoff
+                        # itself fails. A later Stop can retry request_stop and
+                        # create the joiner without exposing a false OFF state.
+                        with self._ownership_lock:
+                            self._bot = bot
+                            self._stopping = True
+                            self._state = BotState.STOPPING
+                        cleanup_started = True
+                        self._on_log(
+                            f"[STATE] Failed-start cleanup could not be scheduled: {cleanup_exc}"
+                        )
+                elif startup_session_opened:
+                    # No runtime remains to own the session writer. This runs
+                    # on the startup thread, never on Tk, so session.end cannot
+                    # freeze the UI while flushing its queue.
+                    if bot is not None:
+                        self._close_failed_start_session(
+                            bot, "bot start failed"
+                        )
+                    else:
+                        try:
+                            self._session.end("bot start failed")
+                        except Exception as cleanup_exc:
+                            self._on_log(
+                                f"[STATE] Failed-start session cleanup failed: {cleanup_exc}"
+                            )
                 self._post_to_main(
-                    lambda err=exc: self._fail_start(err, generation=generation),
+                    lambda err=exc, cleanup_started=cleanup_started: self._fail_start(
+                        err,
+                        generation=generation,
+                        cleanup_started=cleanup_started,
+                    ),
                 )
                 posted_terminal = True
             finally:
                 if not posted_terminal:
+                    if startup_session_opened and not session_cleanup_transferred:
+                        if bot is not None:
+                            self._close_failed_start_session(
+                                bot, "bot start cancelled"
+                            )
+                        else:
+                            try:
+                                self._session.end("bot start cancelled")
+                            except Exception as cleanup_exc:
+                                self._on_log(
+                                    f"[STATE] Cancelled-start session cleanup failed: {cleanup_exc}"
+                                )
                     self._post_to_main(
                         lambda: self._clear_stuck_starting(generation),
                     )
 
-        self._start_thread = threading.Thread(
+        start_thread = threading.Thread(
             target=_run_start,
             name="bot-start",
             daemon=True,
         )
-        self._start_thread.start()
+        with self._ownership_lock:
+            self._start_thread = start_thread
+        try:
+            start_thread.start()
+        except Exception as exc:
+            with self._ownership_lock:
+                if self._start_thread is start_thread:
+                    self._start_thread = None
+                self._start_cancelled = True
+                if self._state == BotState.STARTING:
+                    self._state = BotState.OFF
+                    self._emit_state(BotState.OFF)
+            self._on_log(f"[STATE] Bot startup thread failed: {exc}")
+            raise
         return True
+
+    def _consume_start_callback(self, callback: Callable[[], None]) -> None:
+        """Consume one queued terminal-start callback before executing it."""
+        with self._ownership_lock:
+            self._pending_start_callbacks = max(
+                0, self._pending_start_callbacks - 1
+            )
+        callback()
 
     def _clear_stuck_starting(self, generation: int) -> None:
         """If start aborted without finish/fail, do not leave UI stuck on Starting."""
@@ -379,6 +538,54 @@ class BotLifecycleManager:
         self._state = BotState.OFF
         self._emit_state(BotState.OFF)
 
+    def _start_orphan_stop_joiner(
+        self,
+        bot: BotController,
+        *,
+        end_session: bool,
+    ) -> None:
+        """Unwind a stale startup bot without changing current lifecycle state."""
+        with self._ownership_lock:
+            if bot in self._orphan_cleanup_bots:
+                return
+            self._orphan_cleanup_bots.add(bot)
+
+        def _join_orphan() -> None:
+            stopped = False
+            try:
+                for _attempt in range(_STOP_RETRY_ATTEMPTS):
+                    try:
+                        if bot.stop(join_timeout=DEFAULT_STOP_JOIN_TIMEOUT_S):
+                            stopped = True
+                            break
+                    except Exception as exc:
+                        self._on_log(
+                            f"[STATE] Stale-start cleanup failed: {exc}"
+                        )
+                if stopped and end_session:
+                    self._close_failed_start_session(
+                        bot, "bot start superseded"
+                    )
+                if not stopped:
+                    self._on_log(
+                        "[STATE] Stale-start cleanup incomplete; "
+                        "resources remain owned"
+                    )
+            finally:
+                with self._ownership_lock:
+                    self._orphan_cleanup_threads.discard(threading.current_thread())
+                    if stopped:
+                        self._orphan_cleanup_bots.discard(bot)
+
+        thread = threading.Thread(
+            target=_join_orphan,
+            name="bot-stale-start-joiner",
+            daemon=True,
+        )
+        with self._ownership_lock:
+            self._orphan_cleanup_threads.add(thread)
+        thread.start()
+
     def _finish_start(
         self,
         bot: BotController,
@@ -389,18 +596,56 @@ class BotLifecycleManager:
     ) -> None:
         if generation != self._start_generation:
             pending = self._bot_shutdown_pending(bot)
-            if pending:
-                self._bot = bot
+            with self._ownership_lock:
+                current_bot = self._bot
+            if pending and current_bot is not None and current_bot is not bot:
+                # This callback is stale and another hunt owns lifecycle state;
+                # never let the old bot's joiner set STOPPING/OFF globally.
+                try:
+                    bot.request_stop()
+                except Exception as exc:
+                    self._on_log(f"[STATE] Stale-start stop request failed: {exc}")
+                self._start_orphan_stop_joiner(
+                    bot,
+                    end_session=self._failed_start_session_owner is bot,
+                )
+            elif pending:
+                with self._ownership_lock:
+                    self._bot = bot
                 bot.request_stop()
-                self._start_stop_joiner(bot, destroy_overlay=False)
+                self._start_stop_joiner(
+                    bot,
+                    destroy_overlay=False,
+                    end_session=True,
+                )
+            else:
+                self._close_failed_start_session(bot, "bot start superseded")
             return
 
         if self._start_cancelled or self._state != BotState.STARTING:
             pending = self._bot_shutdown_pending(bot)
-            if pending:
-                self._bot = bot
+            with self._ownership_lock:
+                current_bot = self._bot
+            if pending and current_bot is not None and current_bot is not bot:
+                try:
+                    bot.request_stop()
+                except Exception as exc:
+                    self._on_log(f"[STATE] Cancelled-start stop request failed: {exc}")
+                self._start_orphan_stop_joiner(
+                    bot,
+                    end_session=self._failed_start_session_owner is bot,
+                )
+            elif pending:
+                with self._ownership_lock:
+                    self._bot = bot
                 bot.request_stop()
-                self._start_stop_joiner(bot)
+                self._start_stop_joiner(
+                    bot,
+                    destroy_overlay=False,
+                    end_session=True,
+                )
+            else:
+                self._close_failed_start_session(bot, "bot start cancelled")
             if self._state == BotState.STARTING:
                 self._state = BotState.OFF
                 self._emit_state(BotState.OFF)
@@ -413,13 +658,25 @@ class BotLifecycleManager:
                 # bounded stop joiner rather than abandoning those workers.
                 self._bot = bot
                 bot.request_stop()
-                self._start_stop_joiner(bot)
+                self._start_stop_joiner(
+                    bot,
+                    end_session=self._failed_start_session_owner is bot,
+                )
                 return
             self._on_log("[STATE] Bot start failed — hunt thread did not start")
+            # The startup thread already transferred session ownership to this
+            # callback, but no runtime exists to close it. Close it here before
+            # exposing OFF so the next start cannot inherit a stale writer.
+            self._close_failed_start_session(bot, "bot start failed")
             self._state = BotState.OFF
             self._emit_state(BotState.OFF)
             return
 
+        with self._ownership_lock:
+            if self._failed_start_session_owner is bot:
+                # Normal startup now owns the open session; it will be closed
+                # by MainWindow's final application shutdown, not bot Stop.
+                self._failed_start_session_owner = None
         self._bot = bot
         self._state = BotState.RUNNING
         self._arm_focus_grace()
@@ -447,12 +704,37 @@ class BotLifecycleManager:
         self._root.after(300, self._poll_focus)
         self._on_log("[STATE] Hunt runtime started")
 
-    def _fail_start(self, exc: Exception, *, generation: int) -> None:
+    def _close_failed_start_session(
+        self,
+        bot: BotController,
+        reason: str,
+    ) -> None:
+        """Close a session only if this failed-start bot still owns it."""
+        with self._ownership_lock:
+            if self._failed_start_session_owner is not bot:
+                return
+            self._failed_start_session_owner = None
+        try:
+            self._session.end(reason)
+        except Exception as exc:
+            self._on_log(f"[STATE] Failed-start session close failed: {exc}")
+
+    def _fail_start(
+        self,
+        exc: Exception,
+        *,
+        generation: int,
+        cleanup_started: bool = False,
+    ) -> None:
         if generation != self._start_generation:
+            return
+        self._on_log(f"[STATE] Bot start failed: {exc}")
+        if cleanup_started:
+            # The stop joiner owns the terminal transition. Keeping STOPPING
+            # visible prevents a second Start from racing that cleanup.
             return
         if self._state != BotState.STARTING:
             return
-        self._on_log(f"[STATE] Bot start failed: {exc}")
         self._state = BotState.OFF
         self._emit_state(BotState.OFF)
 
@@ -466,8 +748,15 @@ class BotLifecycleManager:
                 if bot is not None and (
                     joiner is None or not joiner.is_alive()
                 ):
+                    try:
+                        bot.request_stop()
+                    except Exception as exc:
+                        self._on_log(f"[STATE] Stop retry request failed: {exc}")
+                        return
                     self._start_stop_joiner(
-                        bot, overlay_epoch=self._overlay_epoch
+                        bot,
+                        overlay_epoch=self._overlay_epoch,
+                        end_session=self._failed_start_session_owner is bot,
                     )
                 return
             if self._state == BotState.OFF and self._bot is None:
@@ -478,7 +767,16 @@ class BotLifecycleManager:
 
             bot = self._bot
             if bot is not None:
-                bot.request_stop()
+                try:
+                    bot.request_stop()
+                except Exception as exc:
+                    # Preserve ownership and STOPPING rather than reporting a
+                    # successful stop when the runtime could not be signalled.
+                    self._stopping = True
+                    self._state = BotState.STOPPING
+                    self._on_log(f"[STATE] Stop request failed: {exc}")
+                    self._emit_state(BotState.STOPPING)
+                    return
 
             overlay_epoch = self._overlay_epoch
             # Keep ``_bot`` until the joiner proves full shutdown. This is the
@@ -510,6 +808,7 @@ class BotLifecycleManager:
         *,
         destroy_overlay: bool = True,
         overlay_epoch: int | None = None,
+        end_session: bool = False,
     ) -> None:
         epoch = self._overlay_epoch if overlay_epoch is None else overlay_epoch
         # Every path that hands a live bot to the joiner must claim stopping
@@ -555,6 +854,8 @@ class BotLifecycleManager:
                 self._stopping = False
                 if self._bot is bot:
                     self._bot = None
+            if end_session:
+                self._close_failed_start_session(bot, "bot start cancelled")
             self._post_to_main(self._refresh_stopped_state)
             if destroy_overlay:
                 self._post_to_main(

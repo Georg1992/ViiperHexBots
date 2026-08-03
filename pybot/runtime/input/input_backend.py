@@ -43,6 +43,8 @@ class InputBackend(Protocol):
 
     def move_and_click(self, x: int, y: int) -> bool: ...
 
+    def move_and_double_click(self, x: int, y: int) -> bool: ...
+
     def skill_click(self, scan_code: int) -> bool: ...
 
     def skill_click_at(
@@ -109,6 +111,10 @@ class ShadowInputBackend:
     def move_and_click(self, x: int, y: int) -> bool:
         del x, y
         return self.left_click()
+
+    def move_and_double_click(self, x: int, y: int) -> bool:
+        del x, y
+        return self.left_click() and self.left_click()
 
     def skill_click(self, scan_code: int) -> bool:
         if scan_code <= 0:

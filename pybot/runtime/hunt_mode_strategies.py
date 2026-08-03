@@ -48,8 +48,15 @@ class HuntModeStrategy(ABC):
     @property
     def discovery_since_reset(self) -> bool:
         """True after discovery has completed for the current area epoch."""
+        # Read track state before taking the strategy lock. Track reset paths
+        # update ``HuntTracks`` before resetting strategy state; reading the
+        # epoch while holding this lock creates a lock-order inversion with a
+        # discovery/reset race and can freeze all workers (and the UI polling
+        # thread that asks for these properties).
+        current_epoch = self._ctx.tracks.area_epoch
         with self._lock:
-            return self._discovery_area_epoch == self._ctx.tracks.area_epoch
+            return self._discovery_area_epoch == current_epoch
+
 
     @property
     def discovery_confirmed_clear(self) -> bool:
@@ -61,10 +68,13 @@ class HuntModeStrategy(ABC):
         block clear — otherwise mode TP can wipe them before COORD creates
         tracks and the bot teleports past live mobs.
         """
+        # Never acquire the strategy lock before reading the track epoch; see
+        # ``discovery_since_reset`` for the lock-order contract.
+        current_epoch = self._ctx.tracks.area_epoch
         with self._lock:
             if not (
                 self._discovery_confirmed_clear
-                and self._discovery_area_epoch == self._ctx.tracks.area_epoch
+                and self._discovery_area_epoch == current_epoch
             ):
                 return False
         return not self._ctx.tracks.has_pending_discovery_candidates()
@@ -93,8 +103,12 @@ class HuntModeStrategy(ABC):
     ) -> None:
         """Record a successful discovery scan for *area_epoch*."""
         del added_count
+        # ``HuntTracks.area_epoch`` has its own lock. Sample it before taking
+        # ``self._lock`` so a concurrent area reset cannot deadlock discovery
+        # against the teleport reset callback.
+        current_epoch = self._ctx.tracks.area_epoch
         with self._lock:
-            if area_epoch != self._ctx.tracks.area_epoch:
+            if area_epoch != current_epoch:
                 return
             self._discovery_area_epoch = area_epoch
             self._discovery_confirmed_clear = living_count == 0

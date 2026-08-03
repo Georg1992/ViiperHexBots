@@ -102,6 +102,8 @@ class HpRestoreWorker:
                     ctx.stop_event.wait(HP_RESTORE_POLL_S)
             except Exception:
                 ctx.logger.behavior(f"[HP] tick error:\n{traceback.format_exc()}")
+                if ctx.stop_event.wait(0.25):
+                    break
 
     def _hp_ratio(self) -> float | None:
         """Return HP/max HP, or None when the shared vitals are unavailable."""

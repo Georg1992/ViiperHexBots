@@ -35,6 +35,7 @@ class SelfBuffRuntime:
 class CustomBehaviorRuntime:
     configured: bool = False
     kiting_tick_ms: int = 0
+    kite_distance_px: int = CELL_SIZE_PX * 5
     debuff_button: str = ""
     debuff_scan_code: int = 0
     heal_button: str = ""
@@ -177,6 +178,7 @@ def hunt_runtime_config_from_settings(
         configured=resolved_mob_name.strip().lower()
         in settings.mob_custom_settings,
         kiting_tick_ms=max(0, int(round(custom_settings.kiting_tick_s * 1000))),
+        kite_distance_px=max(1, int(custom_settings.kite_distance_cells)) * CELL_SIZE_PX,
         debuff_button=custom_settings.debuff_button.strip(),
         debuff_scan_code=key_name_to_scan_code(custom_settings.debuff_button),
         heal_button=custom_settings.heal_button.strip(),

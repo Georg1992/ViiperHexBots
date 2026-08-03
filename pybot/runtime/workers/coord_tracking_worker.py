@@ -59,6 +59,8 @@ class CoordTrackingWorker:
                     ctx.resume_gate.wait(WORKER_POLL_INTERVAL_S)
             except Exception:
                 ctx.logger.behavior(f"[COORD] tick error:\n{traceback.format_exc()}")
+                if ctx.stop_event.wait(0.25):
+                    break
 
     def _tick(self) -> None:
         ctx = self._ctx

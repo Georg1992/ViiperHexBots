@@ -50,12 +50,12 @@ class MobBehaviorRegistryTests(unittest.TestCase):
         behavior = AnubisBehavior()
         backend = MagicMock()
         backend.move_and_click.return_value = True
-        # Char at (100, 100); one mob at (120, 100) → kite left to (80, 100).
+        # Char at (100, 100); one mob at (120, 100) → kite left by 320px.
         ok = behavior.kite_after_attack(
             100, 100, backend, all_mobs=[(120, 100)],
         )
         self.assertTrue(ok)
-        backend.move_and_click.assert_called_once_with(80, 100)
+        backend.move_and_click.assert_called_once_with(-220, 100)
 
 
 if __name__ == "__main__":

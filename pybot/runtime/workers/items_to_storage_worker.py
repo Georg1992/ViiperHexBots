@@ -152,6 +152,8 @@ class ItemsToStorageWorker:
                     ctx.discovery_wake.set()
             except Exception:
                 ctx.logger.behavior(f"[STORAGE] tick error:\n{traceback.format_exc()}")
+                if ctx.stop_event.wait(0.25):
+                    break
 
     def _weight_threshold(self, weight_max: int) -> float:
         modifier = int(self._ctx.config.weight_modifier)

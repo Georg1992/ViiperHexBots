@@ -155,6 +155,26 @@ def verify_status_panel_at(
     return score >= HEADER_MATCH_THRESHOLD
 
 
+def read_status_panel_hp(
+    frame_bgr: np.ndarray,
+    *,
+    origin: tuple[int, int] | None = None,
+) -> tuple[int, int] | None:
+    """Read only HP/HP-max so damage detection survives other OCR misses."""
+    if origin is None:
+        origin = find_status_panel(frame_bgr)
+    if origin is None:
+        return None
+    result = _parse_anchored(
+        frame_bgr,
+        origin,
+        HP_SCAN_ZONE,
+        min_width=2,
+        stop_at_slash=False,
+    )
+    return result if isinstance(result, tuple) else None
+
+
 def read_status_panel(
     frame_bgr: np.ndarray,
     *,

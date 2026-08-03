@@ -29,6 +29,7 @@ class AppConfigTests(unittest.TestCase):
             config.hunt_mode = "walk"
             config.mob_custom_settings["horn"] = MobCustomSettings(
                 kiting_tick_s=0.5,
+                kite_distance_cells=7,
                 debuff_button="r",
                 heal_button="q",
                 buff1_button="f1",
@@ -42,6 +43,7 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual(loaded.search_range, 12)
             self.assertEqual(loaded.hunt_mode, "walk")
             self.assertEqual(loaded.mob_custom_settings["horn"].kiting_tick_s, 0.5)
+            self.assertEqual(loaded.mob_custom_settings["horn"].kite_distance_cells, 7)
             self.assertEqual(loaded.mob_custom_settings["horn"].debuff_button, "r")
             self.assertEqual(loaded.mob_custom_settings["horn"].heal_button, "q")
             self.assertEqual(loaded.mob_custom_settings["horn"].buff1_delay_s, 10)

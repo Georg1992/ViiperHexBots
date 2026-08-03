@@ -43,18 +43,23 @@ class MobBehaviorDialog(tk.Toplevel):
         self._kiting_tick.insert(0, self._format_number(settings.kiting_tick_s))
         self._kiting_tick.grid(row=1, column=1, sticky="w", padx=(8, 0))
 
+        ttk.Label(body, text="Kite distance (cells):").grid(row=2, column=0, sticky="w")
+        self._kite_distance = ttk.Entry(body, width=8)
+        self._kite_distance.insert(0, str(settings.kite_distance_cells))
+        self._kite_distance.grid(row=2, column=1, sticky="w", padx=(8, 0))
+
         ttk.Separator(body, orient=tk.HORIZONTAL).grid(
-            row=2, column=0, columnspan=3, sticky="ew", pady=10
+            row=3, column=0, columnspan=3, sticky="ew", pady=10
         )
 
         ttk.Label(body, text="Skill", font=("Segoe UI", 9, "bold")).grid(
-            row=3, column=0, sticky="w"
+            row=4, column=0, sticky="w"
         )
         ttk.Label(body, text="Button", font=("Segoe UI", 9, "bold")).grid(
-            row=3, column=1, sticky="w", padx=(8, 0)
+            row=4, column=1, sticky="w", padx=(8, 0)
         )
         ttk.Label(body, text="Delay (s)", font=("Segoe UI", 9, "bold")).grid(
-            row=3, column=2, sticky="w", padx=(8, 0)
+            row=4, column=2, sticky="w", padx=(8, 0)
         )
 
         self._key_entries: list[ttk.Entry] = []
@@ -66,7 +71,7 @@ class MobBehaviorDialog(tk.Toplevel):
             ("Buff 2", settings.buff2_button, settings.buff2_delay_s),
             ("Buff 3", settings.buff3_button, settings.buff3_delay_s),
         ]
-        for row, (label, button, delay) in enumerate(rows, start=4):
+        for row, (label, button, delay) in enumerate(rows, start=5):
             ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", pady=2)
             key_entry = ttk.Entry(body, width=10)
             key_entry.insert(0, button)
@@ -85,7 +90,7 @@ class MobBehaviorDialog(tk.Toplevel):
                 )
 
         buttons = ttk.Frame(body)
-        buttons.grid(row=9, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        buttons.grid(row=10, column=0, columnspan=3, sticky="e", pady=(12, 0))
         ttk.Button(buttons, text="Cancel", command=self._cancel).pack(side=tk.LEFT)
         ttk.Button(buttons, text="Save", command=self._save).pack(
             side=tk.LEFT, padx=(8, 0)
@@ -119,23 +124,30 @@ class MobBehaviorDialog(tk.Toplevel):
     def _save(self) -> None:
         try:
             kiting_tick = float(self._kiting_tick.get().strip() or "0")
+            kite_distance = int(self._kite_distance.get().strip() or "5")
             delays = [int(entry.get().strip() or "0") for entry in self._delay_entries]
         except ValueError:
             messagebox.showerror(
                 "Invalid custom behavior",
-                "Kiting tick and buff delays must be valid non-negative numbers.",
+                "Kiting tick and kite distance must be valid positive/non-negative numbers.",
                 parent=self,
             )
             return
-        if not math.isfinite(kiting_tick) or kiting_tick < 0 or any(delay < 0 for delay in delays):
+        if (
+            not math.isfinite(kiting_tick)
+            or kiting_tick < 0
+            or kite_distance < 1
+            or any(delay < 0 for delay in delays)
+        ):
             messagebox.showerror(
                 "Invalid custom behavior",
-                "Kiting tick and buff delays must be valid non-negative numbers.",
+                "Kiting tick and kite distance must be valid positive/non-negative numbers.",
                 parent=self,
             )
             return
         result = MobCustomSettings(
             kiting_tick_s=kiting_tick,
+            kite_distance_cells=kite_distance,
             debuff_button=self._key_entries[0].get().strip(),
             heal_button=self._key_entries[1].get().strip(),
             buff1_button=self._key_entries[2].get().strip(),

@@ -182,6 +182,10 @@ class SkillTimerWorker:
                 ctx.stop_event.wait(max(0.05, next_wait_ms / 1000.0))
             except Exception:
                 ctx.logger.behavior(f"[TIMER] tick error:\n{traceback.format_exc()}")
+                # Bound repeated failures so a bad timer/input backend cannot
+                # spin this daemon thread and flood the logger queue.
+                if ctx.stop_event.wait(0.25):
+                    break
 
     def _startup_block_reason(self) -> str:
         """Describe the first startup milestone currently blocking a timer."""

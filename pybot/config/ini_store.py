@@ -74,6 +74,7 @@ def _load_mob_custom_settings(
         try:
             result[key] = MobCustomSettings(
                 kiting_tick_s=max(0.0, float(item.get("kitingTick", 0.0))),
+                kite_distance_cells=max(1, int(item.get("kiteDistanceCells", 5))),
                 debuff_button=str(item.get("debuffKey", "")).strip(),
                 heal_button=str(item.get("healKey", "")).strip(),
                 buff1_button=str(item.get("buff1Key", "")).strip(),
@@ -98,6 +99,7 @@ def _save_mob_custom_settings(
             continue
         payload[key] = {
             "kitingTick": float(value.kiting_tick_s),
+            "kiteDistanceCells": int(value.kite_distance_cells),
             "debuffKey": value.debuff_button,
             "healKey": value.heal_button,
             "buff1Key": value.buff1_button,

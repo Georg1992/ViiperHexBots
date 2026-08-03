@@ -263,6 +263,53 @@ class HuntModeTests(unittest.TestCase):
         )
         self.assertFalse(self.mode.discovery_since_reset)
 
+    def test_discovery_epoch_reads_do_not_invert_track_and_strategy_locks(self) -> None:
+        """Post-teleport reset and discovery completion must not deadlock."""
+        strategy = self.mode._strategy
+        strategy._discovery_area_epoch = self.tracks.area_epoch
+        strategy._discovery_confirmed_clear = True
+
+        track_holds_lock = threading.Event()
+        release_track_lock = threading.Event()
+        original_epoch = type(self.tracks).area_epoch
+
+        def blocked_epoch(tracks):
+            track_holds_lock.set()
+            release_track_lock.wait(timeout=1.0)
+            return original_epoch.__get__(tracks, type(tracks))
+
+        type(self.tracks).area_epoch = property(blocked_epoch)
+        try:
+            reader_done = threading.Event()
+
+            def read_clear() -> None:
+                self.mode.discovery_confirmed_clear
+                reader_done.set()
+
+            reader = threading.Thread(target=read_clear, daemon=True)
+            reader.start()
+            self.assertTrue(track_holds_lock.wait(timeout=1.0))
+
+            reset_done = threading.Event()
+
+            def reset() -> None:
+                self.tracks.area_reset()
+                self.mode.on_area_reset()
+                reset_done.set()
+
+            resetter = threading.Thread(target=reset, daemon=True)
+            resetter.start()
+            self.assertTrue(reset_done.wait(timeout=1.0))
+
+            release_track_lock.set()
+            reader.join(timeout=1.0)
+            resetter.join(timeout=1.0)
+            self.assertFalse(reader.is_alive())
+            self.assertFalse(resetter.is_alive())
+            self.assertTrue(reader_done.is_set())
+        finally:
+            type(self.tracks).area_epoch = original_epoch
+
     def test_attacks_when_alive_tracks_exist_does_not_teleport(self) -> None:
         now = monotonic_ms()
         track = self.tracks.create_track("horn", 100, 200, 0.7, 0.9, now_tick=now)

@@ -16,6 +16,7 @@ class MobCustomSettings:
     """Per-mob kiting and self-cast skill settings."""
 
     kiting_tick_s: float = 0.0
+    kite_distance_cells: int = 5
     debuff_button: str = ""
     heal_button: str = ""
     buff1_button: str = ""

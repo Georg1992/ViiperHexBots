@@ -42,6 +42,17 @@ class TeleportKeySelectionTests(unittest.TestCase):
         self.assertEqual(self.tport.danger_scan_code(), 17)
         self.assertEqual(self.tport.danger_button(), "w")
 
+    def test_danger_teleport_resets_hunt_mode_discovery_state(self) -> None:
+        self.ctx.config.teleport_scan_code = 16
+        self.ctx.config.teleport_button = "q"
+        self.ctx.config.teleport_duration_ms = 10
+        self.ctx.danger_detector = MagicMock()
+        strategy = MagicMock()
+        tport = TeleportController(self.ctx, self.input, strategy)
+
+        self.assertTrue(tport.danger_teleport(reason="critical_hunt"))
+        strategy.on_area_reset.assert_called_once_with()
+
     def test_danger_teleport_presses_wing_key(self) -> None:
         self.tport.danger_teleport(reason="critical_hp")
         self.input.teleport_key.assert_called_once_with(16)

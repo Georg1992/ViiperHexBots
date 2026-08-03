@@ -219,12 +219,33 @@ class ViiperBackend(ShadowInputBackend):
             user32.SetCursorPos(int(x), int(y))
             if not self._wait_or_cancel(0.005):
                 return False
-            self._mouse_button(MOUSE_BUTTON_LEFT, down=True)
-            try:
-                self._wait_or_cancel(0.05)
-            finally:
-                self._mouse_button(MOUSE_BUTTON_LEFT, down=False)
-        return not self._cancel_event.is_set()
+            return self._left_click_locked()
+
+    def move_and_double_click(self, x: int, y: int) -> bool:
+        """Move and double-click atomically, with no post-click delay.
+
+        Kiting must hand control back to the attack loop immediately after the
+        walk command. Both clicks stay under the shared operation lock so a
+        buff/heal/storage worker cannot move the cursor between them.
+        """
+        with self._operation_lock:
+            self._ensure_connected()
+            user32.SetCursorPos(int(x), int(y))
+            if not self._wait_or_cancel(0.005):
+                return False
+            if not self._left_click_locked():
+                return False
+            return self._left_click_locked()
+
+    def _left_click_locked(self) -> bool:
+        """Emit one left click; caller holds the shared operation lock."""
+        if self._cancel_event.is_set():
+            return False
+        self._mouse_button(MOUSE_BUTTON_LEFT, down=True)
+        try:
+            return self._wait_or_cancel(0.05)
+        finally:
+            self._mouse_button(MOUSE_BUTTON_LEFT, down=False)
 
     def skill_click(self, scan_code: int) -> bool:
         """Press a keyboard key, left-click, then release the key.
@@ -301,11 +322,7 @@ class ViiperBackend(ShadowInputBackend):
             if self._cancel_event.is_set():
                 return False
             self._ensure_connected()
-            self._mouse_button(MOUSE_BUTTON_LEFT, down=True)
-            try:
-                self._wait_or_cancel(0.05)
-            finally:
-                self._mouse_button(MOUSE_BUTTON_LEFT, down=False)
+            self._left_click_locked()
         return not self._cancel_event.is_set()
 
     def right_click(self) -> bool:

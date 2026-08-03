@@ -431,6 +431,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker = self._worker(_ScriptedVitals([0.99, 0.99]))
         self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
         self.ctx.request_danger_sit()
+        self.ctx.request_critical_danger()
         worker._sit_until_done = MagicMock(return_value="recovered")  # type: ignore[method-assign]
         self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
         self.teleport.teleport_once_for_sit = MagicMock(return_value=True)  # type: ignore[method-assign]
@@ -442,6 +443,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         )
         self.teleport.teleport_once_for_sit.assert_not_called()
         self.assertFalse(self.ctx.danger_sit_requested.is_set())
+        self.assertFalse(self.ctx.critical_danger_requested.is_set())
 
     def test_failed_urgent_escape_retries_before_sitting_without_extra_teleport(self) -> None:
         worker = self._worker(_ScriptedVitals([0.02, 0.02, 0.99, 0.99]))

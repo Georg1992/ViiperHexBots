@@ -15,7 +15,9 @@ from pybot.runtime.gate_controller import CharacterActionGate
 from pybot.runtime.mob_behaviors import (
     AnubisBehavior,
     ConfiguredMobBehavior,
+    DEFAULT_KITE_DISTANCE_PX,
     get_configured_mob_behavior,
+    kite_away_from_mobs,
 )
 from pybot.runtime.workers.self_buff_worker import SelfBuffWorker
 
@@ -27,6 +29,7 @@ class CustomMobBehaviorConfigTests(unittest.TestCase):
             mob_custom_settings={
                 "horn": MobCustomSettings(
                     kiting_tick_s=0.75,
+                    kite_distance_cells=7,
                     debuff_button="r",
                     heal_button="q",
                     buff1_button="f1",
@@ -50,6 +53,7 @@ class CustomMobBehaviorConfigTests(unittest.TestCase):
 
         self.assertTrue(config.custom_behavior.configured)
         self.assertEqual(config.custom_behavior.kiting_tick_ms, 750)
+        self.assertEqual(config.custom_behavior.kite_distance_px, 7 * 64)
         self.assertEqual(config.custom_behavior.debuff_scan_code, 19)
         self.assertEqual(config.custom_behavior.heal_scan_code, 16)
         self.assertEqual(len(config.custom_behavior.buffs), 1)
@@ -63,6 +67,7 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
         settings = SimpleNamespace(
             configured=True,
             kiting_tick_ms=1,
+            kite_distance_px=320,
             debuff_button="",
             debuff_scan_code=0,
             heal_button="q",
@@ -93,9 +98,148 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
 
         self.assertEqual(
             backend.method_calls,
-            [unittest.mock.call.move_and_click(80, 100)],
+            [unittest.mock.call.move_and_click(-220, 100)],
         )
         danger.is_safe_for_heal.assert_not_called()
+
+    def test_kiting_uses_atomic_double_click_when_backend_supports_it(self) -> None:
+        class DoubleClickBackend:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, int, int]] = []
+
+            def move_and_double_click(self, x: int, y: int) -> bool:
+                self.calls.append(("double", x, y))
+                return True
+
+            def move_and_click(self, x: int, y: int) -> bool:
+                self.calls.append(("single", x, y))
+                return True
+
+        backend = DoubleClickBackend()
+        self.assertTrue(
+            kite_away_from_mobs(
+                100, 100, backend, all_mobs=[(200, 100)], distance_px=320
+            )
+        )
+        self.assertEqual(backend.calls, [("double", -220, 100)])
+
+    def test_kiting_click_is_fixed_distance_from_character(self) -> None:
+        settings = SimpleNamespace(
+            configured=True,
+            kiting_tick_ms=1,
+            debuff_scan_code=0,
+            heal_scan_code=0,
+            buffs=(),
+        )
+        backend = MagicMock()
+        backend.move_and_click.return_value = True
+        behavior = ConfiguredMobBehavior(settings, PlayerVitals(), MagicMock())
+
+        with patch("pybot.runtime.mob_behaviors.monotonic_ms", return_value=10):
+            self.assertTrue(
+                behavior.kite_after_attack(
+                    100,
+                    100,
+                    backend,
+                    all_mobs=[(100, 200)],
+                )
+            )
+
+        target_x, target_y = backend.move_and_click.call_args.args
+        self.assertEqual(target_x, 100)
+        self.assertEqual(abs(target_y - 100), 320)
+
+    def test_kiting_uses_configured_distance(self) -> None:
+        settings = SimpleNamespace(
+            kiting_tick_ms=1,
+            kite_distance_px=5 * 64,
+            debuff_scan_code=0,
+            heal_scan_code=0,
+            buffs=(),
+        )
+        backend = MagicMock()
+        backend.move_and_click.return_value = True
+        behavior = ConfiguredMobBehavior(settings, PlayerVitals(), MagicMock())
+
+        with patch("pybot.runtime.mob_behaviors.monotonic_ms", return_value=10):
+            self.assertTrue(
+                behavior.kite_after_attack(100, 100, backend, all_mobs=[(200, 100)])
+            )
+
+        self.assertEqual(backend.move_and_click.call_args.args, (-220, 100))
+
+    def test_kiting_chooses_open_direction_when_mobs_are_centered(self) -> None:
+        backend = MagicMock()
+        backend.move_and_click.return_value = True
+        behavior = ConfiguredMobBehavior(
+            SimpleNamespace(
+                kiting_tick_ms=1,
+                kite_distance_px=320,
+                debuff_scan_code=0,
+                heal_scan_code=0,
+                buffs=(),
+            ),
+            PlayerVitals(),
+            MagicMock(),
+        )
+
+        with patch("pybot.runtime.mob_behaviors.monotonic_ms", return_value=10):
+            self.assertTrue(
+                behavior.kite_after_attack(
+                    100,
+                    100,
+                    backend,
+                    all_mobs=[(100, 100), (100, 100)],
+                )
+            )
+
+        # Fully centered is symmetric; deterministic compass order chooses up.
+        self.assertEqual(backend.move_and_click.call_args.args, (100, -220))
+
+    def test_kiting_centered_mobs_choose_less_occupied_direction(self) -> None:
+        backend = MagicMock()
+        backend.move_and_click.return_value = True
+        behavior = ConfiguredMobBehavior(
+            SimpleNamespace(
+                kiting_tick_ms=1,
+                kite_distance_px=320,
+                debuff_scan_code=0,
+                heal_scan_code=0,
+                buffs=(),
+            ),
+            PlayerVitals(),
+            MagicMock(),
+        )
+
+        with patch("pybot.runtime.mob_behaviors.monotonic_ms", return_value=10):
+            self.assertTrue(
+                behavior.kite_after_attack(
+                    100,
+                    100,
+                    backend,
+                    # The average is centered, but all tracked mobs are on
+                    # the horizontal axis, so up is the least occupied sector.
+                    all_mobs=[(120, 100), (120, 100), (60, 100)],
+                )
+            )
+
+        self.assertEqual(backend.move_and_click.call_args.args, (100, -220))
+
+    def test_heal_requires_hp_below_max(self) -> None:
+        settings = SimpleNamespace(heal_scan_code=16)
+        vitals = PlayerVitals()
+        danger = MagicMock()
+        danger.is_safe_for_heal.return_value = True
+        backend = MagicMock()
+        behavior = ConfiguredMobBehavior(settings, vitals, danger)
+
+        vitals.publish_hp(100, 100)
+        self.assertFalse(behavior.heal_if_needed(100, 100, backend))
+        backend.skill_click_at.assert_not_called()
+
+        vitals.publish_hp(99, 100)
+        self.assertTrue(behavior.heal_if_needed(100, 100, backend))
+        backend.skill_click_at.assert_called_once_with(16, 100, 100)
 
     def test_casts_debuff_once_per_target_and_retries_failed_cast(self) -> None:
         settings = SimpleNamespace(
@@ -125,7 +269,10 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(
             backend.skill_click_at.call_args_list,
-            [unittest.mock.call(19, 100, 200), unittest.mock.call(19, 100, 200)],
+            [
+                unittest.mock.call(19, 100, 200, move_delay_s=0.0),
+                unittest.mock.call(19, 100, 200, move_delay_s=0.0),
+            ],
         )
         marked.assert_called_once()
 
@@ -149,6 +296,7 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
         settings = SimpleNamespace(
             configured=True,
             kiting_tick_ms=0,
+            kite_distance_px=320,
             debuff_button="",
             debuff_scan_code=0,
             heal_button="",
@@ -167,7 +315,7 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
         behavior.before_attack(100, 100, backend, all_mobs=[(120, 100)])
         behavior.kite_after_attack(100, 100, backend, all_mobs=[(120, 100)])
 
-        backend.move_and_click.assert_called_once_with(80, 100)
+        backend.move_and_click.assert_called_once_with(-220, 100)
 
 
 class SelfBuffWorkerTests(unittest.TestCase):

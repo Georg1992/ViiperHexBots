@@ -69,6 +69,29 @@ class ViiperBackendStreamLifetimeTests(unittest.TestCase):
         mouse.write.assert_called_once()
         self.assertEqual(backend._mouse_buttons, 0)
 
+    def test_move_and_double_click_emits_two_atomic_clicks(self) -> None:
+        backend = ViiperBackend()
+        backend._connected = True
+        backend._kb_stream = MagicMock()
+        backend._mouse_stream = MagicMock()
+        backend._cancel_event.clear()
+
+        with unittest.mock.patch.object(vb.user32, "SetCursorPos") as set_cursor, \
+             unittest.mock.patch.object(backend, "_wait_or_cancel", return_value=True), \
+             unittest.mock.patch.object(backend, "_mouse_button") as mouse_button:
+            self.assertTrue(backend.move_and_double_click(120, 240))
+
+        set_cursor.assert_called_once_with(120, 240)
+        self.assertEqual(
+            [call for call in mouse_button.call_args_list],
+            [
+                unittest.mock.call(vb.MOUSE_BUTTON_LEFT, down=True),
+                unittest.mock.call(vb.MOUSE_BUTTON_LEFT, down=False),
+                unittest.mock.call(vb.MOUSE_BUTTON_LEFT, down=True),
+                unittest.mock.call(vb.MOUSE_BUTTON_LEFT, down=False),
+            ],
+        )
+
     def test_cancel_interrupts_key_tap_and_releases_key(self) -> None:
         backend = ViiperBackend()
         backend._connected = True

@@ -88,6 +88,8 @@ class DiscoveryWorker:
                 self._scan()
             except Exception:
                 ctx.logger.behavior(f"[DISCOVERY] tick error:\n{traceback.format_exc()}")
+                if ctx.stop_event.wait(0.25):
+                    break
 
     def _wait_for_discovery_wake(self, timeout_s: float) -> bool:
         ctx = self._ctx

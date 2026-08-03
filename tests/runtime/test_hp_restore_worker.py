@@ -175,6 +175,18 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.danger._poll_hp()
         self.assertEqual(self.danger.danger_level(), DangerLevel.CRITICAL)
 
+    def test_critical_hp_drop_is_logged_and_queued_for_escape(self) -> None:
+        self.vitals.publish_hp(80, 100)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(40, 100)
+        self.danger._poll_hp()
+
+        self.assertTrue(self.ctx.critical_danger_requested.is_set())
+        self.ctx.logger.behavior.assert_any_call(
+            "[DANGER] HP drop previous=80 current=40 loss=50.0% "
+            "level=CRITICAL sitQueued=True criticalQueued=True"
+        )
+
     def test_drop_greater_than_twenty_percent_of_previous_tick_is_critical(self) -> None:
         self.vitals.publish_hp(150, 200)
         self.danger._poll_hp()
@@ -228,6 +240,60 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.vitals.publish_hp(40, 100)
         self.danger._poll_hp()
         self.teleport.danger_teleport.assert_not_called()
+
+    def test_critical_damage_during_sit_gate_keeps_escape_request_queued(self) -> None:
+        # CriticalDangerWorker holds sitting_event while teleporting. A fresh
+        # damage drop during that window must still queue the independent
+        # critical request; otherwise only danger_sit_requested survives and
+        # permanently blocks combat after the escape worker releases the gate.
+        self.ctx.sitting_event.set()
+        self.vitals.publish_hp(80, 100)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(40, 100)
+        self.danger._poll_hp()
+
+        self.assertTrue(self.ctx.danger_sit_requested.is_set())
+        self.assertTrue(self.ctx.critical_danger_requested.is_set())
+
+    def test_critical_damage_during_escape_is_retried_then_hunt_resumes(self) -> None:
+        # Exercise the complete ownership transition: damage arrives while the
+        # critical worker holds sitting_event inside the first teleport. The
+        # second escape consumes the mirrored requests, after which combat is
+        # allowed to resume.
+        from pybot.runtime.workers.critical_danger_worker import CriticalDangerWorker
+
+        self.ctx.config.teleport_scan_code = 16
+        self.ctx.config.teleport_button = "q"
+        self.ctx.config.teleport_duration_ms = 10
+        self.ctx.mark_running()
+        self.ctx.danger_detector = self.danger
+        self.vitals.publish_hp(80, 100)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(40, 100)
+        self.danger._poll_hp()
+
+        calls = {"count": 0}
+
+        def escape(*, reason: str) -> bool:
+            self.assertEqual(reason, "critical_hunt")
+            calls["count"] += 1
+            if calls["count"] == 1:
+                self.vitals.publish_hp(30, 100)
+                self.danger._poll_hp()
+            return True
+
+        self.teleport.danger_teleport.side_effect = escape
+        worker = CriticalDangerWorker(self.ctx, self.teleport)
+
+        self.assertTrue(worker.process_pending())
+        self.assertTrue(self.ctx.critical_danger_requested.is_set())
+        self.assertTrue(self.ctx.danger_sit_requested.is_set())
+        self.assertFalse(self.ctx.should_run_combat())
+
+        self.assertTrue(worker.process_pending())
+        self.assertFalse(self.ctx.critical_danger_requested.is_set())
+        self.assertFalse(self.ctx.danger_sit_requested.is_set())
+        self.assertTrue(self.ctx.should_run_combat())
 
     def test_repeated_low_hp_without_new_damage_never_requeues_danger(self) -> None:
         # Polling the same low HP repeatedly must not produce an infinite
@@ -336,6 +402,25 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.assertTrue(self.ctx.danger_sit_requested.is_set())
         self.teleport.danger_teleport.assert_not_called()
         self.ctx.end_heal_ops()
+
+    def test_tracking_continues_while_danger_request_blocks_combat(self) -> None:
+        self.ctx.config.sit_on_low_sp_scan_code = 82
+        self.ctx.mark_running()
+        self.assertTrue(self.ctx.request_danger_sit())
+
+        self.assertFalse(self.ctx.should_run_combat())
+        # Danger escape owns combat, but local tracking must keep updating
+        # until the area reset so the next hunt does not resume stale.
+        self.assertTrue(self.ctx.should_run_tracking())
+
+    def test_tracking_continues_during_sit_gate_until_area_changes(self) -> None:
+        self.ctx.mark_running()
+        self.assertTrue(self.ctx.begin_sit_ops())
+
+        self.assertFalse(self.ctx.should_run_combat())
+        self.assertTrue(self.ctx.should_run_tracking())
+
+        self.ctx.end_sit_ops()
 
     def test_combat_blocked_during_discovery_suspend(self) -> None:
         self.ctx.mark_running()

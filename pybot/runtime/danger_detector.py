@@ -72,19 +72,31 @@ class DangerDetector:
             # Critical damage also gets its own independent hunting escape
             # signal, so critical protection does not depend on sit being
             # enabled or configured.
+            level = self.danger_level()
             request = getattr(self._ctx, "request_danger_sit", None)
-            if callable(request):
-                request()
-            sitting = getattr(self._ctx, "sitting_event", None)
-            is_sitting = bool(
-                sitting is not None
-                and callable(getattr(sitting, "is_set", None))
-                and sitting.is_set()
-            )
-            if not is_sitting and self.danger_level() is DangerLevel.CRITICAL:
+            sit_queued = bool(request()) if callable(request) else False
+            critical_queued = False
+            # Critical damage must remain queued even while a sit/teleport
+            # gate is held. The critical worker temporarily holds
+            # ``sitting_event`` during danger teleport; a new HP drop during
+            # settle would otherwise create only ``danger_sit_requested``.
+            # The sit worker intentionally leaves critical hunting damage
+            # alone, so that request would then survive the escape forever and
+            # keep ``should_run_combat()`` false. Seated recovery consumes the
+            # mirrored critical request when it owns the damage event.
+            if level is DangerLevel.CRITICAL:
                 request_critical = getattr(self._ctx, "request_critical_danger", None)
                 if callable(request_critical):
                     request_critical()
+                    critical_queued = True
+            logger = getattr(self._ctx, "logger", None)
+            behavior = getattr(logger, "behavior", None)
+            if callable(behavior):
+                behavior(
+                    f"[DANGER] HP drop previous={previous_hp} current={hp} "
+                    f"loss={self._last_damage_ratio:.1%} level={level.name} "
+                    f"sitQueued={sit_queued} criticalQueued={critical_queued}"
+                )
 
     def danger_level(self) -> DangerLevel:
         """Return SAFE, DANGER, or CRITICAL using received damage only.

@@ -40,14 +40,15 @@ class CharacterActionGate:
     def __init__(self, stagger_ms: int = SKILL_TIMER_STAGGER_MS) -> None:
         self._lock = threading.Lock()
         self._stagger_ms = max(0, int(stagger_ms))
-        # 0 means "no prior action yet" — the first ever claim is always open.
-        self._last_action_ms = 0
+        # ``None`` means no prior action yet. Zero is a valid monotonic test
+        # timestamp, so it must not be used as the sentinel.
+        self._last_action_ms: int | None = None
         self._buff_burst_active = False
 
     def note_action(self, now_ms: int) -> None:
         """Record a completed buff/timer keypress time."""
         with self._lock:
-            if now_ms > self._last_action_ms:
+            if self._last_action_ms is None or now_ms > self._last_action_ms:
                 self._last_action_ms = now_ms
 
     def try_claim(self, *, is_buff: bool, now_ms: int) -> bool:
@@ -61,7 +62,10 @@ class CharacterActionGate:
         with self._lock:
             if not is_buff and self._buff_burst_active:
                 return False
-            if self._last_action_ms and now_ms - self._last_action_ms < self._stagger_ms:
+            if (
+                self._last_action_ms is not None
+                and now_ms - self._last_action_ms < self._stagger_ms
+            ):
                 return False
             self._last_action_ms = now_ms
             return True
@@ -69,7 +73,7 @@ class CharacterActionGate:
     def stagger_remaining_ms(self, now_ms: int) -> int:
         """Milliseconds until the shared stagger window reopens (0 if open)."""
         with self._lock:
-            if not self._last_action_ms:
+            if self._last_action_ms is None:
                 return 0
             return max(0, self._stagger_ms - (now_ms - self._last_action_ms))
 
@@ -82,6 +86,11 @@ class CharacterActionGate:
         """Clear the buff burst after all due buffs cast or the burst aborts."""
         with self._lock:
             self._buff_burst_active = False
+
+    def buff_burst_active(self) -> bool:
+        """Return whether a buff worker currently has priority over timers."""
+        with self._lock:
+            return self._buff_burst_active
 
 
 class GateController:
@@ -191,12 +200,17 @@ class GateController:
     def should_run_tracking(self) -> bool:
         """True when tracking may tick (workers running and not storage).
 
-        Heal does not block tracking — tracks stay fresh while topping up HP.
+        Tracking is deliberately independent of combat/danger requests. A
+        pending danger event blocks attacks and discovery, but local tracking
+        must keep its last-known mobs fresh until the escape lifecycle owns the
+        area reset. This prevents a danger request from starving the tracker
+        and making the next hunt look stale.
         """
         return (
-            self.should_run_workers()
+            not self.stop_event.is_set()
+            and not self.pause_event.is_set()
             and not self.storage_event.is_set()
-            and not self.danger_sit_requested.is_set()
+            and not self.discovery_suspend.is_set()
         )
 
     def _session_held(self) -> bool:

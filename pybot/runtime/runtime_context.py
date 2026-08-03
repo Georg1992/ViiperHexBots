@@ -345,6 +345,7 @@ class HuntRuntimeContext:
         return self.gates.should_run_discovery()
 
     def should_run_tracking(self) -> bool:
+        """Return whether local tracking may continue independently of combat."""
         return self.gates.should_run_tracking()
 
     def is_stopped(self) -> bool:

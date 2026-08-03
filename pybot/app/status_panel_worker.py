@@ -16,6 +16,7 @@ from pybot.recognition.ui.status_panel import (
     StatusPanelValues,
     find_status_panel,
     read_status_panel,
+    read_status_panel_hp,
     verify_status_panel_at,
 )
 
@@ -32,6 +33,7 @@ class StatusPanelReadResult:
     client_width: int = 0
     client_height: int = 0
     values: StatusPanelValues | None = None
+    hp: tuple[int, int] | None = None
     full_refresh: bool = False
 
 
@@ -71,13 +73,15 @@ def read_status_panel_snapshot(
                         previous=confirmed,
                     )
                     if values is None:
+                        hp = read_status_panel_hp(panel_frame, origin=(0, 0))
                         return StatusPanelReadResult(
                             hwnd=hwnd,
-                            state="panel_open_digits_missing",
+                            state="hp_only" if hp is not None else "panel_open_digits_missing",
                             client_left=left,
                             client_top=top,
                             client_width=width,
                             client_height=height,
+                            hp=hp,
                         )
                     return StatusPanelReadResult(
                         hwnd=hwnd,
@@ -122,13 +126,15 @@ def read_status_panel_snapshot(
 
     values = read_status_panel(frame, origin=origin)
     if values is None:
+        hp = read_status_panel_hp(frame, origin=origin)
         return StatusPanelReadResult(
             hwnd=hwnd,
-            state="panel_open_digits_missing",
+            state="hp_only" if hp is not None else "panel_open_digits_missing",
             client_left=left,
             client_top=top,
             client_width=width,
             client_height=height,
+            hp=hp,
         )
 
     return StatusPanelReadResult(

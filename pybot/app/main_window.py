@@ -66,6 +66,8 @@ STATUS_PANEL_SEARCH_MS = 1000
 STATUS_PANEL_VALUE_MS = 200
 # Re-parse max SP / Weight this often while the panel stays locked.
 STATUS_PANEL_MAX_REFRESH_S = 1.0
+# Avoid flooding the application log when SP/weight OCR is transiently bad.
+STATUS_PANEL_HP_ONLY_LOG_S = 5.0
 
 
 class MainWindow:
@@ -141,6 +143,7 @@ class MainWindow:
         self._resume_pending = False
         self._status_panel_confirmed: StatusPanelValues | None = None
         self._status_panel_max_read_at = 0.0
+        self._last_hp_only_log_at = 0.0
         # Last known Basic Info origin — anchors the open-panel prompt.
         self._status_panel_anchor: tuple[int, int] = (0, 0)
         # Ignore widget callbacks while building; enable at end of _build_ui.
@@ -1252,6 +1255,20 @@ class MainWindow:
             panel_origin=self._status_panel_anchor,
         )
 
+    def _apply_hp_only_result(self, hp: tuple[int, int] | None) -> None:
+        """Publish HP even when another status-panel row failed OCR."""
+        if hp is None:
+            return
+        self.vitals.publish_hp(*hp)
+        self.memory_hp.configure(text=self._format_pair(*hp))
+        now = time.monotonic()
+        if now - self._last_hp_only_log_at >= STATUS_PANEL_HP_ONLY_LOG_S:
+            self._last_hp_only_log_at = now
+            self.log_pipe.log(
+                f"[UI] Status panel HP-only read hp={hp[0]}/{hp[1]}; "
+                "SP/weight OCR unavailable"
+            )
+
     def _commit_status_panel(
         self,
         values: StatusPanelValues,
@@ -1363,6 +1380,13 @@ class MainWindow:
                 client_left=result.client_left,
                 client_top=result.client_top,
             )
+            return
+        if result.state == "hp_only":
+            # HP damage detection must not depend on SP/weight OCR. A malformed
+            # SP or weight row is common during bar animation; retain the last
+            # confirmed panel for those values but publish the independently
+            # parsed HP pair immediately so DangerDetector can see damage.
+            self._apply_hp_only_result(result.hp)
             return
         if result.state == "panel_open_digits_missing":
             if self._status_panel_confirmed is None:
@@ -1664,7 +1688,10 @@ class MainWindow:
             return
         self._exit_requested = True
         self._apply_ui_settings()
-        if self.lifecycle.state != BotState.OFF:
+        if (
+            self.lifecycle.state != BotState.OFF
+            or not self.lifecycle.shutdown_ready
+        ):
             self.stop_bot()
         self.bot_button.configure(state=tk.DISABLED, text="Closing...")
         self.log_pipe.log("Closing bot and stopping VIIPER...")
@@ -1672,6 +1699,7 @@ class MainWindow:
 
     def _poll_shutdown(self) -> None:
         """Keep Tk responsive while lifecycle workers unwind."""
+        self.lifecycle.retry_shutdown_cleanup()
         if not self.lifecycle.shutdown_ready:
             self.root.after(50, self._poll_shutdown)
             return

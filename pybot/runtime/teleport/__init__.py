@@ -170,7 +170,12 @@ class TeleportController:
         try:
             if not self.teleport_once(scan_code=tp):
                 return False
+            # Danger teleports start a new hunt area just like normal mode
+            # teleports. Reset both the track epoch and the strategy's
+            # discovery confirmation; otherwise the strategy can carry a
+            # pre-teleport clear result into the new screen.
             ctx.area_reset(reason="danger_teleport")
+            self._hunt_mode.on_area_reset()
             return True
         finally:
             ctx.discovery_suspend.clear()

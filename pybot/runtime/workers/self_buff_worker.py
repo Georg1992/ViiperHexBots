@@ -5,6 +5,7 @@ from __future__ import annotations
 import traceback
 
 from pybot.runtime.constants import (
+    LOG_REPEAT_INTERVAL_MS,
     STARTUP_BUFF_CURSOR_DELAY_S,
     STARTUP_BUFF_GAP_S,
 )
@@ -32,6 +33,7 @@ class SelfBuffWorker:
         self._input = input_backend
         self._last_cast_ms: dict[int, int] = {}
         self._completed_generation: int | None = None
+        self._last_error_log_ms: int | None = None
 
     def run(self) -> None:
         ctx = self._ctx
@@ -54,10 +56,11 @@ class SelfBuffWorker:
                 generation = self._current_generation()
                 if self._completed_generation != generation:
                     self._last_cast_ms.clear()
-                    if not self._run_startup_sequence(
+                    startup_ok = self._run_startup_sequence(
                         buffs,
                         expected_generation=generation,
-                    ):
+                    )
+                    if not startup_ok:
                         # A sit/stand transition can change the generation
                         # while a startup sequence is in progress. Do not
                         # publish completion for the old hunt; the next loop
@@ -124,7 +127,11 @@ class SelfBuffWorker:
                 )
                 ctx.stop_event.wait(max(0.05, remaining / 1000.0))
             except Exception:
-                ctx.logger.behavior(f"[CUSTOM] buff tick error:\n{traceback.format_exc()}")
+                self._log_error(f"[CUSTOM] buff tick error:\n{traceback.format_exc()}")
+                # A persistent backend/config failure must not turn this
+                # worker into a hot exception/logging loop.
+                if ctx.stop_event.wait(0.25):
+                    return
 
     def _current_generation(self) -> int:
         return int(getattr(self._ctx, "hunt_generation", 0))
@@ -161,6 +168,8 @@ class SelfBuffWorker:
                     if not resumed and self._ctx.stop_event.wait(0.05):
                         return False
                     continue
+                if not self._wait_stagger_gap(startup=True):
+                    return False
                 if self._cast_buff(buff, startup=True):
                     if self._current_generation() != expected_generation:
                         return False
@@ -218,16 +227,18 @@ class SelfBuffWorker:
                 return False
         return False
 
-    def _wait_stagger_gap(self) -> bool:
-        """Wait for the shared buff/timer keypress slot before a buff cast.
+    def _wait_stagger_gap(self, *, startup: bool = False) -> bool:
+        """Wait for the shared character-action slot before a buff cast.
 
-        Uses the shared :class:`CharacterActionGate` so buff casts and skill
-        timer presses never fire closer than ``SKILL_TIMER_STAGGER_MS`` apart,
-        regardless of which worker sent the last keypress.
+        Startup buffs and periodic buffs use the same gate as skill timers. The
+        only difference is their lifecycle admission predicate: startup buffs
+        may run before combat is released, while periodic buffs require normal
+        combat safety.
         """
         gate = self._ctx.character_action_gate
+        allowed = self._startup_action_allowed if startup else self._character_action_allowed
         while not self._ctx.is_stopped():
-            if not self._character_action_allowed():
+            if not allowed():
                 self._ctx.wait_while_combat_blocked(0.25)
                 continue
             now = monotonic_ms()
@@ -292,8 +303,18 @@ class SelfBuffWorker:
             )
             return True
         except Exception:
-            ctx.logger.behavior(
+            self._log_error(
                 f"[CUSTOM] buff cast failed key={buff.button}:\n"
                 f"{traceback.format_exc()}"
             )
             return False
+
+    def _log_error(self, message: str) -> None:
+        """Throttle repeated custom-worker tracebacks under persistent failure."""
+        now = monotonic_ms()
+        if (
+            self._last_error_log_ms is None
+            or now - self._last_error_log_ms >= LOG_REPEAT_INTERVAL_MS
+        ):
+            self._last_error_log_ms = now
+            self._ctx.logger.behavior(message)

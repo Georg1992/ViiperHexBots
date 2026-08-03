@@ -237,6 +237,136 @@ class BotControllerStopStartCycleTests(unittest.TestCase):
         self.assertEqual(run_count["n"], 2)
 
 
+class BotLifecycleStartingCleanupTests(unittest.TestCase):
+    def test_start_thread_creation_failure_does_not_strand_starting(self) -> None:
+        root = MagicMock()
+        root.after = MagicMock()
+        lifecycle = BotLifecycleManager(
+            root=root,
+            config=MagicMock(),
+            mob_catalog=[],
+            session=MagicMock(),
+            viiper=MagicMock(),
+        )
+
+        class StartFailThread:
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            def start(self) -> None:
+                raise RuntimeError("thread creation failed")
+
+        with patch("pybot.app.bot_lifecycle.threading.Thread", StartFailThread):
+            with self.assertRaisesRegex(RuntimeError, "thread creation failed"):
+                lifecycle.start(
+                    config_snapshot=MagicMock(),
+                    session_id="thread-failure",
+                )
+
+        self.assertEqual(lifecycle.state, BotState.OFF)
+        self.assertFalse(lifecycle.stopping)
+        self.assertTrue(lifecycle.shutdown_ready)
+
+    def test_start_failure_after_controller_creation_keeps_cleanup_owned(self) -> None:
+        root = MagicMock()
+        root.after = MagicMock()
+        session = MagicMock()
+        lifecycle = BotLifecycleManager(
+            root=root,
+            config=MagicMock(),
+            mob_catalog=[MagicMock()],
+            session=session,
+            viiper=MagicMock(),
+        )
+        bot = MagicMock()
+        bot.running = True
+        bot.shutdown_pending = True
+        release_stop = threading.Event()
+
+        def stop_after_release(**_kwargs) -> bool:
+            release_stop.wait(timeout=2.0)
+            return True
+
+        bot.stop.side_effect = stop_after_release
+
+        with (
+            patch("pybot.app.bot_lifecycle.restore_and_activate"),
+            patch("pybot.app.bot_lifecycle.mob_folder_by_index", return_value="wolf"),
+            patch("pybot.app.bot_lifecycle.BotController", return_value=bot),
+            patch.object(bot, "start", side_effect=RuntimeError("thread launch failed")),
+        ):
+            cfg = MagicMock(
+                window_id=1,
+                selected_monster=0,
+                hunt_log_overlay=False,
+            )
+            self.assertTrue(lifecycle.start(config_snapshot=cfg, session_id="failed-start"))
+            start_thread = lifecycle._start_thread
+            self.assertIsNotNone(start_thread)
+            assert start_thread is not None
+            start_thread.join(timeout=2.0)
+            self.assertFalse(start_thread.is_alive())
+
+        self.assertTrue(lifecycle.stopping)
+        self.assertIs(lifecycle._bot, bot)
+        self.assertEqual(lifecycle.state, BotState.STOPPING)
+        bot.request_stop.assert_called_once_with()
+        session.end.assert_not_called()
+
+        joiner = lifecycle._stop_joiner
+        self.assertIsNotNone(joiner)
+        assert joiner is not None
+        release_stop.set()
+        joiner.join(timeout=2.0)
+        self.assertFalse(joiner.is_alive())
+        lifecycle._refresh_stopped_state()
+        self.assertEqual(lifecycle.state, BotState.OFF)
+        self.assertFalse(lifecycle.stopping)
+        session.end.assert_called_once_with("bot start cancelled")
+
+
+class BotLifecycleOrphanCleanupTests(unittest.TestCase):
+    def test_orphan_cleanup_retry_is_tracked_by_shutdown_readiness(self) -> None:
+        root = MagicMock()
+        root.after = MagicMock()
+        lifecycle = BotLifecycleManager(
+            root=root,
+            config=MagicMock(),
+            mob_catalog=[],
+            session=MagicMock(),
+            viiper=MagicMock(),
+        )
+        bot = MagicMock()
+        bot.shutdown_pending = True
+        outcomes = iter([False, False, False, True])
+        first_attempt = threading.Event()
+
+        def stop_with_signal(**_kwargs) -> bool:
+            first_attempt.set()
+            return next(outcomes)
+
+        bot.stop.side_effect = stop_with_signal
+
+        lifecycle._start_orphan_stop_joiner(bot, end_session=False)
+        self.assertTrue(first_attempt.wait(timeout=2.0))
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if bot.stop.call_count >= 3 and not lifecycle._orphan_cleanup_threads:
+                break
+            time.sleep(0.01)
+        self.assertGreaterEqual(bot.stop.call_count, 3)
+        self.assertFalse(lifecycle.shutdown_ready)
+
+        lifecycle.retry_shutdown_cleanup()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if bot.stop.call_count >= 4 and lifecycle.shutdown_ready:
+                break
+            time.sleep(0.01)
+        self.assertGreaterEqual(bot.stop.call_count, 4)
+        self.assertTrue(lifecycle.shutdown_ready)
+
+
 class BotLifecycleStoppingTests(unittest.TestCase):
     def test_stop_owns_shutdown_and_refuses_restart_until_bot_exits(self) -> None:
         root = MagicMock()
