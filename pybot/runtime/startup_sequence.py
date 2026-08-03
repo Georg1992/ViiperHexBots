@@ -79,8 +79,17 @@ class HuntStartupSequence:
             # actions may run immediately instead of waiting for the first scan.
             self.area_clear.set()
 
-    def begin_new_hunt(self) -> None:
-        """Advance to a new hunt and reset its startup milestones atomically."""
+    def begin_new_hunt(self, *, trusted_clear: bool = False) -> None:
+        """Advance to a new hunt and reset its startup milestones atomically.
+
+        ``trusted_clear`` pre-satisfies the area-clear milestone: the caller
+        has verified the landing is safe (e.g. a sit-recovery session that
+        regenerated through an entire SP cycle at the bot-chosen quiet spot
+        without taking damage). Startup buffs/timers then run immediately,
+        exactly like a fresh ``begin``. Without it, the landing is assumed
+        possibly populated: combat stays live so the area can be cleared, and
+        startup actions wait for the first empty discovery scan.
+        """
         with self._lock:
             self._generation += 1
             if self._managed:
@@ -91,6 +100,11 @@ class HuntStartupSequence:
                 # buffs then timers gate the normal hunt again.
                 self._allow_combat_before_area_clear = True
                 self._clear_milestones()
+            if trusted_clear:
+                # Managed hunts gate combat on this milestone, so startup
+                # actions are released immediately; a populated landing can
+                # still downgrade it on the first scan and reopen combat.
+                self.area_clear.set()
 
     def mark_area_clear(
         self,

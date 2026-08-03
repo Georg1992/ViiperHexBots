@@ -45,6 +45,15 @@ class PlayerVitals:
         with self._lock:
             return self._hp, self._hp_max
 
+    def hp_sample(self) -> tuple[int | None, int | None, int, int]:
+        """Atomic ``(hp, hp_max, hp_observed_ms, hp_changed_ms)``.
+
+        The observation clock lets healers reject a stale pre-heal reading
+        instead of healing twice while the vitals publisher catches up.
+        """
+        with self._lock:
+            return self._hp, self._hp_max, self._hp_observed_ms, self._hp_changed_ms
+
     # ── SP ────────────────────────────────────────────────────────
 
     def publish_sp(self, sp: int | None, sp_max: int | None) -> None:

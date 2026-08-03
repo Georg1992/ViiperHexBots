@@ -80,7 +80,11 @@ class CriticalDangerWorker:
                 end_escape = getattr(ctx, "end_danger_escape", None)
                 if callable(end_escape):
                     end_escape()
-                ctx.end_sit_ops()
+                # Legacy contexts without end_critical_escape_ops release the
+                # borrowed sit gate here. A random fly-wing escape landing is
+                # not verified safe, so startup actions must wait for the
+                # first discovery scan rather than trusting the area clear.
+                ctx.end_sit_ops(trusted_clear=False)
 
     def run(self) -> None:
         ctx = self._ctx

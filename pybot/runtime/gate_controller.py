@@ -368,20 +368,27 @@ class GateController:
             self.stop_event.wait(WORKER_POLL_INTERVAL_S)
         return False
 
-    def end_sit_ops(self) -> None:
+    def end_sit_ops(self, *, trusted_clear: bool = True) -> None:
         """Release sit pause and begin a fresh hunt cycle.
 
         Standing after SP recovery is a new hunt start: normal timers fire
-        again, then character buffs replay in order. The generation/event pair
-        lets those independent workers coordinate without relying on thread
-        start order. Discovery is explicitly woken after the new generation is
-        published so the resumed hunt does not wait for the full cadence.
+        again, then character buffs replay in order. The recovery session only
+        completes at a spot the character sat through without damage (a
+        bot-chosen quiet area or a safe-key escape landing), so by default the
+        area is trusted clear: startup buffs/timers run immediately instead of
+        waiting for the first discovery scan, and combat resumes without a
+        dead window. Pass ``trusted_clear=False`` for landings that were not
+        verified safe (e.g. a random fly-wing escape). The generation/event
+        pair lets those independent workers coordinate without relying on
+        thread start order. Discovery is explicitly woken after the new
+        generation is published so the resumed hunt does not wait for the
+        full cadence.
         """
         with self._sit_storage_lock:
             # Reset the generation and startup milestones first. The sit gate
             # remains held until this completes, so workers cannot observe a
             # new hunt with the previous hunt's completion events.
-            self.startup.begin_new_hunt()
+            self.startup.begin_new_hunt(trusted_clear=trusted_clear)
             self.sitting_event.clear()
             self._restore_resume_gate()
         # The discovery worker may be asleep in its cadence wait while the sit

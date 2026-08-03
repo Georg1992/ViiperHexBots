@@ -20,6 +20,7 @@ import threading
 
 from pybot.runtime.constants import (
     ALT_MOUSE_CLICK_DELAY_S,
+    KITE_DOUBLE_CLICK_GAP_S,
 )
 from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.input.scan_codes import key_name_to_scan_code
@@ -234,6 +235,10 @@ class ViiperBackend(ShadowInputBackend):
             if not self._wait_or_cancel(0.005):
                 return False
             if not self._left_click_locked():
+                return False
+            # Deliberate separation so the client registers two distinct
+            # clicks as a double-click walk command rather than one gesture.
+            if not self._wait_or_cancel(KITE_DOUBLE_CLICK_GAP_S):
                 return False
             return self._left_click_locked()
 

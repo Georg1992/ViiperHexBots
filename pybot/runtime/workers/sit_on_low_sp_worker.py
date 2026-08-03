@@ -20,6 +20,7 @@ from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import (
     SIT_KEY_SETTLE_S,
     SIT_LOW_SP_RATIO,
+    SIT_POST_TELEPORT_SETTLE_S,
     SIT_RESUME_SP_RATIO,
     SIT_SP_POLL_INTERVAL_S,
     SIT_STAND_RESUME_DELAY_S,
@@ -166,6 +167,21 @@ class SitOnLowSpWorker:
     def _sp_recovered(self) -> bool:
         ratio = self._sp_ratio()
         return ratio is not None and ratio >= SIT_RESUME_SP_RATIO
+
+    def _wait_post_teleport_settle(self) -> None:
+        """Let the client finish the landing before the sit toggle is sent.
+
+        The sit key pressed during the teleport landing transition can be
+        eaten (character stays standing while the bot believes it is seated)
+        or, on a client that preserves the seated pose through the teleport,
+        inverted. A short margin after the teleport settle makes the single
+        sit press land on a settled character so the logical seated state
+        matches the game.
+        """
+        if not self._ctx.wait_unless_stopped(SIT_POST_TELEPORT_SETTLE_S):
+            self._ctx.logger.behavior(
+                "[SIT] post-teleport settle interrupted"
+            )
 
     def _sit_danger_detected(self) -> bool:
         """Consume a danger request raised by an observed HP drop.
@@ -390,6 +406,7 @@ class SitOnLowSpWorker:
                         ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
                         continue
                     teleported_for_session = True
+                    self._wait_post_teleport_settle()
 
                 outcome = self._sit_until_done(sit_scan)
                 if outcome == "recovered" and self._sp_recovered():
@@ -413,6 +430,7 @@ class SitOnLowSpWorker:
                     escape_first = False
                     teleported_for_session = True
                     reason = "low_sp"
+                    self._wait_post_teleport_settle()
                     ctx.logger.behavior(
                         "[SIT] interrupted — new sit spot (hunt stays paused)"
                     )
@@ -425,6 +443,7 @@ class SitOnLowSpWorker:
                     escape_first = False
                     teleported_for_session = True
                     reason = "low_sp"
+                    self._wait_post_teleport_settle()
                     ctx.logger.behavior(
                         "[SIT] danger escaped — sitting again for SP recovery"
                     )

@@ -33,6 +33,10 @@ SIT_IDLE_BEFORE_SIT_S = 1.0
 SIT_STAND_RESUME_DELAY_S = 0.5
 # Wait after sit/stand key tap for the toggle animation to finish.
 SIT_KEY_SETTLE_S = 0.35
+# Extra margin after a sit-placement / danger-escape teleport before the sit
+# toggle. The client's landing transition can eat or invert a key sent too
+# early, leaving the character standing while the bot believes it is seated.
+SIT_POST_TELEPORT_SETTLE_S = 0.8
 # Press HP Item Key when vision HP/max is below this.
 HP_RESTORE_RATIO = 0.5
 # Vision HP poll / min gap between HP Item Key presses.
@@ -42,6 +46,9 @@ HP_RESTORE_COOLDOWN_S = 1.0
 HP_HEAL_DAMAGE_QUIET_S = 1.0
 # After teleport settle, custom self-heal may cast during this grace window.
 HP_POST_TELEPORT_HEAL_S = 2.0
+# After a custom heal cast, wait this long and require a fresh HP reading
+# before another heal may be sent (vitals refresh lags the game state).
+HEAL_VERIFY_DELAY_MS = 300
 
 # Minimum gap between distinct skill-timer key presses when several are due.
 SKILL_TIMER_STAGGER_MS = 500
@@ -58,6 +65,9 @@ FLY_WING_WEIGHT = 5
 STORAGE_ENTER_SCAN_CODE = 284
 # Always wait this long after Alt+mouse click (deposit).
 ALT_MOUSE_CLICK_DELAY_S = 0.1
+# Gap between the two clicks of a kiting double-click so the client
+# registers them as a deliberate double-click walk command.
+KITE_DOUBLE_CLICK_GAP_S = 0.08
 # Settle after moving onto a Use-tab fly wing before Alt+RMB deposit.
 STORAGE_WING_AIM_SETTLE_S = 0.25
 # Use-tab grid from assets/UI/InventoryPanel.png (8×6, 32px pitch).
@@ -95,11 +105,13 @@ __all__ = [
     "SIT_IDLE_BEFORE_SIT_S",
     "SIT_STAND_RESUME_DELAY_S",
     "SIT_KEY_SETTLE_S",
+    "SIT_POST_TELEPORT_SETTLE_S",
     "HP_RESTORE_RATIO",
     "HP_RESTORE_POLL_S",
     "HP_RESTORE_COOLDOWN_S",
     "HP_HEAL_DAMAGE_QUIET_S",
     "HP_POST_TELEPORT_HEAL_S",
+    "HEAL_VERIFY_DELAY_MS",
     "SKILL_TIMER_STAGGER_MS",
     "STARTUP_BUFF_GAP_S",
     "STARTUP_BUFF_CURSOR_DELAY_S",
@@ -108,6 +120,7 @@ __all__ = [
     "FLY_WING_WEIGHT",
     "STORAGE_ENTER_SCAN_CODE",
     "ALT_MOUSE_CLICK_DELAY_S",
+    "KITE_DOUBLE_CLICK_GAP_S",
     "STORAGE_WING_AIM_SETTLE_S",
     "STORAGE_INV_COLS",
     "STORAGE_INV_ROWS",

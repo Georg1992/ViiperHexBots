@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -129,6 +130,31 @@ class CaptureRegionTests(unittest.TestCase):
         new_sct.grab.assert_called_once()
         old_sct.close.assert_called_once_with()
         self.assertFalse(capture_mod._retired_sessions)
+
+    def test_hung_grab_times_out_without_freezing_the_caller(self) -> None:
+        """A native grab that never returns must fail the frame, not wedge."""
+        release = threading.Event()
+        fake_sct = MagicMock()
+
+        def hung_grab(_monitor):
+            release.wait(timeout=5.0)
+            return np.zeros((4, 4, 4), dtype=np.uint8)
+
+        fake_sct.grab.side_effect = hung_grab
+        try:
+            with patch("pybot.recognition.capture.mss.MSS", return_value=fake_sct):
+                with patch("pybot.recognition.capture._CAPTURE_GRAB_TIMEOUT_S", 0.2):
+                    capture_mod.reset_capture_session()
+                    start = time.monotonic()
+                    frame = capture_mod.capture_region(10, 20, 4, 4)
+                    elapsed = time.monotonic() - start
+        finally:
+            # Always release the worker so later tests are not queued behind
+            # a stuck grab.
+            release.set()
+
+        self.assertIsNone(frame)
+        self.assertLess(elapsed, 2.0)
 
     def test_retries_once_after_grab_failure(self) -> None:
         shot = np.zeros((4, 4, 4), dtype=np.uint8)

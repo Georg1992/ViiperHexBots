@@ -10,6 +10,7 @@ from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import (
     SIT_KEY_SETTLE_S,
     SIT_LOW_SP_RATIO,
+    SIT_POST_TELEPORT_SETTLE_S,
     SIT_RESUME_SP_RATIO,
 )
 from pybot.runtime.danger_detector import DangerDetector, DangerLevel
@@ -186,6 +187,9 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.end_sit_ops()
         self.assertTrue(self.ctx.discovery_wake.is_set())
         self.assertFalse(self.ctx.sitting_event.is_set())
+        # The recovery landing is trusted clear, so startup buffs/timers are
+        # not held back by the first post-stand discovery scan.
+        self.assertTrue(self.ctx.startup_area_clear.is_set())
 
     def test_low_sp_recovery_teleports_once_then_sits(self) -> None:
         worker = self._worker(_ScriptedVitals([0.02, 0.99]))
@@ -198,6 +202,41 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.teleport.teleport_once_for_sit.assert_called_once_with(log_tag="SIT")
         self.teleport.teleport_until_quiet.assert_not_called()
         worker._sit_until_done.assert_called_once_with(82)
+        self.assertFalse(self.ctx.sitting_event.is_set())
+
+    def test_post_teleport_settle_before_first_sit(self) -> None:
+        """The sit toggle waits for the landing after the placement teleport."""
+        worker = self._worker(_ScriptedVitals([0.02, 0.99]))
+        waits: list[float] = []
+        self.ctx.wait_unless_stopped = lambda t: waits.append(t) or True  # type: ignore[method-assign]
+        worker._sit_until_done = MagicMock(return_value="recovered")  # type: ignore[method-assign]
+        self.teleport.teleport_once_for_sit = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+        worker._recover_sp(0.02)
+
+        self.assertEqual(waits.count(SIT_POST_TELEPORT_SETTLE_S), 1)
+
+    def test_post_escape_settle_before_resitting(self) -> None:
+        """After a danger escape the re-sit waits for the new landing too."""
+        worker = self._worker(_ScriptedVitals([0.02, 0.02, 0.99, 0.99]))
+        waits: list[float] = []
+        self.ctx.wait_unless_stopped = lambda t: waits.append(t) or True  # type: ignore[method-assign]
+
+        def recovery_side_effect(_scan: int) -> str:
+            if worker._sit_until_done.call_count == 1:
+                return "danger_escaped"
+            return "recovered"
+
+        worker._sit_until_done = MagicMock(  # type: ignore[method-assign]
+            side_effect=recovery_side_effect
+        )
+        self.teleport.teleport_once_for_sit = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+        worker._recover_sp(0.02)
+
+        # Once after the placement teleport, once after the danger escape.
+        self.assertGreaterEqual(waits.count(SIT_POST_TELEPORT_SETTLE_S), 2)
+        self.assertEqual(worker._sit_until_done.call_count, 2)
         self.assertFalse(self.ctx.sitting_event.is_set())
 
     def test_danger_request_survives_competing_storage_session(self) -> None:

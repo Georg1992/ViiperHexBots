@@ -202,7 +202,7 @@ class HuntStartupSequenceTests(unittest.TestCase):
         self.assertFalse(gates.should_run_combat())
         gates.end_sit_ops()
 
-    def test_gate_resets_startup_before_releasing_sit_gate(self) -> None:
+    def test_gate_trusts_sit_recovery_start_and_releases_sit_gate(self) -> None:
         sequence = HuntStartupSequence()
         sequence.begin()
         gates = GateController(startup=sequence)
@@ -216,20 +216,45 @@ class HuntStartupSequenceTests(unittest.TestCase):
 
         self.assertEqual(sequence.generation, old_generation + 1)
         self.assertFalse(gates.sitting_event.is_set())
-        self.assertFalse(sequence.area_clear.is_set())
+        # A recovery session only completes at a spot the character sat
+        # through without damage, so the landing area is trusted clear and
+        # startup buffs/timers run immediately — no scan-gated dead window.
+        self.assertTrue(sequence.area_clear.is_set())
         self.assertFalse(sequence.buffs_done.is_set())
         self.assertFalse(sequence.timers_done.is_set())
-        # Post-recovery combat remains available while discovery establishes
-        # the new area; startup actions still remain gated until clear.
-        self.assertTrue(gates.should_run_combat())
-
-        sequence.mark_area_clear()
+        # With the area trusted clear, combat waits for buffs then timers.
         self.assertFalse(gates.should_run_combat())
+
         sequence.mark_buffs_done()
         self.assertFalse(gates.should_run_combat())
         self.assertFalse(sequence.timers_done.is_set())
         sequence.mark_timers_done()
         self.assertTrue(gates.should_run_combat())
+
+    def test_new_hunt_with_trusted_clear_runs_startup_immediately(self) -> None:
+        sequence = HuntStartupSequence()
+        sequence.begin()
+        sequence.mark_buffs_done()
+        sequence.mark_timers_done()
+
+        sequence.begin_new_hunt(trusted_clear=True)
+
+        self.assertTrue(sequence.area_clear.is_set())
+        self.assertFalse(sequence.buffs_done.is_set())
+        self.assertFalse(sequence.timers_done.is_set())
+        # Trusted clear releases startup actions without waiting for a scan;
+        # combat gates on buffs/timers exactly like a fresh begin().
+        self.assertFalse(sequence.is_combat_ready())
+
+        # A populated landing can still downgrade the trusted milestone and
+        # reopen combat for the clear pass.
+        sequence.mark_area_clear(False)
+        self.assertTrue(sequence.is_combat_ready())
+        sequence.mark_area_clear()
+        self.assertFalse(sequence.is_combat_ready())
+        sequence.mark_buffs_done()
+        sequence.mark_timers_done()
+        self.assertTrue(sequence.is_combat_ready())
 
 
 if __name__ == "__main__":

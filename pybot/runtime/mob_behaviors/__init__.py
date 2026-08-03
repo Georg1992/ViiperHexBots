@@ -19,7 +19,11 @@ from typing import TYPE_CHECKING, Callable
 
 from pybot.game_state import PlayerVitals
 from pybot.config.runtime import CustomBehaviorRuntime
-from pybot.runtime.constants import CELL_SIZE_PX, HP_RESTORE_COOLDOWN_S
+from pybot.runtime.constants import (
+    CELL_SIZE_PX,
+    HEAL_VERIFY_DELAY_MS,
+    HP_RESTORE_COOLDOWN_S,
+)
 
 DEFAULT_KITE_DISTANCE_PX = CELL_SIZE_PX * 5
 _KITE_DIRECTIONS: tuple[tuple[int, int], ...] = (
@@ -220,13 +224,23 @@ class ConfiguredMobBehavior(MobBehavior):
         char_y: int,
         input_backend: InputBackend,
     ) -> bool:
-        hp, hp_max = self._vitals.hp_pair()
+        hp, hp_max, _hp_observed_ms, hp_changed_ms = self._vitals.hp_sample()
         now = monotonic_ms()
-        if (
-            self._last_heal_ms is not None
-            and now - self._last_heal_ms < int(HP_RESTORE_COOLDOWN_S * 1000)
-        ):
-            return False
+        if self._last_heal_ms is not None:
+            # Post-heal verification window: give the vitals publisher time to
+            # refresh after the cast. A second heal fired on the pre-heal HP
+            # reading is what caused the double-heal when the first one filled
+            # the bar.
+            if now - self._last_heal_ms < HEAL_VERIFY_DELAY_MS:
+                return False
+            # Healthcheck: a second heal must be based on an HP *value* that
+            # changed since the last cast. The observation clock advances on
+            # every poll even when the value is unchanged, so an observed-only
+            # check still re-heals on a stale pre-heal sample while the
+            # publisher lags. Only a changed value proves the heal's result
+            # was read back.
+            if hp_changed_ms <= self._last_heal_ms:
+                return False
         # A heal is never sent for a full (or invalid) HP reading. Keep the
         # safety gate separate so this invariant is explicit at the input
         # boundary.

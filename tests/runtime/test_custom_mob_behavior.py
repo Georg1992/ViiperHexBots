@@ -241,6 +241,99 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
         self.assertTrue(behavior.heal_if_needed(100, 100, backend))
         backend.skill_click_at.assert_called_once_with(16, 100, 100)
 
+    def test_no_second_heal_until_fresh_hp_reading(self) -> None:
+        """A heal is never repeated on the stale pre-heal HP reading."""
+        settings = SimpleNamespace(heal_scan_code=16)
+        danger = MagicMock()
+        danger.is_safe_for_heal.return_value = True
+        backend = MagicMock()
+        backend.skill_click_at.return_value = True
+        behavior = ConfiguredMobBehavior(settings, PlayerVitals(), danger)
+
+        class _ScriptedHpVitals:
+            def __init__(self) -> None:
+                self._samples: list[tuple[int | None, int | None, int, int]] = []
+
+            def hp_sample(self) -> tuple[int | None, int | None, int, int]:
+                return self._samples.pop(0)
+
+        vitals = _ScriptedHpVitals()
+        behavior._vitals = vitals  # type: ignore[assignment]
+        now_ms = {"value": 0}
+
+        # Pre-heal low reading at t=0 → cast.
+        vitals._samples.append((90, 100, 0, 0))
+        with patch("pybot.runtime.mob_behaviors.monotonic_ms", return_value=now_ms["value"]):
+            self.assertTrue(behavior.heal_if_needed(100, 100, backend))
+        self.assertEqual(backend.skill_click_at.call_count, 1)
+
+        # Stale reading observed before the cast → blocked even past the
+        # 300 ms verify window.
+        vitals._samples.append((80, 100, 0, 0))
+        now_ms["value"] = 1000
+        with patch("pybot.runtime.mob_behaviors.monotonic_ms", return_value=now_ms["value"]):
+            self.assertFalse(behavior.heal_if_needed(100, 100, backend))
+        self.assertEqual(backend.skill_click_at.call_count, 1)
+
+        # Fresh full reading → no heal (already full).
+        vitals._samples.append((100, 100, 1500, 1500))
+        now_ms["value"] = 2000
+        with patch("pybot.runtime.mob_behaviors.monotonic_ms", return_value=now_ms["value"]):
+            self.assertFalse(behavior.heal_if_needed(100, 100, backend))
+        self.assertEqual(backend.skill_click_at.call_count, 1)
+
+        # Fresh still-low reading → a second heal is allowed.
+        vitals._samples.append((80, 100, 2500, 2500))
+        now_ms["value"] = 3000
+        with patch("pybot.runtime.mob_behaviors.monotonic_ms", return_value=now_ms["value"]):
+            self.assertTrue(behavior.heal_if_needed(100, 100, backend))
+        self.assertEqual(backend.skill_click_at.call_count, 2)
+
+    def test_no_heal_on_republished_same_hp_value(self) -> None:
+        """A newer poll with an unchanged value is not a fresh healthcheck.
+
+        The observation clock advances on every poll, so a stale low reading
+        republished after a heal must not trigger a second heal. Only an HP
+        value change since the cast proves the publisher caught up.
+        """
+        settings = SimpleNamespace(heal_scan_code=16)
+        danger = MagicMock()
+        danger.is_safe_for_heal.return_value = True
+        backend = MagicMock()
+        backend.skill_click_at.return_value = True
+        behavior = ConfiguredMobBehavior(settings, PlayerVitals(), danger)
+
+        class _ScriptedHpVitals:
+            def __init__(self) -> None:
+                self._samples: list[tuple[int | None, int | None, int, int]] = []
+
+            def hp_sample(self) -> tuple[int | None, int | None, int, int]:
+                return self._samples.pop(0)
+
+        vitals = _ScriptedHpVitals()
+        behavior._vitals = vitals  # type: ignore[assignment]
+
+        # Pre-heal low reading at t=0 → cast at t=5.
+        vitals._samples.append((90, 100, 0, 0))
+        with patch("pybot.runtime.mob_behaviors.monotonic_ms", return_value=5):
+            self.assertTrue(behavior.heal_if_needed(100, 100, backend))
+        self.assertEqual(backend.skill_click_at.call_count, 1)
+
+        # The publisher polls at t=400 with the same unchanged value: the
+        # observation clock advanced, but the value-change clock did not.
+        # Even past the 300 ms verify window, this stale healthcheck must
+        # not re-heal (the first heal may still be filling the bar).
+        vitals._samples.append((90, 100, 400, 0))
+        with patch("pybot.runtime.mob_behaviors.monotonic_ms", return_value=1000):
+            self.assertFalse(behavior.heal_if_needed(100, 100, backend))
+        self.assertEqual(backend.skill_click_at.call_count, 1)
+
+        # The heal lands: the value changes to full → no further heal.
+        vitals._samples.append((100, 100, 1200, 1200))
+        with patch("pybot.runtime.mob_behaviors.monotonic_ms", return_value=1500):
+            self.assertFalse(behavior.heal_if_needed(100, 100, backend))
+        self.assertEqual(backend.skill_click_at.call_count, 1)
+
     def test_casts_debuff_once_per_target_and_retries_failed_cast(self) -> None:
         settings = SimpleNamespace(
             debuff_scan_code=19,
