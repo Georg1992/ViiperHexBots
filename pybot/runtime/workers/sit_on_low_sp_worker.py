@@ -395,11 +395,21 @@ class SitOnLowSpWorker:
                 if self._seated:
                     if escape_first:
                         if self._urgent_escape(reason="sit_danger"):
+                            # The successful retry moved this same recovery
+                            # session to a new landing. Keep ownership here;
+                            # ending now would make the outer gameplay tick
+                            # start a second low-SP session and press the sit
+                            # toggle again. Reuse this landing and perform the
+                            # normal single re-sit below.
                             self._seated = False
+                            escape_first = False
+                            teleported_for_session = True
+                            self._wait_post_teleport_settle()
                             ctx.logger.behavior(
-                                "[SIT] danger escape succeeded while seated"
+                                "[SIT] danger escape succeeded while seated — "
+                                "resuming recovery in new area"
                             )
-                            break
+                            continue
                         ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
                         continue
                     if not self.stand(sit_scan):

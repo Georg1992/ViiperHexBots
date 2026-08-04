@@ -516,7 +516,18 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.pop_danger_sit_request.return_value = False
         worker._recover_sp(0.40, reason="danger")
         self.assertEqual(self.teleport.danger_teleport.call_count, 2)
-        self.assertEqual(self.input.toggle_key.call_count, 0)
+        # The retry never sends a stand toggle while seated. The resumed
+        # recovery then performs its normal sit/stand pair exactly once each.
+        self.assertEqual(self.input.toggle_key.call_count, 2)
+        sit_logs = [
+            call.args[0]
+            for call in self.ctx.logger.behavior.call_args_list
+            if call.args and "tap sit-key" in call.args[0]
+        ]
+        self.assertEqual(
+            sit_logs,
+            ["[SIT] tap sit-key reason=enter_sit", "[SIT] tap sit-key reason=leave_sit"],
+        )
         self.assertFalse(worker._seated)
 
     def test_danger_request_escapes_once_then_searches_safe_place(self) -> None:
@@ -537,6 +548,32 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.teleport.teleport_once_for_sit.assert_not_called()
         self.assertFalse(self.ctx.danger_sit_requested.is_set())
         self.assertFalse(self.ctx.critical_danger_requested.is_set())
+
+    def test_failed_seated_escape_retry_resits_once_in_same_session(self) -> None:
+        """A failed-then-successful seated escape must not restart recovery."""
+        worker = self._worker(_ScriptedVitals([0.40, 0.40, 0.99, 0.99]))
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        worker._seated = True
+
+        def resume_in_same_session(scan: int) -> str:
+            self.assertTrue(worker.sit(scan))
+            # The scripted helper represents a completed sit/stand recovery.
+            worker._seated = False
+            return "recovered"
+
+        worker._sit_until_done = MagicMock(side_effect=resume_in_same_session)  # type: ignore[method-assign]
+        self.teleport.danger_teleport = MagicMock(side_effect=[False, True])  # type: ignore[method-assign]
+
+        # ``reason=\"danger\"`` models the already-owned seated danger
+        # session. The first direct escape fails; the seated retry succeeds.
+        worker._recover_sp(0.02, reason="danger")
+
+        self.assertEqual(self.teleport.danger_teleport.call_count, 2)
+        self.assertEqual(worker._sit_until_done.call_count, 1)
+        # The retry stays in this recovery session and reuses the new area;
+        # exactly one re-sit is emitted, not a second recovery session.
+        self.assertEqual(self.input.toggle_key.call_count, 1)
+        self.assertFalse(self.ctx.sitting_event.is_set())
 
     def test_failed_urgent_escape_retries_before_sitting_without_extra_teleport(self) -> None:
         worker = self._worker(_ScriptedVitals([0.02, 0.02, 0.99, 0.99]))
