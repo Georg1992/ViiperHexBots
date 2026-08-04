@@ -31,79 +31,50 @@ class HpRestoreWorker:
 
     def run(self) -> None:
         ctx = self._ctx
-        cfg = ctx.config
-        scan = int(cfg.hp_scan_code)
+        scan = int(ctx.config.hp_scan_code)
         if scan <= 0:
             return
-
         ctx.logger.behavior(
-            f"[HP] item worker started key={cfg.hp_button!r} scanCode={scan} "
+            f"[HP] item worker started key={ctx.config.hp_button!r} scanCode={scan} "
             f"threshold<{HP_RESTORE_RATIO:.0%}"
         )
         while not ctx.is_stopped():
-            try:
-                if not ctx.should_run_workers():
-                    ctx.wait_while_stopped_or_paused(HP_RESTORE_POLL_S)
-                    continue
+            self.process_pending()
+            # ``process_pending`` is deliberately non-blocking for the
+            # deterministic gameplay owner. The compatibility run loop still
+            # needs a bounded cadence so legacy callers cannot spin forever.
+            ctx.stop_event.wait(HP_RESTORE_POLL_S)
 
-                # HP-item healing is allowed only in the explicit post-
-                # teleport safety window; never consume a heal item during a
-                # live hunt/fight.
-                can_heal = getattr(
-                    ctx, "should_run_heal_actions", None
-                )
-                if callable(can_heal):
-                    in_heal_window = bool(can_heal())
-                else:
-                    in_heal_window = bool(
-                        getattr(ctx, "in_post_teleport_heal_window", lambda: False)()
-                    ) and bool(ctx.should_run_workers())
-                if not in_heal_window:
-                    ctx.stop_event.wait(HP_RESTORE_POLL_S)
-                    continue
-
-                ratio = self._hp_ratio()
-                if ratio is None or ratio >= HP_RESTORE_RATIO:
-                    ctx.stop_event.wait(HP_RESTORE_POLL_S)
-                    continue
-
-                now = time.monotonic()
-                if now - self._last_press_mono < HP_RESTORE_COOLDOWN_S:
-                    ctx.stop_event.wait(HP_RESTORE_POLL_S)
-                    continue
-
-                ctx.logger.behavior(
-                    f"[HP] item key={cfg.hp_button!r} ratio={ratio:.1%}"
-                )
-                # Recheck the same heal-specific admission predicate at the
-                # input boundary. A danger/teleport transition may claim the
-                # lifecycle after the preflight window check; the broad worker
-                # gate alone would still allow a stale HP press.
-                perform_heal = getattr(type(ctx), "perform_heal_if_allowed", None)
-                if callable(perform_heal):
-                    healed = bool(
-                        ctx.perform_heal_if_allowed(
-                            ctx.should_run_heal_actions,
-                            lambda: self._press_if_still_needed(scan),
-                            cooldown_s=HP_RESTORE_COOLDOWN_S,
-                        )
-                    )
-                else:
-                    healed = perform_if_allowed(
-                        self._input,
-                        ctx.should_run_heal_actions,
-                        lambda: self._press_if_still_needed(scan),
-                        lifecycle=ctx,
-                    )
-                if healed:
-                    self._last_press_mono = time.monotonic()
-                    ctx.stop_event.wait(HP_RESTORE_COOLDOWN_S)
-                else:
-                    ctx.stop_event.wait(HP_RESTORE_POLL_S)
-            except Exception:
-                ctx.logger.behavior(f"[HP] tick error:\n{traceback.format_exc()}")
-                if ctx.stop_event.wait(0.25):
-                    break
+    def process_pending(self) -> bool:
+        """Evaluate one item-heal step; the gameplay loop owns scheduling."""
+        ctx = self._ctx
+        scan = int(ctx.config.hp_scan_code)
+        if scan <= 0 or not ctx.should_run_workers():
+            return False
+        can_heal = getattr(ctx, "should_run_heal_actions", None)
+        in_window = bool(can_heal()) if callable(can_heal) else False
+        ratio = self._hp_ratio()
+        if not in_window or ratio is None or ratio >= HP_RESTORE_RATIO:
+            return False
+        if time.monotonic() - self._last_press_mono < HP_RESTORE_COOLDOWN_S:
+            return False
+        ctx.logger.behavior(
+            f"[HP] item key={ctx.config.hp_button!r} ratio={ratio:.1%}"
+        )
+        if hasattr(type(ctx), "perform_heal_if_allowed"):
+            healed = bool(ctx.perform_heal_if_allowed(
+                ctx.should_run_heal_actions,
+                lambda: self._press_if_still_needed(scan),
+                cooldown_s=HP_RESTORE_COOLDOWN_S,
+            ))
+        else:
+            healed = perform_if_allowed(
+                self._input, ctx.should_run_heal_actions,
+                lambda: self._press_if_still_needed(scan), lifecycle=ctx,
+            )
+        if healed:
+            self._last_press_mono = time.monotonic()
+        return healed
 
     def _press_if_still_needed(self, scan: int) -> bool:
         """Recheck HP immediately before sending the item key.

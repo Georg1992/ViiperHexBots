@@ -105,9 +105,7 @@ class TeleportController:
         if tp == cfg.teleport_scan_code and cfg.teleport_scan_code > 0:
             self._ctx.note_teleport_for_wings()
         self._ctx.overlay.increment_teleports()
-        settled = self._ctx.wait_unless_stopped(
-            cfg.teleport_duration_ms / 1000.0
-        )
+        settled = self._wait_for_settle(cfg.teleport_duration_ms / 1000.0)
         if settled:
             # Every successful teleport starts a new area. Clear only damage
             # observed before this teleport. Damage recorded during settle
@@ -119,6 +117,36 @@ class TeleportController:
                 if callable(reset):
                     reset(teleport_started)
         return settled
+
+    def _critical_request_is_set(self) -> bool | None:
+        """Return the real critical notification state when available."""
+        event = getattr(self._ctx, "critical_danger_requested", None)
+        is_set = getattr(event, "is_set", None)
+        if not callable(is_set):
+            return None
+        try:
+            value = is_set()
+        except Exception:
+            return None
+        return value if type(value) is bool else None
+
+    def _wait_for_settle(self, timeout_s: float) -> bool:
+        """Wait for landing without hiding an urgent critical notification."""
+        critical_is_real = self._critical_request_is_set()
+        if critical_is_real is None:
+            # Preserve the narrow compatibility context contract used by tests
+            # and custom integrations: one wait for the complete settle.
+            return self._ctx.wait_unless_stopped(timeout_s)
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while not self._ctx.is_stopped():
+            if self._critical_request_is_set() is True:
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            if not self._ctx.wait_unless_stopped(min(SIT_SP_POLL_INTERVAL_S, remaining)):
+                return False
+        return False
 
     # ── Safe-place teleport ──────────────────────────────────────
 

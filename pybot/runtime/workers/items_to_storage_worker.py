@@ -97,6 +97,38 @@ class ItemsToStorageWorker:
         if ctx.critical_danger_requested.is_set() or ctx.danger_escape_active.is_set():
             raise InventoryUiError("critical danger preempted storage session")
 
+    def process_pending(self) -> bool:
+        """Run one storage decision/session; the gameplay loop owns polling."""
+        ctx = self._ctx
+        cfg = ctx.config
+        if (not cfg.open_storage_steps or ctx.is_stopped()
+                or ctx.critical_danger_requested.is_set()
+                or ctx.danger_escape_active.is_set()
+                or ctx.pause_event.is_set() or ctx.sitting_event.is_set()):
+            return False
+        heavy = self._weight_over_threshold()
+        need_wings = ctx.should_restock_fly_wings()
+        dump = heavy or (need_wings and self._fly_wings_would_hit_threshold())
+        if not dump and not need_wings:
+            return False
+        if not ctx.begin_storage_ops():
+            return False
+        try:
+            ctx.logger.behavior("[STORAGE] starting deterministic storage session")
+            if not self._teleport.teleport_until_quiet(log_tag="STORAGE"):
+                return False
+            self.storage_session(dump=dump, restock=need_wings)
+            return True
+        except InventoryUiError as exc:
+            ctx.logger.behavior(f"[STORAGE] UI miss: {exc}")
+            return False
+        except Exception:
+            ctx.logger.behavior(f"[STORAGE] cycle error:\n{traceback.format_exc()}")
+            return False
+        finally:
+            ctx.end_storage_ops()
+            ctx.discovery_wake.set()
+
     def run(self) -> None:
         ctx = self._ctx
         cfg = ctx.config
@@ -104,73 +136,11 @@ class ItemsToStorageWorker:
         ctx.logger.behavior(
             f"[STORAGE] worker started chain=[{chain_keys}] "
             f"steps={len(cfg.open_storage_steps)} "
-            f"weight>={cfg.weight_modifier}% "
-            f"flyWings={cfg.take_fly_wings}"
+            f"weight>={cfg.weight_modifier}% flyWings={cfg.take_fly_wings}"
         )
         while not ctx.is_stopped():
-            try:
-                if not cfg.open_storage_steps:
-                    ctx.stop_event.wait(STORAGE_WEIGHT_POLL_INTERVAL_S)
-                    continue
-                if ctx.critical_danger_requested.is_set() or ctx.danger_escape_active.is_set():
-                    # A critical escape owns the input boundary and will
-                    # preempt this session. Park until it resolves.
-                    ctx.stop_event.wait(STORAGE_WEIGHT_POLL_INTERVAL_S)
-                    continue
-                if ctx.pause_event.is_set() or ctx.sitting_event.is_set():
-                    ctx.wait_while_stopped_or_paused(STORAGE_WEIGHT_POLL_INTERVAL_S)
-                    continue
-                heavy = self._weight_over_threshold()
-                need_wings = ctx.should_restock_fly_wings()
-                dump_for_wings = need_wings and self._fly_wings_would_hit_threshold()
-                dump = heavy or dump_for_wings
-                if not dump and not need_wings:
-                    ctx.stop_event.wait(STORAGE_WEIGHT_POLL_INTERVAL_S)
-                    continue
-                if not ctx.begin_storage_ops():
-                    continue
-                try:
-                    if dump and need_wings:
-                        reason = (
-                            "weight high"
-                            if heavy
-                            else (
-                                f"GetFlyWings would hit threshold "
-                                f"(+{int(cfg.fly_wings_amount) * FLY_WING_WEIGHT}wt)"
-                            )
-                        )
-                        ctx.logger.behavior(
-                            f"[STORAGE] {reason} + wingcount=0 — "
-                            "merged ItemsToStorage+GetFlyWings"
-                        )
-                    elif dump:
-                        ctx.logger.behavior("[STORAGE] weight high — ItemsToStorage")
-                    else:
-                        ctx.logger.behavior("[STORAGE] wingcount=0 — GetFlyWings")
-                    ctx.logger.behavior(
-                        "[STORAGE] teleport until quiet before storage UI"
-                    )
-                    if not self._teleport.teleport_until_quiet(
-                        log_tag="STORAGE"
-                    ):
-                        ctx.logger.behavior(
-                            "[STORAGE] area clear aborted — skip storage session"
-                        )
-                        continue
-                    self.storage_session(dump=dump, restock=need_wings)
-                except InventoryUiError as exc:
-                    ctx.logger.behavior(f"[STORAGE] UI miss: {exc}")
-                except Exception:
-                    ctx.logger.behavior(
-                        f"[STORAGE] cycle error:\n{traceback.format_exc()}"
-                    )
-                finally:
-                    ctx.end_storage_ops()
-                    ctx.discovery_wake.set()
-            except Exception:
-                ctx.logger.behavior(f"[STORAGE] tick error:\n{traceback.format_exc()}")
-                if ctx.stop_event.wait(0.25):
-                    break
+            self.process_pending()
+            ctx.stop_event.wait(STORAGE_WEIGHT_POLL_INTERVAL_S)
 
     def _weight_threshold(self, weight_max: int) -> float:
         modifier = int(self._ctx.config.weight_modifier)

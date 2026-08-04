@@ -38,6 +38,55 @@ class SkillTimerWorker:
         self._startup_pressed: set[int] = set()
         self._startup_block_logged: set[tuple[int, int]] = set()
 
+    def process_pending(self) -> bool:
+        """Press due timers once; gameplay loop supplies all scheduling."""
+        ctx = self._ctx
+        timers = [t for t in ctx.config.skill_timers if t.scan_code and t.interval_ms > 0]
+        if not timers or ctx.is_stopped() or not ctx.should_run_timers():
+            return False
+        # Startup buffs are a prerequisite, not merely a convention. The
+        # gameplay owner may call this step immediately after a blocked buff
+        # attempt, so fail closed until the milestone is actually published.
+        startup_buffs = getattr(ctx, "startup_buffs_done", None)
+        if startup_buffs is not None:
+            is_set = getattr(startup_buffs, "is_set", None)
+            if callable(is_set) and type(is_set()) is bool and not is_set():
+                return False
+        generation = int(getattr(ctx, "hunt_generation", 0))
+        if self._startup_cycle_generation != generation:
+            self._startup_pressed.clear()
+            self._startup_cycle_generation = generation
+            self._armed = False
+        if not self._armed:
+            self._arm_timers(timers)
+            self._armed = True
+        now = monotonic_ms()
+        for timer in timers:
+            if now - self._last_press_ms.get(timer.scan_code, 0) < timer.interval_ms:
+                continue
+            if not self._wait_stagger_gap():
+                return False
+            pressed = perform_if_allowed(
+                self._input, ctx.should_run_timers,
+                lambda code=timer.scan_code: self._input.teleport_key(code),
+                lifecycle=ctx,
+            )
+            if pressed is False:
+                continue
+            pressed_at = monotonic_ms()
+            self._last_press_ms[timer.scan_code] = pressed_at
+            self._startup_pressed.add(timer.scan_code)
+            ctx.character_action_gate.note_action(pressed_at)
+            ctx.logger.behavior(
+                f"[TIMER] key executed key={timer.button} scanCode={timer.scan_code}"
+            )
+        if {t.scan_code for t in timers}.issubset(self._startup_pressed):
+            mark = getattr(ctx, "mark_startup_timers_done", None)
+            if callable(mark):
+                mark(expected_generation=generation)
+            self._startup_generation = generation
+        return True
+
     def run(self) -> None:
         ctx = self._ctx
         timers = [

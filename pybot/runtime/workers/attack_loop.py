@@ -43,36 +43,41 @@ class AttackLoop:
         self._last_sp_unknown_log_ms = 0
 
     def run(self) -> None:
+        """Compatibility loop; production ownership is ``GameplayLoop``."""
         self._ctx.logger.behavior("[ATTACK] loop started")
         while not self._ctx.is_stopped():
-            try:
-                if not self._ctx.should_run_combat():
-                    self._ctx.wait_while_combat_blocked(WORKER_POLL_INTERVAL_S)
-                    continue
+            self.process_pending()
 
-                tick = monotonic_ms()
-                policy_tracks = self._ctx.tracks.tracks_for_policy(tick)
+    def process_pending(self) -> bool:
+        """Advance one deterministic combat decision/action step.
 
-                target_id = self._ctx.policy.select_target(policy_tracks, tick)
-                if target_id:
-                    # Safe self-heal is attempted before the attack. The
-                    # shared admission helper serializes it with the HP-item
-                    # worker and applies one cooldown to both paths.
-                    self._attempt_heal()
-                    self._attack_one(target_id, tick)
-                    self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
-                    continue
+        This method deliberately performs no independent scheduling. The
+        gameplay owner calls it after higher-priority danger/session steps.
+        """
+        try:
+            if not self._ctx.should_run_combat():
+                self._ctx.wait_while_combat_blocked(WORKER_POLL_INTERVAL_S)
+                return False
 
-                # Also heal while the area is temporarily empty.
+            tick = monotonic_ms()
+            policy_tracks = self._ctx.tracks.tracks_for_policy(tick)
+            target_id = self._ctx.policy.select_target(policy_tracks, tick)
+            if target_id:
                 self._attempt_heal()
-
-                self._hunt_mode.on_no_attackable_targets()
+                self._attack_one(target_id, tick)
                 self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
-            except Exception:
-                self._ctx.logger.behavior(
-                    f"[ATTACK] CRASH:\n{traceback.format_exc()}"
-                )
-                break
+                return True
+
+            self._attempt_heal()
+            self._hunt_mode.on_no_attackable_targets()
+            self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
+            return False
+        except Exception:
+            self._ctx.logger.behavior(
+                f"[ATTACK] CRASH:\n{traceback.format_exc()}"
+            )
+            return False
+
 
     def _attempt_heal(self) -> None:
         """Attempt one custom heal through the shared heal admission gate."""
@@ -115,6 +120,21 @@ class AttackLoop:
         if pos is None:
             return self._char_x, self._char_y
         return int(pos[0]), int(pos[1])
+
+    def _wait_for_gameplay_delay(self, timeout_s: float) -> None:
+        """Wait a gameplay delay without hiding an urgent critical request."""
+        critical = getattr(self._ctx, "critical_danger_requested", None)
+        is_set = getattr(critical, "is_set", None)
+        if not callable(is_set) or type(is_set()) is not bool:
+            self._ctx.stop_event.wait(timeout_s)
+            return
+        deadline = monotonic_ms() + int(timeout_s * 1000)
+        while not self._ctx.is_stopped() and not critical.is_set():
+            remaining_ms = deadline - monotonic_ms()
+            if remaining_ms <= 0:
+                return
+            if self._ctx.stop_event.wait(min(0.05, remaining_ms / 1000.0)):
+                return
 
     def _log_unknown_observation(
         self,
@@ -239,7 +259,10 @@ class AttackLoop:
             )
 
         # Sole inter-skill wait — game applies SP cost; UI may refresh vitals.
-        self._ctx.stop_event.wait(ctx.config.skill_delay_ms / 1000.0)
+        # In production this is sliced when a real critical notification is
+        # pending, returning control to GameplayLoop so escape wins the next
+        # deterministic step instead of waiting out the full skill delay.
+        self._wait_for_gameplay_delay(ctx.config.skill_delay_ms / 1000.0)
 
         # Sit/heal/pause may have claimed the gate during the skill delay.
         if not ctx.should_run_combat():
@@ -326,3 +349,48 @@ class AttackLoop:
             f"[ATTACK] id={target_id} @{click_x},{click_y} "
             f"mob_attacks={snap.attack_count + 1}"
         )
+
+
+class GameplayLoop:
+    """Single owner for gameplay decisions and character input."""
+
+    def __init__(self, ctx, *, attack, critical, sit=None, storage=None,
+                 hp_restore=None, buffs=None, timers=None) -> None:
+        self._ctx = ctx
+        self._attack = attack
+        self._critical = critical
+        self._sit = sit
+        self._storage = storage
+        self._hp_restore = hp_restore
+        self._buffs = buffs
+        self._timers = timers
+
+    def run(self) -> None:
+        self._ctx.logger.behavior("[GAMEPLAY] loop started")
+        while not self._ctx.is_stopped():
+            try:
+                if self._critical.process_pending():
+                    continue
+                if self._ctx.danger_escape_active.is_set():
+                    continue
+                if self._sit is not None and self._sit.process_pending():
+                    continue
+                if self._storage is not None and self._storage.process_pending():
+                    continue
+                if self._hp_restore is not None:
+                    self._hp_restore.process_pending()
+                if self._buffs is not None:
+                    self._buffs.process_pending()
+                # Buff processing completes before timers are even considered;
+                # timer startup cannot race or overtake a pending buff burst.
+                if self._timers is not None:
+                    self._timers.process_pending()
+                self._attack.process_pending()
+            except Exception:
+                # The gameplay owner is the runtime's last safety boundary.
+                # One malformed action must be logged and retried, not kill
+                # the only thread that sequences all character input.
+                self._ctx.logger.behavior(
+                    f"[GAMEPLAY] step error:\n{traceback.format_exc()}"
+                )
+                self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)

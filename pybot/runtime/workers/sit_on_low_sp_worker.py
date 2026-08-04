@@ -296,6 +296,26 @@ class SitOnLowSpWorker:
         # The sit session consumed the request it owns before calling here.
         return bool(escaped)
 
+    def process_pending(self) -> bool:
+        """Advance one sit/danger decision synchronously.
+
+        Long recovery remains one owned action sequence rather than a second
+        control thread. Observation workers only publish vitals/danger state.
+        """
+        ctx = self._ctx
+        if ctx.is_stopped() or not ctx.should_run_workers():
+            return False
+        if ctx.critical_danger_requested.is_set() or ctx.danger_escape_active.is_set():
+            return False
+        if ctx.danger_sit_requested.is_set():
+            self._handle_hunting_danger()
+            return False
+        ratio = self._sp_ratio()
+        if ratio is not None and ratio < SIT_LOW_SP_RATIO:
+            self._recover_sp(ratio, reason="low_sp")
+            return True
+        return False
+
     def run(self) -> None:
         ctx = self._ctx
         ctx.logger.behavior(

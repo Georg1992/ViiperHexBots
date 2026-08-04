@@ -26,7 +26,7 @@ from pybot.runtime.validation_log import HuntValidationLogger
 from pybot.recognition.capture import reset_capture_session
 from pybot.recognition.detector.detector import load_detector_config
 from pybot.runtime.detection.detector_session import DetectorSession
-from pybot.runtime.workers.attack_loop import AttackLoop
+from pybot.runtime.workers.attack_loop import AttackLoop, GameplayLoop
 from pybot.runtime.workers.coord_tracking_worker import CoordTrackingWorker
 from pybot.runtime.mob_behaviors import (
     get_configured_mob_behavior,
@@ -224,12 +224,8 @@ def _build_core_workers(
     player_vitals: PlayerVitals,
     mob_behavior,
     danger: DangerDetector | None = None,
-) -> tuple[list[tuple[str, Callable[[], None]]], DangerDetector]:
-    """Build always-running workers: danger, critical escape, coord, discovery, attack.
-
-    Returns ``(workers, danger_detector)`` so callers can reuse the
-    DangerDetector instance for sit-worker injection.
-    """
+) -> tuple[list[tuple[str, Callable[[], None]]], DangerDetector, AttackLoop, CriticalDangerWorker]:
+    """Build observation workers and action objects for the single gameplay owner."""
     tracking = CoordTrackingWorker(ctx)
     discovery = DiscoveryWorker(ctx, hunt_mode)
     roi = ctx.capture.get_hunt_roi()
@@ -244,14 +240,13 @@ def _build_core_workers(
         char_x=char_x, char_y=char_y,
     )
     critical_escape = CriticalDangerWorker(ctx, tport)
+    # Only independent observation/data production runs in its own thread.
     workers = [
         ("danger", danger.run),
-        ("critical_danger", critical_escape.run),
         ("coord", tracking.run),
         ("discovery", discovery.run),
-        ("attack", attack.run),
     ]
-    return workers, danger
+    return workers, danger, attack, critical_escape
 
 
 def _build_conditional_workers(
@@ -260,12 +255,12 @@ def _build_conditional_workers(
     tport: TeleportController,
     player_vitals: PlayerVitals,
     danger: DangerDetector | None = None,
-) -> list[tuple[str, Callable[[], None]]]:
-    """Build optional workers: skill timer, hp restore, sit, storage."""
-    workers: list[tuple[str, Callable[[], None]]] = []
+) -> dict[str, object]:
+    """Build gameplay actions; they are advanced by ``GameplayLoop``."""
+    actions: dict[str, object] = {}
 
     if any(t.scan_code and t.interval_ms > 0 for t in ctx.config.skill_timers):
-        workers.append(("skill_timer", SkillTimerWorker(ctx, input_backend).run))
+        actions["timers"] = SkillTimerWorker(ctx, input_backend)
     has_buffs = any(
         buff.scan_code > 0 and buff.delay_ms > 0
         for buff in ctx.config.custom_behavior.buffs
@@ -275,7 +270,7 @@ def _build_conditional_workers(
         for t in ctx.config.skill_timers
     )
     if has_buffs:
-        workers.append(("custom_buffs", SelfBuffWorker(ctx, input_backend).run))
+        actions["buffs"] = SelfBuffWorker(ctx, input_backend)
     else:
         # No character buffs means normal timers may start immediately.
         ctx.mark_startup_buffs_done()
@@ -285,12 +280,7 @@ def _build_conditional_workers(
         if not has_buffs:
             ctx.mark_startup_timers_done()
     if ctx.config.hp_scan_code > 0:
-        workers.append(
-            (
-                "hp_restore",
-                HpRestoreWorker(ctx, input_backend, player_vitals).run,
-            )
-        )
+        actions["hp_restore"] = HpRestoreWorker(ctx, input_backend, player_vitals)
 
     if ctx.config.sit_on_low_sp:
         if danger is None:
@@ -299,14 +289,14 @@ def _build_conditional_workers(
             ctx, input_backend, tport,
             danger=danger, vitals=player_vitals,
         )
-        workers.append(("sit_sp", sit_worker.run))
+        actions["sit"] = sit_worker
     if ctx.config.open_storage_steps:
         storage_worker = ItemsToStorageWorker(
             ctx, input_backend, tport, vitals=player_vitals,
         )
-        workers.append(("storage", storage_worker.run))
+        actions["storage"] = storage_worker
 
-    return workers
+    return actions
 
 
 def create_runtime_deps(
@@ -367,11 +357,11 @@ def create_runtime_deps(
         else:
             mob_behavior = legacy_behavior
 
-        core_workers, danger = _build_core_workers(
+        core_workers, danger, attack, critical = _build_core_workers(
             ctx, hunt_mode, input_backend, tport, player_vitals, mob_behavior,
             danger=danger,
         )
-        conditional_workers = _build_conditional_workers(
+        actions = _build_conditional_workers(
             ctx, input_backend, tport, player_vitals,
             danger=danger,
         )
@@ -379,13 +369,23 @@ def create_runtime_deps(
         # The controller's hunt-mode callback is resolved after create_hunt_mode().
         tport._hunt_mode = hunt_mode
 
+        gameplay = GameplayLoop(
+            ctx,
+            attack=attack,
+            critical=critical,
+            sit=actions.get("sit"),
+            storage=actions.get("storage"),
+            hp_restore=actions.get("hp_restore"),
+            buffs=actions.get("buffs"),
+            timers=actions.get("timers"),
+        )
         return RuntimeDependencies(
             ctx=ctx,
             input_backend=input_backend,
             hunt_mode=hunt_mode,
             logger=logger,
             teleport_controller=tport,
-            workers=core_workers + conditional_workers,
+            workers=core_workers + [("gameplay", gameplay.run)],
         )
     except BaseException:
         # The logger owns a live QueueListener as soon as it is constructed.

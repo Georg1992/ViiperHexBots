@@ -35,6 +35,45 @@ class SelfBuffWorker:
         self._completed_generation: int | None = None
         self._last_error_log_ms: int | None = None
 
+    def process_pending(self) -> bool:
+        """Advance buffs once; character input is owned by the gameplay loop."""
+        ctx = self._ctx
+        buffs = tuple(
+            buff for buff in ctx.config.custom_behavior.buffs
+            if buff.scan_code > 0 and buff.delay_ms > 0
+        )
+        if not buffs or ctx.is_stopped():
+            return False
+        generation = self._current_generation()
+        if self._completed_generation != generation:
+            self._last_cast_ms.clear()
+            if not self._run_startup_sequence(buffs, expected_generation=generation):
+                return False
+            if self._current_generation() != generation:
+                return False
+            mark = getattr(ctx, "mark_startup_buffs_done", None)
+            if callable(mark) and mark(expected_generation=generation) is False:
+                return False
+            if not self._has_normal_timers():
+                mark_timers = getattr(ctx, "mark_startup_timers_done", None)
+                if callable(mark_timers):
+                    mark_timers(expected_generation=generation)
+            self._completed_generation = generation
+            return True
+        if not ctx.should_run_combat():
+            return False
+        now = monotonic_ms()
+        due = [
+            buff for buff in buffs
+            if now - self._last_cast_ms.get(id(buff), -buff.delay_ms) >= buff.delay_ms
+        ]
+        if not due:
+            return False
+        for buff in due:
+            if not self._character_action_allowed() or not self._cast_buff(buff):
+                return False
+        return True
+
     def run(self) -> None:
         ctx = self._ctx
         buffs = tuple(
