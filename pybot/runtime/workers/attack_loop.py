@@ -83,7 +83,7 @@ class AttackLoop:
             hx, hy = self._character_pos()
             allowed = getattr(
                 self._ctx,
-                "should_run_heal_actions",
+                "should_run_custom_heal_actions",
                 getattr(
                     self._ctx,
                     "should_run_character_actions",

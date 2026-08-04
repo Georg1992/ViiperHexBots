@@ -305,11 +305,38 @@ class HuntRuntimeContext:
         return bool(danger.is_safe_for_heal())
 
     def should_run_heal_actions(self) -> bool:
-        """True when healing is allowed in the post-teleport safety window."""
+        """True when healing is allowed in the post-teleport safety window.
+
+        This is the conservative gate for the HP-item worker: consumables are
+        spent only in the short grace window right after a teleport.
+        """
         return (
             self.should_run_character_actions()
             and self.in_post_teleport_heal_window()
         )
+
+    def should_run_custom_heal_actions(self) -> bool:
+        """True when the custom skill heal may run.
+
+        A skill heal is free, so it runs whenever the character is safe and
+        combat is allowed (``should_run_character_actions``) — or during the
+        short post-teleport grace window, the intended heal moment right after
+        a danger/area teleport even when the last hit landed within the
+        damage-quiet window. Without this, a damage cascade after a critical
+        teleport (recent damage keeps ``is_safe_for_heal`` false) never lets
+        the bot heal at critically low HP. Session gates (sit/storage/heal/
+        pause/stop) and an in-flight teleport still block the cast.
+        """
+        if self.in_post_teleport_heal_window():
+            return not (
+                self.is_stopped()
+                or self.pause_event.is_set()
+                or self.sitting_event.is_set()
+                or self.storage_event.is_set()
+                or self.healing_event.is_set()
+                or self.discovery_suspend.is_set()
+            )
+        return self.should_run_character_actions()
 
     def should_run_startup_actions(self) -> bool:
         """True when a new-hunt startup action may run.
@@ -369,8 +396,16 @@ class HuntRuntimeContext:
     def begin_danger_escape(self) -> bool:
         return self.gates.begin_danger_escape()
 
-    def try_begin_critical_escape_ops(self) -> bool:
-        return self.gates.try_begin_critical_escape_ops()
+    def try_begin_critical_escape_ops(self, *, override: bool = False) -> bool:
+        return self.gates.try_begin_critical_escape_ops(override=override)
+
+    def wait_for_preempted_session_release(self, timeout_s: float) -> bool:
+        """Block until sessions the escape preempted release their gates."""
+        return self.gates.wait_for_preempted_session_release(timeout_s)
+
+    def preempted_sessions(self) -> tuple[bool, bool, bool]:
+        """Sessions (sit, storage, heal) the current escape overrode."""
+        return self.gates.preempted_sessions()
 
     def end_danger_escape(self) -> None:
         self.gates.end_danger_escape()

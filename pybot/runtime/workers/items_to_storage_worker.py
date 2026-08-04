@@ -66,7 +66,17 @@ class ItemsToStorageWorker:
         self._ui = InventoryAutomation(ctx, input_backend)
 
     def _wait(self, seconds: float) -> None:
-        """Wait for storage UI settling while honoring input cancellation."""
+        """Wait for storage UI settling while honoring input cancellation.
+
+        A pending or in-flight critical escape aborts the session: the
+        escape's teleport key must not race the storage UI (an open panel
+        would waste the wing), and the storage session releases its gate so
+        the escape can proceed. The check runs before and after the wait so
+        an escape claimed during the settle is caught too.
+        """
+        ctx = self._ctx
+        if ctx.critical_danger_requested.is_set() or ctx.danger_escape_active.is_set():
+            raise InventoryUiError("critical danger preempted storage session")
         wait = getattr(self._input, "wait_interruptible", None)
         # Real input backends expose the interruptible wait. Lightweight
         # custom doubles without it still retain the original UI-settle delay.
@@ -84,6 +94,8 @@ class ItemsToStorageWorker:
         stopped = self._ctx.is_stopped()
         if completed is False or stopped is True:
             raise InventoryUiError("storage input wait cancelled")
+        if ctx.critical_danger_requested.is_set() or ctx.danger_escape_active.is_set():
+            raise InventoryUiError("critical danger preempted storage session")
 
     def run(self) -> None:
         ctx = self._ctx
@@ -98,6 +110,11 @@ class ItemsToStorageWorker:
         while not ctx.is_stopped():
             try:
                 if not cfg.open_storage_steps:
+                    ctx.stop_event.wait(STORAGE_WEIGHT_POLL_INTERVAL_S)
+                    continue
+                if ctx.critical_danger_requested.is_set() or ctx.danger_escape_active.is_set():
+                    # A critical escape owns the input boundary and will
+                    # preempt this session. Park until it resolves.
                     ctx.stop_event.wait(STORAGE_WEIGHT_POLL_INTERVAL_S)
                     continue
                 if ctx.pause_event.is_set() or ctx.sitting_event.is_set():

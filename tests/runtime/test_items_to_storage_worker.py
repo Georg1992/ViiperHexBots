@@ -240,6 +240,47 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.assertTrue(self.ctx.should_run_discovery())
         self.assertTrue(self.ctx.should_run_tracking())
 
+    def test_critical_escape_overrides_storage_session(self) -> None:
+        """Critical danger preempts an active storage session."""
+        self.assertTrue(self.ctx.begin_storage_ops())
+        self.ctx.request_critical_danger()
+
+        self.assertTrue(self.ctx.try_begin_critical_escape_ops(override=True))
+        self.assertTrue(self.ctx.danger_escape_active.is_set())
+        self.assertTrue(self.ctx.sitting_event.is_set())
+        self.assertFalse(self.ctx.should_run_combat())
+
+        # Storage releases its gate (closing UI panels) before the escape
+        # presses the teleport key; the release wait then unblocks.
+        self.ctx.end_storage_ops()
+        self.assertTrue(self.ctx.wait_for_preempted_session_release(0.2))
+
+        self.ctx.end_critical_escape_ops()
+        self.assertFalse(self.ctx.danger_escape_active.is_set())
+        self.assertFalse(self.ctx.sitting_event.is_set())
+        # The escape worker consumes the request after the claim; combat
+        # re-enables once it is gone.
+        self.ctx.pop_critical_danger()
+        self.assertTrue(self.ctx.should_run_combat())
+
+    def test_critical_escape_refuses_duplicate_claim(self) -> None:
+        self.assertTrue(self.ctx.try_begin_critical_escape_ops(override=True))
+        self.assertFalse(self.ctx.try_begin_critical_escape_ops(override=True))
+        self.ctx.end_critical_escape_ops()
+        self.assertFalse(self.ctx.danger_escape_active.is_set())
+
+    def test_storage_wait_aborts_when_critical_escape_pending(self) -> None:
+        """A storage settle wait must abort for a pending/in-flight escape."""
+        worker = self._worker()
+        self.ctx.request_critical_danger()
+        with self.assertRaises(InventoryUiError):
+            worker._wait(0.5)
+        self.ctx.pop_critical_danger()
+        self.ctx.danger_escape_active.set()
+        with self.assertRaises(InventoryUiError):
+            worker._wait(0.5)
+        self.ctx.danger_escape_active.clear()
+
     def test_heal_ops_pause_combat_but_not_timers_then_resume(self) -> None:
         self.ctx.mark_running()
         self.assertTrue(self.ctx.begin_heal_ops())

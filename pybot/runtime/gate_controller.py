@@ -140,6 +140,10 @@ class GateController:
         # intentionally separate from sitting_event: the critical worker holds
         # the sit gate for input exclusion but is not doing SP recovery.
         self.danger_escape_active = threading.Event()
+        # Sessions (sit/storage/heal) that a critical escape overrode. Used
+        # only to bound the pre-teleport wait for the preempted owners to
+        # release; teardown always releases the gate the escape itself set.
+        self._preempted_sessions = (False, False, False)
         # A seated toggle could not be undone during worker cleanup. Runtime
         # shutdown must retry this before releasing input ownership.
         self.sit_cleanup_unresolved = threading.Event()
@@ -170,6 +174,7 @@ class GateController:
             and not self.discovery_suspend.is_set()
             and not self.danger_sit_requested.is_set()
             and not self.critical_danger_requested.is_set()
+            and not self.danger_escape_active.is_set()
             and self.startup.is_combat_ready()
         )
 
@@ -177,22 +182,25 @@ class GateController:
         """True when skill timers may fire.
 
         Timers keep running during storage and healing. Sitting, user pause,
-        danger handling, and an in-flight teleport suspend them.
+        danger handling, an in-flight teleport, and an active escape suspend
+        them.
         """
         return (
             self.should_run_workers()
             and not self.discovery_suspend.is_set()
             and not self.danger_sit_requested.is_set()
             and not self.critical_danger_requested.is_set()
+            and not self.danger_escape_active.is_set()
         )
 
     def should_allow_danger_teleport(self) -> bool:
-        """True when danger TP may run.
+        """True when a danger teleport may run.
 
-        Heal does not block this — danger teleport has priority over healing.
-        Sit/storage/pause/stop still block.
+        Critical danger overrides every session (sit/storage/heal): only an
+        explicit stop or user pause may hold it back. Session preemption is
+        managed by the escape claim itself.
         """
-        return self.should_run_workers() and not self.storage_event.is_set()
+        return not self.stop_event.is_set() and not self.pause_event.is_set()
 
     def should_run_discovery(self) -> bool:
         """True when discovery may scan (workers running and not storage).
@@ -316,20 +324,74 @@ class GateController:
             self.danger_escape_active.set()
             return True
 
-    def try_begin_critical_escape_ops(self) -> bool:
+    def try_begin_critical_escape_ops(self, *, override: bool = False) -> bool:
         """Atomically claim the critical escape and its input gate.
 
         The critical worker is not an SP-recovery session. Claim both markers
         under one lock so HP polling cannot see ``sitting_event`` alone and
         enqueue a sit request in the pre-teleport window.
+
+        With ``override=True`` the escape preempts any active session (sit
+        recovery, storage UI, heal). Critical danger has the highest priority:
+        the preempted owners see ``danger_escape_active`` on their next loop
+        and abandon without touching input or gates, and the critical worker
+        waits (bounded) for storage/heal to release before pressing the
+        teleport key.
         """
         with self._sit_storage_lock:
-            if self._session_held() or self.danger_escape_active.is_set():
+            if self.danger_escape_active.is_set():
                 return False
+            if not override and self._session_held():
+                return False
+            self._preempted_sessions = (
+                self.sitting_event.is_set(),
+                self.storage_event.is_set(),
+                self.healing_event.is_set(),
+            )
             self.danger_escape_active.set()
             self.sitting_event.set()
             self.resume_gate.clear()
             return True
+
+    def preempted_sessions(self) -> tuple[bool, bool, bool]:
+        """Sessions (sit, storage, heal) the current escape overrode."""
+        return self._preempted_sessions
+
+    def wait_for_preempted_session_release(self, timeout_s: float) -> bool:
+        """Block until sessions preempted by the escape release their gates.
+
+        The escape itself holds ``sitting_event`` (set by its own claim), so
+        only preempted storage/heal owners are waited on: storage must close
+        its UI panels before the teleport key is pressed, otherwise the wing
+        is wasted against an open panel. A preempted sit session needs no
+        release — the character can teleport while seated and its worker
+        stops touching input once it sees the escape.
+
+        The preempted snapshot is overwritten by the next claim, so it only
+        ever describes the escape currently in flight.
+
+        Returns True when nothing remains to release. Exits early on stop or
+        user pause (the caller re-checks both after this wait).
+        """
+        preempted = self._preempted_sessions
+        if not (preempted[1] or preempted[2]):
+            return True
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while not self.stop_event.is_set():
+            if self.pause_event.is_set():
+                return False
+            with self._sit_storage_lock:
+                still_held = (
+                    (preempted[1] and self.storage_event.is_set())
+                    or (preempted[2] and self.healing_event.is_set())
+                )
+                if not still_held:
+                    return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            self.stop_event.wait(min(WORKER_POLL_INTERVAL_S, remaining))
+        return False
 
     def end_danger_escape(self) -> None:
         """Release the explicit danger-escape phase after teleport handling."""

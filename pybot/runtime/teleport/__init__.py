@@ -132,6 +132,24 @@ class TeleportController:
         """
         return self.teleport_until_quiet(log_tag=log_tag)
 
+    def _escape_in_flight(self) -> bool:
+        """True while any urgent danger escape owns the teleport key.
+
+        Only the escape itself may press a teleport key while it is in
+        flight; every other teleport path (sit placement, storage clear,
+        mode teleport) must yield so the escape key is never queued behind
+        or alongside a competing teleport.
+        """
+        event = getattr(self._ctx, "danger_escape_active", None)
+        is_set = getattr(event, "is_set", None)
+        if not callable(is_set):
+            return False
+        try:
+            value = is_set()
+        except Exception:
+            return False
+        return type(value) is bool and value
+
     def teleport_once_for_sit(self, *, log_tag: str = "SIT") -> bool:
         """Teleport exactly once before sitting to recover SP.
 
@@ -139,7 +157,17 @@ class TeleportController:
         one fresh area is enough, then the sit worker owns the spot. Reset all
         stale area state after the single teleport so the next hunt generation
         cannot act on tracks from the previous screen.
+
+        If a critical escape claims while this placement is already settling,
+        both teleports fire (placement + escape key). That window is narrow
+        and self-correcting — the escape wins and the recovery re-sits — but
+        two consumables may be spent in that one race.
         """
+        if self._escape_in_flight():
+            self._ctx.logger.behavior(
+                "[SIT] placement teleport skipped — critical escape in flight"
+            )
+            return False
         if not self.teleport_once():
             return False
         self._reset_tracking(f"{log_tag.lower()}_teleport", log_tag=log_tag)
@@ -221,6 +249,8 @@ class TeleportController:
             return False
 
         while not self._ctx.is_stopped():
+            if self._escape_in_flight():
+                return False
             living = self._scan_living_count()
             if living is None:
                 self._ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
@@ -263,6 +293,8 @@ class TeleportController:
     ) -> bool:
         """Clear area, idle, then re-scan, aborting promptly for danger."""
         while not self._ctx.is_stopped():
+            if self._escape_in_flight():
+                return False
             if self._danger_request_is_set() is True:
                 return False
             if not self.teleport_until_clear(log_tag=log_tag):
@@ -274,6 +306,8 @@ class TeleportController:
             danger_is_real = self._danger_request_is_set() is not None
             deadline = time.monotonic() + idle_s
             while True:
+                if self._escape_in_flight():
+                    return False
                 if self._danger_request_is_set() is True:
                     return False
                 remaining = deadline - time.monotonic()
@@ -293,6 +327,8 @@ class TeleportController:
                 if not self._ctx.wait_unless_stopped(wait_s):
                     return False
 
+            if self._escape_in_flight():
+                return False
             if self._danger_request_is_set() is True:
                 return False
             living = self._scan_living_count()
@@ -320,6 +356,14 @@ class TeleportController:
         Returns ``True`` on successful teleport.
         """
         ctx = self._ctx
+
+        # A critical escape owns the teleport key; the mode transition must
+        # yield even after its escape request was consumed mid-settle.
+        if self._escape_in_flight():
+            ctx.logger.behavior(
+                "[MODE] teleport skipped — critical escape in flight"
+            )
+            return False
 
         # Suspend discovery so the 1s cadence cannot scan during teleport
         # settle and confirm clear on a loading / empty frame.

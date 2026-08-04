@@ -94,6 +94,28 @@ class TeleportKeySelectionTests(unittest.TestCase):
         self.input.teleport_key.assert_called_once_with(17)
         self.ctx.note_teleport_for_wings.assert_not_called()
 
+    def _set_escape_in_flight(self) -> None:
+        self.ctx.danger_escape_active = MagicMock()
+        self.ctx.danger_escape_active.is_set.return_value = True
+
+    def test_placement_teleport_refuses_during_critical_escape(self) -> None:
+        """A sit placement must never press a teleport key mid-escape."""
+        self._set_escape_in_flight()
+        self.assertFalse(self.tport.teleport_once_for_sit(log_tag="SIT"))
+        self.input.teleport_key.assert_not_called()
+
+    def test_until_quiet_aborts_when_escape_claims(self) -> None:
+        self.ctx.is_stopped.return_value = False
+        self._set_escape_in_flight()
+        self.assertFalse(self.tport.teleport_until_quiet(log_tag="SAFE"))
+        self.input.teleport_key.assert_not_called()
+
+    def test_mode_teleport_refuses_during_critical_escape(self) -> None:
+        self._set_escape_in_flight()
+        self.assertFalse(self.tport.mode_teleport())
+        self.input.teleport_key.assert_not_called()
+        self.ctx.discovery_suspend.set.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

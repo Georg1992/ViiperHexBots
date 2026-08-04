@@ -44,6 +44,11 @@ HP_RESTORE_POLL_S = 1.0
 HP_RESTORE_COOLDOWN_S = 1.0
 # No HP drop for this long before custom self-heal may run.
 HP_HEAL_DAMAGE_QUIET_S = 1.0
+# Critical danger must escape at the detector's cadence, not the sit poll.
+CRITICAL_DANGER_POLL_INTERVAL_S = WORKER_POLL_INTERVAL_S
+# Bounded wait for a preempted session (e.g. storage closing its UI panels)
+# before the critical escape presses the teleport key.
+CRITICAL_PREEMPT_RELEASE_TIMEOUT_S = 3.0
 # After teleport settle, custom self-heal may cast during this grace window.
 HP_POST_TELEPORT_HEAL_S = 2.0
 # After a custom heal cast, wait this long and require a fresh HP reading
@@ -106,6 +111,8 @@ __all__ = [
     "SIT_STAND_RESUME_DELAY_S",
     "SIT_KEY_SETTLE_S",
     "SIT_POST_TELEPORT_SETTLE_S",
+    "CRITICAL_DANGER_POLL_INTERVAL_S",
+    "CRITICAL_PREEMPT_RELEASE_TIMEOUT_S",
     "HP_RESTORE_RATIO",
     "HP_RESTORE_POLL_S",
     "HP_RESTORE_COOLDOWN_S",

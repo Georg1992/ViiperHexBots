@@ -61,6 +61,15 @@ class SitOnLowSpWorker:
         already been sent. Callers must therefore use the key result—not the
         wait result—to update the logical seated state.
         """
+        # A critical escape owns urgent input. Never interleave a sit toggle
+        # with the escape's teleport key: after the escape's teleport the
+        # character is standing, so a late toggle would invert the pose.
+        if self._ctx.danger_escape_active.is_set():
+            self._ctx.logger.behavior(
+                f"[SIT] sit-key input skipped reason={why} — "
+                "critical escape in flight"
+            )
+            return False
         self._ctx.logger.behavior(f"[SIT] tap sit-key reason={why}")
         try:
             toggle = getattr(self._input, "toggle_key", None)
@@ -90,6 +99,11 @@ class SitOnLowSpWorker:
     def _ok_to_act(self) -> bool:
         ctx = self._ctx
         if ctx.is_stopped():
+            return False
+        # A pending or in-flight critical escape owns urgent input and the
+        # sit gate. Yield to it; the outer loop abandons the session so the
+        # escape worker can teleport without competing for the toggle.
+        if ctx.critical_danger_requested.is_set() or ctx.danger_escape_active.is_set():
             return False
         while ctx.pause_event.is_set():
             if ctx.is_stopped():
@@ -294,6 +308,11 @@ class SitOnLowSpWorker:
                 if not ctx.should_run_workers():
                     ctx.wait_while_stopped_or_paused(SIT_SP_POLL_INTERVAL_S)
                     continue
+                if ctx.critical_danger_requested.is_set() or ctx.danger_escape_active.is_set():
+                    # A critical escape owns urgent input and the sit gate.
+                    # Park until it resolves; SP recovery resumes afterwards.
+                    ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
+                    continue
                 if ctx.danger_sit_requested.is_set():
                     # Every HP drop is queued so a seated session can escape
                     # immediately. While hunting, only CRITICAL damage may
@@ -469,46 +488,79 @@ class SitOnLowSpWorker:
                 )
                 ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
         finally:
-            # Do not release the sit gate while we still believe the character
-            # is seated. Retry transient input rejection while running; Pause
-            # intentionally waits for resume. Stop uses the shutdown-only
-            # toggle path because normal input has already been cancelled.
-            shutdown_cleanup_attempts = 0
-            while self._seated:
-                if ctx.is_stopped():
-                    shutdown_cleanup_attempts += 1
-                    if self._cleanup_stand(sit_scan):
-                        self._seated = False
-                        ctx.logger.behavior("[SIT] shutdown stand accepted")
-                        break
-                    if shutdown_cleanup_attempts >= 3:
-                        # Never let an unavailable input backend deadlock the
-                        # entire runtime. The character state is explicitly
-                        # unresolved; the failure is visible in the log rather
-                        # than being mistaken for a successful stand.
-                        ctx.logger.behavior(
-                            "[SIT] shutdown stand could not be confirmed "
-                            "after 3 attempts"
-                        )
-                        mark_unresolved = getattr(
-                            ctx, "mark_sit_cleanup_unresolved", None
-                        )
-                        if callable(mark_unresolved):
-                            mark_unresolved()
-                        break
-                    continue
-                if ctx.pause_event.is_set():
-                    # Keep the sit gate held while the character is still
-                    # seated. Once the user resumes, stand cleanly before
-                    # releasing the gate; otherwise hunting could resume
-                    # while the game character remains seated.
-                    ctx.wait_while_user_paused(SIT_SP_POLL_INTERVAL_S)
-                    continue
-                if self.stand(sit_scan):
+            self._finish_recovery_session(sit_scan)
+
+    def _finish_recovery_session(self, sit_scan: int) -> None:
+        """Release the sit session after recovery, yielding to a critical escape.
+
+        A critical escape can claim ownership while the teardown is running.
+        Once it does, the escape's teleport stands the character and its
+        ``end_critical_escape_ops`` clears the gate it set. Never press the
+        sit toggle or run ``end_sit_ops`` after that point: a late toggle
+        would invert the post-teleport pose.
+        """
+        ctx = self._ctx
+        if ctx.danger_escape_active.is_set():
+            self._seated = False
+            ctx.logger.behavior(
+                "[SIT] recovery session preempted by critical escape"
+            )
+            return
+        if ctx.critical_danger_requested.is_set():
+            # The escape is queued but not yet claimed. Yield one poll so the
+            # critical worker can take ownership; if the request is consumed
+            # as stale instead, fall through to the normal teardown on the
+            # next wake.
+            ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
+            if ctx.danger_escape_active.is_set():
+                self._seated = False
+                return
+        # Do not release the sit gate while we still believe the character
+        # is seated. Retry transient input rejection while running; Pause
+        # intentionally waits for resume. Stop uses the shutdown-only
+        # toggle path because normal input has already been cancelled.
+        shutdown_cleanup_attempts = 0
+        while self._seated:
+            if ctx.danger_escape_active.is_set():
+                self._seated = False
+                ctx.logger.behavior(
+                    "[SIT] stand aborted — critical escape owns the character"
+                )
+                return
+            if ctx.is_stopped():
+                shutdown_cleanup_attempts += 1
+                if self._cleanup_stand(sit_scan):
+                    self._seated = False
+                    ctx.logger.behavior("[SIT] shutdown stand accepted")
                     break
-                ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
-            ctx.end_sit_ops()
-            ctx.discovery_wake.set()
+                if shutdown_cleanup_attempts >= 3:
+                    # Never let an unavailable input backend deadlock the
+                    # entire runtime. The character state is explicitly
+                    # unresolved; the failure is visible in the log rather
+                    # than being mistaken for a successful stand.
+                    ctx.logger.behavior(
+                        "[SIT] shutdown stand could not be confirmed "
+                        "after 3 attempts"
+                    )
+                    mark_unresolved = getattr(
+                        ctx, "mark_sit_cleanup_unresolved", None
+                    )
+                    if callable(mark_unresolved):
+                        mark_unresolved()
+                    break
+                continue
+            if ctx.pause_event.is_set():
+                # Keep the sit gate held while the character is still
+                # seated. Once the user resumes, stand cleanly before
+                # releasing the gate; otherwise hunting could resume
+                # while the game character remains seated.
+                ctx.wait_while_user_paused(SIT_SP_POLL_INTERVAL_S)
+                continue
+            if self.stand(sit_scan):
+                break
+            ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
+        ctx.end_sit_ops()
+        ctx.discovery_wake.set()
 
     def _sit_until_done(self, sit_scan: int) -> str | None:
         """Sit once → wait SP/damage → stand once."""

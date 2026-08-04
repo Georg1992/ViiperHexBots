@@ -547,15 +547,144 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.assertEqual(danger.danger_level(), DangerLevel.DANGER)
         self.assertFalse(self.ctx.danger_sit_requested.is_set())
 
-    def test_danger_teleport_blocked_during_storage(self) -> None:
+    def test_danger_teleport_allowed_during_storage(self) -> None:
+        """Critical danger overrides storage; only stop/pause hold it back."""
         self.assertTrue(self.ctx.begin_storage_ops())
-        self.assertFalse(self.ctx.should_allow_danger_teleport())
+        self.assertTrue(self.ctx.should_allow_danger_teleport())
         self.vitals.publish_hp(80, 100)
         self.danger._poll_hp()
         self.vitals.publish_hp(40, 100)
         self.danger._poll_hp()
         self.teleport.danger_teleport.assert_not_called()
         self.ctx.end_storage_ops()
+
+
+class CustomHealGateTests(unittest.TestCase):
+    """The custom skill heal runs when safe OR in the post-teleport window."""
+
+    def setUp(self) -> None:
+        self.config = MagicMock()
+        self.ctx = HuntRuntimeContext(
+            config=self.config,
+            logger=MagicMock(),
+            tracks=MagicMock(),
+            policy=MagicMock(),
+            capture=MagicMock(),
+            detector=MagicMock(),
+            tracker=MagicMock(),
+            validation=MagicMock(),
+            control=MagicMock(),
+            overlay=MagicMock(),
+        )
+        self.ctx.mark_running()
+        self.vitals = PlayerVitals()
+        self.danger = DangerDetector(self.ctx, vitals=self.vitals)
+        self.ctx.danger_detector = self.danger
+
+    def test_heal_allowed_when_safe_outside_window(self) -> None:
+        self.assertTrue(self.ctx.should_run_custom_heal_actions())
+
+    def test_heal_blocked_with_recent_damage_outside_window(self) -> None:
+        self.vitals.publish_hp(90, 100)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(80, 100)
+        self.danger._poll_hp()
+
+        self.assertFalse(self.ctx.should_run_custom_heal_actions())
+
+    def test_heal_allowed_in_window_despite_recent_damage(self) -> None:
+        # The exact low-HP-after-critical-teleport case: recent damage keeps
+        # the normal safe gate closed, but the post-teleport grace window
+        # allows the heal.
+        self.vitals.publish_hp(90, 100)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(80, 100)
+        self.danger._poll_hp()
+        self.ctx.mark_post_teleport_heal(10.0)
+
+        self.assertTrue(self.ctx.should_run_custom_heal_actions())
+
+    def test_heal_blocked_in_window_while_sitting(self) -> None:
+        self.ctx.mark_post_teleport_heal(10.0)
+        self.ctx.begin_sit_ops()
+
+        self.assertFalse(self.ctx.should_run_custom_heal_actions())
+
+    def test_heal_blocked_in_window_while_teleporting(self) -> None:
+        self.ctx.mark_post_teleport_heal(10.0)
+        self.ctx.discovery_suspend.set()
+
+        self.assertFalse(self.ctx.should_run_custom_heal_actions())
+        self.ctx.discovery_suspend.clear()
+        self.assertTrue(self.ctx.should_run_custom_heal_actions())
+
+
+class StaleCriticalRequestTests(unittest.TestCase):
+    """A critical request whose damage already resolved must not teleport."""
+
+    def setUp(self) -> None:
+        self.config = MagicMock()
+        self.ctx = HuntRuntimeContext(
+            config=self.config,
+            logger=MagicMock(),
+            tracks=MagicMock(),
+            policy=MagicMock(),
+            capture=MagicMock(),
+            detector=MagicMock(),
+            tracker=MagicMock(),
+            validation=MagicMock(),
+            control=MagicMock(),
+            overlay=MagicMock(),
+        )
+        self.ctx.mark_running()
+        self.vitals = PlayerVitals()
+        self.danger = DangerDetector(self.ctx, vitals=self.vitals)
+        self.ctx.danger_detector = self.danger
+
+    def test_stale_critical_request_is_consumed_without_teleport(self) -> None:
+        from pybot.runtime.workers.critical_danger_worker import CriticalDangerWorker
+
+        self.vitals.publish_hp(80, 100)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(40, 100)
+        self.danger._poll_hp()
+        self.assertTrue(self.ctx.critical_danger_requested.is_set())
+
+        # The character recovers (sit regeneration) before the worker runs:
+        # no recent damage, HP back to full.
+        self.vitals.publish_hp(100, 100)
+        self.danger.reset_after_teleport()
+        self.assertEqual(self.danger.danger_level(), DangerLevel.SAFE)
+
+        teleport = MagicMock()
+        worker = CriticalDangerWorker(self.ctx, teleport)
+
+        self.assertTrue(worker.process_pending())
+
+        teleport.danger_teleport.assert_not_called()
+        self.assertFalse(self.ctx.critical_danger_requested.is_set())
+        self.assertFalse(self.ctx.danger_sit_requested.is_set())
+
+    def test_fresh_critical_request_still_teleports(self) -> None:
+        from pybot.runtime.workers.critical_danger_worker import CriticalDangerWorker
+
+        self.ctx.config.teleport_scan_code = 16
+        self.ctx.config.teleport_button = "q"
+        self.ctx.config.teleport_duration_ms = 10
+        self.vitals.publish_hp(80, 100)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(40, 100)
+        self.danger._poll_hp()
+        self.assertEqual(self.danger.danger_level(), DangerLevel.CRITICAL)
+
+        teleport = MagicMock()
+        teleport.danger_teleport.return_value = True
+        worker = CriticalDangerWorker(self.ctx, teleport)
+
+        self.assertTrue(worker.process_pending())
+
+        teleport.danger_teleport.assert_called_once_with(reason="critical_hunt")
+        self.assertFalse(self.ctx.critical_danger_requested.is_set())
 
 
 if __name__ == "__main__":

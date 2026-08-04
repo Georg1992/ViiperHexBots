@@ -393,16 +393,57 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertEqual(self.teleport.danger_teleport.call_count, 2)
         self.assertFalse(self.ctx.critical_danger_requested.is_set())
 
-    def test_critical_escape_waits_while_sitting(self) -> None:
+    def test_critical_escape_overrides_sitting_session(self) -> None:
+        """Critical danger preempts an active sit session and teleports."""
         self.ctx.request_critical_danger()
         self.ctx.sitting_event.set()
         self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
         escape = CriticalDangerWorker(self.ctx, self.teleport)
 
-        self.assertFalse(escape.process_pending())
-        self.teleport.danger_teleport.assert_not_called()
-        self.assertTrue(self.ctx.critical_danger_requested.is_set())
-        self.ctx.sitting_event.clear()
+        self.assertTrue(escape.process_pending())
+        # A preempted sit session keeps the safe-key escape (creamy / save
+        # point first) so the character can sit and finish SP recovery.
+        self.teleport.danger_teleport.assert_called_once_with(
+            reason="critical_hunt", prefer_safe_key=True
+        )
+        self.assertFalse(self.ctx.critical_danger_requested.is_set())
+        # The escape released the borrowed sit gate after the teleport.
+        self.assertFalse(self.ctx.sitting_event.is_set())
+        self.assertFalse(self.ctx.danger_escape_active.is_set())
+
+    def test_ok_to_act_yields_to_pending_critical_escape(self) -> None:
+        worker = self._worker()
+        self.ctx.request_critical_danger()
+        self.assertFalse(worker._ok_to_act())
+        self.ctx.pop_critical_danger()
+        self.assertFalse(self.ctx.critical_danger_requested.is_set())
+        self.assertTrue(worker._ok_to_act())
+
+    def test_tap_skips_input_while_escape_in_flight(self) -> None:
+        worker = self._worker()
+        self.ctx.danger_escape_active.set()
+        self.assertFalse(worker._tap(82, why="enter_sit"))
+        self.input.toggle_key.assert_not_called()
+
+    def test_recovery_abandons_when_critical_escape_claims(self) -> None:
+        """A sit session yields to the escape without touching the toggle."""
+        worker = self._worker(_ScriptedVitals([0.02, 0.02]))
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        self.teleport.teleport_once_for_sit = MagicMock(return_value=True)  # type: ignore[method-assign]
+        worker._seated = False
+
+        def claim_during_regen(_scan: int) -> str:
+            self.ctx.request_critical_danger()
+            self.ctx.danger_escape_active.set()
+            return "recovered"
+
+        worker._sit_until_done = claim_during_regen  # type: ignore[method-assign]
+        worker._recover_sp(0.02)
+
+        self.input.toggle_key.assert_not_called()
+        self.assertFalse(worker._seated)
+        # The escape owns the sit gate; the sit worker must not release it.
+        self.assertTrue(self.ctx.sitting_event.is_set())
 
     def test_critical_escape_waits_while_paused_without_repeating_teleport(self) -> None:
         self.ctx.request_critical_danger()
