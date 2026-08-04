@@ -13,8 +13,9 @@ from pybot.runtime.constants import (
     WORKER_POLL_INTERVAL_S,
 )
 from pybot.runtime.combat_observer import CombatObserver
-from pybot.runtime.hunt_mode import HuntModeController
+from pybot.runtime.deferred_actions import DeferredActionScheduler
 from pybot.runtime.hunt_tracks import monotonic_ms
+from pybot.runtime.hunt_mode import HuntModeController
 from pybot.runtime.input.input_backend import InputBackend, perform_if_allowed
 from pybot.runtime.mob_behaviors import MobBehavior
 from pybot.runtime.workers.worker_contexts import AttackLoopContext
@@ -364,6 +365,93 @@ class GameplayLoop:
         self._hp_restore = hp_restore
         self._buffs = buffs
         self._timers = timers
+        self._scheduler = DeferredActionScheduler()
+        self._scheduler_generation: int | None = None
+        self._startup_seed_generation: int | None = None
+        self._register_deferred_actions()
+
+    def _register_deferred_actions(self) -> None:
+        """Register periodic actions without creating more control threads."""
+        if self._hp_restore is not None:
+            self._scheduler.register(
+                "hp_restore",
+                interval_ms=1000,
+                priority=20,
+                ready=lambda: bool(self._hp_restore.can_restore_now()),
+                due_when=self._hp_restore.needs_restore,
+                execute=self._hp_restore.process_pending,
+                due_on_generation=False,
+            )
+        if self._buffs is not None:
+            for buff in getattr(self._ctx.config.custom_behavior, "buffs", ()):
+                if buff.scan_code > 0 and buff.delay_ms > 0:
+                    self._scheduler.register(
+                        f"buff:{buff.scan_code}",
+                        interval_ms=buff.delay_ms,
+                        priority=30,
+                        ready=lambda: bool(self._ctx.should_run_character_actions()),
+                        execute=lambda code=buff.scan_code: self._buffs.execute_buff(code),
+                    )
+        if self._timers is not None:
+            for timer in getattr(self._ctx.config, "skill_timers", ()):
+                if timer.scan_code and timer.interval_ms > 0:
+                    self._scheduler.register(
+                        f"timer:{timer.scan_code}",
+                        interval_ms=timer.interval_ms,
+                        priority=40,
+                        ready=lambda: bool(self._ctx.should_run_timers()),
+                        execute=lambda code=timer.scan_code: self._timers.execute_timer(code),
+                    )
+
+    def _prepare_deferred_actions(self, now_ms: int) -> None:
+        """Reconcile generation/startup success with periodic deadlines."""
+        generation = int(getattr(self._ctx, "hunt_generation", 0))
+        if self._scheduler_generation == generation:
+            return
+        self._scheduler.sync_generation(generation, now_ms=now_ms)
+        # Startup timestamps are collected after the startup callbacks have
+        # actually completed. They are intentionally seeded once per
+        # generation; periodic executions must never be copied back into the
+        # scheduler on later ticks.
+        self._scheduler_generation = generation
+        self._startup_seed_generation = None
+
+    def _seed_startup_successes(self) -> None:
+        """Seed periodic schedules from successful startup casts exactly once."""
+        generation = int(getattr(self._ctx, "hunt_generation", 0))
+        if self._startup_seed_generation == generation:
+            return
+        buffs_done = getattr(self._ctx, "startup_buffs_done", None)
+        timers_done = getattr(self._ctx, "startup_timers_done", None)
+        if (
+            hasattr(buffs_done, "is_set") and not buffs_done.is_set()
+        ) or (
+            hasattr(timers_done, "is_set") and not timers_done.is_set()
+        ):
+            return
+        found = False
+        if self._buffs is not None:
+            for buff in getattr(self._ctx.config.custom_behavior, "buffs", ()):
+                if buff.scan_code > 0 and buff.delay_ms > 0:
+                    at = self._buffs.last_success_ms(buff.scan_code)
+                    if at is not None:
+                        action = self._scheduler.get(f"buff:{buff.scan_code}")
+                        if action.last_executed_ms != at:
+                            self._scheduler.seed_executed(f"buff:{buff.scan_code}", at_ms=at)
+                        found = True
+        if self._timers is not None:
+            for timer in getattr(self._ctx.config, "skill_timers", ()):
+                if timer.scan_code and timer.interval_ms > 0:
+                    at = self._timers.last_success_ms(timer.scan_code)
+                    if at is not None:
+                        self._scheduler.seed_executed(f"timer:{timer.scan_code}", at_ms=at)
+                        found = True
+        if found or (self._buffs is None and self._timers is None):
+            self._startup_seed_generation = generation
+
+    def deferred_statuses(self, *, now_ms: int | None = None):
+        """Expose scheduler state for diagnostics and focused tests."""
+        return self._scheduler.statuses(now_ms=monotonic_ms() if now_ms is None else now_ms)
 
     def run(self) -> None:
         self._ctx.logger.behavior("[GAMEPLAY] loop started")
@@ -377,14 +465,31 @@ class GameplayLoop:
                     continue
                 if self._storage is not None and self._storage.process_pending():
                     continue
-                if self._hp_restore is not None:
-                    self._hp_restore.process_pending()
+
+                now_ms = monotonic_ms()
+                # Startup casts are a real execution phase. They run before
+                # periodic due actions and their successful timestamps seed the
+                # deferred deadlines below. A failed/unsafe startup stays
+                # retryable and never resets a timer merely because it expired.
                 if self._buffs is not None:
-                    self._buffs.process_pending()
-                # Buff processing completes before timers are even considered;
-                # timer startup cannot race or overtake a pending buff burst.
+                    self._buffs.process_pending(startup_only=True)
                 if self._timers is not None:
-                    self._timers.process_pending()
+                    self._timers.process_pending(startup_only=True)
+                # Startup callbacks may have succeeded on this same generation;
+                # seed their real success timestamps before observing deadlines.
+                self._prepare_deferred_actions(now_ms)
+                self._seed_startup_successes()
+
+                if self._hp_restore is not None and self._hp_restore.needs_restore():
+                    self._scheduler.mark_pending("hp_restore")
+                # The scheduler observes monotonic deadlines and drains all
+                # safe actions in priority order. Failed actions remain pending;
+                # only successful callbacks restart their own deadline.
+                ran = self._scheduler.run_pending(now_ms=monotonic_ms())
+                # A due high-priority action that failed or is not yet safe must
+                # remain the next gameplay concern; do not attack around it.
+                if self._scheduler.requires_retry(max_priority=40):
+                    continue
                 self._attack.process_pending()
             except Exception:
                 # The gameplay owner is the runtime's last safety boundary.

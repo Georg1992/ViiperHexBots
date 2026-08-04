@@ -35,8 +35,30 @@ class SelfBuffWorker:
         self._completed_generation: int | None = None
         self._last_error_log_ms: int | None = None
 
-    def process_pending(self) -> bool:
-        """Advance buffs once; character input is owned by the gameplay loop."""
+    def execute_buff(self, buff_key: int) -> bool:
+        """Execute one periodic buff for the serialized scheduler."""
+        ctx = self._ctx
+        buffs = tuple(
+            buff for buff in ctx.config.custom_behavior.buffs
+            if buff.scan_code == buff_key and buff.delay_ms > 0
+        )
+        if not buffs or ctx.is_stopped() or not ctx.should_run_character_actions():
+            return False
+        buff = buffs[0]
+        if not self._wait_stagger_gap():
+            return False
+        if not self._cast_buff(buff):
+            return False
+        return True
+
+    def process_pending(self, *, startup_only: bool = False) -> bool:
+        """Advance startup buffs; periodic casts may be scheduler-owned.
+
+        ``startup_only`` is used by the serialized gameplay owner so periodic
+        deadlines are handled by ``DeferredActionScheduler`` rather than by a
+        second implicit clock in this worker. The default preserves the legacy
+        compatibility behavior for direct callers.
+        """
         ctx = self._ctx
         buffs = tuple(
             buff for buff in ctx.config.custom_behavior.buffs
@@ -60,6 +82,8 @@ class SelfBuffWorker:
                     mark_timers(expected_generation=generation)
             self._completed_generation = generation
             return True
+        if startup_only:
+            return False
         if not ctx.should_run_combat():
             return False
         now = monotonic_ms()
@@ -171,6 +195,13 @@ class SelfBuffWorker:
                 # worker into a hot exception/logging loop.
                 if ctx.stop_event.wait(0.25):
                     return
+
+    def last_success_ms(self, buff_key: int) -> int | None:
+        """Return the last successful cast timestamp for scheduler seeding."""
+        for buff in self._ctx.config.custom_behavior.buffs:
+            if buff.scan_code == buff_key:
+                return self._last_cast_ms.get(id(buff))
+        return None
 
     def _current_generation(self) -> int:
         return int(getattr(self._ctx, "hunt_generation", 0))

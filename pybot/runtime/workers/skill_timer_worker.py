@@ -38,8 +38,72 @@ class SkillTimerWorker:
         self._startup_pressed: set[int] = set()
         self._startup_block_logged: set[tuple[int, int]] = set()
 
-    def process_pending(self) -> bool:
-        """Press due timers once; gameplay loop supplies all scheduling."""
+    def execute_timer(self, scan_code: int) -> bool:
+        """Execute one scheduler-owned timer action.
+
+        Deadline ownership lives in ``GameplayLoop``'s deferred scheduler;
+        this method only performs the admitted input and records successful
+        startup state for the existing lifecycle gates.
+        """
+        ctx = self._ctx
+        timers = [
+            timer for timer in ctx.config.skill_timers
+            if timer.scan_code == scan_code and timer.interval_ms > 0
+        ]
+        if not timers or ctx.is_stopped() or not ctx.should_run_timers():
+            return False
+        startup_buffs = getattr(ctx, "startup_buffs_done", None)
+        if startup_buffs is not None and hasattr(startup_buffs, "is_set"):
+            if not startup_buffs.is_set():
+                return False
+        generation = int(getattr(ctx, "hunt_generation", 0))
+        if self._startup_cycle_generation != generation:
+            self._startup_pressed.clear()
+            self._startup_block_logged.clear()
+            self._startup_cycle_generation = generation
+            self._armed = False
+        if not self._armed:
+            self._arm_timers([
+                timer for timer in ctx.config.skill_timers
+                if timer.scan_code and timer.interval_ms > 0
+            ])
+            self._armed = True
+        timer = timers[0]
+        if not self._wait_stagger_gap():
+            return False
+        pressed = perform_if_allowed(
+            self._input,
+            ctx.should_run_timers,
+            lambda: self._input.teleport_key(timer.scan_code),
+            lifecycle=ctx,
+        )
+        if pressed is False:
+            return False
+        pressed_at = monotonic_ms()
+        self._last_press_ms[timer.scan_code] = pressed_at
+        self._startup_pressed.add(timer.scan_code)
+        ctx.character_action_gate.note_action(pressed_at)
+        ctx.logger.behavior(
+            f"[TIMER] key executed key={timer.button} scanCode={timer.scan_code}"
+        )
+        startup_scans = {
+            item.scan_code for item in ctx.config.skill_timers
+            if item.scan_code and item.interval_ms > 0
+        }
+        if startup_scans.issubset(self._startup_pressed):
+            mark = getattr(ctx, "mark_startup_timers_done", None)
+            if callable(mark):
+                mark(expected_generation=generation)
+            self._startup_generation = generation
+        return True
+
+    def process_pending(self, *, startup_only: bool = False) -> bool:
+        """Advance startup timers; periodic casts are scheduler-owned.
+
+        Direct legacy callers retain the old combined behavior. The gameplay
+        owner passes ``startup_only=True`` so periodic deadlines are latched by
+        the deferred scheduler instead of being silently consumed here.
+        """
         ctx = self._ctx
         timers = [t for t in ctx.config.skill_timers if t.scan_code and t.interval_ms > 0]
         if not timers or ctx.is_stopped() or not ctx.should_run_timers():
@@ -57,6 +121,13 @@ class SkillTimerWorker:
             self._startup_pressed.clear()
             self._startup_cycle_generation = generation
             self._armed = False
+        if startup_only:
+            # Startup execution is deliberately one key at a time. Periodic
+            # expiry is owned exclusively by DeferredActionScheduler.
+            missing = [timer for timer in timers if timer.scan_code not in self._startup_pressed]
+            if not missing:
+                return True
+            return self.execute_timer(missing[0].scan_code)
         if not self._armed:
             self._arm_timers(timers)
             self._armed = True
@@ -86,6 +157,10 @@ class SkillTimerWorker:
                 mark(expected_generation=generation)
             self._startup_generation = generation
         return True
+
+    def last_success_ms(self, scan_code: int) -> int | None:
+        """Return the last successful press timestamp for scheduler seeding."""
+        return self._last_press_ms.get(scan_code)
 
     def run(self) -> None:
         ctx = self._ctx

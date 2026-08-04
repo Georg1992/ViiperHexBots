@@ -45,6 +45,21 @@ class HpRestoreWorker:
             # needs a bounded cadence so legacy callers cannot spin forever.
             ctx.stop_event.wait(HP_RESTORE_POLL_S)
 
+    def needs_restore(self) -> bool:
+        """Return whether the current vitals require an HP-item action."""
+        ratio = self._hp_ratio()
+        return ratio is not None and ratio < HP_RESTORE_RATIO
+
+    def can_restore_now(self) -> bool:
+        """Return whether a due item action is currently admissible."""
+        can_heal = getattr(self._ctx, "should_run_heal_actions", None)
+        return (
+            self.needs_restore()
+            and callable(can_heal)
+            and bool(can_heal())
+            and time.monotonic() - self._last_press_mono >= HP_RESTORE_COOLDOWN_S
+        )
+
     def process_pending(self) -> bool:
         """Evaluate one item-heal step; the gameplay loop owns scheduling."""
         ctx = self._ctx
