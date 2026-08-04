@@ -198,14 +198,26 @@ class SitOnLowSpWorker:
             )
 
     def _sit_danger_detected(self) -> bool:
-        """Consume a danger request raised by an observed HP drop.
+        """Consume or recover a danger event for the seated owner.
 
-        Nearby mobs alone are not an attack signal: they can be present while
-        the character is safely sitting. The danger detector queues this event
-        only after seeing HP decrease, so the sit worker remains the sole owner
-        of the resulting escape sequence.
+        Most damage arrives as ``danger_sit_requested``. Damage observed while
+        an urgent teleport is settling is deliberately not queued, because the
+        escape owner already holds the gate. The detector still preserves that
+        fresh damage timestamp; consult its real danger level here before
+        sitting again so that settle damage cannot become stale silently.
         """
-        return self._ctx.pop_danger_sit_request()
+        if self._ctx.pop_danger_sit_request():
+            return True
+        try:
+            level = self._danger.danger_level()
+        except Exception:
+            self._ctx.logger.behavior(
+                "[DANGER] seated damage classification failed — no new escape"
+            )
+            return False
+        # MagicMock/lightweight doubles are not a danger classification. Only
+        # the concrete enum values may trigger the detector-state fallback.
+        return isinstance(level, DangerLevel) and level is not DangerLevel.SAFE
 
     def _hunting_danger_is_critical(self) -> bool | None:
         """Return whether a pending hunting damage event warrants teleport.
@@ -385,6 +397,33 @@ class SitOnLowSpWorker:
                 f"SP>={SIT_RESUME_SP_RATIO:.0%}"
             )
             while not ctx.is_stopped():
+                # A seated danger retry and a fresh hit preserved during the
+                # preceding teleport settle belong to this recovery owner.
+                # Inspect them before _ok_to_act(), which intentionally yields
+                # to critical danger for ordinary hunting sessions.
+                if self._seated and escape_first:
+                    if self._urgent_escape(reason="sit_danger"):
+                        self._seated = False
+                        escape_first = False
+                        teleported_for_session = True
+                        self._wait_post_teleport_settle()
+                        ctx.logger.behavior(
+                            "[SIT] danger escape succeeded while seated — "
+                            "resuming recovery in new area"
+                        )
+                        continue
+                    ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
+                    continue
+
+                if teleported_for_session and not escape_first and self._sit_danger_detected():
+                    # Consume a settle-time request before the independent
+                    # critical worker can preempt this still-owned recovery.
+                    pop_critical = getattr(ctx, "pop_critical_danger", None)
+                    if callable(pop_critical):
+                        pop_critical()
+                    escape_first = True
+                    continue
+
                 if not self._ok_to_act():
                     break
 
@@ -393,25 +432,6 @@ class SitOnLowSpWorker:
                 # must retry teleport directly while still seated, never press
                 # the toggle just to escape.
                 if self._seated:
-                    if escape_first:
-                        if self._urgent_escape(reason="sit_danger"):
-                            # The successful retry moved this same recovery
-                            # session to a new landing. Keep ownership here;
-                            # ending now would make the outer gameplay tick
-                            # start a second low-SP session and press the sit
-                            # toggle again. Reuse this landing and perform the
-                            # normal single re-sit below.
-                            self._seated = False
-                            escape_first = False
-                            teleported_for_session = True
-                            self._wait_post_teleport_settle()
-                            ctx.logger.behavior(
-                                "[SIT] danger escape succeeded while seated — "
-                                "resuming recovery in new area"
-                            )
-                            continue
-                        ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
-                        continue
                     if not self.stand(sit_scan):
                         ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
                     continue
@@ -620,9 +640,11 @@ class SitOnLowSpWorker:
         ctx.logger.behavior("[SIT] waiting for regen")
 
         while not ctx.is_stopped():
-            if not self._ok_to_act():
-                return None
-
+            # The sit worker owns damage observed during its seated recovery,
+            # including the mirrored critical notification. Consume and route
+            # that fresh event before yielding to the independent critical
+            # worker; otherwise _ok_to_act() would leave the character seated
+            # with the request pending and the recovery would never re-escape.
             if self._sit_danger_detected():
                 # A seated session owns any damage request; prevent a mirrored
                 # critical hunting request from escaping a second time.
@@ -639,10 +661,11 @@ class SitOnLowSpWorker:
                 # a second toggle from accidentally seating the character.
                 if not self._urgent_escape(reason="sit_danger"):
                     return "danger_escape_failed"
-                # Teleport ends this seated recovery session. Do not let the
-                # recovery loop send a redundant stand or sit toggle afterward.
                 self._seated = False
                 return "danger_escaped"
+
+            if not self._ok_to_act():
+                return None
 
             ratio = self._sp_ratio()
             if ratio is not None and ratio >= SIT_RESUME_SP_RATIO:

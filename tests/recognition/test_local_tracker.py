@@ -13,6 +13,7 @@ from pybot.recognition.fixtures import default_horn_fixture
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
 from pybot.recognition.detector.tracking.local_tracker import (
     LocalTrackResult,
+    _effective_search_radius,
     _local_follow_scales,
     track_local,
 )
@@ -109,6 +110,41 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertTrue(result.found, result.miss_reason)
         dist = abs(result.x - anchor.center_x) + abs(result.y - anchor.center_y)
         self.assertLess(dist, 50)
+
+    def test_large_sprite_gets_bounded_scale_aware_search_radius(self) -> None:
+        """Large runners get more room without allowing unbounded scans."""
+        detector = self._detector()
+        descriptor = detector.ensure_descriptor("horn")
+        base = detector.local_track_moving_search_radius_px
+        self.assertEqual(
+            _effective_search_radius(detector, descriptor, 0.9),
+            base,
+        )
+
+        large_descriptor = type(
+            "DescriptorStub",
+            (),
+            {"avg_width": 180.0, "avg_height": 245.0},
+        )()
+        expanded = _effective_search_radius(detector, large_descriptor, 1.0)
+        self.assertGreater(expanded, base)
+        self.assertLessEqual(expanded, detector.local_track_max_search_radius_px)
+
+        # The real modified-sprite Anubis descriptor is large enough to use the
+        # adaptive path; this guards the universal change against a test-only
+        # synthetic size.
+        anubis = detector.ensure_descriptor("anubis")
+        anubis_radius = _effective_search_radius(detector, anubis, 1.0)
+        self.assertGreater(anubis_radius, base)
+        self.assertLessEqual(anubis_radius, detector.local_track_max_search_radius_px)
+
+        # Anubis runs through the modified-sprite/sprite.grf descriptor in the
+        # actual runtime path, so verify that descriptor is adaptive too.
+        grf_detector = MobDetector(ROOT, detector.config, use_sprite_grf=True)
+        grf_anubis = grf_detector.ensure_descriptor("anubis")
+        grf_radius = _effective_search_radius(grf_detector, grf_anubis, 1.0)
+        self.assertGreater(grf_radius, base)
+        self.assertLessEqual(grf_radius, grf_detector.local_track_max_search_radius_px)
 
     def test_follow_ignores_velocity_fields(self) -> None:
         """Wrong vel must not pull search away from last-known."""

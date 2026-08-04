@@ -38,6 +38,7 @@ class HuntModeStrategy(ABC):
         self._input = input_backend
         self._discovery_area_epoch: int | None = None
         self._discovery_confirmed_clear = False
+        self._last_discovery_scan_ms = 0
         self._last_no_target_blocked_log_ms = 0
         self._last_no_target_wait_reason: str | None = None
         self._last_discovery_fail_reason = ""
@@ -61,6 +62,14 @@ class HuntModeStrategy(ABC):
             with self._lock:
                 return self._discovery_area_epoch == current_epoch
 
+
+    @property
+    def discovery_scan_age_ms(self) -> int:
+        """Milliseconds since the latest successful discovery scan."""
+        with self._lock:
+            if self._last_discovery_scan_ms <= 0:
+                return -1
+            return max(0, monotonic_ms() - self._last_discovery_scan_ms)
 
     @property
     def discovery_confirmed_clear(self) -> bool:
@@ -94,6 +103,7 @@ class HuntModeStrategy(ABC):
         with self._lock:
             self._discovery_area_epoch = None
             self._discovery_confirmed_clear = False
+            self._last_discovery_scan_ms = 0
             self._last_no_target_blocked_log_ms = 0
             self._last_no_target_wait_reason = None
         self._on_area_reset_unlocked()
@@ -125,6 +135,7 @@ class HuntModeStrategy(ABC):
                     return
                 self._discovery_area_epoch = area_epoch
                 self._discovery_confirmed_clear = living_count == 0
+                self._last_discovery_scan_ms = monotonic_ms()
 
     def note_discovery_scan_failed(self, reason: str) -> None:
         """Record a failed discovery scan."""

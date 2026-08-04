@@ -64,8 +64,31 @@ class AttackLoop:
             policy_tracks = self._ctx.tracks.tracks_for_policy(tick)
             target_id = self._ctx.policy.select_target(policy_tracks, tick)
             if target_id:
+                selected_epoch = next(
+                    (
+                        int(track.area_epoch)
+                        for track in policy_tracks
+                        if track.id == target_id
+                        and type(getattr(track, "area_epoch", None)) is int
+                    ),
+                    None,
+                )
+                # Capture the selected track's area identity before any heal or
+                # other action can yield to a teleport/reset. Track IDs are
+                # intentionally reusable after an area reset, so the ID alone
+                # is not a safe target identity.
                 self._attempt_heal()
-                self._attack_one(target_id, tick)
+                if selected_epoch is None:
+                    # Preserve the compatibility path for lightweight callers
+                    # that do not expose area epochs; real MobTrack snapshots
+                    # always carry one.
+                    self._attack_one(target_id, tick)
+                else:
+                    self._attack_one(
+                        target_id,
+                        tick,
+                        expected_epoch=selected_epoch,
+                    )
                 self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
                 return True
 
@@ -115,6 +138,64 @@ class AttackLoop:
                 f"[HEAL] self-heal error:\\n{traceback.format_exc()}"
             )
 
+    def _perform_target_input(
+        self,
+        target_id: int,
+        expected_epoch: int | None,
+        action,
+    ) -> bool:
+        """Admit target input atomically with the final track identity check."""
+        # Enter the existing session/input ownership boundary first. The
+        # track store then validates identity under its own lock, preserving
+        # the runtime lock order used by teleport/reset paths.
+        lifecycle_admit = getattr(type(self._ctx), "perform_input_if_allowed", None)
+        if callable(lifecycle_admit):
+            return bool(
+                self._ctx.perform_input_if_allowed(
+                    lambda: self._ctx.should_run_combat(),
+                    lambda: self._ctx.tracks.perform_if_current(
+                        target_id,
+                        expected_epoch,
+                        action,
+                    ),
+                )
+            )
+        admit = getattr(type(self._ctx.tracks), "perform_if_current", None)
+        if callable(admit):
+            return bool(
+                self._ctx.tracks.perform_if_current(
+                    target_id,
+                    expected_epoch,
+                    action,
+                )
+            )
+        # Lightweight compatibility stores do not expose the atomic helper;
+        # retain their existing gate path for tests/older integrations.
+        return bool(
+            perform_if_allowed(
+                self._input,
+                lambda: (
+                    self._ctx.should_run_combat()
+                    and self._target_is_current_compat(target_id, expected_epoch)
+                ),
+                action,
+                lifecycle=self._ctx,
+            )
+        )
+
+    def _target_is_current_compat(
+        self,
+        target_id: int,
+        expected_epoch: int | None,
+    ) -> bool:
+        current = self._ctx.tracks.snapshot_for_track(target_id, monotonic_ms())
+        if current is None:
+            return False
+        return (
+            expected_epoch is None
+            or getattr(current, "area_epoch", None) == expected_epoch
+        )
+
     def _character_pos(self) -> tuple[int, int]:
         """Screen position used for the melee-range idle guard."""
         pos = self._ctx.character_screen_pos()
@@ -161,7 +242,13 @@ class AttackLoop:
             "— idle/death counters frozen"
         )
 
-    def _attack_one(self, target_id: int, now_tick: int) -> None:
+    def _attack_one(
+        self,
+        target_id: int,
+        now_tick: int,
+        *,
+        expected_epoch: int | None = None,
+    ) -> None:
         ctx = self._ctx
 
         # Snapshot coords under the store lock.
@@ -170,15 +257,25 @@ class AttackLoop:
             return
 
         click_x, click_y = snap.x, snap.y
+        snap_epoch = expected_epoch
+        if snap_epoch is None:
+            snap_epoch = getattr(snap, "area_epoch", None)
+            if type(snap_epoch) is not int:
+                snap_epoch = None
+        elif getattr(snap, "area_epoch", None) != snap_epoch:
+            ctx.logger.behavior(
+                f"[ATTACK] stale target dropped id={target_id} before preparation"
+            )
+            return
         char_x, char_y = self._character_pos()
 
         # A configured debuff is cast once for this stable track before its
         # first attack. Failed input leaves the flag unset so the next cycle
         # can retry instead of attacking an unprepared target.
         try:
-            prepared = perform_if_allowed(
-                self._input,
-                ctx.should_run_combat,
+            prepared = self._perform_target_input(
+                target_id,
+                snap_epoch,
                 lambda: self._mob_behavior.prepare_target(
                     target_id,
                     click_x,
@@ -187,7 +284,6 @@ class AttackLoop:
                     target_debuffed=getattr(snap, "debuff_applied", False),
                     mark_debuffed=lambda: ctx.tracks.mark_debuff_applied(target_id),
                 ),
-                lifecycle=ctx,
             )
         except Exception:
             ctx.logger.behavior(
@@ -204,13 +300,12 @@ class AttackLoop:
         # another worker's self-cast or storage action.
         try:
             all_mobs = ctx.tracks.positions_snapshot()
-            perform_if_allowed(
-                self._input,
-                ctx.should_run_combat,
+            self._perform_target_input(
+                target_id,
+                snap_epoch,
                 lambda: self._mob_behavior.before_attack(
                     char_x, char_y, self._input, all_mobs=all_mobs,
                 ),
-                lifecycle=ctx,
             )
         except Exception:
             ctx.logger.behavior(
@@ -225,13 +320,12 @@ class AttackLoop:
             # Atomic target move + skill key + click. This prevents a periodic
             # self-buff or heal worker from stealing the cursor between move
             # and attack input.
-            attack_started = perform_if_allowed(
-                self._input,
-                ctx.should_run_combat,
+            attack_started = self._perform_target_input(
+                target_id,
+                snap_epoch,
                 lambda: self._input.skill_click_at(
                     ctx.config.skill_scan_code, click_x, click_y
                 ),
-                lifecycle=ctx,
             )
         except Exception:
             ctx.logger.behavior(
@@ -267,6 +361,18 @@ class AttackLoop:
 
         # Sit/heal/pause may have claimed the gate during the skill delay.
         if not ctx.should_run_combat():
+            return
+        # Discovery may remove a target while its skill delay is in flight.
+        # Do not apply idle/death bookkeeping, attack counters, or target
+        # rotation to that stale track after it has disappeared.
+        post_snap = ctx.tracks.snapshot_for_track(target_id, now_tick)
+        if post_snap is None or (
+            snap_epoch is not None
+            and getattr(post_snap, "area_epoch", None) != snap_epoch
+        ):
+            ctx.logger.behavior(
+                f"[ATTACK] stale target dropped id={target_id} after skill delay"
+            )
             return
 
         post_sp, post_obs_ms, post_chg_ms = self._vitals.sp_sample()
@@ -402,6 +508,15 @@ class GameplayLoop:
                         ready=lambda: bool(self._ctx.should_run_timers()),
                         execute=lambda code=timer.scan_code: self._timers.execute_timer(code),
                     )
+        if self._storage is not None:
+            self._scheduler.register(
+                "storage",
+                interval_ms=1000,
+                priority=50,
+                ready=lambda: bool(self._storage.can_execute_now()),
+                due_when=self._storage.storage_due,
+                execute=self._storage.process_pending,
+            )
 
     def _prepare_deferred_actions(self, now_ms: int) -> None:
         """Reconcile generation/startup success with periodic deadlines."""
@@ -463,8 +578,6 @@ class GameplayLoop:
                     continue
                 if self._sit is not None and self._sit.process_pending():
                     continue
-                if self._storage is not None and self._storage.process_pending():
-                    continue
 
                 now_ms = monotonic_ms()
                 # Startup casts are a real execution phase. They run before
@@ -488,6 +601,11 @@ class GameplayLoop:
                 ran = self._scheduler.run_pending(now_ms=monotonic_ms())
                 # A due high-priority action that failed or is not yet safe must
                 # remain the next gameplay concern; do not attack around it.
+                # Storage is deferred maintenance: when the screen is not
+                # safe it stays pending while combat continues clearing the
+                # area. Urgent/defensive actions at priorities <=40 still
+                # prevent combat; storage retries on the next safe gameplay
+                # tick without creating a second control flow.
                 if self._scheduler.requires_retry(max_priority=40):
                     continue
                 self._attack.process_pending()

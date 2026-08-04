@@ -151,6 +151,41 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         self.assertEqual(mob_behavior.heal_if_needed.call_count, 2)
         self.assertEqual(ctx.should_run_custom_heal_actions.call_count, 2)
 
+    def test_attack_drops_target_removed_during_skill_delay(self) -> None:
+        """A discovery removal must prevent stale post-delay bookkeeping."""
+        ctx = MagicMock()
+        ctx.config = SimpleNamespace(skill_scan_code=16, skill_delay_ms=1, use_sprite_grf=True)
+        ctx.logger = MagicMock()
+        ctx.should_run_combat.return_value = True
+        ctx.stop_event = MagicMock()
+        ctx.stop_event.wait.side_effect = lambda _timeout: None
+        ctx.character_screen_pos.return_value = (0, 0)
+        snapshot = SimpleNamespace(
+            x=10, y=20, debuff_applied=False, was_accessible=False,
+            discovery_stationary=False, moving=False,
+            idle_attack_count=0, attack_count=0, area_epoch=0,
+        )
+        # Initial snapshot, preparation admission, skill admission, then
+        # removal during the skill delay. This exercises the post-delay guard.
+        ctx.tracks.snapshot_for_track.side_effect = [
+            snapshot, snapshot, snapshot, snapshot, None,
+        ]
+        ctx.tracks.positions_snapshot.return_value = [(10, 20)]
+        ctx.logger = MagicMock()
+        input_backend = MagicMock()
+        input_backend.skill_click_at.return_value = True
+        mob_behavior = MagicMock()
+        mob_behavior.prepare_target.return_value = True
+        vitals = PlayerVitals()
+        loop = AttackLoop(ctx, MagicMock(), input_backend, mob_behavior=mob_behavior, vitals=vitals)
+
+        loop._attack_one(1, 1)
+
+        ctx.tracks.evaluate_idle_attack.assert_not_called()
+        ctx.tracks.apply_attack_event.assert_not_called()
+        ctx.policy.note_attack_target.assert_not_called()
+        self.assertTrue(any("stale target dropped" in str(call) for call in ctx.logger.behavior.call_args_list))
+
     def test_attack_kites_before_sit_blocks_combat_during_skill_delay(self) -> None:
         ctx = MagicMock()
         ctx.config = SimpleNamespace(skill_scan_code=16, skill_delay_ms=50)

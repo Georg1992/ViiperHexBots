@@ -53,6 +53,8 @@ REQUIRED_CONFIG_KEYS = {
     "centerScales",
     "localTrackSearchRadiusPx",
     "localTrackMovingSearchRadiusPx",
+    "localTrackSpriteRadiusMultiplier",
+    "localTrackMaxSearchRadiusPx",
     "discoveryClusterRadiusPx",
     "trackDedupRadiusPx",
     "debugOutputDir",
@@ -266,6 +268,15 @@ class MobDetector:
         self.local_track_moving_search_radius_px = int(
             self.config["localTrackMovingSearchRadiusPx"]
         )
+        # Keep programmatic/older runtime configs compatible with the new
+        # optional tracking tuning knobs; the checked-in detector config still
+        # validates and documents the defaults.
+        self.local_track_sprite_radius_multiplier = float(
+            self.config.get("localTrackSpriteRadiusMultiplier", 1.5)
+        )
+        self.local_track_max_search_radius_px = int(
+            self.config.get("localTrackMaxSearchRadiusPx", 360)
+        )
 
     def apply_runtime_config(self, config: dict) -> None:
         self.config = dict(config)
@@ -276,6 +287,15 @@ class MobDetector:
         self.local_track_search_radius_px = int(self.config["localTrackSearchRadiusPx"])
         self.local_track_moving_search_radius_px = int(
             self.config["localTrackMovingSearchRadiusPx"]
+        )
+        # Keep programmatic/older runtime configs compatible with the new
+        # optional tracking tuning knobs; the checked-in detector config still
+        # validates and documents the defaults.
+        self.local_track_sprite_radius_multiplier = float(
+            self.config.get("localTrackSpriteRadiusMultiplier", 1.5)
+        )
+        self.local_track_max_search_radius_px = int(
+            self.config.get("localTrackMaxSearchRadiusPx", 360)
         )
 
     def descriptor_path(self, mob_name: str) -> Path:

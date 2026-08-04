@@ -61,9 +61,11 @@ SKILL_TIMER_STAGGER_MS = 500
 STARTUP_BUFF_GAP_S = 1.0
 # Let the cursor settle on the character before a startup self-buff cast.
 STARTUP_BUFF_CURSOR_DELAY_S = 0.2
-# Storage / fly-wings worker (AHK WeightModifier gate is active at >= 50).
+# Storage / fly-wings deferred action. Storage is enabled at 50%+, with
+# 85% as the maximum supported threshold.
 STORAGE_WEIGHT_POLL_INTERVAL_S = 0.25
 STORAGE_WEIGHT_MODIFIER_MIN = 50
+STORAGE_WEIGHT_MODIFIER_MAX = 85
 # RO fly wing unit weight — used to decide ItemsToStorage before GetFlyWings.
 FLY_WING_WEIGHT = 5
 # AHK ItemsToStorage OK-dialog Enter (extended scan code).
@@ -124,6 +126,7 @@ __all__ = [
     "STARTUP_BUFF_CURSOR_DELAY_S",
     "STORAGE_WEIGHT_POLL_INTERVAL_S",
     "STORAGE_WEIGHT_MODIFIER_MIN",
+    "STORAGE_WEIGHT_MODIFIER_MAX",
     "FLY_WING_WEIGHT",
     "STORAGE_ENTER_SCAN_CODE",
     "ALT_MOUSE_CLICK_DELAY_S",

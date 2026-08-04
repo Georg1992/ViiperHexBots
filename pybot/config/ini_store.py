@@ -16,6 +16,7 @@ from pybot.config.schema import (
     SkillTimerSetting,
 )
 from pybot.paths import CONFIG_PATH
+from pybot.runtime.constants import STORAGE_WEIGHT_MODIFIER_MAX
 
 
 def _load_open_storage_chain(parser: configparser.ConfigParser) -> list[KeyChainStep]:
@@ -184,7 +185,10 @@ def load_settings(path: Path | None = None) -> AppSettings:
         mob_custom_settings=_load_mob_custom_settings(parser),
         search_range=parser.getint("Settings", "SearchRange", fallback=16),
         hunt_mode=parser.get("Settings", "HuntMode", fallback="teleport"),
-        weight_modifier=parser.getint("Settings", "WeightModifier", fallback=80),
+        weight_modifier=min(
+            STORAGE_WEIGHT_MODIFIER_MAX,
+            parser.getint("Settings", "WeightModifier", fallback=85),
+        ),
         take_fly_wings=parser.getint("Settings", "TakeFlyWings", fallback=0) == 1,
         fly_wings_amount=parser.getint("Settings", "FlyWingsAmount", fallback=100),
         detect_captcha=parser.getint("Settings", "DetectCaptcha", fallback=0) == 1,
@@ -242,7 +246,9 @@ def save_settings(settings: AppSettings) -> None:
     _ensure_section(parser, "Settings")
     parser["Settings"]["SearchRange"] = str(settings.search_range)
     parser["Settings"]["HuntMode"] = settings.hunt_mode
-    parser["Settings"]["WeightModifier"] = str(settings.weight_modifier)
+    parser["Settings"]["WeightModifier"] = str(
+        min(STORAGE_WEIGHT_MODIFIER_MAX, int(settings.weight_modifier))
+    )
     parser["Settings"]["TakeFlyWings"] = "1" if settings.take_fly_wings else "0"
     parser["Settings"]["FlyWingsAmount"] = str(settings.fly_wings_amount)
     parser["Settings"]["DetectCaptcha"] = "1" if settings.detect_captcha else "0"

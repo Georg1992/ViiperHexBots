@@ -33,8 +33,8 @@ from pybot.runtime.constants import (
     STORAGE_INV_COLS,
     STORAGE_INV_ROWS,
     STORAGE_UI_SETTLE_S,
+    STORAGE_WEIGHT_MODIFIER_MAX,
     STORAGE_WEIGHT_MODIFIER_MIN,
-    STORAGE_WEIGHT_POLL_INTERVAL_S,
     STORAGE_WING_AIM_SETTLE_S,
 )
 from pybot.runtime.input.input_backend import InputBackend
@@ -49,7 +49,7 @@ __all__ = ["ItemsToStorageWorker", "is_inventory_open", "_slot_contains_template
 
 
 class ItemsToStorageWorker:
-    """When weight ≥ WeightModifier%, deposit / restock in a quiet area."""
+    """Produce a deferred storage request and execute one safe session."""
 
     def __init__(
         self,
@@ -58,11 +58,13 @@ class ItemsToStorageWorker:
         teleport: TeleportController,
         *,
         vitals: PlayerVitals | None = None,
+        hunt_mode=None,
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
         self._teleport = teleport
         self._vitals = PlayerVitals() if vitals is None else vitals
+        self._hunt_mode = hunt_mode
         self._ui = InventoryAutomation(ctx, input_backend)
 
     def _wait(self, seconds: float) -> None:
@@ -75,7 +77,11 @@ class ItemsToStorageWorker:
         an escape claimed during the settle is caught too.
         """
         ctx = self._ctx
-        if ctx.critical_danger_requested.is_set() or ctx.danger_escape_active.is_set():
+        critical_escape = getattr(ctx, "critical_danger_escape_active", None)
+        critical_escape_active = bool(
+            critical_escape is not None and critical_escape.is_set()
+        )
+        if critical_escape_active:
             raise InventoryUiError("critical danger preempted storage session")
         wait = getattr(self._input, "wait_interruptible", None)
         # Real input backends expose the interruptible wait. Lightweight
@@ -94,56 +100,107 @@ class ItemsToStorageWorker:
         stopped = self._ctx.is_stopped()
         if completed is False or stopped is True:
             raise InventoryUiError("storage input wait cancelled")
-        if ctx.critical_danger_requested.is_set() or ctx.danger_escape_active.is_set():
+        critical_escape = getattr(ctx, "critical_danger_escape_active", None)
+        critical_escape_active = bool(
+            critical_escape is not None and critical_escape.is_set()
+        )
+        if critical_escape_active:
             raise InventoryUiError("critical danger preempted storage session")
 
-    def process_pending(self) -> bool:
-        """Run one storage decision/session; the gameplay loop owns polling."""
+    def storage_due(self) -> bool:
+        """Return whether weight or wing supply requires storage.
+
+        This is observation only. It never claims the character or starts a
+        teleport/UI session; GameplayLoop latches the result as a deferred
+        action and retries it at a later safe point.
+        """
         ctx = self._ctx
         cfg = ctx.config
-        if (not cfg.open_storage_steps or ctx.is_stopped()
-                or ctx.critical_danger_requested.is_set()
-                or ctx.danger_escape_active.is_set()
-                or ctx.pause_event.is_set() or ctx.sitting_event.is_set()):
+        if not cfg.open_storage_steps or ctx.is_stopped():
             return False
         heavy = self._weight_over_threshold()
         need_wings = ctx.should_restock_fly_wings()
-        dump = heavy or (need_wings and self._fly_wings_would_hit_threshold())
-        if not dump and not need_wings:
+        return heavy or need_wings
+
+    def storage_request(self) -> tuple[bool, bool] | None:
+        """Snapshot the storage work required by the current vitals."""
+        if not self.storage_due():
+            return None
+        dump = self._weight_over_threshold()
+        restock = self._ctx.should_restock_fly_wings()
+        if restock and self._fly_wings_would_hit_threshold():
+            dump = True
+        return dump, restock
+
+    def _latest_discovery_is_fresh_and_empty(self) -> bool:
+        """Require a recent zero-mob discovery result for storage."""
+        if self._hunt_mode is None:
+            # Narrow compatibility fixtures without a hunt-mode observer use
+            # the track snapshot only; production always supplies the mode.
+            return True
+        age_ms = int(getattr(self._hunt_mode, "discovery_scan_age_ms", -1))
+        if age_ms < 0 or age_ms > max(1000, int(
+            self._ctx.config.discovery_interval_ms * 2
+        )):
             return False
-        if not ctx.begin_storage_ops():
+        return bool(getattr(self._hunt_mode, "discovery_confirmed_clear", False))
+
+    def can_execute_now(self) -> bool:
+        """Return whether storage may claim the character at this tick."""
+        ctx = self._ctx
+        if not self.storage_due():
+            return False
+        if (
+            ctx.critical_danger_requested.is_set()
+            or ctx.danger_sit_requested.is_set()
+            or ctx.danger_escape_active.is_set()
+            or ctx.pause_event.is_set()
+            or ctx.sitting_event.is_set()
+            or ctx.healing_event.is_set()
+        ):
+            return False
+        # Discovery is the first safety gate. It must have explicitly observed
+        # zero visible mobs for this area; tracks alone are not proof that the
+        # current screen is empty.
+        if not self._latest_discovery_is_fresh_and_empty():
+            return False
+        clear = ctx.tracks.get_area_clear_candidate()
+        return clear.clear
+
+    def process_pending(self) -> bool:
+        """Compatibility entry point; GameplayLoop normally owns deferral."""
+        request = self.storage_request()
+        if request is None or not self.can_execute_now():
+            return False
+        dump, restock = request
+        if not (self._ctx.begin_storage_ops()):
             return False
         try:
-            ctx.logger.behavior("[STORAGE] starting deterministic storage session")
-            if not self._teleport.teleport_until_quiet(log_tag="STORAGE"):
-                return False
-            self.storage_session(dump=dump, restock=need_wings)
+            self._ctx.logger.behavior("[STORAGE] starting deterministic storage session")
+            # Storage is already deferred until the gameplay owner observes a
+            # fresh, discovery-confirmed empty area. Do not run another
+            # teleport/quiet loop here: that would create a second area-control
+            # path after storage has claimed the action gate. The storage
+            # session performs the final live visibility checks immediately
+            # before and after opening the UI; a late mob aborts this attempt
+            # and leaves the deferred action pending for a later safe tick.
+            self.storage_session(dump=dump, restock=restock)
             return True
         except InventoryUiError as exc:
-            ctx.logger.behavior(f"[STORAGE] UI miss: {exc}")
+            self._ctx.logger.behavior(f"[STORAGE] UI miss: {exc}")
             return False
         except Exception:
-            ctx.logger.behavior(f"[STORAGE] cycle error:\n{traceback.format_exc()}")
+            self._ctx.logger.behavior(f"[STORAGE] cycle error:\n{traceback.format_exc()}")
             return False
         finally:
-            ctx.end_storage_ops()
-            ctx.discovery_wake.set()
-
-    def run(self) -> None:
-        ctx = self._ctx
-        cfg = ctx.config
-        chain_keys = ",".join(step[0] for step in cfg.open_storage_steps)
-        ctx.logger.behavior(
-            f"[STORAGE] worker started chain=[{chain_keys}] "
-            f"steps={len(cfg.open_storage_steps)} "
-            f"weight>={cfg.weight_modifier}% flyWings={cfg.take_fly_wings}"
-        )
-        while not ctx.is_stopped():
-            self.process_pending()
-            ctx.stop_event.wait(STORAGE_WEIGHT_POLL_INTERVAL_S)
+            self._ctx.end_storage_ops()
+            self._ctx.discovery_wake.set()
 
     def _weight_threshold(self, weight_max: int) -> float:
-        modifier = int(self._ctx.config.weight_modifier)
+        modifier = min(
+            STORAGE_WEIGHT_MODIFIER_MAX,
+            int(self._ctx.config.weight_modifier),
+        )
         return weight_max * modifier / 100.0
 
     def _weight_over_threshold(self) -> bool:
@@ -390,6 +447,11 @@ class ItemsToStorageWorker:
         log = self._ctx.logger.behavior
         try:
             self._wait(0.5)
+            # Discovery safety decides when storage may start. Once this
+            # serialized session owns the character, visible mobs and ordinary
+            # danger do not cancel it; only critical danger may preempt it.
+            # The critical check remains inside _wait before/after each settle
+            # boundary, so the emergency can still close the UI safely.
             self._ui.ensure_inventory_open()
             self._wait(0.5)
 

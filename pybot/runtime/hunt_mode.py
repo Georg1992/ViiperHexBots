@@ -41,6 +41,10 @@ class HuntModeController:
         return self._strategy.discovery_since_reset
 
     @property
+    def discovery_scan_age_ms(self) -> int:
+        return self._strategy.discovery_scan_age_ms
+
+    @property
     def discovery_confirmed_clear(self) -> bool:
         return self._strategy.discovery_confirmed_clear
 

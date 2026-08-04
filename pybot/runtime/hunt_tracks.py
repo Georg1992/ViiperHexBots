@@ -76,6 +76,7 @@ class MobTrackSnapshot:
     discovery_stationary: bool = False
     moving: bool = False
     debuff_applied: bool = False
+    area_epoch: int = 0
 
 
 @dataclass(frozen=True)
@@ -102,9 +103,10 @@ class HuntTracks:
         )
 
     def reset(self) -> None:
+        """Clear all tracks and invalidate any in-flight frame snapshots."""
         with self._lock:
+            self._area_epoch += 1
             self._tracks = []
-            self._next_id = 1
             self._discovery_candidates = []
             self._death_site_store.clear()
 
@@ -131,7 +133,9 @@ class HuntTracks:
     def _area_reset_locked(self) -> None:
         self._area_epoch += 1
         self._tracks = []
-        self._next_id = 1
+        # Track IDs remain unique across area resets. Attack decisions may be
+        # in flight while a teleport clears the old area; reusing an ID could
+        # make that stale decision target a new mob in the same lifecycle.
         self._discovery_candidates = []
         self._death_site_store.clear()
 
@@ -164,10 +168,6 @@ class HuntTracks:
         with self._lock:
             alive = sum(1 for track in self._tracks if is_alive(track))
             pending = len(self._discovery_candidates)
-            if len(self._tracks) == 0:
-                # No tracks at all — reset ID counter to prevent unbounded
-                # growth across many create/remove cycles.
-                self._next_id = 1
             if alive > 0:
                 return AreaClearStatus(
                     clear=False, reason="alive_tracks", alive_count=alive,
@@ -219,13 +219,38 @@ class HuntTracks:
             apply_attack_event(track, tick)
             return True
 
+    def perform_if_current(
+        self,
+        track_id: int,
+        expected_epoch: int | None,
+        action,
+    ) -> bool:
+        """Run one short action only while this exact track is still current.
+
+        The track lock covers the final identity check and the input callback,
+        closing the check-then-act gap where discovery could remove a target
+        between validation and the skill key/click. Callers must keep *action*
+        short and must not perform capture or waits inside it.
+        """
+        with self._lock:
+            track = self._get_track_by_id_locked(track_id)
+            if track is None:
+                return False
+            if (
+                expected_epoch is not None
+                and track.area_epoch != expected_epoch
+            ):
+                return False
+            result = action()
+            return result is not False
+
     def positions_snapshot(self, now_tick: int | None = None) -> list[tuple[int, int]]:
         with self._lock:
             return [(t.x, t.y) for t in self._tracks if is_alive(t)]
 
     def discovery_frame_snapshot(
         self, now_tick: int | None = None
-    ) -> tuple[int, list[tuple[int, int]], list[tuple[int, int, int]]]:
+    ) -> tuple[int, list[tuple[int, int]], list[tuple[int, int, int, float, float]]]:
         """Atomic sample for one discovery capture: epoch + dedup + positions.
 
         Dedup positions are alive tracks only. Death sites are absorbed later
@@ -237,7 +262,10 @@ class HuntTracks:
             return (
                 self._area_epoch,
                 self._dedup_positions_locked(tick, alive=alive),
-                [(t.id, t.x, t.y) for t in alive],
+                [
+                    (t.id, t.x, t.y, float(t.vel_x), float(t.vel_y))
+                    for t in alive
+                ],
             )
 
     def tracking_frame_snapshot(
@@ -289,7 +317,7 @@ class HuntTracks:
         mob_name: str = "",
         now_tick: int | None = None,
         existing_positions: list[tuple[int, int]] | None = None,
-        existing_track_positions: list[tuple[int, int, int]] | None = None,
+        existing_track_positions: list[tuple] | None = None,
         area_epoch: int | None = None,
         hunt_roi: HuntRoi | None = None,
     ) -> ReconcileSummary:
@@ -435,7 +463,7 @@ class HuntTracks:
         self,
         unmatched_ids: set[int],
         hunt_roi: HuntRoi | None,
-        track_positions: list[tuple[int, int, int]],
+        track_positions: list[tuple],
     ) -> set[int]:
         """Factor 1: Remove tracks whose capture-time position is outside the hunt ROI."""
         if hunt_roi is None:
@@ -785,7 +813,7 @@ class HuntTracks:
     @staticmethod
     def _capture_position(
         track_id: int,
-        track_positions: list[tuple[int, int, int]],
+        track_positions: list[tuple],
     ) -> tuple[int | None, int | None]:
         """Get capture-time (x, y) for a track from the snapshot positions."""
         for entry in track_positions:
@@ -805,6 +833,7 @@ class HuntTracks:
             confidence=track.confidence,
             attack_count=track.attack_count,
             debuff_applied=track.debuff_applied,
+            area_epoch=track.area_epoch,
             state=track.state,
             mob_name=track.mob_name,
             updated_tick=track.updated_tick,

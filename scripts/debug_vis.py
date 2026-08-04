@@ -1166,6 +1166,7 @@ def main() -> None:
 
             # ── sprite.grf pass (ModifiedSprite fixtures only) ──
             if is_modified and mod_desc_path.is_file():
+                expected = image.expected_count
                 result_sg = detector_spritegrf.detect(frame, mob_name)
 
                 pane_heat_sg = heatmap_to_color(result_sg.sprite_heatmap)

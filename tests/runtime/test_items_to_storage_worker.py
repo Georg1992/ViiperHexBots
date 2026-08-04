@@ -178,7 +178,7 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.config = MagicMock()
         self.config.hwnd = 1
         self.config.open_storage_steps = (("f8", 66, 0),)
-        self.config.weight_modifier = 80
+        self.config.weight_modifier = 85
         self.config.take_fly_wings = True
         self.config.fly_wings_amount = 100
         self.ctx = HuntRuntimeContext(
@@ -199,14 +199,15 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.input = _RecordingInput()
         self.vitals = PlayerVitals()
 
-    def _worker(self) -> ItemsToStorageWorker:
+    def _worker(self, *, hunt_mode=None, teleport=None) -> ItemsToStorageWorker:
         from pybot.runtime.teleport import TeleportController
-        tport = TeleportController(self.ctx, self.input, MagicMock())
+        tport = teleport or TeleportController(self.ctx, self.input, MagicMock())
         return ItemsToStorageWorker(
             self.ctx,
             self.input,
             tport,
             vitals=self.vitals,
+            hunt_mode=hunt_mode,
         )
 
     # ── unit / no-patch tests ──────────────────────────────────────
@@ -225,6 +226,19 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.ctx.end_sit_ops()
         self.assertTrue(self.ctx.should_run_workers())
         self.assertTrue(self.ctx.should_run_combat())
+
+    def test_storage_ops_refuse_pending_higher_priority_actions(self) -> None:
+        """Storage cannot claim the character after danger/sit is requested."""
+        self.ctx.request_critical_danger()
+        self.assertFalse(self.ctx.try_begin_storage_ops())
+        self.ctx.pop_critical_danger()
+
+        self.assertTrue(self.ctx.request_danger_sit())
+        self.assertFalse(self.ctx.try_begin_storage_ops())
+        self.ctx.pop_danger_sit_request()
+
+        self.assertTrue(self.ctx.try_begin_storage_ops())
+        self.ctx.end_storage_ops()
 
     def test_storage_ops_pause_combat_not_timers(self) -> None:
         self.assertTrue(self.ctx.begin_storage_ops())
@@ -269,17 +283,26 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.ctx.end_critical_escape_ops()
         self.assertFalse(self.ctx.danger_escape_active.is_set())
 
-    def test_storage_wait_aborts_when_critical_escape_pending(self) -> None:
-        """A storage settle wait must abort for a pending/in-flight escape."""
+    def test_storage_wait_aborts_only_for_critical_escape(self) -> None:
+        """Active storage yields to critical danger, not ordinary escapes."""
         worker = self._worker()
         self.ctx.request_critical_danger()
-        with self.assertRaises(InventoryUiError):
-            worker._wait(0.5)
+        # A queued request is not yet a claimed critical escape. It may still
+        # be stale and must not cancel an active storage session.
+        worker._wait(0.0)
         self.ctx.pop_critical_danger()
+
+        # The generic marker is also used by seated recovery escapes and must
+        # not cancel an active storage session by itself.
         self.ctx.danger_escape_active.set()
-        with self.assertRaises(InventoryUiError):
-            worker._wait(0.5)
+        worker._wait(0.0)
         self.ctx.danger_escape_active.clear()
+
+        # A claimed critical escape has its own exclusive marker.
+        self.assertTrue(self.ctx.try_begin_critical_escape_ops(override=True))
+        with self.assertRaises(InventoryUiError):
+            worker._wait(0.0)
+        self.ctx.end_critical_escape_ops()
 
     def test_heal_ops_pause_combat_but_not_timers_then_resume(self) -> None:
         self.ctx.mark_running()
@@ -323,18 +346,77 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.ctx.note_teleport_for_wings()
         self.assertEqual(self.ctx.wingcount, 2)
 
-    def test_weight_threshold_gate(self) -> None:
+    def test_weight_threshold_gate_defaults_to_85_percent_maximum(self) -> None:
         worker = self._worker()
-        self.config.weight_modifier = 80
-        self.vitals.publish_weight(79, 100)
+        self.config.weight_modifier = 85
+        self.vitals.publish_weight(84, 100)
         self.assertFalse(worker._weight_over_threshold())
-        self.vitals.publish_weight(80, 100)
+        self.vitals.publish_weight(85, 100)
         self.assertTrue(worker._weight_over_threshold())
+        # Runtime values above the UI maximum are fail-safe clamped to 85%.
+        self.config.weight_modifier = 95
+        self.assertTrue(worker._weight_over_threshold())
+        self.vitals.publish_weight(84, 100)
+        self.assertFalse(worker._weight_over_threshold())
         self.config.weight_modifier = 49
         self.assertFalse(worker._weight_over_threshold())
 
+    def test_storage_stays_pending_when_discovery_sees_visible_mob(self) -> None:
+        mode = MagicMock()
+        mode.discovery_scan_age_ms = 0
+        mode.discovery_confirmed_clear = True
+        self.ctx.tracks.get_area_clear_candidate.return_value = type(
+            "Clear", (), {"clear": False}
+        )()
+        worker = self._worker(hunt_mode=mode)
+        self.vitals.publish_weight(85, 100)
+        self.assertTrue(worker.storage_due())
+        self.assertFalse(worker.can_execute_now())
+        self.assertFalse(worker.process_pending())
+
+    def test_storage_is_deferred_until_fresh_empty_discovery(self) -> None:
+        mode = MagicMock()
+        mode.discovery_scan_age_ms = 0
+        mode.discovery_confirmed_clear = True
+        self.ctx.tracks.get_area_clear_candidate.return_value = type(
+            "Clear", (), {"clear": True}
+        )()
+        teleport = MagicMock()
+        worker = self._worker(hunt_mode=mode, teleport=teleport)
+        self.vitals.publish_weight(85, 100)
+        self.assertTrue(worker.storage_due())
+        self.assertTrue(worker.can_execute_now())
+        with patch.object(worker, "storage_session") as storage_session:
+            storage_session.return_value = None
+            self.assertTrue(worker.process_pending())
+        teleport.teleport_until_quiet.assert_not_called()
+        teleport.no_visible_mobs_now.assert_not_called()
+        storage_session.assert_called_once_with(dump=True, restock=True)
+        self.assertFalse(self.ctx.storage_event.is_set())
+
+    def test_active_storage_ignores_late_visible_mob_without_teleporting(self) -> None:
+        """A mob appearing after admission does not cancel active storage."""
+        mode = MagicMock()
+        mode.discovery_scan_age_ms = 0
+        mode.discovery_confirmed_clear = True
+        self.ctx.tracks.get_area_clear_candidate.return_value = type(
+            "Clear", (), {"clear": True}
+        )()
+        teleport = MagicMock()
+        teleport.no_visible_mobs_now.return_value = False
+        worker = self._worker(hunt_mode=mode, teleport=teleport)
+        self.vitals.publish_weight(85, 100)
+
+        with patch.object(worker, "storage_session") as storage_session:
+            self.assertTrue(worker.process_pending())
+
+        teleport.teleport_until_quiet.assert_not_called()
+        teleport.no_visible_mobs_now.assert_not_called()
+        storage_session.assert_called_once_with(dump=True, restock=True)
+        self.assertFalse(self.ctx.storage_event.is_set())
+
     def test_fly_wings_would_hit_threshold_triggers_dump(self) -> None:
-        self.config.weight_modifier = 80
+        self.config.weight_modifier = 85
         self.config.fly_wings_amount = 150
         worker = self._worker()
         self.vitals.publish_weight(70, 100)

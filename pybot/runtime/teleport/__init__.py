@@ -7,7 +7,7 @@ Responsibilities
 * **Execution** — press teleport key, wait for settle, track wings/overlay.
 * **Danger teleport** — the sit worker's urgent escape primitive.
 * **Area clear** — scan-loop that teleports until discovery sees zero mobs.
-* **Quiet area** — clear + idle + re-scan (for sit/storage workers).
+* **Quiet area** — clear + idle + re-scan for recovery/sit placement.
 * **Mode teleport** — discovery-gated teleport with suspend/release (for TeleportStrategy).
 
 Usage
@@ -118,47 +118,64 @@ class TeleportController:
                     reset(teleport_started)
         return settled
 
-    def _critical_request_is_set(self) -> bool | None:
-        """Return the real critical notification state when available."""
-        event = getattr(self._ctx, "critical_danger_requested", None)
-        is_set = getattr(event, "is_set", None)
-        if not callable(is_set):
-            return None
-        try:
-            value = is_set()
-        except Exception:
-            return None
-        return value if type(value) is bool else None
-
     def _wait_for_settle(self, timeout_s: float) -> bool:
-        """Wait for landing without hiding an urgent critical notification."""
-        critical_is_real = self._critical_request_is_set()
-        if critical_is_real is None:
-            # Preserve the narrow compatibility context contract used by tests
-            # and custom integrations: one wait for the complete settle.
-            return self._ctx.wait_unless_stopped(timeout_s)
+        """Wait for a teleport already in flight to finish landing.
+
+        A critical request can arrive after the teleport key was accepted. It
+        must not turn that in-flight teleport into a reported failure: retrying
+        the key before the client has landed can send duplicate teleports and
+        skip the post-teleport damage baseline reset. The detector preserves
+        damage observed during this wait, and the owning gameplay sequence
+        handles that fresh request immediately after the landing boundary.
+
+        Once input was accepted, a user pause also must not make this teleport
+        look failed. If the normal wait is interrupted by pause, finish the
+        remaining settle window while honoring stop; a later gameplay tick will
+        observe the pause and defer its next action.
+        """
         deadline = time.monotonic() + max(0.0, timeout_s)
-        while not self._ctx.is_stopped():
-            if self._critical_request_is_set() is True:
-                return False
+        while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return True
-            if not self._ctx.wait_unless_stopped(min(SIT_SP_POLL_INTERVAL_S, remaining)):
-                return False
-        return False
+            stop_is_set = getattr(self._ctx.stop_event, "is_set", None)
+            if callable(stop_is_set):
+                try:
+                    stop_value = stop_is_set()
+                except Exception:
+                    stop_value = False
+                if type(stop_value) is bool and stop_value:
+                    return False
+            pause_is_set = getattr(self._ctx.pause_event, "is_set", None)
+            paused = False
+            if callable(pause_is_set):
+                try:
+                    pause_value = pause_is_set()
+                    paused = type(pause_value) is bool and pause_value
+                except Exception:
+                    paused = False
+            if paused:
+                self._ctx.stop_event.wait(
+                    min(SIT_SP_POLL_INTERVAL_S, remaining)
+                )
+                continue
+            waited = self._ctx.wait_unless_stopped(remaining)
+            if waited:
+                return True
+            # A false result can be caused by a pause racing with the check;
+            # finish the already-issued teleport's settle after that pause.
+            if callable(pause_is_set):
+                try:
+                    pause_value = pause_is_set()
+                except Exception:
+                    pause_value = False
+                if type(pause_value) is bool and pause_value:
+                    continue
+            # A false result without pause means the wait was stopped or the
+            # compatibility context explicitly rejected the settle. Preserve
+            # that failure result rather than retrying an already-issued key.
+            return False
 
-    # ── Safe-place teleport ──────────────────────────────────────
-
-    def teleport_to_safe_place(self, *, log_tag: str = "SAFE") -> bool:
-        """Move to a quiet area before a storage/recovery UI session.
-
-        This is the shared escape primitive for storage: it repeatedly
-        teleports and rechecks the area until no living mobs remain through
-        the idle window. It owns discovery suspension and area tracking resets
-        through the existing teleport helpers.
-        """
-        return self.teleport_until_quiet(log_tag=log_tag)
 
     def _escape_in_flight(self) -> bool:
         """True while any urgent danger escape owns the teleport key.
@@ -200,6 +217,18 @@ class TeleportController:
             return False
         self._reset_tracking(f"{log_tag.lower()}_teleport", log_tag=log_tag)
         return True
+
+    # ── Recovery-place compatibility helper ─────────────────────
+
+    def teleport_to_safe_place(self, *, log_tag: str = "SAFE") -> bool:
+        """Compatibility wrapper for recovery/sit placement.
+
+        Deferred storage no longer calls this method: storage is admitted only
+        after discovery confirms a clear area and performs its own final live
+        visibility checks. Existing recovery integrations may still use this
+        wrapper when they explicitly need a quiet-area placement.
+        """
+        return self.teleport_until_quiet(log_tag=log_tag)
 
     # ── Danger teleport ──────────────────────────────────────────
 
@@ -279,6 +308,11 @@ class TeleportController:
         while not self._ctx.is_stopped():
             if self._escape_in_flight():
                 return False
+            if (
+                self._danger_request_is_set() is True
+                or self._critical_request_is_set() is True
+            ):
+                return False
             living = self._scan_living_count()
             if living is None:
                 self._ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
@@ -293,12 +327,33 @@ class TeleportController:
             self._ctx.logger.behavior(
                 f"[{log_tag}] discovery living={living} — teleport before UI"
             )
+            # Danger has priority even if it arrives after the scan but before
+            # the storage clear teleport. Never issue a competing teleport
+            # once the urgent request is visible.
+            if (
+                self._escape_in_flight()
+                or self._danger_request_is_set() is True
+                or self._critical_request_is_set() is True
+            ):
+                return False
             if not self.teleport_once():
                 return False
             self._reset_tracking(
                 f"{log_tag.lower()}_teleport", log_tag=log_tag
             )
         return False
+
+    def _critical_request_is_set(self) -> bool | None:
+        """Return critical-danger state when the context exposes a real event."""
+        event = getattr(self._ctx, "critical_danger_requested", None)
+        is_set = getattr(event, "is_set", None)
+        if not callable(is_set):
+            return None
+        try:
+            value = is_set()
+        except Exception:
+            return None
+        return value if type(value) is bool else None
 
     def _danger_request_is_set(self) -> bool | None:
         """Return danger state when the context exposes a real boolean event."""
@@ -323,7 +378,10 @@ class TeleportController:
         while not self._ctx.is_stopped():
             if self._escape_in_flight():
                 return False
-            if self._danger_request_is_set() is True:
+            if (
+                self._danger_request_is_set() is True
+                or self._critical_request_is_set() is True
+            ):
                 return False
             if not self.teleport_until_clear(log_tag=log_tag):
                 return False
@@ -336,7 +394,10 @@ class TeleportController:
             while True:
                 if self._escape_in_flight():
                     return False
-                if self._danger_request_is_set() is True:
+                if (
+                    self._danger_request_is_set() is True
+                    or self._critical_request_is_set() is True
+                ):
                     return False
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -357,7 +418,10 @@ class TeleportController:
 
             if self._escape_in_flight():
                 return False
-            if self._danger_request_is_set() is True:
+            if (
+                self._danger_request_is_set() is True
+                or self._critical_request_is_set() is True
+            ):
                 return False
             living = self._scan_living_count()
             if living is None:
@@ -425,6 +489,16 @@ class TeleportController:
             ctx.discovery_wake.set()
 
     # ── Internal helpers ─────────────────────────────────────────
+
+    def no_visible_mobs_now(self) -> bool:
+        """Return true only when an immediate discovery scan sees zero mobs.
+
+        This is intentionally a fresh detector read rather than the cached
+        strategy flag. Storage uses it immediately before opening inventory so
+        a mob appearing after the quiet-area wait cannot be treated as safe.
+        """
+        living = self._scan_living_count()
+        return living == 0
 
     def _scan_living_count(self) -> int | None:
         """Run one discovery scan; return filtered living count or ``None``."""

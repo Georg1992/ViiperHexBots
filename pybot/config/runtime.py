@@ -13,6 +13,7 @@ from pybot.paths import CONFIG_PATH, SESSIONS_DIR
 from pybot.runtime.constants import (
     CELL_SIZE_PX,
     HUNT_DISCOVERY_INTERVAL_MS,
+    STORAGE_WEIGHT_MODIFIER_MAX,
 )
 from pybot.runtime.input.scan_codes import key_name_to_scan_code
 
@@ -72,7 +73,7 @@ class HuntRuntimeConfig:
     sp_scan_code: int = 0
     # (button, scan_code, delay_ms) for each assigned Open Storage chain step.
     open_storage_steps: tuple[tuple[str, int, int], ...] = ()
-    weight_modifier: int = 80
+    weight_modifier: int = 85
     take_fly_wings: bool = False
     fly_wings_amount: int = 100
     sit_on_low_sp: bool = False
@@ -213,7 +214,10 @@ def hunt_runtime_config_from_settings(
         sp_button=settings.sp_button,
         sp_scan_code=key_name_to_scan_code(settings.sp_button),
         open_storage_steps=_open_storage_steps_from_settings(settings),
-        weight_modifier=settings.weight_modifier,
+        weight_modifier=min(
+            STORAGE_WEIGHT_MODIFIER_MAX,
+            int(settings.weight_modifier),
+        ),
         take_fly_wings=settings.take_fly_wings,
         fly_wings_amount=settings.fly_wings_amount,
         sit_on_low_sp=settings.sit_on_low_sp,

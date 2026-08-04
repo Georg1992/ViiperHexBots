@@ -61,7 +61,7 @@ class AppSettings:
 
     search_range: int = 16
     hunt_mode: str = "teleport"
-    weight_modifier: int = 80
+    weight_modifier: int = 85
     take_fly_wings: bool = False
     fly_wings_amount: int = 100
     detect_captcha: bool = False

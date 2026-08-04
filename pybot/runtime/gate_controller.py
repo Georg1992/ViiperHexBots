@@ -136,10 +136,14 @@ class GateController:
         # Independent critical-danger signal so hunting can escape even when
         # low-SP sitting is disabled or no sit key is configured.
         self.critical_danger_requested = threading.Event()
-        # True from escape ownership claim through teleport settle. This is
-        # intentionally separate from sitting_event: the critical worker holds
-        # the sit gate for input exclusion but is not doing SP recovery.
+        # True from any danger-escape ownership claim through teleport settle.
+        # This is intentionally separate from sitting_event: the escape holds
+        # the input gate but is not necessarily SP recovery.
         self.danger_escape_active = threading.Event()
+        # Unlike danger_escape_active, this marker is exclusively owned by the
+        # critical hunting escape. Active storage must abort only for this
+        # emergency, not for the seated recovery escape's generic marker.
+        self.critical_danger_escape_active = threading.Event()
         # Sessions (sit/storage/heal) that a critical escape overrode. Used
         # only to bound the pre-teleport wait for the preempted owners to
         # release; teardown always releases the gate the escape itself set.
@@ -349,6 +353,7 @@ class GateController:
                 self.healing_event.is_set(),
             )
             self.danger_escape_active.set()
+            self.critical_danger_escape_active.set()
             self.sitting_event.set()
             self.resume_gate.clear()
             return True
@@ -408,6 +413,7 @@ class GateController:
         """
         with self._sit_storage_lock:
             self.danger_escape_active.clear()
+            self.critical_danger_escape_active.clear()
             self.sitting_event.clear()
             self._restore_resume_gate()
 
@@ -469,9 +475,17 @@ class GateController:
     # ── Storage lifecycle ────────────────────────────────────────
 
     def try_begin_storage_ops(self) -> bool:
-        """Acquire storage session (combat only). False if sit/storage/heal held."""
+        """Acquire storage only when no higher-priority action is pending."""
         with self._sit_storage_lock:
-            if self._session_held():
+            # This check must live inside the same lock as session acquisition.
+            # A flag-only pre-check in ItemsToStorageWorker leaves a race where
+            # storage wins just before danger/sit claims the character.
+            if (
+                self._session_held()
+                or self.critical_danger_requested.is_set()
+                or self.danger_sit_requested.is_set()
+                or self.danger_escape_active.is_set()
+            ):
                 return False
             self.storage_event.set()
             self.resume_gate.clear()

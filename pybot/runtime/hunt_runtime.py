@@ -255,6 +255,7 @@ def _build_conditional_workers(
     tport: TeleportController,
     player_vitals: PlayerVitals,
     danger: DangerDetector | None = None,
+    hunt_mode: HuntModeController | None = None,
 ) -> dict[str, object]:
     """Build gameplay actions; they are advanced by ``GameplayLoop``."""
     actions: dict[str, object] = {}
@@ -292,7 +293,11 @@ def _build_conditional_workers(
         actions["sit"] = sit_worker
     if ctx.config.open_storage_steps:
         storage_worker = ItemsToStorageWorker(
-            ctx, input_backend, tport, vitals=player_vitals,
+            ctx,
+            input_backend,
+            tport,
+            vitals=player_vitals,
+            hunt_mode=hunt_mode,
         )
         actions["storage"] = storage_worker
 
@@ -362,9 +367,11 @@ def create_runtime_deps(
             danger=danger,
         )
         actions = _build_conditional_workers(
-            ctx, input_backend, tport, player_vitals,
+            ctx, input_backend, tport,            player_vitals,
             danger=danger,
+            hunt_mode=hunt_mode,
         )
+
 
         # The controller's hunt-mode callback is resolved after create_hunt_mode().
         tport._hunt_mode = hunt_mode

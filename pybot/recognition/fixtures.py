@@ -104,6 +104,14 @@ MOB_FIXTURE_SUITES: tuple[MobFixtureSuite, ...] = (
         mob_name="noxious",
         pattern=re.compile(r"^(\d+)Noxious(?:_Gray)?\.png$", re.IGNORECASE),
     ),
+    MobFixtureSuite.from_manifest(
+        folder="Anubis",
+        mob_name="anubis",
+        pattern=re.compile(
+            r"^(\d+)Anubis(?:_Gray_ModifiedSprite|_Gray\d*)?\.png$",
+            re.IGNORECASE,
+        ),
+    ),
     # Creamy — no SPR/ACT assets yet; fixtures kept for future use.
     # MobFixtureSuite.from_manifest(
     #     folder="Creamy",

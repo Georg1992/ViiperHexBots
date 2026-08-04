@@ -131,6 +131,43 @@ class HuntTracksRulesTests(unittest.TestCase):
         assert track is not None
         self.assertEqual((track.x, track.y), (905, 615))
 
+    def test_moving_track_reconciles_beyond_static_dedup_radius(self) -> None:
+        """A fast local-follow update must not fragment the discovery track."""
+        track_id = self._create(815, 421)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        # The discovery frame was captured at the old center, while local
+        # tracking has learned a large movement toward the fresh detection.
+        track.vel_x = -100.0
+        track.vel_y = 100.0
+        summary = self.tracks.process_discovery_scan(
+            [det(712, 525)],
+            mob_name="anubis",
+            now_tick=self.now + 100,
+            existing_positions=[(815, 421)],
+            existing_track_positions=[
+                (track_id, 815, 421, track.vel_x, track.vel_y),
+            ],
+        )
+        self.assertEqual(summary.added_count, 0)
+        self.assertEqual(summary.matched_count, 1)
+        self.assertEqual(summary.removed_count, 0)
+        self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 0)
+
+    def test_stationary_track_does_not_match_far_detection(self) -> None:
+        """The moving grace must not turn an unrelated far blob into a match."""
+        track_id = self._create(815, 421)
+        summary = self.tracks.process_discovery_scan(
+            [det(1100, 700)],
+            mob_name="anubis",
+            now_tick=self.now + 100,
+            existing_positions=[(815, 421)],
+            existing_track_positions=[(track_id, 815, 421, 0.0, 0.0)],
+        )
+        self.assertEqual(summary.matched_count, 0)
+        self.assertEqual(summary.added_count, 1)
+        self.assertEqual(summary.removed_count, 0)
+
     def test_outside_roi_unmatched_removes_immediately(self) -> None:
         from pybot.runtime.capture.window_roi import HuntRoi
 
@@ -378,6 +415,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         new_id = self.tracks.create_track(
             "horn", 874, 578, 0.75, 0.9, now_tick=self.now + 200,
         ).id
+        self.assertNotEqual(new_id, track_id)
         self.assertIsNotNone(self.tracks.get_track_by_id(new_id))
         self.assertEqual(self.tracks.get_alive_count(), 1)
 
@@ -388,7 +426,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         new_id = self.tracks.create_track(
             "horn", 900, 600, 0.7, 0.9, now_tick=self.now + 1
         ).id
-        self.assertEqual(new_id, track_id)  # ids reuse after reset
+        self.assertNotEqual(new_id, track_id)  # stale IDs are never recycled
         missed_ids, _opacity_dead = self.tracks.apply_tracking(
             [_miss(track_id)],
             now_tick=self.now + 2,
@@ -398,6 +436,59 @@ class HuntTracksRulesTests(unittest.TestCase):
         surviving = self.tracks.get_track_by_id(new_id)
         assert surviving is not None
         self.assertEqual((surviving.x, surviving.y), (900, 600))
+
+    def test_reset_invalidates_inflight_discovery_snapshot(self) -> None:
+        """A reset cannot commit detections captured before the reset."""
+        old_epoch = self.tracks.area_epoch
+        self.tracks.reset()
+        self.assertEqual(self.tracks.area_epoch, old_epoch + 1)
+        summary = self.tracks.process_discovery_scan(
+            [det(500, 500)],
+            mob_name="horn",
+            now_tick=self.now + 1,
+            area_epoch=old_epoch,
+        )
+        self.assertEqual(summary.added_count, 0)
+        self.assertFalse(self.tracks.has_pending_discovery_candidates())
+
+    def test_competing_moving_tracks_assign_one_to_one(self) -> None:
+        """Overlapping motion grace cannot assign both detections to one ID."""
+        from pybot.runtime.track_reconciler import TrackReconciler
+
+        assignments = TrackReconciler._assign_track_ids(
+            [det(90, 0), det(100, 0)],
+            [(1, 0, 0, 90.0, 0.0), (2, 180, 0, -90.0, 0.0)],
+            {1, 2},
+            radius_sq=90 * 90,
+            moving_radius=260,
+        )
+        self.assertEqual(set(assignments), {0, 1})
+        self.assertEqual(set(assignments.values()), {1, 2})
+
+    def test_atomic_target_admission_rejects_removed_track(self) -> None:
+        """A removed target cannot run its key callback after validation."""
+        track_id = self._create(874, 578)
+        called: list[bool] = []
+        self.assertTrue(
+            self.tracks.perform_if_current(
+                track_id,
+                self.tracks.area_epoch,
+                lambda: called.append(True) or True,
+            )
+        )
+        self.assertEqual(called, [True])
+        self.tracks.process_discovery_scan([], mob_name="horn", now_tick=self.now + 1)
+        self.tracks.process_discovery_scan([], mob_name="horn", now_tick=self.now + 2)
+        self.tracks.process_discovery_scan([], mob_name="horn", now_tick=self.now + 3)
+        called.clear()
+        self.assertFalse(
+            self.tracks.perform_if_current(
+                track_id,
+                self.tracks.area_epoch,
+                lambda: called.append(True) or True,
+            )
+        )
+        self.assertEqual(called, [])
 
     def test_tracking_hit_resets_miss_streak(self) -> None:
         track_id = self._create(874, 578)

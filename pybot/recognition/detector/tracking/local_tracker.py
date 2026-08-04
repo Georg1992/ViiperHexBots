@@ -81,13 +81,17 @@ def track_local(
             reason="invalid_scale",
         )
 
-    # One fixed wide radius — enough for runners without velocity coast.
+    # Use the configured runner radius as a floor, then give unusually large
+    # sprites a proportionally larger bounded search disk. A large mob can
+    # move farther between tracker frames while kiting, and its animation can
+    # also shift the strongest heat peak away from the last center. Keep an
+    # explicit caller radius authoritative for tests/specialized callers.
+    descriptor = detector.ensure_descriptor(mob_name)
     if search_radius_px is not None:
         radius = int(search_radius_px)
     else:
-        radius = int(detector.local_track_moving_search_radius_px)
+        radius = _effective_search_radius(detector, descriptor, scale)
 
-    descriptor = detector.ensure_descriptor(mob_name)
     screen_cx = cx + offset_x
     screen_cy = cy + offset_y
 
@@ -128,6 +132,29 @@ def track_local(
         track_id=track_id, x=screen_cx, y=screen_cy,
         reason="no_peak", confidence=sim,
     )
+
+
+def _effective_search_radius(
+    detector: MobDetector,
+    descriptor: MobDescriptor,
+    scale: float,
+) -> int:
+    """Return a bounded local-follow radius appropriate for sprite size.
+
+    The normal moving radius remains the floor for ordinary mobs. For larger
+    sprites, search at least ``multiplier * rendered_extent`` pixels so the
+    follow window reflects the object's visual footprint rather than treating
+    every mob as the same size. The hard cap prevents a malformed descriptor
+    from turning one local pass into an unbounded frame scan.
+    """
+    base = int(detector.local_track_moving_search_radius_px)
+    multiplier = float(detector.local_track_sprite_radius_multiplier)
+    cap = max(base, int(detector.local_track_max_search_radius_px))
+    rendered_extent = max(
+        float(descriptor.avg_width), float(descriptor.avg_height),
+    ) * max(float(scale), 0.0)
+    scaled_radius = int(round(rendered_extent * multiplier))
+    return min(cap, max(base, scaled_radius))
 
 
 def _miss_result(

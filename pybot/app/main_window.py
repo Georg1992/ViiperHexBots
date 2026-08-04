@@ -679,13 +679,13 @@ class MainWindow:
         weight_cell = ttk.Frame(keys_main)
         weight_cell.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         ttk.Label(weight_cell, text="Items to storage weight:").pack(side=tk.LEFT)
-        # 49 = Off (AHK); 50–90 = active threshold %.
-        initial_weight = max(49, min(90, int(self.config.weight_modifier)))
+        # 49 = Off (AHK); 50–85 = active threshold %.
+        initial_weight = max(49, min(85, int(self.config.weight_modifier)))
         self.storage_weight = tk.IntVar(value=initial_weight)
         self.storage_weight_scale = ttk.Scale(
             weight_cell,
             from_=49,
-            to=90,
+            to=85,
             orient=tk.HORIZONTAL,
             variable=self.storage_weight,
             command=self._update_storage_weight_label,

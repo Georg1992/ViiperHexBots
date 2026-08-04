@@ -154,8 +154,13 @@ class HuntRuntimeContext:
 
     @property
     def danger_escape_active(self) -> threading.Event:
-        """True while an urgent danger escape owns the transition."""
+        """True while any urgent danger escape owns the transition."""
         return self.gates.danger_escape_active
+
+    @property
+    def critical_danger_escape_active(self) -> threading.Event:
+        """True only while the critical hunting escape owns the transition."""
+        return self.gates.critical_danger_escape_active
 
     @property
     def area_transition_lock(self):

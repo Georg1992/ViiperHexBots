@@ -353,6 +353,130 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.input.teleport_key.assert_called_once_with(17)
         self.assertFalse(worker._seated)
 
+    def test_damage_preserved_during_escape_settle_triggers_next_escape(self) -> None:
+        """Settle damage suppressed from the queue must not be ignored."""
+        vitals = PlayerVitals()
+        danger = DangerDetector(self.ctx, vitals=vitals)
+        self.ctx.danger_detector = danger
+        worker = self._worker(vitals)
+        worker._danger = danger
+        self.input.teleport_key.return_value = True
+        self.config.creamy_tp_scan_code = 17
+        self.config.creamy_tp_button = "w"
+        self.config.teleport_scan_code = 16
+        self.config.teleport_button = "q"
+        self.config.teleport_duration_ms = 10
+
+        # Establish the first damage event while the recovery session owns the
+        # seated gate. The worker consumes this request before escaping.
+        vitals.publish_hp(90, 100)
+        danger._poll_hp()
+        self.ctx.sitting_event.set()
+        vitals.publish_hp(80, 100)
+        danger._poll_hp()
+        self.assertTrue(self.ctx.pop_danger_sit_request())
+
+        # Inject the second drop from the real teleport settle wait. The
+        # escape gate is active at this point, so DangerDetector records the
+        # damage but deliberately does not enqueue another sit request.
+        settle_polls = {"count": 0}
+
+        def settle_wait(_timeout: float) -> bool:
+            if settle_polls["count"] == 0:
+                settle_polls["count"] += 1
+                vitals.publish_hp(40, 100)
+                danger._poll_hp()
+            return True
+
+        self.ctx.wait_unless_stopped = settle_wait  # type: ignore[method-assign]
+        self.assertTrue(worker._urgent_escape(reason="sit_danger"))
+        self.assertEqual(settle_polls["count"], 1)
+        self.assertFalse(self.ctx.danger_sit_requested.is_set())
+        self.assertEqual(self.input.toggle_key.call_count, 0)
+
+        # The seated owner must recover the preserved detector state through
+        # the real sit-recovery entrypoint. It consumes the mirrored critical
+        # request, performs one second escape, and never clicks sit.
+        self.assertEqual(worker._sit_until_done(82), "interrupted")
+        self.assertEqual(self.input.teleport_key.call_count, 2)
+        self.assertFalse(self.ctx.critical_danger_requested.is_set())
+        self.assertEqual(danger.danger_level(), DangerLevel.SAFE)
+        self.assertFalse(worker._sit_danger_detected())
+
+    def test_damage_after_resit_triggers_second_danger_escape(self) -> None:
+        """A fresh hit after re-sitting must not be treated as stale."""
+        vitals = PlayerVitals()
+        danger = DangerDetector(self.ctx, vitals=vitals)
+        self.ctx.danger_detector = danger
+        worker = self._worker(vitals)
+        worker._danger = danger
+        self.input.toggle_key.return_value = True
+        self.input.teleport_key.return_value = True
+
+        # Establish the detector baseline before the recovery sequence. Each
+        # accepted sit toggle then represents a real seated interval: damage is
+        # injected during the sit-key settle after the character has entered
+        # the seated pose. The second hit occurs only after the recovery has
+        # escaped and re-sat in the new area.
+        vitals.publish_hp(100, 100)
+        danger._poll_hp()
+        toggle_count = {"count": 0}
+        second_damage_injected = {"value": False}
+
+        def toggle(_scan: int) -> bool:
+            toggle_count["count"] += 1
+            return True
+
+        self.input.toggle_key.side_effect = toggle
+
+        def wait_unless_stopped(timeout: float) -> bool:
+            if timeout == SIT_KEY_SETTLE_S and toggle_count["count"] == 1:
+                vitals.publish_hp(80, 100)
+                danger._poll_hp()
+            elif timeout == SIT_KEY_SETTLE_S and toggle_count["count"] == 2:
+                second_damage_injected["value"] = True
+                vitals.publish_hp(40, 100)
+                danger._poll_hp()
+            return True
+
+        self.ctx.wait_unless_stopped = wait_unless_stopped  # type: ignore[method-assign]
+        danger_teleports = {"count": 0}
+        real_danger_teleport = self.teleport.danger_teleport
+
+        def danger_escape(*, reason: str, prefer_safe_key: bool = False) -> bool:
+            danger_teleports["count"] += 1
+            escaped = real_danger_teleport(
+                reason=reason,
+                prefer_safe_key=prefer_safe_key,
+            )
+            if danger_teleports["count"] == 2:
+                # Stop after the second escape has completed. This keeps the
+                # assertion focused on the reported sequence and avoids a
+                # third sit attempt during teardown.
+                self.ctx.stop_event.set()
+            return escaped
+
+        self.teleport.danger_teleport = MagicMock(  # type: ignore[method-assign]
+            side_effect=danger_escape
+        )
+
+        worker._recover_sp(0.02)
+
+        # One placement teleport, then one danger teleport for each seated hit.
+        self.assertEqual(self.teleport.danger_teleport.call_count, 2)
+        self.assertEqual(self.input.teleport_key.call_count, 3)
+        self.assertEqual(toggle_count["count"], 2)
+        self.assertEqual(self.input.toggle_key.call_count, 2)
+        self.assertTrue(second_damage_injected["value"])
+        self.assertEqual(
+            [call.kwargs["prefer_safe_key"] for call in self.teleport.danger_teleport.call_args_list],
+            [True, True],
+        )
+        self.assertFalse(worker._seated)
+        self.assertEqual(danger.danger_level(), DangerLevel.SAFE)
+        self.assertFalse(self.ctx.critical_danger_requested.is_set())
+        self.assertFalse(self.ctx.danger_sit_requested.is_set())
+
     def test_ordinary_hunting_damage_is_consumed_without_teleport(self) -> None:
         worker = self._worker(_ScriptedVitals([]))
         self.ctx.request_danger_sit()
