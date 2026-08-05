@@ -66,6 +66,69 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         self.assertEqual(events, ["debuff", "marked", "before", "attack", "kite", "delay"])
         ctx.tracks.mark_debuff_applied.assert_called_once_with(1)
 
+    def test_low_hp_successful_heal_has_priority_over_combat(self) -> None:
+        """A successful low-HP heal gets the tick before combat."""
+        ctx = MagicMock()
+        ctx.config = SimpleNamespace(skill_scan_code=16, skill_delay_ms=1)
+        ctx.logger = MagicMock()
+        ctx.should_run_combat.return_value = True
+        ctx.should_run_custom_heal_actions.return_value = True
+        ctx.character_screen_pos.return_value = (100, 100)
+        ctx.tracks.tracks_for_policy.return_value = []
+        ctx.policy.select_target.return_value = 1
+
+        vitals = PlayerVitals()
+        vitals.publish_hp(49, 100)
+        mob_behavior = MagicMock()
+        mob_behavior.heal_if_needed.return_value = True
+        loop = AttackLoop(
+            ctx,
+            MagicMock(),
+            MagicMock(),
+            mob_behavior=mob_behavior,
+            vitals=vitals,
+        )
+        loop._attack_one = MagicMock()
+
+        self.assertFalse(loop.process_pending())
+
+        mob_behavior.heal_if_needed.assert_called_once_with(100, 100, loop._input)
+        ctx.policy.select_target.assert_not_called()
+        loop._attack_one.assert_not_called()
+        ctx.logger.behavior.assert_any_call(
+            unittest.mock.ANY
+        )
+
+    def test_low_hp_without_available_heal_falls_through_to_combat(self) -> None:
+        """Low HP without an admissible heal must not freeze combat."""
+        ctx = MagicMock()
+        ctx.config = SimpleNamespace(skill_scan_code=16, skill_delay_ms=1)
+        ctx.logger = MagicMock()
+        ctx.should_run_combat.return_value = True
+        ctx.should_run_custom_heal_actions.return_value = False
+        ctx.character_screen_pos.return_value = (100, 100)
+        ctx.tracks.tracks_for_policy.return_value = []
+        ctx.policy.select_target.return_value = 1
+
+        vitals = PlayerVitals()
+        vitals.publish_hp(40, 100)
+        mob_behavior = MagicMock()
+        mob_behavior.heal_if_needed.return_value = False
+        loop = AttackLoop(
+            ctx,
+            MagicMock(),
+            MagicMock(),
+            mob_behavior=mob_behavior,
+            vitals=vitals,
+        )
+        loop._attack_one = MagicMock()
+
+        self.assertTrue(loop.process_pending())
+
+        mob_behavior.heal_if_needed.assert_not_called()
+        ctx.policy.select_target.assert_called_once()
+        loop._attack_one.assert_called_once()
+
     def test_run_keeps_healing_in_normal_target_and_idle_paths(self) -> None:
         ctx = MagicMock()
         ctx.config = SimpleNamespace(skill_scan_code=16, skill_delay_ms=1)

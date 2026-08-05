@@ -6,10 +6,15 @@ import time
 import unittest
 
 import cv2
+import numpy as np
 
 from pybot.paths import PROJECT_ROOT, RECOGNITION_DIR
 from pybot.recognition.cli import apply_scale_calibration
-from pybot.recognition.fixtures import default_horn_fixture
+from pybot.recognition.fixtures import (
+    MOB_FIXTURE_SUITES,
+    default_horn_fixture,
+    fixture_search_frame,
+)
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
 from pybot.recognition.detector.tracking.local_tracker import (
     LocalTrackResult,
@@ -146,10 +151,11 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertGreater(grf_radius, base)
         self.assertLessEqual(grf_radius, grf_detector.local_track_max_search_radius_px)
 
-    def test_follow_ignores_velocity_fields(self) -> None:
-        """Wrong vel must not pull search away from last-known."""
+    def test_velocity_prediction_is_clamped_and_reacquires(self) -> None:
+        """A bad momentum hint cannot move the search outside its local disk."""
         detector = self._detector()
         anchor = self._living_anchor(detector)
+        radius = detector.local_track_moving_search_radius_px
         track = self._build_track_dict(
             anchor,
             trackId=6,
@@ -161,6 +167,9 @@ class LocalTrackerTests(unittest.TestCase):
         )
         result = track_local(detector, self.roi, "horn", track)
         self.assertTrue(result.found, result.miss_reason)
+        self.assertLessEqual(
+            abs(result.x - anchor.center_x), radius + 50
+        )
 
     def test_finds_mob_at_center_no_cache_state(self) -> None:
         detector = self._detector()
@@ -177,6 +186,66 @@ class LocalTrackerTests(unittest.TestCase):
         )
         self.assertEqual(_local_follow_scales([0.35, 0.45], 0.35), [0.35, 0.45])
         self.assertEqual(_local_follow_scales([], 0.90), [0.90])
+
+    def test_anubis_modified_sprite_tracking_is_fast_and_moving_tolerant(self) -> None:
+        """Large Anubis follows on the same optimized path used in production."""
+        detector = MobDetector(ROOT, self.base_config, use_sprite_grf=True)
+        suite = next(
+            suite for suite in MOB_FIXTURE_SUITES if suite.mob_name == "anubis"
+        )
+        image = next(
+            image for image in suite.images()
+            if "ModifiedSprite" in image.file_name
+        )
+        frame = cv2.imread(str(image.path), cv2.IMREAD_COLOR)
+        self.assertIsNotNone(frame)
+        assert frame is not None
+        frame = fixture_search_frame(frame)
+        discovery = detector.detect(frame, "anubis")
+        self.assertGreater(len(discovery.accepted), 0)
+        anchor = discovery.accepted[0]
+        track = self._build_track_dict(
+            anchor,
+            trackId=77,
+            x=anchor.center_x - 400,
+            y=anchor.center_y - 30,
+            moving=True,
+            velX=400.0,
+            velY=30.0,
+        )
+        started = time.perf_counter()
+        result = track_local(detector, frame, "anubis", track)
+        elapsed = time.perf_counter() - started
+        self.assertTrue(result.found, result.miss_reason)
+        self.assertLess(elapsed, 0.5)
+
+    def test_confirmed_track_uses_fast_temporal_follow(self) -> None:
+        """A second frame follows the cached patch instead of reacquiring."""
+        detector = self._detector()
+        anchor = self._living_anchor(detector)
+        track = self._build_track_dict(anchor, track_id=88)
+
+        first = track_local(detector, self.roi, "horn", track)
+        self.assertTrue(first.found, first.miss_reason)
+
+        # Move the complete playfield by a small amount, preserving the mob's
+        # appearance. The first call seeds the temporal template; the second
+        # must follow it rather than depend on a fresh discovery heatmap.
+        shifted = cv2.warpAffine(
+            self.roi,
+            np.float32([[1, 0, 18], [0, 1, 7]]),
+            (self.roi.shape[1], self.roi.shape[0]),
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0),
+        )
+        moved = dict(track, x=first.x - 18, y=first.y - 7)
+        started = time.perf_counter()
+        second = track_local(detector, shifted, "horn", moved)
+        elapsed = time.perf_counter() - started
+        self.assertTrue(second.found, second.miss_reason)
+        self.assertLess(abs(second.x - first.x - 18), 10)
+        self.assertLess(abs(second.y - first.y - 7), 10)
+        self.assertLess(elapsed, 0.15)
 
     def test_benchmark_one_three_six_tracks(self) -> None:
         detector = self._detector()

@@ -8,9 +8,9 @@ HuntRuntimeContext structurally satisfies all of them, but no worker
 depends on the full god object.
 
 Pause matrix (see ``runtime_context`` module docstring):
-  sit     → discovery, tracking, attack, timers idle
-  storage → discovery, tracking, attack idle; timers keep running
-  heal    → attack idle; discovery/tracking/timers keep running
+  sit     → discovery/tracking keep sampling; attack/timers idle
+  storage → discovery/tracking keep sampling; attack idle; timers keep running
+  heal    → discovery/tracking/timers keep running; attack idle
   sit ↔ storage ↔ heal mutually exclusive
 """
 

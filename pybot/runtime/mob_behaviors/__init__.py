@@ -249,10 +249,13 @@ class ConfiguredMobBehavior(MobBehavior):
             or hp is None
             or hp_max is None
             or hp >= hp_max
-            or not self._danger.is_safe_for_heal()
         ):
             return False
 
+        # Safety admission is owned by AttackLoop/RuntimeContext. Keeping it
+        # out of this behavior is important: the context deliberately permits
+        # a custom heal during the short post-teleport grace window even when
+        # the danger detector still reports recent damage.
         cast = input_backend.skill_click_at(
             self._settings.heal_scan_code, char_x, char_y
         )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +35,13 @@ class DiscoveryScanResult:
     detections: list[RawDetection]
     duration_ms: int
     elapsed_s: float
+    # Stage timing — total duration_ms = lock_wait_ms + detect_ms. Splitting
+    # them turns a mystery multi-second scan into lock contention vs compute.
+    lock_wait_ms: int = 0
+    detect_ms: int = 0
+    # Detector-internal stage timings (seconds), retained so a slow live scan
+    # can be attributed to heatmap, blobs, or one silhouette candidate.
+    timing: dict[str, float] = field(default_factory=dict)
 
 
 
@@ -56,6 +63,7 @@ class StateTrackSnapshot:
     attack_count: int = 0
     created_tick: int = 0
     now_tick: int = 0
+    prediction_valid: bool = True
 
 
 
@@ -67,6 +75,9 @@ class LocalTrackBatchResult:
     duration_ms: int
     found_count: int
     coord_updates: int
+    # Stage timing — total duration_ms = lock_wait_ms + compute_ms.
+    lock_wait_ms: int = 0
+    compute_ms: int = 0
 
 
 class DetectorSession:
@@ -147,12 +158,15 @@ class DetectorSession:
             )
         start = time.perf_counter()
         with self._lock:
+            locked_at = time.perf_counter()
             result = self._detector.detect(
                 frame,
                 self._mob_name,
             )
         elapsed_s = time.perf_counter() - start
         duration_ms = int(elapsed_s * 1000)
+        lock_wait_ms = int((locked_at - start) * 1000)
+        detect_ms = duration_ms - lock_wait_ms
 
         accepted = [
             RawDetection(
@@ -178,6 +192,9 @@ class DetectorSession:
             detections=accepted,
             duration_ms=duration_ms,
             elapsed_s=elapsed_s,
+            lock_wait_ms=lock_wait_ms,
+            detect_ms=detect_ms,
+            timing=dict(result.timing),
         )
 
     def track_locals_frame(
@@ -207,6 +224,7 @@ class DetectorSession:
         start = time.perf_counter()
         results: list[LocalTrackResult] = []
         with self._lock:
+            locked_at = time.perf_counter()
             # Collect all track positions (ROI-relative) so each track's peak search
             # can suppress heat near other tracks — prevents track swapping when mobs
             # are close together.
@@ -232,6 +250,7 @@ class DetectorSession:
                 track["attackCount"] = snapshot.attack_count
                 track["createdTick"] = snapshot.created_tick
                 track["nowTick"] = snapshot.now_tick
+                track["prediction_valid"] = snapshot.prediction_valid
                 # Other tracks' positions for heatmap suppression
                 other_positions = [
                     pos for j, pos in enumerate(all_roi_positions) if j != i
@@ -246,7 +265,10 @@ class DetectorSession:
                         suppress_positions=other_positions if other_positions else None,
                     )
                 )
-        duration_ms = int((time.perf_counter() - start) * 1000)
+        end = time.perf_counter()
+        duration_ms = int((end - start) * 1000)
+        lock_wait_ms = int((locked_at - start) * 1000)
+        compute_ms = duration_ms - lock_wait_ms
         found_count = sum(1 for result in results if result.found)
         coord_updates = sum(
             1
@@ -260,5 +282,7 @@ class DetectorSession:
             duration_ms=duration_ms,
             found_count=found_count,
             coord_updates=coord_updates,
+            lock_wait_ms=lock_wait_ms,
+            compute_ms=compute_ms,
         )
 

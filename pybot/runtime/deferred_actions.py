@@ -180,12 +180,24 @@ class DeferredActionScheduler:
             ran = True
         return ran
 
-    def requires_retry(self, *, max_priority: int) -> bool:
-        """Whether a due/unsafe action at/above the requested priority needs retry."""
+    def requires_retry(
+        self,
+        *,
+        max_priority: int,
+        ignore_keys: set[str] | frozenset[str] = frozenset(),
+    ) -> bool:
+        """Whether a due/unsafe action needs retry before lower-priority work.
+
+        ``ignore_keys`` is for condition-driven maintenance that is useful when
+        admissible but must never freeze unrelated gameplay when temporarily
+        unsafe (for example an HP item outside its post-teleport window).
+        """
         if not getattr(self, "_retry_required", False):
             return False
         return any(
-            action.pending and action.priority <= max_priority
+            action.pending
+            and action.priority <= max_priority
+            and action.key not in ignore_keys
             for action in self._actions.values()
         )
 

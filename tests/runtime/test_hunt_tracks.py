@@ -290,12 +290,13 @@ class HuntTracksRulesTests(unittest.TestCase):
         )
         self.assertIsNone(self.tracks.get_track_by_id(near_id))
 
-    def test_discovery_miss_preserved_when_tracking_hits(self) -> None:
-        """Tracker hit does NOT reset discovery_miss_count.
+    def test_tracking_hit_resets_discovery_miss_streak(self) -> None:
+        """Tracker hit resets discovery_miss_count — confirmed mobs survive.
 
-        Only discovery determines liveness. The tracker is a pure follower —
-        if it finds background noise it should not interfere with discovery's
-        miss-count removal.
+        Discovery silhouette can miss a large kiting sprite (or a mob occluded
+        by the player) for many consecutive scans. Local tracking confirming
+        the mob on a fresh frame is the fresher signal: the miss streak must
+        not reach the removal threshold while tracking still follows it.
         """
         track_id = self._create(874, 578)
         self.tracks.process_discovery_scan([], mob_name="horn", now_tick=self.now + 50)
@@ -308,8 +309,56 @@ class HuntTracksRulesTests(unittest.TestCase):
         )
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
-        # tracker hit does NOT reset discovery_miss_count — stays at 1
-        self.assertEqual(track.discovery_miss_count, 1)
+        # tracker hit resets the discovery-miss streak — stays alive
+        self.assertEqual(track.discovery_miss_count, 0)
+
+    def test_kiting_mob_survives_discovery_misses_while_tracking_confirms(self) -> None:
+        """Anubis scenario: tracking keeps hitting while discovery misses.
+
+        A large kiting sprite that discovery's silhouette repeatedly fails to
+        extract must not be removed while local tracking still follows it on
+        fresh frames. Regression for tracks removed via ``path=miss-2`` one
+        second after ``found=True`` first ticks. The counter can sit at 1
+        (one discovery miss since the last tracking confirmation) but must
+        never climb to the removal threshold across interleaved hits.
+        """
+        from pybot.runtime.constants import DISCOVERY_MISS_REMOVE_COUNT
+
+        track_id = self._create(874, 578)
+        x = 874
+        for tick in (100, 200, 300, 400, 500, 600):
+            # Tracking confirms the mob on a fresh frame (it is kiting).
+            x += 25
+            self.tracks.apply_tracking(
+                [_hit(track_id, x, 578)],
+                now_tick=self.now + tick,
+            )
+            # Discovery misses it the same cycle (silhouette extraction fails).
+            summary = self.tracks.process_discovery_scan(
+                [], mob_name="anubis", now_tick=self.now + tick + 1,
+            )
+            self.assertEqual(summary.removed_count, 0)
+            track = self.tracks.get_track_by_id(track_id)
+            assert track is not None
+            self.assertLess(
+                track.discovery_miss_count, DISCOVERY_MISS_REMOVE_COUNT
+            )
+        self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
+
+    def test_kiting_mob_removed_after_tracking_also_loses_it(self) -> None:
+        """Once tracking loses the mob, discovery misses remove it normally."""
+        track_id = self._create(874, 578)
+        # Tracking misses now — no more fresh-frame confirmation.
+        self.tracks.apply_tracking([_miss(track_id)], now_tick=self.now + 50)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertEqual(track.lost_count, 1)
+        # Three discovery misses with no tracking hit → removed.
+        for offset in (100, 150, 200):
+            self.tracks.process_discovery_scan(
+                [], mob_name="anubis", now_tick=self.now + offset,
+            )
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
     def test_outside_roi_removed_gone_track_inside_roi_marked_absent(self) -> None:
         from pybot.runtime.capture.window_roi import HuntRoi

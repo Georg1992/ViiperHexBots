@@ -331,9 +331,13 @@ class HuntTracks:
         1. Outside hunt ROI → removed immediately (no death site).
         2. Three missed discovery scans → removed. If the track was already
            opacity-fading, records a death site; otherwise bookkeeping only.
-           Misses inside the melee occlusion disk around the character (ROI
-           center) do **not** count while local tracking still has the mob
-           (``lost_count == 0``). Once tracking has also lost it, misses
+           Misses only accumulate while local tracking does NOT confirm the
+           mob on fresh frames: a tracking hit resets ``discovery_miss_count``
+           (see ``apply_track_observation``), so a large kiting sprite that
+           discovery's silhouette repeatedly fails to extract is never removed
+           while tracking still follows it. Misses inside the melee occlusion
+           disk around the character (ROI center) additionally do not count
+           while ``lost_count == 0``. Once tracking has also lost it, misses
            count normally so corpses under the character are removed.
         3. Earlier misses → ``discovery_miss_count`` += 1 (stays alive).
 
@@ -504,6 +508,11 @@ class HuntTracks:
         tracking still has the mob (``lost_count == 0``), that is occlusion
         — do not count the miss. Once tracking has also lost it, count
         normally so corpses under the character are still removed.
+
+        Tracking confirmation additionally holds the counter everywhere: a
+        fresh-frame hit resets ``discovery_miss_count`` (see
+        ``apply_track_observation``), so discovery misses alone can never
+        remove a mob local tracking still follows.
         """
         remove_ids: set[int] = set()
         first_miss_ids: list[int] = []

@@ -157,3 +157,14 @@ def is_window_active(hwnd: int) -> bool:
         return False
     active = user32.GetForegroundWindow()
     return active == hwnd
+
+
+def is_window_minimized(hwnd: int) -> bool:
+    """True when *hwnd* is minimized (iconic) and thus off-screen.
+
+    Screen-grab OCR does not require the window to be the foreground window;
+    it only requires the window to actually be rendered on screen. A minimized
+    window is not on screen at all, so capturing its client rect would read
+    whatever other content sits at those coordinates.
+    """
+    return bool(hwnd) and bool(user32.IsIconic(hwnd))

@@ -170,5 +170,159 @@ class CaptureRegionTests(unittest.TestCase):
         self.assertEqual(fake_sct.grab.call_count, 2)
 
 
+class UiCaptureChannelTests(unittest.TestCase):
+    """The UI capture channel must be fully isolated from the runtime pipeline."""
+
+    def setUp(self) -> None:
+        self.channel = capture_mod._UiCaptureChannel()
+
+    def tearDown(self) -> None:
+        # Stop this test's worker via the None sentinel so daemon threads do
+        # not accumulate across tests. The module singleton is never touched.
+        try:
+            self.channel._queue.put_nowait(None)
+        except Exception:
+            pass
+
+    def test_ui_channel_uses_its_own_session(self) -> None:
+        """A UI capture must not touch the runtime session/queue."""
+        shot = np.zeros((4, 4, 4), dtype=np.uint8)
+        fake_sct = MagicMock()
+        fake_sct.grab.return_value = shot
+        channel = self.channel
+
+        with patch("pybot.recognition.capture.mss.MSS", return_value=fake_sct):
+            with patch(
+                "pybot.recognition.capture.cv2.cvtColor",
+                side_effect=lambda frame, _: frame[:, :, :3],
+            ):
+                frame = channel.capture(10, 20, 4, 4)
+
+        self.assertIsNotNone(frame)
+        # The runtime pipeline's global session stays untouched.
+        self.assertIsNone(capture_mod._sct)
+        fake_sct.grab.assert_called_once()
+
+    def test_ui_channel_hung_grab_times_out(self) -> None:
+        """A wedged UI grab fails the frame without freezing the caller."""
+        release = threading.Event()
+        fake_sct = MagicMock()
+
+        def hung_grab(_monitor):
+            release.wait(timeout=5.0)
+            return np.zeros((4, 4, 4), dtype=np.uint8)
+
+        fake_sct.grab.side_effect = hung_grab
+        channel = self.channel
+        try:
+            with patch("pybot.recognition.capture.mss.MSS", return_value=fake_sct):
+                with patch("pybot.recognition.capture._CAPTURE_GRAB_TIMEOUT_S", 0.2):
+                    start = time.monotonic()
+                    frame = channel.capture(10, 20, 4, 4)
+                    elapsed = time.monotonic() - start
+        finally:
+            release.set()
+
+        self.assertIsNone(frame)
+        self.assertLess(elapsed, 2.0)
+
+    def test_ui_channel_retries_once_after_grab_failure(self) -> None:
+        shot = np.zeros((4, 4, 4), dtype=np.uint8)
+        fake_sct = MagicMock()
+        fake_sct.grab.side_effect = [ScreenShotError("BitBlt", details={}), shot]
+        channel = self.channel
+
+        with patch("pybot.recognition.capture.mss.MSS", return_value=fake_sct):
+            with patch(
+                "pybot.recognition.capture.cv2.cvtColor",
+                side_effect=lambda frame, _: frame[:, :, :3],
+            ):
+                frame = channel.capture(10, 20, 4, 4)
+
+        self.assertIsNotNone(frame)
+        self.assertEqual(fake_sct.grab.call_count, 2)
+
+    def test_ui_channel_rotates_after_hung_grab(self) -> None:
+        """A later OCR read must escape a permanently blocked native grab."""
+        release_old = threading.Event()
+        old_sct = MagicMock()
+        new_sct = MagicMock()
+        shot = np.zeros((4, 4, 4), dtype=np.uint8)
+
+        def hung_grab(_monitor):
+            release_old.wait(timeout=5.0)
+            return shot
+
+        old_sct.grab.side_effect = hung_grab
+        new_sct.grab.return_value = shot
+        channel = self.channel
+        try:
+            with patch(
+                "pybot.recognition.capture.mss.MSS",
+                side_effect=[old_sct, new_sct],
+            ):
+                with patch(
+                    "pybot.recognition.capture._CAPTURE_GRAB_TIMEOUT_S",
+                    0.1,
+                ):
+                    first = channel.capture(10, 20, 4, 4)
+                    self.assertIsNone(first)
+                    second = channel.capture(10, 20, 4, 4)
+        finally:
+            release_old.set()
+
+        self.assertIsNotNone(second)
+        old_sct.grab.assert_called_once()
+        new_sct.grab.assert_called_once()
+
+    def test_ui_channel_is_distinct_from_runtime_worker(self) -> None:
+        """The UI channel and runtime channel must not share a grab queue."""
+        self.assertIsNot(
+            capture_mod._ui_capture_channel._queue,
+            capture_mod._grab_queue,
+        )
+        self.assertIsNot(
+            capture_mod._ui_capture_channel._session_lock,
+            capture_mod._capture_lock,
+        )
+
+    def test_discovery_and_tracking_observers_have_independent_channels(self) -> None:
+        """A wedged observer channel cannot serialize the other observer."""
+        discovery = capture_mod._UiCaptureChannel()
+        tracking = capture_mod._UiCaptureChannel()
+        release = threading.Event()
+        old_sct = MagicMock()
+        new_sct = MagicMock()
+        shot = np.zeros((4, 4, 4), dtype=np.uint8)
+
+        def hung_grab(_monitor):
+            release.wait(timeout=5.0)
+            return shot
+
+        old_sct.grab.side_effect = hung_grab
+        new_sct.grab.return_value = shot
+        try:
+            with patch(
+                "pybot.recognition.capture.mss.MSS",
+                side_effect=[old_sct, new_sct],
+            ):
+                with patch(
+                    "pybot.recognition.capture._CAPTURE_GRAB_TIMEOUT_S",
+                    0.1,
+                ):
+                    self.assertIsNone(discovery.capture(0, 0, 4, 4))
+                    self.assertIsNotNone(tracking.capture(0, 0, 4, 4))
+        finally:
+            release.set()
+            for channel in (discovery, tracking):
+                try:
+                    channel._queue.put_nowait(None)
+                except Exception:
+                    pass
+
+        old_sct.grab.assert_called_once()
+        new_sct.grab.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

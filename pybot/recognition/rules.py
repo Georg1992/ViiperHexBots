@@ -102,8 +102,9 @@ class MobTrack:
     vel_x: float = 0.0
     vel_y: float = 0.0
     # Consecutive discovery scans that failed to see this track (unmatched).
-    # At >= DISCOVERY_MISS_REMOVE_COUNT the track is removed — it failed
-    # discovery gates that many times in a row, meaning it's dead or gone.
+    # At >= DISCOVERY_MISS_REMOVE_COUNT the track is removed. A confirmed
+    # tracking hit resets the counter, so removal effectively requires that
+    # BOTH discovery misses the mob AND local tracking failed to confirm it.
     discovery_miss_count: int = 0
     # True after the configured per-mob debuff was successfully cast once.
     debuff_applied: bool = False
@@ -294,10 +295,14 @@ def apply_track_observation(
         track.updated_tick = now_tick
         track.last_found_tick = now_tick
         track.lost_count = 0
-        # NOTE: discovery_miss_count is NOT reset here — only discovery
-        # (apply_discovery_match) determines liveness. The tracker is a pure
-        # follower; if it reports found=True on background noise it should
-        # NOT block discovery's miss-count removal.
+        # A confirmed fresh-frame hit proves the mob is still here, so the
+        # discovery-miss streak must not grow past the removal threshold.
+        # Discovery's silhouette extraction can miss a large kiting sprite or
+        # a mob occluded by the player for many consecutive scans; local
+        # tracking is the fresher, more reliable observer while it keeps
+        # finding the mob. Once tracking also loses it (found=False), misses
+        # count normally so gone/dead mobs are still removed.
+        track.discovery_miss_count = 0
         if confidence > 0:
             track.confidence = confidence
         return

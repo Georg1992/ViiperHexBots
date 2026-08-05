@@ -246,6 +246,20 @@ def clear_detector_config_cache() -> None:
     _load_detector_config_cached.cache_clear()
 
 
+def configure_opencv_runtime() -> None:
+    """Bound native OpenCV parallelism for the live observer runtime.
+
+    Discovery and local tracking intentionally use separate detector sessions,
+    so their Python workers can enter OpenCV at the same time. OpenCV's default
+    native worker pool multiplies that concurrency and can turn a normal frame
+    into a long CPU oversubscription spike. Configure this once at runtime
+    startup, rather than as a side effect of constructing an individual
+    detector (which would make unrelated detector users and tests order
+    dependent).
+    """
+    cv2.setNumThreads(1)
+
+
 class MobDetector:
     def __init__(
         self,
@@ -257,34 +271,32 @@ class MobDetector:
         self.project_root = project_root
         self.config = load_detector_config() if config is None else config
         self.use_sprite_grf = use_sprite_grf
+        # Native OpenCV parallelism is configured once by the live runtime
+        # startup path (``configure_opencv_runtime``). Detector construction
+        # itself must remain side-effect free because sessions are also used by
+        # recognition tools and tests outside the hunt runtime.
         self.heatmap_detector = HeatmapDetector(self.config)
         self._descriptor_cache: dict[str, MobDescriptor] = {}
         self._silhouette_ref_cache: dict[
             tuple[int, ...], list[tuple[np.ndarray, np.ndarray]]
         ] = {}
-        self.discovery_heatmap_downscale = int(self.config["discoveryHeatmapDownscale"])
-        self.discovery_heatmap_downscale_min_side = int(self.config["discoveryHeatmapDownscaleMinSide"])
-        self.local_track_search_radius_px = int(self.config["localTrackSearchRadiusPx"])
-        self.local_track_moving_search_radius_px = int(
-            self.config["localTrackMovingSearchRadiusPx"]
-        )
-        # Keep programmatic/older runtime configs compatible with the new
-        # optional tracking tuning knobs; the checked-in detector config still
-        # validates and documents the defaults.
-        self.local_track_sprite_radius_multiplier = float(
-            self.config.get("localTrackSpriteRadiusMultiplier", 1.5)
-        )
-        self.local_track_max_search_radius_px = int(
-            self.config.get("localTrackMaxSearchRadiusPx", 360)
-        )
+        self._apply_config_values()
 
     def apply_runtime_config(self, config: dict) -> None:
         self.config = dict(config)
         self.heatmap_detector = HeatmapDetector(self.config)
         self._silhouette_ref_cache.clear()
+        self._apply_config_values()
+
+    def _apply_config_values(self) -> None:
+        """Refresh scalar detector settings from the active config."""
         self.discovery_heatmap_downscale = int(self.config["discoveryHeatmapDownscale"])
-        self.discovery_heatmap_downscale_min_side = int(self.config["discoveryHeatmapDownscaleMinSide"])
-        self.local_track_search_radius_px = int(self.config["localTrackSearchRadiusPx"])
+        self.discovery_heatmap_downscale_min_side = int(
+            self.config["discoveryHeatmapDownscaleMinSide"]
+        )
+        self.local_track_search_radius_px = int(
+            self.config["localTrackSearchRadiusPx"]
+        )
         self.local_track_moving_search_radius_px = int(
             self.config["localTrackMovingSearchRadiusPx"]
         )
@@ -394,11 +406,40 @@ class MobDetector:
         peak_rel = float(self.config["peakRelativeThreshold"])
         small_rel_heat = _SMALL_HEAT_RELATIVE_PEAK_MULT * peak_rel
 
+        # The silhouette gate needs the unweighted palette mask, not the
+        # weighted discovery heatmap. Build that mask once per frame and slice
+        # it for every candidate. Recomputing the same palette-distance matrix
+        # inside every gate made a frame with several plausible blobs spend
+        # seconds in the gate, even though only one mob was ultimately accepted.
+        # This is especially visible when the sitting character changes the
+        # post-teleport frame and creates several Anubis-colored blobs.
+        # A full-frame palette map pays off only when several candidates will
+        # reuse it. Keep the one-candidate/common path local; this avoids adding
+        # a large frame-wide allocation to normal scans while bounding the
+        # repeated per-candidate work on a noisy post-transition frame.
+        reuse_palette_heatmap = len(blobs) >= 2
+        palette_heatmap_started = time.perf_counter()
+        palette_heatmap_full = (
+            sprite_palette_heatmap(
+                frame_bgr,
+                descriptor.match_palette_bgr,
+                float(descriptor.max_sprite_palette_distance),
+            )
+            if reuse_palette_heatmap
+            else None
+        )
+        palette_heatmap_elapsed = time.perf_counter() - palette_heatmap_started
+
         # --- gates → silhouette (known tracks skip pre-gates) ----------
         candidates: list[DetectionCandidate] = []
         silhouette_checks: list[SilhouetteCheck] = []
+        # Keep candidate-level timing so a pathological live frame can be
+        # diagnosed as blob explosion versus one malformed silhouette crop.
+        gate_elapsed_s = 0.0
+        max_gate_elapsed_s = 0.0
+        max_gate_bbox: tuple[int, int, int, int] = (0, 0, 0, 0)
 
-        for blob_index, (cx, cy, heat_score, comp_bbox) in enumerate(blobs):
+        for cx, cy, heat_score, comp_bbox in blobs:
             bx, by, bw, bh = comp_bbox
             bbox = (bx, by, bw, bh)
             # All blobs must clear geometry + color structure pre-gates.
@@ -439,6 +480,7 @@ class MobDetector:
                 continue
 
 
+            gate_started = time.perf_counter()
             (
                 passed,
                 similarity,
@@ -454,7 +496,13 @@ class MobDetector:
                 descriptor,
                 bbox,
                 comp_bbox=comp_bbox,
+                palette_heatmap_full=palette_heatmap_full,
             )
+            gate_elapsed = time.perf_counter() - gate_started
+            gate_elapsed_s += gate_elapsed
+            if gate_elapsed > max_gate_elapsed_s:
+                max_gate_elapsed_s = gate_elapsed
+                max_gate_bbox = comp_bbox
             # All passed blobs must confirm body mass on the final extract crop.
             if passed:
                 if not self._passes_extract_body_gate(
@@ -525,8 +573,20 @@ class MobDetector:
             "descriptor": heatmap_start - start,
             "spriteHeatmap": heatmap_end - heatmap_start,
             "blobCenters": blobs_end - heatmap_end,
-            "silhouetteGate": gate_end - blobs_end,
+            "silhouettePaletteHeatmap": palette_heatmap_elapsed,
+            # Candidate gate time excludes the optional shared palette-map
+            # build above; ``silhouetteGate`` is therefore directly comparable
+            # with ``gateTotal`` and no longer hides the precompute cost.
+            "silhouetteGate": gate_end - (
+                palette_heatmap_started + palette_heatmap_elapsed
+            ),
             "total": elapsed,
+            "blobCount": float(len(blobs)),
+            "silhouetteCheckCount": float(len(silhouette_checks)),
+            "gateTotal": gate_elapsed_s,
+            "maxGate": max_gate_elapsed_s,
+            "maxGateWidth": float(max_gate_bbox[2]),
+            "maxGateHeight": float(max_gate_bbox[3]),
         }
 
         return DetectionResult(
@@ -857,6 +917,7 @@ class MobDetector:
         *,
         comp_bbox: tuple[int, int, int, int] | None = None,
         masks: list | None = None,
+        palette_heatmap_full: np.ndarray | None = None,
     ) -> tuple[
         bool,
         float,
@@ -895,10 +956,23 @@ class MobDetector:
             return fail
         search_region, search_x, search_y, ref_w, ref_h, local_bbox_left, local_bbox_top = search
 
-        palette_heat = sprite_palette_heatmap(
-            search_region, descriptor.match_palette_bgr,
-            float(descriptor.max_sprite_palette_distance),
-        )
+        if palette_heatmap_full is not None:
+            region_h, region_w = search_region.shape[:2]
+            palette_heat = palette_heatmap_full[
+                search_y : search_y + region_h,
+                search_x : search_x + region_w,
+            ]
+            if palette_heat.shape != (region_h, region_w):
+                palette_heat = sprite_palette_heatmap(
+                    search_region,
+                    descriptor.match_palette_bgr,
+                    float(descriptor.max_sprite_palette_distance),
+                )
+        else:
+            palette_heat = sprite_palette_heatmap(
+                search_region, descriptor.match_palette_bgr,
+                float(descriptor.max_sprite_palette_distance),
+            )
         binary_raw = (palette_heat >= float(self.config["minSpritePaletteMatch"])).astype(np.uint8)
         if not np.any(binary_raw):
             return fail
@@ -1189,11 +1263,24 @@ class MobDetector:
         if not np.any(base_small):
             return empty
 
+        # Work in the same descriptor-scale image that the candidate is
+        # resized to immediately afterward. This preserves the silhouette
+        # geometry while making deformation cost independent of a terrain-
+        # merged source crop's raw pixel dimensions.
+        desc_w, desc_h = _descriptor_sprite_size_px(descriptor)
+        work_w = min(w, max(desc_w, int(ref.shape[1])))
+        work_h = min(h, max(desc_h, int(ref.shape[0])))
+        if work_w != w or work_h != h:
+            work_region = cv2.resize(
+                region_bgr, (work_w, work_h), interpolation=cv2.INTER_AREA,
+            )
+        else:
+            work_region = region_bgr
         base = cv2.resize(
-            base_small, (w, h), interpolation=cv2.INTER_NEAREST,
+            base_small, (work_w, work_h), interpolation=cv2.INTER_NEAREST,
         ).astype(bool)
         heat = sprite_palette_heatmap(
-            region_bgr,
+            work_region,
             descriptor.match_palette_bgr,
             float(descriptor.max_sprite_palette_distance),
         )
@@ -1201,7 +1288,10 @@ class MobDetector:
         signal = heat >= match_thr
 
         gate_w = int(ref.shape[1])
-        cell_px = max(1, int(round(w / float(gate_w))))
+        # The work image is descriptor-scale, so this is the intended number
+        # of source pixels per silhouette cell—not a value derived from a
+        # frame-sized noisy extract.
+        cell_px = max(1, int(round(work_w / float(gate_w))))
         radius_px = _DEFORM_RADIUS_SILHOUETTE_CELLS * cell_px
         ksize = 2 * radius_px + 1
         band = cv2.dilate(
@@ -1211,6 +1301,9 @@ class MobDetector:
 
         grown = base.astype(np.uint8)
         allowed_u8 = allowed.astype(np.uint8)
+        # Each pass expands at most one source-pixel. The explicit bound above
+        # keeps this loop descriptor-scale and prevents frame-sized work from
+        # being repeated for noisy/merged extracts.
         for _ in range(radius_px):
             nxt = cv2.bitwise_and(
                 cv2.dilate(grown, _MORPH_ELLIPSE_3, iterations=1), allowed_u8,
@@ -1218,7 +1311,12 @@ class MobDetector:
             if np.array_equal(nxt, grown):
                 break
             grown = nxt
-        return grown.astype(bool)
+        result = grown.astype(bool)
+        if result.shape != (h, w):
+            result = cv2.resize(
+                result.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
+        return result
 
     def _shrink_bloated_extract_to_descriptor(
         self,

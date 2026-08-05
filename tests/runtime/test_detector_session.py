@@ -40,6 +40,13 @@ class DetectorSessionTests(unittest.TestCase):
         living = [d for d in scan.detections if d.living]
         self.assertGreater(len(living), 0)
         self.assertGreater(scan.duration_ms, 0)
+        # Stage timing: total duration splits into lock-wait + detect, and an
+        # uncontended lock must be ~instant while the detect does real work.
+        self.assertEqual(
+            scan.duration_ms, scan.lock_wait_ms + scan.detect_ms
+        )
+        self.assertGreater(scan.detect_ms, 0)
+        self.assertLess(scan.lock_wait_ms, 50)
 
     def test_track_locals_returns_results(self) -> None:
         scan = self.detector.discover_frame(self.roi_frame, self.roi)
@@ -57,6 +64,10 @@ class DetectorSessionTests(unittest.TestCase):
         self.assertEqual(len(batch.results), 1)
         self.assertTrue(batch.results[0].found)
         self.assertGreater(batch.duration_ms, 0)
+        # Stage timing: total duration splits into lock-wait + compute.
+        self.assertEqual(batch.duration_ms, batch.lock_wait_ms + batch.compute_ms)
+        self.assertGreater(batch.compute_ms, 0)
+        self.assertLess(batch.lock_wait_ms, 50)
 
 
 if __name__ == "__main__":

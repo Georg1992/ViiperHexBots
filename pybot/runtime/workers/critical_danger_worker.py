@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import traceback
+
 from pybot.runtime.constants import (
     CRITICAL_DANGER_POLL_INTERVAL_S,
     CRITICAL_PREEMPT_RELEASE_TIMEOUT_S,
@@ -155,7 +157,21 @@ class CriticalDangerWorker:
     def run(self) -> None:
         ctx = self._ctx
         while not ctx.is_stopped():
-            if not self.process_pending():
+            try:
+                handled = self.process_pending()
+            except Exception:
+                # This thread is the last safety boundary. A transient backend,
+                # detector, or lifecycle failure must not silently terminate
+                # emergency protection; log it and retry on the next poll.
+                try:
+                    ctx.logger.behavior(
+                        "[DANGER] critical worker tick failed — retrying:\\n"
+                        f"{traceback.format_exc()}"
+                    )
+                except Exception:
+                    pass
+                handled = False
+            if not handled:
                 # Poll at the danger detector's cadence so a critical drop is
                 # answered as fast as the detector can observe it.
                 ctx.stop_event.wait(CRITICAL_DANGER_POLL_INTERVAL_S)

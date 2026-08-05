@@ -457,14 +457,14 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         # A pending ordinary danger request is no longer produced while
         # hunting; if injected manually it blocks tracking until ownership
         # resolves rather than allowing stale candidates through.
-        self.assertFalse(self.ctx.should_run_tracking())
+        self.assertTrue(self.ctx.should_run_tracking())
 
     def test_tracking_continues_during_sit_gate_until_area_changes(self) -> None:
         self.ctx.mark_running()
         self.assertTrue(self.ctx.begin_sit_ops())
 
         self.assertFalse(self.ctx.should_run_combat())
-        self.assertFalse(self.ctx.should_run_tracking())
+        self.assertTrue(self.ctx.should_run_tracking())
 
         self.ctx.end_sit_ops()
 

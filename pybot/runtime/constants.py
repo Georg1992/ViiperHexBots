@@ -14,6 +14,9 @@ WORKER_POLL_INTERVAL_S = 0.05
 TRACKING_LOOP_INTERVAL_S = 0.02
 TRACKING_OVERLAY_INTERVAL_S = 0.10
 LOG_REPEAT_INTERVAL_MS = 5000
+# A discovery or tracking pass taking longer than this gets a stage-timing
+# warning (capture / lock-wait / compute split) so stalls are diagnosable.
+SLOW_SCAN_WARN_MS = 2000
 # Attack loop spin when no target or after one attack (half worker poll).
 ATTACK_IDLE_SPIN_S = WORKER_POLL_INTERVAL_S / 2.0
 # Idle SP confirmation: post observation must be this fresh at sample time,
@@ -100,6 +103,7 @@ __all__ = [
     "TRACKING_LOOP_INTERVAL_S",
     "TRACKING_OVERLAY_INTERVAL_S",
     "LOG_REPEAT_INTERVAL_MS",
+    "SLOW_SCAN_WARN_MS",
     "ATTACK_IDLE_SPIN_S",
     "SP_IDLE_MAX_OBSERVATION_AGE_MS",
     "DISCOVERY_MISS_REMOVE_COUNT",

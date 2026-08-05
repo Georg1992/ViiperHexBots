@@ -21,6 +21,7 @@ import traceback
 
 from pybot.runtime.constants import (
     LOG_REPEAT_INTERVAL_MS,
+    SLOW_SCAN_WARN_MS,
     TRACKING_LOOP_INTERVAL_S,
     TRACKING_OVERLAY_INTERVAL_S,
     WORKER_POLL_INTERVAL_S,
@@ -36,6 +37,7 @@ class CoordTrackingWorker:
     def __init__(self, ctx: CoordTrackingWorkerContext) -> None:
         self._ctx = ctx
         self._last_empty_frame_log_ms = 0
+        self._last_slow_track_log_ms = 0
         # Track IDs whose first-tick data has been logged (one shot per track).
         self._logged_first_tick: set[tuple[int, int]] = set()
         self._last_overlay_ms = 0
@@ -55,8 +57,10 @@ class CoordTrackingWorker:
                 elif not ctx.should_run_workers():
                     ctx.wait_while_stopped_or_paused(WORKER_POLL_INTERVAL_S)
                 else:
-                    # Storage/heal: resume_gate cleared until session ends.
-                    ctx.resume_gate.wait(WORKER_POLL_INTERVAL_S)
+                    # Gameplay/session gates never suspend observation. Retry
+                    # after a short stop-aware yield; do not wait on
+                    # resume_gate, which belongs only to action workers.
+                    ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
             except Exception:
                 ctx.logger.behavior(f"[COORD] tick error:\n{traceback.format_exc()}")
                 if ctx.stop_event.wait(0.25):
@@ -64,10 +68,9 @@ class CoordTrackingWorker:
 
     def _tick(self) -> None:
         ctx = self._ctx
-        # ``run()`` checks this gate, but the detector can raise a critical
-        # escape request immediately afterward. Re-check at the tick boundary
-        # so a candidate from the old screen cannot be ingested while the
-        # escape worker owns the transition.
+        # ``run()`` checks this lifecycle gate. Gameplay transitions are not
+        # observation blockers; epoch checks below reject stale state before
+        # publication.
         if not ctx.should_run_tracking():
             return
         if not ctx.capture.is_valid():
@@ -84,9 +87,6 @@ class CoordTrackingWorker:
         candidates = ctx.tracks.get_and_clear_new_candidates()
 
         if not ctx.should_run_tracking():
-            # Keep candidates pending for the current epoch. A successful
-            # danger teleport clears them in area_reset; a failed escape can
-            # retry without losing the discovery result.
             ctx.tracks.requeue_discovery_candidates(
                 candidates, expected_epoch=area_epoch,
             )
@@ -97,7 +97,7 @@ class CoordTrackingWorker:
             self._update_overlay(now_ms)
             return
 
-        frame = ctx.capture.capture_roi(roi)
+        frame = ctx.capture.capture_roi(roi, observer="tracking")
         if frame is None or frame.size == 0:
             if candidates:
                 ctx.tracks.requeue_discovery_candidates(
@@ -119,8 +119,14 @@ class CoordTrackingWorker:
                 candidates, frame, roi, now_ms, area_epoch,
             )
             if new_count > 0:
-                # Refresh alive tracks snapshot after creating new tracks
-                _, alive_tracks = ctx.tracks.tracking_frame_snapshot(now_ms)
+                # The candidate pass already ran local follow on this exact
+                # fresh frame and created the tracks at its resolved centers.
+                # Do not immediately run local follow a second time on the
+                # same frame: that duplicate work was especially expensive for
+                # large Anubis sprites and could consume several seconds before
+                # the next fresh observation. New tracks enter the normal loop
+                # on the next frame; existing tracks still follow below.
+                pass
 
         # ── Step 2: Follow existing tracks ───────────────────────────────
         if not alive_tracks:
@@ -143,6 +149,15 @@ class CoordTrackingWorker:
                 attack_count=track.attack_count,
                 created_tick=track.created_tick,
                 now_tick=now_ms,
+                # A track that has not been observed recently cannot safely
+                # extrapolate its last frame displacement across the whole
+                # stalled interval. Let local tracking reacquire around the
+                # last confirmed position instead of biasing the search with
+                # stale momentum.
+                prediction_valid=(
+                    now_ms - track.updated_tick
+                    <= max(250, 3 * int(TRACKING_LOOP_INTERVAL_S * 1000))
+                ),
             )
             for track in alive_tracks
             if track.discovery_scale > 0
@@ -152,6 +167,7 @@ class CoordTrackingWorker:
             return
 
         batch = ctx.tracker.track_locals_frame(frame, roi, snapshots)
+        self._warn_if_slow_tracking(batch, snapshots)
         results = batch.results
 
         # Data collection: log first tracking tick for newly created tracks
@@ -178,6 +194,15 @@ class CoordTrackingWorker:
                     f"shift={dist}px "
                     f"miss_reason={miss_reason}"
                 )
+
+        # A teleport/area reset may win while local matching is computing.
+        # Never publish a frame from the old screen into the new area, and do
+        # not let an in-flight transition turn a stale hit into liveness.
+        if (
+            ctx.tracks.area_epoch != area_epoch
+            or ctx.discovery_suspend.is_set()
+        ):
+            return
 
         missed_ids, opacity_deaths = ctx.tracks.apply_tracking(
             results,
@@ -264,6 +289,7 @@ class CoordTrackingWorker:
             return 0
 
         batch = ctx.tracker.track_locals_frame(frame, roi, snaps)
+        self._warn_if_slow_tracking(batch, snaps)
         if not batch.ok or len(batch.results) != len(pending):
             ctx.tracks.requeue_discovery_candidates(
                 pending, expected_epoch=area_epoch,
@@ -274,10 +300,13 @@ class CoordTrackingWorker:
         for index, (candidate, result) in enumerate(
             zip(pending, batch.results, strict=True)
         ):
-            if not ctx.should_run_tracking():
-                # Do not create any more old-area tracks after danger ownership
-                # changes. The pending suffix remains available only if the
-                # escape fails; a successful area reset clears it atomically.
+            if (
+                ctx.tracks.area_epoch != area_epoch
+                or ctx.discovery_suspend.is_set()
+            ):
+                # A transition won while local-follow was running. Do not
+                # create old-area tracks; the next discovery frame owns the
+                # fresh area.
                 ctx.tracks.requeue_discovery_candidates(
                     pending[index:], expected_epoch=area_epoch,
                 )
@@ -319,6 +348,24 @@ class CoordTrackingWorker:
                 f"[COORD] created {created} track(s) from discovery candidates"
             )
         return created
+
+    def _warn_if_slow_tracking(self, batch, snapshots) -> None:
+        # getattr defaults keep fake batches (SimpleNamespace in tests) fast.
+        duration_ms = getattr(batch, "duration_ms", 0)
+        if duration_ms < SLOW_SCAN_WARN_MS:
+            return
+        now_ms = monotonic_ms()
+        if now_ms - self._last_slow_track_log_ms < LOG_REPEAT_INTERVAL_MS:
+            return
+        self._last_slow_track_log_ms = now_ms
+        ctx = self._ctx
+        ctx.logger.behavior(
+            f"[COORD] SLOW tracking total={duration_ms}ms "
+            f"lock_wait={getattr(batch, 'lock_wait_ms', 0)}ms "
+            f"compute={getattr(batch, 'compute_ms', 0)}ms "
+            f"tracks={len(snapshots)} found={getattr(batch, 'found_count', 0)} "
+            f"coord_updates={getattr(batch, 'coord_updates', 0)}"
+        )
 
     def _update_overlay(self, now_ms: int) -> None:
         ctx = self._ctx

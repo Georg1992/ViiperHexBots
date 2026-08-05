@@ -60,9 +60,11 @@ class RuntimeResourceBoundsTests(unittest.TestCase):
         worker._logged_first_tick.add((tracks.area_epoch, first.id))
         tracks.area_reset()
         second = tracks.create_track("horn", 100, 100, 0.8, 0.9, now_tick=2)
-        self.assertEqual(first.id, second.id)
+        # IDs stay globally unique across area epochs so an in-flight action
+        # can never target a new mob after reset.
+        self.assertNotEqual(first.id, second.id)
         worker._update_overlay(1000)
-        self.assertNotIn((0, second.id), worker._logged_first_tick)
+        self.assertNotIn((1, second.id), worker._logged_first_tick)
         self.assertEqual(tracks.area_epoch, 1)
 
 

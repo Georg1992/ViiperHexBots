@@ -115,6 +115,27 @@ class DeferredActionSchedulerTests(unittest.TestCase):
         scheduler.run_pending(now_ms=1_000)
         self.assertEqual(calls, ["heal"])
 
+    def test_ignored_unsafe_action_does_not_require_retry(self) -> None:
+        """Optional maintenance may remain pending without freezing gameplay."""
+        scheduler = DeferredActionScheduler(clock=lambda: 500)
+        scheduler.register(
+            "hp_restore",
+            interval_ms=100,
+            priority=20,
+            ready=lambda: False,
+            execute=lambda: True,
+            due_on_generation=False,
+        )
+        scheduler.sync_generation(1, now_ms=0)
+        scheduler.mark_pending("hp_restore")
+        scheduler.run_pending(now_ms=500)
+
+        self.assertTrue(scheduler.get("hp_restore").pending)
+        self.assertFalse(
+            scheduler.requires_retry(max_priority=40, ignore_keys={"hp_restore"})
+        )
+        self.assertTrue(scheduler.requires_retry(max_priority=40))
+
     def test_successful_callback_uses_post_callback_timestamp(self) -> None:
         now = {"ms": 100}
         scheduler = DeferredActionScheduler(clock=lambda: now["ms"])

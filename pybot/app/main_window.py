@@ -25,7 +25,10 @@ from pybot.app.overlay import StatusPanelOverlay, Win32HuntOverlay
 from pybot.game_state import GameMemoryPoller, MemorySnapshot, PlayerVitals
 from pybot.app.session_log import AppSessionLog
 from pybot.app.status_display import format_pair, status_panel_numbers
-from pybot.app.status_panel_worker import StatusPanelReadResult, read_status_panel_snapshot
+from pybot.app.status_panel_worker import (
+    StatusPanelReadResult,
+    read_status_panel_snapshot_bounded,
+)
 from pybot.app.ui_work_queue import UiWorkQueue
 from pybot.app.startup_splash import preload_mob_descriptors
 from pybot.app.viiper_manager import ViiperManager
@@ -68,6 +71,12 @@ STATUS_PANEL_VALUE_MS = 200
 STATUS_PANEL_MAX_REFRESH_S = 1.0
 # Avoid flooding the application log when SP/weight OCR is transiently bad.
 STATUS_PANEL_HP_ONLY_LOG_S = 5.0
+# A status-panel or memory read must never pin its pending flag forever: a
+# wedged capture/read would otherwise silently kill the HP/SP feed (and with
+# it danger protection) with no error and no log line. After this long with a
+# request outstanding, the worker is abandoned and recreated.
+STATUS_PANEL_READ_TIMEOUT_S = 6.0
+MEMORY_READ_TIMEOUT_S = 6.0
 
 
 class MainWindow:
@@ -133,6 +142,14 @@ class MainWindow:
         self._memory_request_generation = 0
         self._status_request_pending = False
         self._status_request_generation = 0
+        # Monotonic start of the in-flight status/memory read for the stall
+        # watchdog (0 = no request outstanding).
+        self._status_request_started_at = 0.0
+        self._memory_request_started_at = 0.0
+        # Consecutive stall-recoveries since the last successful read; reset
+        # when a result arrives so repeated wedges are visible in the log.
+        self._status_read_stall_count = 0
+        self._memory_read_stall_count = 0
         self._exit_requested = False
         self._memory_work = UiWorkQueue(name="ui-memory-reader")
         self._status_work = UiWorkQueue(name="ui-status-reader")
@@ -144,6 +161,12 @@ class MainWindow:
         self._status_panel_confirmed: StatusPanelValues | None = None
         self._status_panel_max_read_at = 0.0
         self._last_hp_only_log_at = 0.0
+        # Monotonic time the Basic Info panel was last seen missing, or None.
+        self._status_panel_missing_since: float | None = None
+        self._last_panel_missing_log_at = 0.0
+        # Throttle for the panel-open-but-digits-unreadable diagnostic so a
+        # persistently blind feed is visible in the log instead of silent.
+        self._last_digits_missing_log_at = 0.0
         # Last known Basic Info origin — anchors the open-panel prompt.
         self._status_panel_anchor: tuple[int, int] = (0, 0)
         # Ignore widget callbacks while building; enable at end of _build_ui.
@@ -163,6 +186,7 @@ class MainWindow:
         self.log_pipe.set_log_box(self.log_box)
         self.log_pipe.set_status_widgets(self.input_status, self.input_hint)
         self.log_pipe.set_overlay_callback(self._maybe_pipe_to_overlay)
+        self.log_pipe.set_persist_callback(self._persist_log_line)
 
         # Async VIIPER init (descriptors were prepared on the splash before this window)
         self.log_pipe.log("ViiperHexBots started (Python)")
@@ -1133,9 +1157,34 @@ class MainWindow:
             text=self._format_pair(values.weight, values.weight_max)
         )
 
+    def _recover_memory_reader(self) -> None:
+        """Abandon a stalled memory read so SP/Weight can keep flowing.
+
+        A read that never returns leaves ``_memory_request_pending`` set, so
+        the poll stops submitting work and the SP/Weight feed dies silently.
+        Replace the worker queue (fresh daemon thread); the stuck thread is
+        abandoned, never joined.
+        """
+        self._memory_request_pending = False
+        self._memory_request_started_at = 0.0
+        self._memory_work.close()
+        self._memory_work = UiWorkQueue(name="ui-memory-reader")
+        self._memory_read_stall_count += 1
+        self.log_pipe.log(
+            "[UI] Memory read stalled — restarted memory reader "
+            f"(stall #{self._memory_read_stall_count})"
+        )
+
     def _request_memory_stats(self) -> None:
         """Request process-memory reads without running Win32 I/O on Tk."""
         if self._memory_request_pending:
+            # A hung read must not pin the pending flag forever; recover so
+            # the next poll tick retries on a fresh worker.
+            if self._memory_request_started_at and (
+                time.monotonic() - self._memory_request_started_at
+                >= MEMORY_READ_TIMEOUT_S
+            ):
+                self._recover_memory_reader()
             return
         if not self.config.use_memory_reading:
             self.memory_name.configure(text="—")
@@ -1156,6 +1205,7 @@ class MainWindow:
             return
 
         self._memory_request_pending = True
+        self._memory_request_started_at = time.monotonic()
         self._memory_request_generation += 1
         generation = self._memory_request_generation
 
@@ -1184,6 +1234,7 @@ class MainWindow:
 
         if not self._memory_work.submit(_read):
             self._memory_request_pending = False
+            self._memory_request_started_at = 0.0
 
     def _memory_read_failed(
         self, hwnd: int, generation: int, exc: Exception
@@ -1202,6 +1253,7 @@ class MainWindow:
         if generation != self._memory_request_generation:
             return
         self._memory_request_pending = False
+        self._memory_read_stall_count = 0
         if hwnd == self.config.window_id and self.config.use_memory_reading:
             self._apply_memory_snapshot(snap)
 
@@ -1233,6 +1285,16 @@ class MainWindow:
         self._status_panel_confirmed = None
         self._status_panel_max_read_at = 0.0
 
+    def _persist_log_line(self, message: str) -> None:
+        """LogPipe sink — mirror every UI log line into the session log.
+
+        Registered in ``__init__`` via ``set_persist_callback``; runs on the
+        Tk main thread during drain. write_system only enqueues
+        (non-blocking) and silently drops before a session opens or after it
+        closes, so this is safe and cheap.
+        """
+        self.session.write_system("INFO", "ui", message)
+
     @staticmethod
     def _status_panel_numbers(
         values: StatusPanelValues,
@@ -1247,6 +1309,18 @@ class MainWindow:
         client_top: int,
     ) -> None:
         """Basic Info not open — clear reads and prompt to open it."""
+        now = time.monotonic()
+        if self._status_panel_missing_since is None:
+            self._status_panel_missing_since = now
+            self.log_pipe.log(
+                "[UI] Status panel missing — HP/SP/weight feed paused"
+            )
+        elif now - self._last_panel_missing_log_at >= STATUS_PANEL_HP_ONLY_LOG_S:
+            self._last_panel_missing_log_at = now
+            self.log_pipe.log(
+                "[UI] Status panel still missing "
+                f"({int(now - self._status_panel_missing_since)}s)"
+            )
         self._reset_status_panel_tracking()
         self._clear_status_panel_ui()
         self._status_panel_overlay.show_panel_missing(
@@ -1255,10 +1329,40 @@ class MainWindow:
             panel_origin=self._status_panel_anchor,
         )
 
+    def _log_digits_missing(self) -> None:
+        """Throttled diagnostic for a panel that is open but unreadable.
+
+        The panel header is visible but HP/SP/Weight digits fail to parse — a
+        state that publishes nothing and logs nothing. While it persists, the
+        danger detector goes blind, so surface it instead of failing silently.
+        """
+        now = time.monotonic()
+        if now - self._last_digits_missing_log_at < STATUS_PANEL_HP_ONLY_LOG_S:
+            return
+        self._last_digits_missing_log_at = now
+        since = ""
+        if self._status_panel_missing_since is not None:
+            since = (
+                f" (panel missing {int(now - self._status_panel_missing_since)}s)"
+            )
+        self.log_pipe.log(
+            "[UI] Status panel open but HP/SP/weight digits unreadable"
+            f"{since} — feed paused until OCR recovers"
+        )
+
     def _apply_hp_only_result(self, hp: tuple[int, int] | None) -> None:
         """Publish HP even when another status-panel row failed OCR."""
         if hp is None:
             return
+        # An hp_only read means the panel header/origin was found, so a live
+        # HP OCR is proof the panel feed is back — end a missing spell even
+        # when the SP/weight rows are still unreadable.
+        if self._status_panel_missing_since is not None:
+            duration = time.monotonic() - self._status_panel_missing_since
+            self._status_panel_missing_since = None
+            self.log_pipe.log(
+                f"[UI] Status panel recovered (HP only) after {int(duration)}s"
+            )
         self.vitals.publish_hp(*hp)
         self.memory_hp.configure(text=self._format_pair(*hp))
         now = time.monotonic()
@@ -1277,6 +1381,12 @@ class MainWindow:
         client_top: int,
     ) -> None:
         """Store a successful read; UI stats update only when numbers change."""
+        if self._status_panel_missing_since is not None:
+            duration = time.monotonic() - self._status_panel_missing_since
+            self._status_panel_missing_since = None
+            self.log_pipe.log(
+                f"[UI] Status panel recovered after {int(duration)}s"
+            )
         previous = self._status_panel_confirmed
         self._status_panel_confirmed = values
         self._status_panel_anchor = values.panel_origin
@@ -1298,11 +1408,55 @@ class MainWindow:
         if self._panel_owns_sp_weight():
             self._apply_status_panel_stats(values)
 
+    def _panel_lookup_active(self) -> bool:
+        """Run status OCR whenever the bot session is active.
+
+        OCR is an observation pipeline and must not depend on foreground focus;
+        the game can be covered by the bot window while its client remains
+        rendered. Minimized/invalid windows are rejected inside the background
+        status reader, without blocking or stopping future polls.
+        """
+        return self.lifecycle.state in (BotState.STARTING, BotState.RUNNING)
+
+    def _recover_status_panel_reader(self) -> None:
+        """Abandon a stalled OCR read so the HP/SP feed can restart.
+
+        A read that never returns leaves ``_status_request_pending`` set, so
+        the poll stops submitting work and the feed dies silently (no
+        ``panel_missing``, no error). Replace the worker queue (fresh daemon
+        thread); the stuck thread is abandoned, never joined.
+        """
+        self._status_request_pending = False
+        self._status_request_started_at = 0.0
+        self._status_work.close()
+        self._status_work = UiWorkQueue(name="ui-status-reader")
+        self._status_read_stall_count += 1
+        self.log_pipe.log(
+            "[UI] Status-panel read stalled — restarted OCR worker "
+            f"(stall #{self._status_read_stall_count})"
+        )
+
     def _request_status_panel_overlay(self) -> int:
         """Request capture/OCR off the Tk thread and return the next poll delay."""
         self._consume_status_panel_result()
         if self._status_request_pending:
+            # A wedged read would pin this flag forever and silently kill the
+            # HP/SP feed (danger protection included). Recover on the poll
+            # tick so the next cycle retries on a fresh worker.
+            if self._status_request_started_at and (
+                time.monotonic() - self._status_request_started_at
+                >= STATUS_PANEL_READ_TIMEOUT_S
+            ):
+                self._recover_status_panel_reader()
             return STATUS_PANEL_VALUE_MS
+        if not self._panel_lookup_active():
+            # No OCR while off/paused — cheaply re-check later. Also drop any
+            # stale missing/recovery bookkeeping so a panel gap from a previous
+            # run is not attributed to the next one, and hide the overlay so
+            # the "open Basic Info" prompt cannot linger over the game.
+            self._status_panel_missing_since = None
+            self._status_panel_overlay.hide()
+            return STATUS_PANEL_SEARCH_MS
         hwnd = self.config.window_id
         confirmed = self._status_panel_confirmed
         now = time.monotonic()
@@ -1311,12 +1465,13 @@ class MainWindow:
             or now - self._status_panel_max_read_at >= STATUS_PANEL_MAX_REFRESH_S
         )
         self._status_request_pending = True
+        self._status_request_started_at = time.monotonic()
         self._status_request_generation += 1
         generation = self._status_request_generation
 
         def _read() -> None:
             try:
-                result = read_status_panel_snapshot(
+                result = read_status_panel_snapshot_bounded(
                     hwnd, confirmed, refresh_max=refresh_max
                 )
                 result = replace(result, generation=generation)
@@ -1342,6 +1497,7 @@ class MainWindow:
 
         if not self._status_work.submit(_read):
             self._status_request_pending = False
+            self._status_request_started_at = 0.0
         return STATUS_PANEL_VALUE_MS if confirmed is not None else STATUS_PANEL_SEARCH_MS
 
     def _status_read_failed(
@@ -1365,10 +1521,17 @@ class MainWindow:
             # result without releasing or overwriting the newer request.
             return
         self._status_request_pending = False
+        self._status_read_stall_count = 0
         if result.hwnd != self.config.window_id:
             return
-        if result.state == "inactive":
+        if result.state in ("inactive", "read_timeout", "read_failed"):
             self._status_panel_overlay.hide()
+            if result.state == "read_timeout":
+                self.log_pipe.log(
+                    "[UI] Status-panel read timed out — discarded blocked OCR read"
+                )
+            elif result.state == "read_failed":
+                self.log_pipe.log("[UI] Status-panel read failed")
             return
         if result.state == "client_missing":
             self._reset_status_panel_tracking()
@@ -1394,6 +1557,11 @@ class MainWindow:
                     client_left=result.client_left,
                     client_top=result.client_top,
                 )
+            else:
+                # Panel header found but HP/SP/Weight digits unreadable. This
+                # is a silent state (no publish, no error); surface it at a
+                # throttled cadence so a persistently blind feed is visible.
+                self._log_digits_missing()
             return
         if result.values is not None:
             if result.full_refresh:

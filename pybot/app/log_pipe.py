@@ -43,6 +43,9 @@ class LogPipe:
         self._status_label: ttk.Label | None = None
         self._hint_label: ttk.Label | None = None
         self._on_append_log: Callable[[str], None] | None = None
+        # Optional durable sink for every appended log line (e.g. the session
+        # log) so UI-side diagnostics survive the in-memory queue.
+        self._on_persist: Callable[[str], None] | None = None
         self._queue: queue.Queue[tuple] = queue.Queue(maxsize=_MAX_QUEUE_ITEMS)
         # __init__ runs on the main thread, so scheduling the drain here
         # keeps every Tk interaction on the main thread.
@@ -66,6 +69,24 @@ class LogPipe:
     ) -> None:
         """Register a callback fired for every appended log line (e.g. overlay)."""
         self._on_append_log = callback
+
+    def set_persist_callback(
+        self, callback: Callable[[str], None] | None
+    ) -> None:
+        """Register a durable sink fired for every appended log line.
+
+        Unlike the overlay callback (used for transient display), this sink is
+        meant for persistence (e.g. writing UI-level lines to the session log)
+        so app-side diagnostics are not lost when the in-memory queue dies.
+
+        Note: every line that reaches ``log_pipe.log`` — including runtime
+        behavior lines routed through the same pipe — is forwarded here. The
+        session log therefore becomes the *complete* session record, while
+        ``behavior.log`` (written separately by the runtime) remains the
+        runtime-only subset. Overlapping lines are intentionally duplicated
+        across the two files.
+        """
+        self._on_persist = callback
 
     # ── Thread-safe public API (never blocks) ───────────────────────
 
@@ -116,6 +137,8 @@ class LogPipe:
             self._log_box.configure(state=tk.DISABLED)
         if self._on_append_log is not None:
             self._on_append_log(message)
+        if self._on_persist is not None:
+            self._on_persist(message)
 
     def _do_status(self, title: str, hint: str) -> None:
         if self._status_label is not None:

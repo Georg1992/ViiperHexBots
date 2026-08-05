@@ -40,7 +40,11 @@ import traceback
 from contextlib import nullcontext
 
 from pybot.recognition.rules import DiscoveryDetection
-from pybot.runtime.constants import LOG_REPEAT_INTERVAL_MS, WORKER_POLL_INTERVAL_S
+from pybot.runtime.constants import (
+    LOG_REPEAT_INTERVAL_MS,
+    SLOW_SCAN_WARN_MS,
+    WORKER_POLL_INTERVAL_S,
+)
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.detection.discovery_filter import filter_scan_candidates
 from pybot.runtime.workers.worker_contexts import DiscoveryWorkerContext
@@ -54,6 +58,7 @@ class DiscoveryWorker:
         self._hunt_mode = hunt_mode
         self._scan_count = 0
         self._last_empty_frame_log_ms = 0
+        self._last_slow_scan_log_ms = 0
 
     def run(self) -> None:
         ctx = self._ctx
@@ -62,29 +67,17 @@ class DiscoveryWorker:
         while not ctx.stop_event.is_set():
             try:
                 if not ctx.should_run_discovery():
-                    # Sit/pause: wait on resume gate. Storage: wait on
-                    # discovery_wake so end_storage_ops can wake us immediately.
-                    # After continue, the normal path's _wait_for_discovery_wake
-                    # picks up the still-set wake signal and clears it.
-                    if not ctx.should_run_workers():
-                        ctx.wait_while_stopped_or_paused(interval_s)
-                    else:
-                        ctx.discovery_wake.wait(interval_s)
+                    # Only an explicit stop/pause may suspend observation. A
+                    # sit/storage/danger/teleport gate belongs to gameplay;
+                    # screen sampling continues independently.
+                    ctx.stop_event.wait(interval_s)
                     continue
-                if ctx.discovery_suspend.is_set():
-                    # Teleport in flight: ignore the 1s cadence; wait for wake.
-                    if not self._wait_for_discovery_wake(interval_s):
-                        continue
-                    ctx.discovery_wake.clear()
-                    if ctx.discovery_suspend.is_set() or not ctx.should_run_discovery():
-                        continue
-                    self._scan()
-                    continue
-                # Normal cadence, or immediate scan when teleport releases wake.
-                woke = self._wait_for_discovery_wake(interval_s)
-                if woke:
-                    ctx.discovery_wake.clear()
-                if not ctx.should_run_discovery() or ctx.discovery_suspend.is_set():
+                # Keep the observer on its cadence even during an area
+                # transition. _scan() rejects the result at the epoch/suspend
+                # publication boundary, rather than starving capture itself.
+                self._wait_for_discovery_wake(interval_s)
+                ctx.discovery_wake.clear()
+                if not ctx.should_run_discovery():
                     continue
                 self._scan()
             except Exception:
@@ -107,7 +100,7 @@ class DiscoveryWorker:
 
     def _scan(self) -> None:
         ctx = self._ctx
-        if ctx.stop_event.is_set() or ctx.discovery_suspend.is_set():
+        if ctx.stop_event.is_set():
             return
         if not ctx.capture.is_valid():
             return
@@ -127,14 +120,26 @@ class DiscoveryWorker:
             ctx.tracks.discovery_frame_snapshot(now_ms)
         )
 
-        frame = ctx.capture.capture_roi(roi)
+        capture_started_ms = monotonic_ms()
+        frame = ctx.capture.capture_roi(roi, observer="discovery")
+        capture_ms = monotonic_ms() - capture_started_ms
         if ctx.stop_event.is_set():
             return
         if frame is None or frame.size == 0:
             now_ms = monotonic_ms()
-            if now_ms - self._last_empty_frame_log_ms >= LOG_REPEAT_INTERVAL_MS:
+            if capture_ms >= SLOW_SCAN_WARN_MS and (
+                now_ms - self._last_empty_frame_log_ms >= LOG_REPEAT_INTERVAL_MS
+            ):
                 self._last_empty_frame_log_ms = now_ms
-                ctx.logger.behavior("[DISCOVERY] capture returned empty frame")
+                ctx.logger.behavior(
+                    "[DISCOVERY] SLOW capture returned empty frame "
+                    f"capture={capture_ms}ms"
+                )
+            elif now_ms - self._last_empty_frame_log_ms >= LOG_REPEAT_INTERVAL_MS:
+                self._last_empty_frame_log_ms = now_ms
+                ctx.logger.behavior(
+                    f"[DISCOVERY] capture returned empty frame capture={capture_ms}ms"
+                )
             return
 
         scan = ctx.detector.discover_frame(
@@ -144,6 +149,28 @@ class DiscoveryWorker:
         if not scan.ok:
             self._hunt_mode.note_discovery_scan_failed(scan.fail_reason)
             return
+
+        total_ms = capture_ms + scan.duration_ms
+        if total_ms >= SLOW_SCAN_WARN_MS and (
+            monotonic_ms() - self._last_slow_scan_log_ms >= LOG_REPEAT_INTERVAL_MS
+        ):
+            self._last_slow_scan_log_ms = monotonic_ms()
+            timing = scan.timing
+            ctx.logger.behavior(
+                f"[DISCOVERY] SLOW scan total={total_ms}ms "
+                f"capture={capture_ms}ms lock_wait={scan.lock_wait_ms}ms "
+                f"detect={scan.detect_ms}ms raw={scan.raw_count} "
+                f"accepted={scan.accepted_count} "
+                f"blobCount={int(timing.get('blobCount', 0.0))} "
+                f"checks={int(timing.get('silhouetteCheckCount', 0.0))} "
+                f"heatmap={int(timing.get('spriteHeatmap', 0.0) * 1000)}ms "
+                f"blobs={int(timing.get('blobCenters', 0.0) * 1000)}ms "
+                f"palette={int(timing.get('silhouettePaletteHeatmap', 0.0) * 1000)}ms "
+                f"gate={int(timing.get('silhouetteGate', 0.0) * 1000)}ms "
+                f"gateMax={int(timing.get('maxGate', 0.0) * 1000)}ms "
+                f"gateBBox={int(timing.get('maxGateWidth', 0.0))}x"
+                f"{int(timing.get('maxGateHeight', 0.0))}"
+            )
 
         self._scan_count += 1
 
@@ -173,6 +200,15 @@ class DiscoveryWorker:
         transition_lock = getattr(ctx, "area_transition_lock", None)
         guard = nullcontext() if transition_lock is None else transition_lock
         with guard:
+            # A frame captured during teleport/loading is observation-only. Do
+            # not mutate tracks or clear candidates while the area transition
+            # owns the publication boundary.
+            if (
+                ctx.discovery_suspend.is_set()
+                or ctx.tracks.area_epoch != area_epoch
+                or expected_generation != int(getattr(ctx, "hunt_generation", 0))
+            ):
+                return
             summary = ctx.tracks.process_discovery_scan(
                 detections,
                 mob_name=ctx.config.mob_name,

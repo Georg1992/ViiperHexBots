@@ -7,6 +7,7 @@ import traceback
 from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import (
     ATTACK_IDLE_SPIN_S,
+    HP_RESTORE_RATIO,
     IDLE_DEAD_ATTACK_COUNT,
     IDLE_UNREACHABLE_ATTACK_COUNT,
     LOG_REPEAT_INTERVAL_MS,
@@ -42,6 +43,7 @@ class AttackLoop:
         self._char_y = char_y
         self._combat_observer = CombatObserver()
         self._last_sp_unknown_log_ms = 0
+        self._last_low_hp_priority_log_ms = 0
 
     def run(self) -> None:
         """Compatibility loop; production ownership is ``GameplayLoop``."""
@@ -60,6 +62,19 @@ class AttackLoop:
                 self._ctx.wait_while_combat_blocked(WORKER_POLL_INTERVAL_S)
                 return False
 
+            # Low HP gives the configured custom heal first opportunity, but it
+            # is not a combat veto. If the heal is admissible and succeeds,
+            # yield this tick so the vitals publisher can verify it. If healing
+            # is unavailable, blocked, or on cooldown, continue normally; the
+            # independent critical-danger worker remains the only urgent veto.
+            heal_attempted = False
+            if self._low_hp_requires_defense():
+                heal_attempted = True
+                heal_result = self._attempt_heal()
+                self._log_low_hp_defense(heal_result)
+                if heal_result:
+                    return False
+
             tick = monotonic_ms()
             policy_tracks = self._ctx.tracks.tracks_for_policy(tick)
             target_id = self._ctx.policy.select_target(policy_tracks, tick)
@@ -77,7 +92,8 @@ class AttackLoop:
                 # other action can yield to a teleport/reset. Track IDs are
                 # intentionally reusable after an area reset, so the ID alone
                 # is not a safe target identity.
-                self._attempt_heal()
+                if not heal_attempted:
+                    self._attempt_heal()
                 if selected_epoch is None:
                     # Preserve the compatibility path for lightweight callers
                     # that do not expose area epochs; real MobTrack snapshots
@@ -92,7 +108,8 @@ class AttackLoop:
                 self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
                 return True
 
-            self._attempt_heal()
+            if not heal_attempted:
+                self._attempt_heal()
             self._hunt_mode.on_no_attackable_targets()
             self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
             return False
@@ -103,11 +120,34 @@ class AttackLoop:
             return False
 
 
-    def _attempt_heal(self) -> None:
+    def _low_hp_requires_defense(self) -> bool:
+        """Return whether a known HP sample should prioritize custom healing."""
+        hp, hp_max = self._vitals.hp_pair()
+        if hp is None or hp_max is None or hp_max <= 0:
+            return False
+        return hp / float(hp_max) < HP_RESTORE_RATIO
+
+    def _log_low_hp_defense(self, heal_result: bool) -> None:
+        """Throttle the diagnostic for a low-HP healing-priority decision."""
+        now = monotonic_ms()
+        if now - self._last_low_hp_priority_log_ms < LOG_REPEAT_INTERVAL_MS:
+            return
+        self._last_low_hp_priority_log_ms = now
+        if heal_result:
+            detail = "heal cast; yielding this tick for HP verification"
+        else:
+            detail = "heal unavailable/blocked; combat continues"
+        hp, hp_max = self._vitals.hp_pair()
+        self._ctx.logger.behavior(
+            f"[HEAL] priority HP={hp}/{hp_max} "
+            f"threshold<{HP_RESTORE_RATIO:.0%}: {detail}"
+        )
+
+    def _attempt_heal(self) -> bool:
         """Attempt one custom heal through the shared heal admission gate."""
         heal = getattr(self._mob_behavior, "heal_if_needed", None)
         if not callable(heal):
-            return
+            return False
         try:
             hx, hy = self._character_pos()
             allowed = getattr(
@@ -121,22 +161,22 @@ class AttackLoop:
             )
             admit = getattr(type(self._ctx), "perform_heal_if_allowed", None)
             if callable(admit):
-                self._ctx.perform_heal_if_allowed(
+                return bool(self._ctx.perform_heal_if_allowed(
                     allowed,
                     lambda: bool(heal(hx, hy, self._input)),
                     cooldown_s=1.0,
-                )
-            else:
-                perform_if_allowed(
-                    self._input,
-                    allowed,
-                    lambda: bool(heal(hx, hy, self._input)),
-                    lifecycle=self._ctx,
-                )
+                ))
+            return bool(perform_if_allowed(
+                self._input,
+                allowed,
+                lambda: bool(heal(hx, hy, self._input)),
+                lifecycle=self._ctx,
+            ))
         except Exception:
             self._ctx.logger.behavior(
                 f"[HEAL] self-heal error:\\n{traceback.format_exc()}"
             )
+            return False
 
     def _perform_target_input(
         self,
@@ -461,11 +501,10 @@ class AttackLoop:
 class GameplayLoop:
     """Single owner for gameplay decisions and character input."""
 
-    def __init__(self, ctx, *, attack, critical, sit=None, storage=None,
+    def __init__(self, ctx, *, attack, sit=None, storage=None,
                  hp_restore=None, buffs=None, timers=None) -> None:
         self._ctx = ctx
         self._attack = attack
-        self._critical = critical
         self._sit = sit
         self._storage = storage
         self._hp_restore = hp_restore
@@ -570,10 +609,14 @@ class GameplayLoop:
 
     def run(self) -> None:
         self._ctx.logger.behavior("[GAMEPLAY] loop started")
+        # Critical danger is intentionally not processed here. It has its own
+        # emergency worker so a startup buff/timer callback that is waiting on
+        # a lifecycle gate cannot deadlock the only thread that could consume
+        # ``critical_danger_requested``. The critical worker still uses the
+        # shared input/session admission boundary, so this is preemption of
+        # scheduling—not unsynchronized input.
         while not self._ctx.is_stopped():
             try:
-                if self._critical.process_pending():
-                    continue
                 if self._ctx.danger_escape_active.is_set():
                     continue
                 if self._sit is not None and self._sit.process_pending():
@@ -598,15 +641,28 @@ class GameplayLoop:
                 # The scheduler observes monotonic deadlines and drains all
                 # safe actions in priority order. Failed actions remain pending;
                 # only successful callbacks restart their own deadline.
-                ran = self._scheduler.run_pending(now_ms=monotonic_ms())
-                # A due high-priority action that failed or is not yet safe must
-                # remain the next gameplay concern; do not attack around it.
-                # Storage is deferred maintenance: when the screen is not
-                # safe it stays pending while combat continues clearing the
-                # area. Urgent/defensive actions at priorities <=40 still
-                # prevent combat; storage retries on the next safe gameplay
-                # tick without creating a second control flow.
-                if self._scheduler.requires_retry(max_priority=40):
+                hp_action = None
+                hp_before = None
+                if self._hp_restore is not None:
+                    hp_action = self._scheduler.get("hp_restore")
+                    hp_before = hp_action.last_executed_ms
+                self._scheduler.run_pending(now_ms=monotonic_ms())
+                # A successful HP-item press gets this gameplay tick to itself;
+                # do not immediately send an offensive key on the same stale
+                # low-HP snapshot. The next tick rechecks the vitals.
+                if (
+                    hp_action is not None
+                    and hp_action.last_executed_ms is not None
+                    and hp_action.last_executed_ms != hp_before
+                ):
+                    continue
+                # An HP item that is currently unsafe/ineligible is maintenance,
+                # not a combat gate. Critical danger remains a real gate and is
+                # handled by its independent emergency worker.
+                if self._scheduler.requires_retry(
+                    max_priority=40,
+                    ignore_keys={"hp_restore"},
+                ):
                     continue
                 self._attack.process_pending()
             except Exception:

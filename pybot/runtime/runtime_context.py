@@ -14,12 +14,13 @@ Signal  Discovery Tracking    Attack Timers
 ======= ========= =========== ====== ======
 (none)  yes       yes         yes    yes
 pause   no        no          no     no
-sit     no        no          no     no
-storage no        no          no     yes
+sit     yes       yes         no     no
+storage yes       yes         no     yes
 heal    yes       yes         no     yes
 ======= ========= =========== ====== ======
 
-Sit, storage, and heal are mutually exclusive.
+Sit, storage, and heal are mutually exclusive. Discovery and tracking are
+observation pipelines and are suspended only by explicit stop/user pause.
 """
 
 from __future__ import annotations

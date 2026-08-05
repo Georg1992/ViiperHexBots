@@ -207,32 +207,25 @@ class GateController:
         return not self.stop_event.is_set() and not self.pause_event.is_set()
 
     def should_run_discovery(self) -> bool:
-        """True when discovery may scan (workers running and not storage).
+        """True whenever the observation pipeline may scan.
 
-        Heal does not block discovery — tracks stay fresh while topping up HP.
+        Discovery is observation, not gameplay. Sit/storage/heal/danger
+        sessions may stop actions, but they must never stop fresh screen
+        sampling. A teleport transition is handled by epoch/suspend checks at
+        the publication boundary, so a capture already in progress cannot
+        commit old-screen state; it is not a reason to starve the observer.
         """
-        return (
-            self.should_run_workers()
-            and not self.storage_event.is_set()
-            and not self.danger_sit_requested.is_set()
-        )
+        return not self.stop_event.is_set() and not self.pause_event.is_set()
 
     def should_run_tracking(self) -> bool:
-        """True when tracking may tick outside an owned session transition.
+        """True whenever the tracking observer may take a fresh frame.
 
-        Tracking may continue during healing, but it must stop as soon as a
-        sit/danger session owns the character or a teleport transition is in
-        flight. Otherwise it can ingest a pre-teleport discovery candidate
-        between the critical worker claiming the gate and the area reset.
+        Tracking must remain live through sit, storage, healing, and danger
+        handling. Gameplay workers own the action gates; this method only
+        represents the observation lifecycle. Stale transition results are
+        rejected by area-epoch checks before they are applied.
         """
-        return (
-            self.should_run_workers()
-            and not self.storage_event.is_set()
-            and not self.discovery_suspend.is_set()
-            and not self.danger_sit_requested.is_set()
-            and not self.critical_danger_requested.is_set()
-            and not self.danger_escape_active.is_set()
-        )
+        return not self.stop_event.is_set() and not self.pause_event.is_set()
 
     def _session_held(self) -> bool:
         return (

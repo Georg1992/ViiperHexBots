@@ -24,7 +24,10 @@ from pybot.runtime.overlay_ports import HuntOverlay, NullOverlay
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.validation_log import HuntValidationLogger
 from pybot.recognition.capture import reset_capture_session
-from pybot.recognition.detector.detector import load_detector_config
+from pybot.recognition.detector.detector import (
+    configure_opencv_runtime,
+    load_detector_config,
+)
 from pybot.runtime.detection.detector_session import DetectorSession
 from pybot.runtime.workers.attack_loop import AttackLoop, GameplayLoop
 from pybot.runtime.workers.coord_tracking_worker import CoordTrackingWorker
@@ -240,9 +243,12 @@ def _build_core_workers(
         char_x=char_x, char_y=char_y,
     )
     critical_escape = CriticalDangerWorker(ctx, tport)
-    # Only independent observation/data production runs in its own thread.
+    # Observation and emergency danger handling run independently from the
+    # serialized gameplay owner. Critical escape must not wait behind a startup
+    # buff/timer callback that is itself blocked by the critical request.
     workers = [
         ("danger", danger.run),
+        ("critical-danger", critical_escape.run),
         ("coord", tracking.run),
         ("discovery", discovery.run),
     ]
@@ -319,6 +325,10 @@ def create_runtime_deps(
     """
     logger = _build_logger(config, session_id, behavior_callback)
     try:
+        # Discovery and tracking are independent observer workers. Bound
+        # OpenCV's native pool before constructing/starting either session so
+        # post-sit concurrent frames cannot oversubscribe the CPU.
+        configure_opencv_runtime()
         detector, tracker = _build_detectors(config)
         ctx = _build_context(config, logger, detector, tracker, overlay)
         has_buffs = any(
@@ -379,7 +389,6 @@ def create_runtime_deps(
         gameplay = GameplayLoop(
             ctx,
             attack=attack,
-            critical=critical,
             sit=actions.get("sit"),
             storage=actions.get("storage"),
             hp_restore=actions.get("hp_restore"),

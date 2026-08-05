@@ -44,9 +44,11 @@ class _GrabRequest:
         self.error: BaseException | None = None
 
 
-def _grab_worker_loop() -> None:
+def _grab_worker_loop(
+    work_queue: "queue.Queue[_GrabRequest | None]",
+) -> None:
     while True:
-        request = _grab_queue.get()
+        request = work_queue.get()
         if request is None:
             return
         try:
@@ -56,25 +58,51 @@ def _grab_worker_loop() -> None:
         finally:
             request.done.set()
             # The worker is the only thread that ever touches this session.
-            # If reset rotated the pair while this grab was in flight, the
-            # waiting caller may have timed out and returned; closing the
-            # retired session here (after grab completes) is the only safe
-            # close point. Callers must never close a session this thread
-            # is still using.
+            # If reset or a timeout rotated the pair while this grab was in
+            # flight, close the old native handle only after grab() returns.
             _close_retired_session_for_sct(request.sct)
 
 
-def _ensure_grab_worker() -> None:
+def _ensure_grab_worker(
+    work_queue: "queue.Queue[_GrabRequest | None]",
+) -> None:
     global _grab_worker_started
     with _grab_state_lock:
-        if _grab_worker_started:
+        if _grab_worker_started or work_queue is not _grab_queue:
             return
         _grab_worker_started = True
     threading.Thread(
         target=_grab_worker_loop,
+        args=(work_queue,),
         name="mss-grab",
         daemon=True,
     ).start()
+
+
+def _retire_runtime_capture(
+    sct: mss.mss,
+    work_queue: "queue.Queue[_GrabRequest | None]",
+) -> None:
+    """Rotate the shared runtime capture after a native grab timeout.
+
+    Discovery and coordinate tracking both use this channel. Leaving the old
+    queue in place after one blocked grab makes every subsequent observer wait
+    behind the same native call, which is exactly the tracking freeze seen in
+    the log. The old daemon worker is left to finish on its private queue;
+    future captures get a new session and worker immediately.
+    """
+    global _sct, _grab_queue, _grab_worker_started
+    with _capture_state_lock:
+        if _sct is not sct or _grab_queue is not work_queue:
+            return
+        _sct = None
+        _grab_queue = queue.Queue(maxsize=16)
+        with _grab_state_lock:
+            _grab_worker_started = False
+        try:
+            work_queue.put_nowait(None)
+        except queue.Full:
+            pass
 
 
 def _close_capture_session(sct: mss.mss | None) -> None:
@@ -168,6 +196,178 @@ def reset_capture_session() -> None:
     return
 
 
+class _UiCaptureChannel:
+    """Dedicated capture channel for the status-panel OCR (UI reads).
+
+    The runtime pipeline (discovery / tracking / teleport scans) funnels every
+    grab through one shared mss session and a single daemon worker. The status
+    panel OCR used to share that same worker, so a slow or wedged UI capture
+    could back up the runtime queue (and vice versa) — the multi-second
+    discovery stalls seen in the wild. This channel owns its own mss session,
+    lock, queue and worker, so UI reads can never starve the runtime pipeline.
+
+    Resilience mirrors the runtime path: grabs run on one daemon worker with a
+    bounded queue and a 2s caller timeout, and a broken session is dropped and
+    recreated on ScreenShotError.
+    """
+
+    def __init__(self) -> None:
+        self._state_lock = threading.Lock()
+        # Kept as a descriptive compatibility alias for tests/integrations
+        # that inspect the channel's session serialization primitive.
+        self._session_lock = self._state_lock
+        self._session: mss.mss | None = None
+        self._queue: "queue.Queue[_GrabRequest | None]" = queue.Queue(maxsize=16)
+        self._worker_started = False
+
+    def _ensure_worker(
+        self, work_queue: "queue.Queue[_GrabRequest | None]"
+    ) -> None:
+        with self._state_lock:
+            if self._worker_started or work_queue is not self._queue:
+                return
+            self._worker_started = True
+        threading.Thread(
+            target=self._grab_worker_loop,
+            args=(work_queue,),
+            name="ui-mss-grab",
+            daemon=True,
+        ).start()
+
+    def _grab_worker_loop(
+        self, work_queue: "queue.Queue[_GrabRequest | None]"
+    ) -> None:
+        while True:
+            request = work_queue.get()
+            if request is None:
+                return
+            try:
+                request.result = request.sct.grab(request.monitor)
+            except BaseException as exc:  # noqa: BLE001 - surface any native failure
+                request.error = exc
+            finally:
+                request.done.set()
+                # A timed-out caller may have retired this session while the
+                # native grab was still blocked. Only the worker that owned the
+                # grab may close that old native handle.
+                with self._state_lock:
+                    current = self._session is request.sct
+                if not current:
+                    _close_capture_session(request.sct)
+
+    def _retire_timed_out_grab(
+        self,
+        sct: mss.mss,
+        work_queue: "queue.Queue[_GrabRequest | None]",
+    ) -> None:
+        """Rotate a wedged UI channel so later reads use a fresh worker/session.
+
+        Recreating only ``UiWorkQueue`` is insufficient: its replacement calls
+        the same UI capture singleton, whose native worker and bounded queue
+        remain blocked forever. Retire the channel's queue/session pair here;
+        the old daemon worker finishes (or remains abandoned) on its private
+        queue, while the next OCR request starts an independent worker.
+        """
+        with self._state_lock:
+            if self._session is not sct or self._queue is not work_queue:
+                return
+            self._session = None
+            self._queue = queue.Queue(maxsize=16)
+            self._worker_started = False
+            try:
+                # Once the in-flight request finishes, the old worker exits
+                # instead of waiting forever on its retired queue.
+                work_queue.put_nowait(None)
+            except queue.Full:
+                pass
+
+    def capture(self, x: int, y: int, width: int, height: int) -> np.ndarray | None:
+        """Capture one screen rectangle on this channel's private worker."""
+        if width <= 0 or height <= 0:
+            raise ValueError("capture width and height must be positive")
+        monitor = {"left": int(x), "top": int(y), "width": int(width), "height": int(height)}
+        grab_failures = 0
+        while grab_failures < 2:
+            with self._state_lock:
+                if self._session is None:
+                    self._session = mss.MSS()
+                sct = self._session
+                work_queue = self._queue
+                start_worker = not self._worker_started
+            if start_worker:
+                self._ensure_worker(work_queue)
+            request = _GrabRequest(monitor, sct)
+            try:
+                work_queue.put_nowait(request)
+            except queue.Full:
+                # A wedged grab backed the queue up. Rotate the channel so a
+                # replacement OCR request is not trapped behind that grab.
+                self._retire_timed_out_grab(sct, work_queue)
+                return None
+            if not request.done.wait(_CAPTURE_GRAB_TIMEOUT_S):
+                # Native grab hung (client/desktop wedge). Retire this entire
+                # channel pair, not just the caller's OCR task; otherwise every
+                # recreated UI worker queues behind the same blocked grab.
+                self._retire_timed_out_grab(sct, work_queue)
+                return None
+            if request.error is not None:
+                if not isinstance(request.error, ScreenShotError):
+                    raise request.error
+                # Broken session — drop it so the next attempt recreates.
+                # Closing from this thread is safe only because this channel
+                # has exactly one caller at a time (status-panel OCR is
+                # serialized by _status_request_pending): the errored grab
+                # already finished before ``done`` was set, so the worker is
+                # not mid-grab on this session. The runtime pipeline cannot
+                # share this session, so no other thread holds it.
+                grab_failures += 1
+                with self._state_lock:
+                    if self._session is sct:
+                        self._session = None
+                _close_capture_session(sct)
+                continue
+            shot = request.result
+            frame = np.array(shot)
+            return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        return None
+
+
+_ui_capture_channel = _UiCaptureChannel()
+# Discovery and local tracking are both observation pipelines, but they must
+# not queue behind one another. Each observer owns an independent native grab
+# worker/session; a wedged discovery frame therefore cannot starve tracking.
+_observation_capture_channels: dict[str, _UiCaptureChannel] = {
+    "discovery": _UiCaptureChannel(),
+    "tracking": _UiCaptureChannel(),
+}
+
+
+def ui_capture_region(x: int, y: int, width: int, height: int) -> np.ndarray | None:
+    """Capture a screen rectangle for UI OCR on its isolated channel."""
+    return _ui_capture_channel.capture(x, y, width, height)
+
+
+def observation_capture_region(
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    *,
+    observer: str,
+) -> np.ndarray | None:
+    """Capture for one runtime observer without sharing another observer's grab.
+
+    ``observer`` is deliberately explicit: discovery and tracking have
+    different freshness requirements and must never serialize behind the same
+    native mss request. Unknown names fail closed instead of silently falling
+    back to the shared legacy channel.
+    """
+    channel = _observation_capture_channels.get(observer)
+    if channel is None:
+        raise ValueError(f"unknown observation capture channel: {observer!r}")
+    return channel.capture(x, y, width, height)
+
+
 def capture_region(x: int, y: int, width: int, height: int) -> np.ndarray | None:
     """Capture a screen rectangle and return a BGR image, or None on failure."""
     if width <= 0 or height <= 0:
@@ -188,6 +388,7 @@ def capture_region(x: int, y: int, width: int, height: int) -> np.ndarray | None
             if _sct is None:
                 _sct = mss.MSS()
             sct = _sct
+            work_queue = _grab_queue
 
         acquired = lock.acquire(timeout=0.5)
         if not acquired:
@@ -209,20 +410,18 @@ def capture_region(x: int, y: int, width: int, height: int) -> np.ndarray | None
             if sct is None:
                 pair_retries += 1
                 continue
-            _ensure_grab_worker()
+            _ensure_grab_worker(work_queue)
             request = _GrabRequest(monitor, sct)
             try:
-                _grab_queue.put_nowait(request)
+                work_queue.put_nowait(request)
             except queue.Full:
                 # A wedged grab has backed the queue up. Fail the frame
                 # instead of blocking; the backlog drains once grabs recover.
                 return None
             if not request.done.wait(_CAPTURE_GRAB_TIMEOUT_S):
                 # The native grab hung (client/desktop wedge). Do not freeze
-                # the calling worker: fail this frame. The request stays owned
-                # by the daemon worker; when the client recovers, queued grabs
-                # drain and captures resume. The next grab after a recovery
-                # re-validates the session and retries.
+                # the calling worker: fail this frame and rotate the shared
+                # runtime channel so discovery and tracking can recover.
                 timed_out = True
                 return None
             if request.error is not None:
@@ -241,7 +440,9 @@ def capture_region(x: int, y: int, width: int, height: int) -> np.ndarray | None
             # only when this grab finished (or was never queued). On a timeout
             # the worker may still be inside grab() for this session, so it
             # closes the retired session after the grab completes.
-            if not timed_out:
+            if timed_out:
+                _retire_runtime_capture(sct, work_queue)
+            else:
                 _close_retired_session(lock)
         # Replace the broken session only after this capture released its
         # lock: reset_capture_session() must acquire the lock to close the
