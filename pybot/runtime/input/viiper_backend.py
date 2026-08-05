@@ -10,7 +10,8 @@ Stream lifetime
 VIIPER removes a virtual device ~5s after its last stream disconnects.
 Hunt stop therefore must **not** close these streams — only release keys —
 or a later Start finds no keyboard/mouse. Streams are process-wide and
-closed only on app exit via ``close_shared_streams``.
+owned by a shared :class:`ViiperStreamStore`; they are closed only on app
+exit via ``store.close()``.
 """
 
 from __future__ import annotations
@@ -39,14 +40,88 @@ SCAN_CODE_E = 18
 MOUSE_BUTTON_LEFT = 0
 MOUSE_BUTTON_RIGHT = 1
 
-_shared_lock = threading.Lock()
-# All backend instances may share the same process-wide VIIPER streams.
-# Serialise operations globally so overlapping lifecycle threads cannot
-# interleave keyboard/mouse reports even during a stop/start race.
-_shared_operation_lock = threading.Lock()
-_shared_cancel_event = threading.Event()
-_shared_kb: DeviceStream | None = None
-_shared_mouse: DeviceStream | None = None
+class ViiperStreamStore:
+    """Process-wide shared VIIPER device streams and input coordination.
+
+    Every :class:`ViiperBackend` instance shares one set of device streams,
+    one operation lock (serialising keyboard/mouse reports across lifecycle
+    threads), and one cancellation event. The store owns these; application
+    shutdown closes the streams so VIIPER can remove the virtual devices.
+
+    The app composition root creates one store and injects it into the
+    ViiperManager and the hunt runtime, so Stop/Start never closes streams.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._operation_lock = threading.Lock()
+        self._cancel_event = threading.Event()
+        self._kb: DeviceStream | None = None
+        self._mouse: DeviceStream | None = None
+
+    @property
+    def operation_lock(self) -> threading.Lock:
+        """Serialize input reports process-wide."""
+        return self._operation_lock
+
+    @property
+    def cancel_event(self) -> threading.Event:
+        """Process-wide cancellation signalled on stop/pause/focus loss."""
+        return self._cancel_event
+
+    def open_once(
+        self,
+        opener,
+    ) -> tuple[DeviceStream, DeviceStream]:
+        """Return the shared streams, opening them exactly once.
+
+        ``opener`` is invoked only when streams are missing, while the store
+        lock is held; it must return ``(keyboard, mouse)`` already-open
+        streams.
+        """
+        with self._lock:
+            if self._kb is None or self._mouse is None:
+                kb, mouse = opener()
+                self._kb = kb
+                self._mouse = mouse
+            return self._kb, self._mouse
+
+    def adopt(
+        self,
+        keyboard: DeviceStream,
+        mouse: DeviceStream,
+    ) -> None:
+        """Register already-open manager streams as the shared pair.
+
+        The application manager creates the devices and opens their keepalive
+        streams before a hunt backend exists. Adopting those exact streams
+        prevents the first backend from opening a duplicate TCP pair.
+        """
+        with self._lock:
+            if self._kb is not None or self._mouse is not None:
+                if self._kb is keyboard and self._mouse is mouse:
+                    return
+                raise RuntimeError("VIIPER stream store already has streams")
+            self._kb = keyboard
+            self._mouse = mouse
+
+    def close(self) -> None:
+        """Close shared device streams (application shutdown only)."""
+        self._cancel_event.set()
+        with self._operation_lock:
+            with self._lock:
+                if self._kb is not None:
+                    try:
+                        self._kb.close()
+                    except OSError:
+                        pass
+                    self._kb = None
+                if self._mouse is not None:
+                    try:
+                        self._mouse.close()
+                    except OSError:
+                        pass
+                    self._mouse = None
 
 
 def _scan_code_to_vk(scan_code: int) -> int:
@@ -65,19 +140,27 @@ class ViiperBackend(ShadowInputBackend):
     while button clicks go through the VIIPER mouse stream.
     """
 
-    def __init__(self, addr: str = VIIPER_ADDR) -> None:
+    def __init__(
+        self,
+        addr: str = VIIPER_ADDR,
+        *,
+        stream_store: ViiperStreamStore | None = None,
+    ) -> None:
         self._addr = addr
         self._api = ViiperClient(addr)
+        self._store = (
+            ViiperStreamStore() if stream_store is None else stream_store
+        )
         self._kb_stream: DeviceStream | None = None
         self._mouse_stream: DeviceStream | None = None
         self._mouse_buttons: int = 0  # current button state
         self._mouse_button_left = 0  # button index for left click
         self._connected = False
         self._connect_lock = threading.Lock()
-        self._operation_lock = _shared_operation_lock
+        self._operation_lock = self._store.operation_lock
         # Set by runtime stop before shutdown joins workers. Long input
         # sequences observe it and release their keys/buttons promptly.
-        self._cancel_event = _shared_cancel_event
+        self._cancel_event = self._store.cancel_event
 
         # Track modifier key state (Ctrl, Shift, Alt, Win)
         self._modifiers: int = 0
@@ -101,73 +184,49 @@ class ViiperBackend(ShadowInputBackend):
 
     def _connect_unlocked(self) -> None:
         """Connect to device streams (caller must hold _connect_lock)."""
-        global _shared_kb, _shared_mouse
-        with _shared_lock:
-            if _shared_kb is not None and _shared_mouse is not None:
-                self._kb_stream = _shared_kb
-                self._mouse_stream = _shared_mouse
-                self._connected = True
-                return
+        kb, mouse = self._store.open_once(self._open_device_streams)
+        self._kb_stream = kb
+        self._mouse_stream = mouse
+        self._connected = True
 
-            # Discover devices on the first available bus
-            buses = self._api.bus_list()
-            if not buses:
-                raise RuntimeError("No VIIPER buses found. Is the server running?")
+    def _open_device_streams(self) -> tuple[DeviceStream, DeviceStream]:
+        """Discover the VIIPER keyboard/mouse devices and open their streams."""
+        buses = self._api.bus_list()
+        if not buses:
+            raise RuntimeError("No VIIPER buses found. Is the server running?")
 
-            bus_id = min(buses)
-            devices = self._api.devices_list(bus_id)
-            kb_dev_id = ""
-            mouse_dev_id = ""
+        bus_id = min(buses)
+        devices = self._api.devices_list(bus_id)
+        kb_dev_id = ""
+        mouse_dev_id = ""
 
-            for dev in devices:
-                dev_type = dev.get("type", "")
-                if dev_type == "keyboard" and not kb_dev_id:
-                    kb_dev_id = dev["devId"]
-                elif dev_type == "mouse" and not mouse_dev_id:
-                    mouse_dev_id = dev["devId"]
+        for dev in devices:
+            dev_type = dev.get("type", "")
+            if dev_type == "keyboard" and not kb_dev_id:
+                kb_dev_id = dev["devId"]
+            elif dev_type == "mouse" and not mouse_dev_id:
+                mouse_dev_id = dev["devId"]
 
-            if not kb_dev_id or not mouse_dev_id:
-                raise RuntimeError(
-                    "Keyboard or mouse device not found on bus. "
-                    "Ensure ViiperManager.start() completed first."
-                )
-
-            _shared_kb = DeviceStream.open(self._addr, bus_id, kb_dev_id)
-            _shared_mouse = DeviceStream.open(self._addr, bus_id, mouse_dev_id)
-            self._kb_stream = _shared_kb
-            self._mouse_stream = _shared_mouse
-            self._connected = True
+        if not kb_dev_id or not mouse_dev_id:
+            raise RuntimeError(
+                "Keyboard or mouse device not found on bus. "
+                "Ensure ViiperManager.start() completed first."
+            )
+        return (
+            DeviceStream.open(self._addr, bus_id, kb_dev_id),
+            DeviceStream.open(self._addr, bus_id, mouse_dev_id),
+        )
 
     def disconnect(self) -> None:
         """Drop this instance's handles without closing shared streams.
 
         Closing the TCP streams starts VIIPER's ~5s device-removal timer.
-        Use ``close_shared_streams`` only on application exit.
+        The shared store's ``close()`` is only called on application exit.
         """
         with self._connect_lock:
             self._kb_stream = None
             self._mouse_stream = None
             self._connected = False
-
-    @staticmethod
-    def close_shared_streams() -> None:
-        """Close process-wide device streams (application shutdown only)."""
-        global _shared_kb, _shared_mouse
-        _shared_cancel_event.set()
-        with _shared_operation_lock:
-            with _shared_lock:
-                if _shared_kb is not None:
-                    try:
-                        _shared_kb.close()
-                    except OSError:
-                        pass
-                    _shared_kb = None
-                if _shared_mouse is not None:
-                    try:
-                        _shared_mouse.close()
-                    except OSError:
-                        pass
-                    _shared_mouse = None
 
     # ── Input methods ─────────────────────────────────────────────────
 

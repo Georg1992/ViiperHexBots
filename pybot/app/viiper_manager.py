@@ -44,10 +44,20 @@ class ViiperManager:
         self,
         *,
         project_root: Path | None = None,
+        stream_store=None,
         on_log: LogFn | None = None,
         on_status: Callable[[str, str], None] | None = None,
     ) -> None:
         self._root = PROJECT_ROOT if project_root is None else project_root
+        # One process-wide stream store is shared with the hunt input backend
+        # so device streams survive Stop/Start and are closed on app exit.
+        if stream_store is None:
+            # Lazy import keeps the backend (and its Win32 ctypes bindings)
+            # out of import time for app modules that never touch input.
+            from pybot.runtime.input.viiper_backend import ViiperStreamStore
+
+            stream_store = ViiperStreamStore()
+        self._stream_store = stream_store
         self._on_log = (lambda _msg: None) if on_log is None else on_log
         self._on_status = (
             (lambda _title, _hint: None) if on_status is None else on_status
@@ -84,13 +94,16 @@ class ViiperManager:
         # Check if already running
         if self._server_ready():
             self._log("Virtual keyboard and mouse already ready")
-            self._on_status("Input: Ready", "Virtual keyboard and mouse active — launch the game now")
+            self._on_status(
+                "Input: Ready",
+                "Virtual keyboard and mouse active — launch the game now",
+            )
             return
 
         # Launch server process
         viiper_path = self._find_viiper_exe()
         self._log("Launching viiper.exe...")
-        self._on_status("Input: Launching server...")
+        self._on_status("Input: Launching server...", "")
 
         proc = subprocess.Popen(
             [str(viiper_path), "server"],
@@ -110,10 +123,18 @@ class ViiperManager:
             )
 
         self._log("VIIPER server ready")
-        self._on_status("Input: Creating devices...")
+        self._on_status("Input: Creating devices...", "")
 
-        # Set up bus and devices (opens & holds streams to keep alive)
-        self._setup_devices()
+        # Set up bus and devices (opens & holds streams to keep alive). If
+        # device creation fails after this manager launched the server, clean
+        # up the owned process before surfacing the original error.
+        try:
+            self._setup_devices()
+        except BaseException:
+            self._stream_store.close()
+            self._close_streams()
+            self._kill_server()
+            raise
 
         self._log("Virtual keyboard and mouse ready")
         self._on_status("Input: Ready", "Virtual keyboard and mouse active — launch the game now")
@@ -132,9 +153,7 @@ class ViiperManager:
         buses = self._api.bus_list()
         if not buses:
             self._log("No VIIPER bus — recreating keyboard and mouse...")
-            from pybot.runtime.input.viiper_backend import ViiperBackend
-
-            ViiperBackend.close_shared_streams()
+            self._stream_store.close()
             self._close_streams()
             self._setup_devices()
             return
@@ -148,9 +167,7 @@ class ViiperManager:
             return
 
         self._log("Virtual keyboard/mouse missing — recreating...")
-        from pybot.runtime.input.viiper_backend import ViiperBackend
-
-        ViiperBackend.close_shared_streams()
+        self._stream_store.close()
         self._close_streams()
         self._setup_devices()
 
@@ -160,9 +177,7 @@ class ViiperManager:
             return
         self._shutdown_done = True
         self._log("Stopping virtual keyboard and mouse...")
-        from pybot.runtime.input.viiper_backend import ViiperBackend
-
-        ViiperBackend.close_shared_streams()
+        self._stream_store.close()
         self._close_streams()
         self._kill_server()
         self._log("VIIPER stopped")
@@ -212,43 +227,77 @@ class ViiperManager:
         """Create a bus, add keyboard + mouse devices, hold streams.
 
         Opening and holding device streams is required because VIIPER
-        auto-removes devices if no stream connects within 5 seconds.
+        auto-removes devices if no stream connects within 5 seconds. Device
+        setup is transactional: a failed second device cannot leak the first
+        TCP stream into the next retry.
         """
         api = self._api
+        kb_dev_id = ""
+        mouse_dev_id = ""
+        kb_stream = None
+        mouse_stream = None
+        try:
+            # List existing buses
+            buses = api.bus_list()
 
-        # List existing buses
-        buses = api.bus_list()
+            if buses:
+                self.bus_id = min(buses)
+                self._log(f"Using existing bus {self.bus_id}")
 
-        if buses:
-            self.bus_id = min(buses)
-            self._log(f"Using existing bus {self.bus_id}")
+                # Clean up any existing devices on this bus
+                devices = api.devices_list(self.bus_id)
+                for dev in devices:
+                    try:
+                        api.device_remove(self.bus_id, dev["devId"])
+                    except ViiperError:
+                        pass
+            else:
+                self.bus_id = api.bus_create()
+                self._log(f"Created bus {self.bus_id}")
 
-            # Clean up any existing devices on this bus
-            devices = api.devices_list(self.bus_id)
-            for dev in devices:
+            # Add keyboard device and open stream to keep it alive
+            kb_resp = api.device_add(self.bus_id, "keyboard")
+            kb_dev_id = kb_resp["devId"]
+            kb_stream = DeviceStream.open(
+                VIIPER_ADDR, self.bus_id, kb_dev_id
+            )
+            self._log(f"Keyboard added: bus={self.bus_id} dev={kb_dev_id}")
+
+            # Add mouse device and open stream to keep it alive
+            mouse_resp = api.device_add(self.bus_id, "mouse")
+            mouse_dev_id = mouse_resp["devId"]
+            mouse_stream = DeviceStream.open(
+                VIIPER_ADDR, self.bus_id, mouse_dev_id
+            )
+        except BaseException:
+            for stream in (mouse_stream, kb_stream):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except BaseException:
+                        pass
+            for dev_id in (mouse_dev_id, kb_dev_id):
+                if dev_id:
+                    try:
+                        api.device_remove(self.bus_id, dev_id)
+                    except BaseException:
+                        pass
+            raise
+
+        try:
+            self._stream_store.adopt(kb_stream, mouse_stream)
+        except BaseException:
+            for stream in (mouse_stream, kb_stream):
                 try:
-                    api.device_remove(self.bus_id, dev["devId"])
-                except ViiperError:
+                    stream.close()
+                except BaseException:
                     pass
-        else:
-            self.bus_id = api.bus_create()
-            self._log(f"Created bus {self.bus_id}")
-
-        # Add keyboard device and open stream to keep it alive
-        kb_resp = api.device_add(self.bus_id, "keyboard")
-        self.keyboard_dev_id = kb_resp["devId"]
-        self._kb_stream = DeviceStream.open(
-            VIIPER_ADDR, self.bus_id, self.keyboard_dev_id
-        )
-        self._log(f"Keyboard added: bus={self.bus_id} dev={self.keyboard_dev_id}")
-
-        # Add mouse device and open stream to keep it alive
-        mouse_resp = api.device_add(self.bus_id, "mouse")
-        self.mouse_dev_id = mouse_resp["devId"]
-        self._mouse_stream = DeviceStream.open(
-            VIIPER_ADDR, self.bus_id, self.mouse_dev_id
-        )
-        self._log(f"Mouse added: bus={self.bus_id} dev={self.mouse_dev_id}")
+            raise
+        self.keyboard_dev_id = kb_dev_id
+        self.mouse_dev_id = mouse_dev_id
+        self._kb_stream = kb_stream
+        self._mouse_stream = mouse_stream
+        self._log(f"Mouse added: bus={self.bus_id} dev={mouse_dev_id}")
 
     def _close_streams(self) -> None:
         """Close held device streams."""

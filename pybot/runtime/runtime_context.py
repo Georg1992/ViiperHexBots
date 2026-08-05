@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pybot.runtime.capture.hunt_capture import HuntWindowCapture
 from pybot.config.runtime import HuntRuntimeConfig
 from pybot.runtime.control import RuntimeControl
+from pybot.runtime.danger_detector import DangerDetector
 from pybot.runtime.gate_controller import GateController
 from pybot.runtime.hunt_policy import HuntPolicy
 from pybot.runtime.hunt_tracks import HuntTracks
@@ -65,7 +66,9 @@ class HuntRuntimeContext:
     # Fly-wing count and restock state.
     wings: WingTracker = field(default_factory=WingTracker)
     # Shared danger observer used by safe character actions (heal/buff).
-    danger_detector: object | None = field(default=None, repr=False)
+    # Assembled by the context factory so the gates and the detector always
+    # observe the same session state.
+    danger_detector: DangerDetector | None = field(default=None, repr=False)
     # Registered by the sit worker so runtime shutdown can retry an unresolved
     # seated toggle after the worker thread has exited.
     sit_cleanup_callback: Callable[[], bool] | None = field(

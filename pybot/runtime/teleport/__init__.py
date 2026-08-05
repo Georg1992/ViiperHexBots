@@ -28,6 +28,7 @@ from pybot.runtime.constants import (
     SIT_SP_POLL_INTERVAL_S,
 )
 from pybot.runtime.detection.discovery_filter import filter_scan_candidates
+from pybot.runtime.event_utils import event_is_set
 from pybot.runtime.input.input_backend import InputBackend
 
 
@@ -38,11 +39,25 @@ class TeleportController:
         self,
         ctx,
         input_backend: InputBackend,
-        hunt_mode,
+        hunt_mode=None,
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
         self._hunt_mode = hunt_mode
+
+    def bind_hunt_mode(self, hunt_mode) -> None:
+        """Wire the hunt-mode area-reset notification after both exist.
+
+        ``TeleportStrategy`` needs this controller before the mode controller
+        exists, so the composition root binds the mode once ``create_hunt_mode``
+        has returned. Only ``on_area_reset`` is consumed.
+        """
+        self._hunt_mode = hunt_mode
+
+    def _notify_area_reset(self) -> None:
+        """Notify the bound hunt mode that the area changed."""
+        if self._hunt_mode is not None:
+            self._hunt_mode.on_area_reset()
 
     # ── Key selection ────────────────────────────────────────────
 
@@ -138,22 +153,9 @@ class TeleportController:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return True
-            stop_is_set = getattr(self._ctx.stop_event, "is_set", None)
-            if callable(stop_is_set):
-                try:
-                    stop_value = stop_is_set()
-                except Exception:
-                    stop_value = False
-                if type(stop_value) is bool and stop_value:
-                    return False
-            pause_is_set = getattr(self._ctx.pause_event, "is_set", None)
-            paused = False
-            if callable(pause_is_set):
-                try:
-                    pause_value = pause_is_set()
-                    paused = type(pause_value) is bool and pause_value
-                except Exception:
-                    paused = False
+            if event_is_set(self._ctx.stop_event) is True:
+                return False
+            paused = event_is_set(self._ctx.pause_event) is True
             if paused:
                 self._ctx.stop_event.wait(
                     min(SIT_SP_POLL_INTERVAL_S, remaining)
@@ -164,13 +166,8 @@ class TeleportController:
                 return True
             # A false result can be caused by a pause racing with the check;
             # finish the already-issued teleport's settle after that pause.
-            if callable(pause_is_set):
-                try:
-                    pause_value = pause_is_set()
-                except Exception:
-                    pause_value = False
-                if type(pause_value) is bool and pause_value:
-                    continue
+            if event_is_set(self._ctx.pause_event) is True:
+                continue
             # A false result without pause means the wait was stopped or the
             # compatibility context explicitly rejected the settle. Preserve
             # that failure result rather than retrying an already-issued key.
@@ -185,15 +182,9 @@ class TeleportController:
         mode teleport) must yield so the escape key is never queued behind
         or alongside a competing teleport.
         """
-        event = getattr(self._ctx, "danger_escape_active", None)
-        is_set = getattr(event, "is_set", None)
-        if not callable(is_set):
-            return False
-        try:
-            value = is_set()
-        except Exception:
-            return False
-        return type(value) is bool and value
+        return event_is_set(
+            getattr(self._ctx, "danger_escape_active", None)
+        ) is True
 
     def teleport_once_for_sit(self, *, log_tag: str = "SIT") -> bool:
         """Teleport exactly once before sitting to recover SP.
@@ -282,7 +273,7 @@ class TeleportController:
                 # Publish the strategy marker and track epoch as one lifecycle
                 # transaction. The lock is re-entrant because ctx.area_reset
                 # also protects direct callers with the same boundary.
-                self._hunt_mode.on_area_reset()
+                self._notify_area_reset()
                 ctx.area_reset(reason="danger_teleport")
                 return True
         finally:
@@ -345,29 +336,17 @@ class TeleportController:
 
     def _critical_request_is_set(self) -> bool | None:
         """Return critical-danger state when the context exposes a real event."""
-        event = getattr(self._ctx, "critical_danger_requested", None)
-        is_set = getattr(event, "is_set", None)
-        if not callable(is_set):
-            return None
-        try:
-            value = is_set()
-        except Exception:
-            return None
-        return value if type(value) is bool else None
+        return event_is_set(
+            getattr(self._ctx, "critical_danger_requested", None)
+        )
 
     def _danger_request_is_set(self) -> bool | None:
         """Return danger state when the context exposes a real boolean event."""
-        event = getattr(self._ctx, "danger_sit_requested", None)
-        is_set = getattr(event, "is_set", None)
-        if not callable(is_set):
-            return None
-        try:
-            value = is_set()
-        except Exception:
-            return None
-        # MagicMock/lightweight contexts return a mock here, not a boolean.
-        # Treat those as contexts without an interruptible danger event.
-        return value if type(value) is bool else None
+        # MagicMock/lightweight contexts are treated as contexts without an
+        # interruptible danger event (``event_is_set`` returns ``None``).
+        return event_is_set(
+            getattr(self._ctx, "danger_sit_requested", None)
+        )
 
     def teleport_until_quiet(
         self,
@@ -475,7 +454,7 @@ class TeleportController:
 
                 ctx.policy.reset()
                 ctx.validation.log_area_reset("pre_teleport")
-                self._hunt_mode.on_area_reset()
+                self._notify_area_reset()
 
                 tp_button = self.active_button()
                 ctx.logger.behavior(
@@ -522,11 +501,11 @@ class TeleportController:
         ctx = self._ctx
         transition_lock = getattr(ctx, "area_transition_lock", None)
         if transition_lock is None:
-            self._hunt_mode.on_area_reset()
+            self._notify_area_reset()
             ctx.area_reset(reason)
         else:
             with transition_lock:
-                self._hunt_mode.on_area_reset()
+                self._notify_area_reset()
                 ctx.area_reset(reason)
         ctx.overlay.set_track_stats(track_count=0, alive_count=0)
         ctx.overlay.set_track_positions([])

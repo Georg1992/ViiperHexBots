@@ -147,8 +147,15 @@ def _build_context(
     detector: DetectorSession,
     tracker: DetectorSession,
     overlay: HuntOverlay | None,
+    player_vitals: PlayerVitals,
 ) -> HuntRuntimeContext:
-    """Build the shared runtime context with all core services."""
+    """Build the shared runtime context with all core services.
+
+    The danger detector is the one service that must be wired back into the
+    context (its gates need the detector, and the detector needs the gates).
+    It is created here so the context factory is the single owner of a fully
+    assembled context object — callers never observe a partially-wired one.
+    """
     detector_config = load_detector_config()
     tracks = HuntTracks(detector_config)
     policy = HuntPolicy()
@@ -158,7 +165,7 @@ def _build_context(
         enabled=config.validation_enabled,
     )
     control = RuntimeControl(config.control_file)
-    return HuntRuntimeContext(
+    ctx = HuntRuntimeContext(
         config=config,
         logger=logger,
         tracks=tracks,
@@ -170,6 +177,8 @@ def _build_context(
         control=control,
         overlay=NullOverlay() if overlay is None else overlay,
     )
+    ctx.danger_detector = DangerDetector(ctx, vitals=player_vitals)
+    return ctx
 
 
 def _validate_teleport_mode(config, tport: TeleportController) -> None:
@@ -226,16 +235,18 @@ def _build_core_workers(
     tport: TeleportController,
     player_vitals: PlayerVitals,
     mob_behavior,
-    danger: DangerDetector | None = None,
-) -> tuple[list[tuple[str, Callable[[], None]]], DangerDetector, AttackLoop, CriticalDangerWorker]:
-    """Build observation workers and action objects for the single gameplay owner."""
+    danger: DangerDetector,
+) -> tuple[list[tuple[str, Callable[[], None]]], AttackLoop, CriticalDangerWorker]:
+    """Build observation workers and action objects for the single gameplay owner.
+
+    ``danger`` is the shared detector assembled by ``_build_context`` — there
+    is exactly one creation path for it.
+    """
     tracking = CoordTrackingWorker(ctx)
     discovery = DiscoveryWorker(ctx, hunt_mode)
     roi = ctx.capture.get_hunt_roi()
     char_x = roi.x + roi.w // 2 if roi else 0
     char_y = roi.y + roi.h // 2 if roi else 0
-    if danger is None:
-        danger = DangerDetector(ctx, vitals=player_vitals)
     attack = AttackLoop(
         ctx, hunt_mode, input_backend,
         mob_behavior=mob_behavior,
@@ -252,7 +263,7 @@ def _build_core_workers(
         ("coord", tracking.run),
         ("discovery", discovery.run),
     ]
-    return workers, danger, attack, critical_escape
+    return workers, attack, critical_escape
 
 
 def _build_conditional_workers(
@@ -317,6 +328,7 @@ def create_runtime_deps(
     behavior_callback: Callable[[str], None] | None = None,
     overlay: HuntOverlay | None = None,
     vitals: PlayerVitals | None = None,
+    stream_store=None,
 ) -> RuntimeDependencies:
     """Construct all hunt runtime dependencies.
 
@@ -330,7 +342,10 @@ def create_runtime_deps(
         # post-sit concurrent frames cannot oversubscribe the CPU.
         configure_opencv_runtime()
         detector, tracker = _build_detectors(config)
-        ctx = _build_context(config, logger, detector, tracker, overlay)
+        player_vitals = PlayerVitals() if vitals is None else vitals
+        ctx = _build_context(
+            config, logger, detector, tracker, overlay, player_vitals,
+        )
         has_buffs = any(
             buff.scan_code > 0 and buff.delay_ms > 0
             for buff in config.custom_behavior.buffs
@@ -346,21 +361,27 @@ def create_runtime_deps(
             require_timers=has_timers,
         )
 
-        input_backend: InputBackend = ViiperBackend()
-        player_vitals = PlayerVitals() if vitals is None else vitals
+        # The process-wide VIIPER stream store (shared with ViiperManager)
+        # keeps device streams alive across hunt stop/start.
+        input_backend: InputBackend = ViiperBackend(stream_store=stream_store)
 
         # Create TeleportController early — every teleport concern lives here.
-        tport = TeleportController(ctx, input_backend, None)
+        tport = TeleportController(ctx, input_backend)
         _validate_teleport_mode(config, tport)
 
         hunt_mode = create_hunt_mode(ctx, input_backend, teleport_controller=tport)
+        # TeleportStrategy needs the controller before the mode controller
+        # exists; bind the area-reset notification once both are built.
+        tport.bind_hunt_mode(hunt_mode)
         _validate_sp_memory(config)
         _validate_weight_memory(config)
 
-        # Build danger before the configurable behavior because safe self-heal
-        # decisions share its threat/teleport observations.
-        danger = DangerDetector(ctx, vitals=player_vitals)
-        ctx.danger_detector = danger
+        # The shared danger detector is assembled inside _build_context (its
+        # gates need the detector and vice versa). Safe self-heal decisions
+        # share its threat/teleport observations.
+        danger = ctx.danger_detector
+        if danger is None:
+            raise RuntimeError("danger detector was not wired into the context")
         legacy_behavior = get_mob_behavior(config.mob_name)
         if config.custom_behavior.configured:
             mob_behavior = get_configured_mob_behavior(
@@ -372,7 +393,7 @@ def create_runtime_deps(
         else:
             mob_behavior = legacy_behavior
 
-        core_workers, danger, attack, critical = _build_core_workers(
+        core_workers, attack, critical = _build_core_workers(
             ctx, hunt_mode, input_backend, tport, player_vitals, mob_behavior,
             danger=danger,
         )
@@ -381,10 +402,6 @@ def create_runtime_deps(
             danger=danger,
             hunt_mode=hunt_mode,
         )
-
-
-        # The controller's hunt-mode callback is resolved after create_hunt_mode().
-        tport._hunt_mode = hunt_mode
 
         gameplay = GameplayLoop(
             ctx,

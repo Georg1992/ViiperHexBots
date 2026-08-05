@@ -93,12 +93,26 @@ class SelfBuffWorker:
         ]
         if not due:
             return False
-        for buff in due:
-            if not self._character_action_allowed() or not self._cast_buff(buff):
-                return False
+        # Claim buff priority before the first cast so a timer due at the same
+        # instant yields until every due buff has fired. This is the same
+        # contract the legacy ``run`` loop used; it lives here so there is
+        # exactly one periodic scheduling policy.
+        ctx.character_action_gate.begin_buff_burst()
+        try:
+            for buff in due:
+                if not self._character_action_allowed() or not self._cast_buff(buff):
+                    return False
+        finally:
+            ctx.character_action_gate.end_buff_burst()
         return True
 
     def run(self) -> None:
+        """Legacy standalone loop; production scheduling is ``GameplayLoop``.
+
+        All startup and periodic scheduling decisions live in
+        ``process_pending``. This loop only paces the poll so legacy callers
+        keep a bounded cadence without a second clock for the same policy.
+        """
         ctx = self._ctx
         buffs = tuple(
             buff
@@ -116,85 +130,14 @@ class SelfBuffWorker:
 
         while not ctx.is_stopped():
             try:
-                generation = self._current_generation()
-                if self._completed_generation != generation:
-                    self._last_cast_ms.clear()
-                    startup_ok = self._run_startup_sequence(
-                        buffs,
-                        expected_generation=generation,
-                    )
-                    if not startup_ok:
-                        # A sit/stand transition can change the generation
-                        # while a startup sequence is in progress. Do not
-                        # publish completion for the old hunt; the next loop
-                        # iteration replays the sequence for the new one.
-                        if ctx.is_stopped():
-                            return
-                        continue
-                    if self._current_generation() != generation:
-                        continue
-                    mark_buffs_done = getattr(ctx, "mark_startup_buffs_done", None)
-                    if callable(mark_buffs_done):
-                        completed = mark_buffs_done(
-                            expected_generation=generation,
-                        )
-                        if completed is False:
-                            continue
-                    if not self._has_normal_timers():
-                        mark_timers_done = getattr(ctx, "mark_startup_timers_done", None)
-                        if callable(mark_timers_done):
-                            completed = mark_timers_done(
-                                expected_generation=generation,
-                            )
-                            if completed is False:
-                                continue
-                    self._completed_generation = generation
-
-                if not ctx.should_run_combat():
-                    # Combat-only gates (healing, storage, danger teleport)
-                    # pause casting but do not reset elapsed buff intervals.
-                    # A sit session is different: its generation change above
-                    # explicitly replays the startup sequence for the new hunt.
-                    ctx.wait_while_combat_blocked(0.25)
-                    continue
-
-                now = monotonic_ms()
-
-                due = [
-                    buff
-                    for buff in buffs
-                    if now - self._last_cast_ms[id(buff)] >= buff.delay_ms
-                ]
-                # Claim buff priority before the first cast so a timer due at
-                # the same instant yields until every due buff has fired.
-                if due:
-                    ctx.character_action_gate.begin_buff_burst()
-                try:
-                    for buff in due:
-                        if not self._character_action_allowed():
-                            break
-                        if not self._wait_stagger_gap():
-                            break
-                        if not self._cast_buff(buff):
-                            break
-                finally:
-                    if due:
-                        ctx.character_action_gate.end_buff_burst()
-
-                if ctx.is_stopped():
-                    break
-                now = monotonic_ms()
-                remaining = min(
-                    max(0, item.delay_ms - (now - self._last_cast_ms[id(item)]))
-                    for item in buffs
-                )
-                ctx.stop_event.wait(max(0.05, remaining / 1000.0))
+                self.process_pending()
             except Exception:
                 self._log_error(f"[CUSTOM] buff tick error:\n{traceback.format_exc()}")
-                # A persistent backend/config failure must not turn this
-                # worker into a hot exception/logging loop.
                 if ctx.stop_event.wait(0.25):
                     return
+            if ctx.is_stopped():
+                break
+            ctx.stop_event.wait(0.25)
 
     def last_success_ms(self, buff_key: int) -> int | None:
         """Return the last successful cast timestamp for scheduler seeding."""

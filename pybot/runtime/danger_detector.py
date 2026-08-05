@@ -15,6 +15,7 @@ from pybot.runtime.constants import (
     HP_HEAL_DAMAGE_QUIET_S,
     WORKER_POLL_INTERVAL_S,
 )
+from pybot.runtime.event_utils import event_is_set
 
 CRITICAL_HP_RATIO = 0.5
 CRITICAL_DAMAGE_RATIO = 0.2
@@ -95,21 +96,11 @@ class DangerDetector:
             sitting = getattr(self._ctx, "sitting_event", None)
             suspend = getattr(self._ctx, "discovery_suspend", None)
             escape = getattr(self._ctx, "danger_escape_active", None)
-            is_sitting = False
-            is_teleporting = False
-            is_escaping = False
-            is_set = getattr(sitting, "is_set", None)
-            if callable(is_set):
-                value = is_set()
-                is_sitting = type(value) is bool and value
-            suspend_is_set = getattr(suspend, "is_set", None)
-            if callable(suspend_is_set):
-                value = suspend_is_set()
-                is_teleporting = type(value) is bool and value
-            escape_is_set = getattr(escape, "is_set", None)
-            if callable(escape_is_set):
-                value = escape_is_set()
-                is_escaping = type(value) is bool and value
+            # Lightweight/mock contexts report ``None`` here and are treated
+            # as "no gate held" — the same as the previous defensive reads.
+            is_sitting = event_is_set(sitting) is True
+            is_teleporting = event_is_set(suspend) is True
+            is_escaping = event_is_set(escape) is True
             request = getattr(self._ctx, "request_danger_sit", None)
             # During an escape teleport, ``sitting_event`` is deliberately held
             # as an input gate. It does not mean the character entered SP
@@ -154,11 +145,7 @@ class DangerDetector:
         danger-sit request; the sit owner performs the actual emergency escape.
         """
         sitting = getattr(self._ctx, "sitting_event", None)
-        is_set = getattr(sitting, "is_set", None)
-        is_sitting = False
-        if callable(is_set):
-            value = is_set()
-            is_sitting = type(value) is bool and value
+        is_sitting = event_is_set(sitting) is True
         if not is_sitting:
             self._last_hp_stale_log_ms = 0
             self._stale_escape_requested = False

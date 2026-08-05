@@ -54,6 +54,7 @@ class BotLifecycleManager:
         *,
         hunt_overlay: Win32HuntOverlay | None = None,
         vitals: PlayerVitals | None = None,
+        stream_store=None,
         on_state_change: Callable[[BotState], None] | None = None,
         on_log: Callable[[str], None] | None = None,
         on_input_ready: Callable[[], None] | None = None,
@@ -68,6 +69,8 @@ class BotLifecycleManager:
             Win32HuntOverlay() if hunt_overlay is None else hunt_overlay
         )
         self._vitals = PlayerVitals() if vitals is None else vitals
+        # Process-wide VIIPER stream store shared with ViiperManager.
+        self._stream_store = stream_store
         self._on_state_change = on_state_change
         self._on_log = (lambda _: None) if on_log is None else on_log
         self._on_input_ready_call = on_input_ready
@@ -387,6 +390,7 @@ class BotLifecycleManager:
                     on_log=self._on_log,
                     overlay=runtime_overlay,
                     vitals=self._vitals,
+                    stream_store=self._stream_store,
                 )
                 with self._ownership_lock:
                     if startup_session_opened:

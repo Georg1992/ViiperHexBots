@@ -15,6 +15,7 @@ from pybot.runtime.constants import (
 )
 from pybot.runtime.combat_observer import CombatObserver
 from pybot.runtime.deferred_actions import DeferredActionScheduler
+from pybot.runtime.event_utils import event_is_set
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.hunt_mode import HuntModeController
 from pybot.runtime.input.input_backend import InputBackend, perform_if_allowed
@@ -246,8 +247,9 @@ class AttackLoop:
     def _wait_for_gameplay_delay(self, timeout_s: float) -> None:
         """Wait a gameplay delay without hiding an urgent critical request."""
         critical = getattr(self._ctx, "critical_danger_requested", None)
-        is_set = getattr(critical, "is_set", None)
-        if not callable(is_set) or type(is_set()) is not bool:
+        # Lightweight/mock contexts have no real critical event; their legacy
+        # behavior is a single blocking wait.
+        if event_is_set(critical) is None:
             self._ctx.stop_event.wait(timeout_s)
             return
         deadline = monotonic_ms() + int(timeout_s * 1000)
@@ -575,12 +577,9 @@ class GameplayLoop:
         generation = int(getattr(self._ctx, "hunt_generation", 0))
         if self._startup_seed_generation == generation:
             return
-        buffs_done = getattr(self._ctx, "startup_buffs_done", None)
-        timers_done = getattr(self._ctx, "startup_timers_done", None)
         if (
-            hasattr(buffs_done, "is_set") and not buffs_done.is_set()
-        ) or (
-            hasattr(timers_done, "is_set") and not timers_done.is_set()
+            event_is_set(getattr(self._ctx, "startup_buffs_done", None)) is False
+            or event_is_set(getattr(self._ctx, "startup_timers_done", None)) is False
         ):
             return
         found = False

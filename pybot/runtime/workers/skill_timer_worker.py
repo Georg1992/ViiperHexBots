@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import traceback
 
+from pybot.runtime.event_utils import event_is_set
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.input.input_backend import InputBackend, perform_if_allowed
 from pybot.runtime.workers.worker_contexts import SkillTimerWorkerContext
@@ -32,9 +33,7 @@ class SkillTimerWorker:
         self._input = input_backend
         self._last_press_ms: dict[int, int] = {}
         self._armed = False
-        self._startup_generation: int | None = None
         self._startup_cycle_generation: int | None = None
-        self._armed_generation: int | None = None
         self._startup_pressed: set[int] = set()
         self._startup_block_logged: set[tuple[int, int]] = set()
 
@@ -52,10 +51,8 @@ class SkillTimerWorker:
         ]
         if not timers or ctx.is_stopped() or not ctx.should_run_timers():
             return False
-        startup_buffs = getattr(ctx, "startup_buffs_done", None)
-        if startup_buffs is not None and hasattr(startup_buffs, "is_set"):
-            if not startup_buffs.is_set():
-                return False
+        if event_is_set(getattr(ctx, "startup_buffs_done", None)) is False:
+            return False
         generation = int(getattr(ctx, "hunt_generation", 0))
         if self._startup_cycle_generation != generation:
             self._startup_pressed.clear()
@@ -94,7 +91,6 @@ class SkillTimerWorker:
             mark = getattr(ctx, "mark_startup_timers_done", None)
             if callable(mark):
                 mark(expected_generation=generation)
-            self._startup_generation = generation
         return True
 
     def process_pending(self, *, startup_only: bool = False) -> bool:
@@ -111,11 +107,8 @@ class SkillTimerWorker:
         # Startup buffs are a prerequisite, not merely a convention. The
         # gameplay owner may call this step immediately after a blocked buff
         # attempt, so fail closed until the milestone is actually published.
-        startup_buffs = getattr(ctx, "startup_buffs_done", None)
-        if startup_buffs is not None:
-            is_set = getattr(startup_buffs, "is_set", None)
-            if callable(is_set) and type(is_set()) is bool and not is_set():
-                return False
+        if event_is_set(getattr(ctx, "startup_buffs_done", None)) is False:
+            return False
         generation = int(getattr(ctx, "hunt_generation", 0))
         if self._startup_cycle_generation != generation:
             self._startup_pressed.clear()
@@ -155,7 +148,6 @@ class SkillTimerWorker:
             mark = getattr(ctx, "mark_startup_timers_done", None)
             if callable(mark):
                 mark(expected_generation=generation)
-            self._startup_generation = generation
         return True
 
     def last_success_ms(self, scan_code: int) -> int | None:
@@ -163,6 +155,13 @@ class SkillTimerWorker:
         return self._last_press_ms.get(scan_code)
 
     def run(self) -> None:
+        """Legacy standalone loop; production scheduling is ``GameplayLoop``.
+
+        All arming and deadline logic lives in ``process_pending``; this loop
+        only paces the poll and parks on the lifecycle gates. ``_last_press_ms``
+        is seeded here so a fresh legacy worker is immediately due, matching
+        the previous standalone behavior.
+        """
         ctx = self._ctx
         timers = [
             t
@@ -181,192 +180,19 @@ class SkillTimerWorker:
 
         while not ctx.is_stopped():
             try:
-                generation = getattr(ctx, "hunt_generation", 0)
-                if not self._wait_for_startup_buffs(generation):
-                    if ctx.is_stopped():
-                        break
-                    continue
-                if not ctx.should_run_timers():
-                    if self._armed:
-                        self._armed = False
-                        ctx.logger.behavior("[TIMER] paused (sit/pause/danger/teleport)")
-                    # Discovery suspension and a queued danger request do not
-                    # stop ordinary workers, so the general pause wait would
-                    # return immediately and spin. Use a bounded stop wait for
-                    # those transient safety gates; use the resume gate for
-                    # user pause/sit as before.
-                    if ctx.should_run_workers():
-                        ctx.stop_event.wait(0.25)
-                    else:
-                        ctx.wait_while_stopped_or_paused(0.25)
-                    continue
-
-                generation = int(getattr(ctx, "hunt_generation", 0))
-                if self._startup_cycle_generation != generation:
-                    # A sit/stand transition creates a new hunt generation.
-                    # Re-arm immediately so every configured timer fires once
-                    # for the new hunt instead of waiting for its old interval.
-                    self._startup_pressed.clear()
-                    self._startup_block_logged.clear()
-                    self._startup_cycle_generation = generation
-                    self._armed = False
-
-                now = monotonic_ms()
-                if not self._armed:
-                    # Teleport suspension pauses the worker without creating a
-                    # new hunt. Preserve elapsed timer time across that pause;
-                    # only a genuinely new hunt generation re-arms timers from
-                    # zero for its startup cast.
-                    if self._armed_generation != generation:
-                        self._arm_timers(timers)
-                        self._armed_generation = generation
-                    self._armed = True
-                    ctx.logger.behavior("[TIMER] armed (hunt running)")
-                    now = monotonic_ms()
-
-                due = [
-                    timer
-                    for timer in timers
-                    if now - self._last_press_ms.get(timer.scan_code, 0)
-                    >= timer.interval_ms
-                ]
-                startup_pending = self._startup_generation != generation
-                for timer in due:
-                    if int(getattr(ctx, "hunt_generation", 0)) != generation:
-                        break
-                    if not ctx.should_run_timers():
-                        break
-                    # A blocked startup cast must not burn the shared stagger
-                    # slot: check admission before claiming so the gate stays
-                    # free for buffs while area-clear/danger holds the timer.
-                    if startup_pending and not self._startup_action_allowed():
-                        block_key = (generation, timer.scan_code)
-                        if block_key not in self._startup_block_logged:
-                            self._startup_block_logged.add(block_key)
-                            ctx.logger.behavior(
-                                f"[TIMER] key blocked key={timer.button} "
-                                f"scanCode={timer.scan_code} "
-                                f"reason={self._startup_block_reason()}"
-                            )
-                        break
-                    if not self._wait_stagger_gap():
-                        break
-                    if int(getattr(ctx, "hunt_generation", 0)) != generation:
-                        break
-                    if not ctx.should_run_timers():
-                        break
-                    pressed = perform_if_allowed(
-                        self._input,
-                        ctx.should_run_timers,
-                        lambda: self._input.teleport_key(timer.scan_code),
-                        lifecycle=ctx,
-                    )
-                    if pressed is False:
-                        ctx.logger.behavior(
-                            f"[TIMER] key rejected key={timer.button} "
-                            f"scanCode={timer.scan_code}"
-                        )
-                        continue
-                    ctx.logger.behavior(
-                        f"[TIMER] key executed key={timer.button} "
-                        f"scanCode={timer.scan_code}"
-                    )
-                    if int(getattr(ctx, "hunt_generation", 0)) != generation:
-                        break
-                    pressed_at = monotonic_ms()
-                    self._last_press_ms[timer.scan_code] = pressed_at
-                    # Record on the shared gate so buff casts and other timer
-                    # presses wait out the stagger window from this keypress.
-                    self._ctx.character_action_gate.note_action(pressed_at)
-                    self._startup_pressed.add(timer.scan_code)
-
-                # Release combat only after every normal timer has fired once
-                # for this hunt generation. The generation changes when sit
-                # ends, so the startup sequence repeats on the next hunt.
-                generation = int(getattr(ctx, "hunt_generation", 0))
-                startup_scans = {timer.scan_code for timer in timers}
-                if (
-                    self._startup_generation != generation
-                    and startup_scans.issubset(self._startup_pressed)
-                ):
-                    mark_done = getattr(ctx, "mark_startup_timers_done", None)
-                    if callable(mark_done):
-                        completed = mark_done(expected_generation=generation)
-                        if completed is False:
-                            continue
-                    self._startup_generation = generation
-
-                now = monotonic_ms()
-                next_wait_ms = 1000
-                for timer in timers:
-                    elapsed = now - self._last_press_ms.get(timer.scan_code, 0)
-                    remaining = max(0, timer.interval_ms - elapsed)
-                    next_wait_ms = min(next_wait_ms, remaining)
-
-                ctx.stop_event.wait(max(0.05, next_wait_ms / 1000.0))
+                self.process_pending()
             except Exception:
                 ctx.logger.behavior(f"[TIMER] tick error:\n{traceback.format_exc()}")
                 # Bound repeated failures so a bad timer/input backend cannot
                 # spin this daemon thread and flood the logger queue.
                 if ctx.stop_event.wait(0.25):
                     break
-
-    def _startup_block_reason(self) -> str:
-        """Describe the first startup milestone currently blocking a timer."""
-        ctx = self._ctx
-        area = getattr(ctx, "startup_area_clear", None)
-        if area is not None and not area.is_set():
-            return "area_clear"
-        buffs = getattr(ctx, "startup_buffs_done", None)
-        if buffs is not None and not buffs.is_set():
-            return "buffs_pending"
-        timers = getattr(ctx, "startup_timers_done", None)
-        if timers is not None and not timers.is_set():
-            return "timers_pending"
-        if not ctx.should_run_timers():
-            return "lifecycle"
-        return "danger_or_character_safety"
-
-    def _startup_action_allowed(self) -> bool:
-        checker = getattr(self._ctx, "should_run_startup_actions", None)
-        if checker is None:
-            return self._ctx.should_run_timers()
-        return bool(checker())
-
-    def _wait_for_startup_buffs(self, generation: int) -> bool:
-        """Wait until character buffs finish before firing normal timers."""
-        custom = getattr(self._ctx.config, "custom_behavior", None)
-        buffs = getattr(custom, "buffs", ())
-        if not buffs:
-            mark_done = getattr(self._ctx, "mark_startup_buffs_done", None)
-            if callable(mark_done):
-                completed = mark_done(expected_generation=generation)
-                if completed is False:
-                    return False
-            return True
-        event = getattr(self._ctx, "startup_buffs_done", None)
-        if event is None or event.is_set():
-            return True
-        while not self._ctx.is_stopped():
-            if generation != getattr(self._ctx, "hunt_generation", generation):
-                return False
-            if not self._ctx.should_run_timers():
-                # Teleport/danger suspension leaves ordinary workers runnable,
-                # so the general pause wait would return immediately and spin.
-                # User pause/sit still use the resume gate.
-                should_run_workers = getattr(
-                    self._ctx,
-                    "should_run_workers",
-                    None,
-                )
-                if callable(should_run_workers) and should_run_workers():
-                    self._ctx.stop_event.wait(0.25)
-                else:
-                    self._ctx.wait_while_stopped_or_paused(0.25)
-                continue
-            if event.wait(0.05):
-                return True
-        return False
+            if ctx.is_stopped():
+                break
+            if ctx.should_run_timers() or ctx.should_run_workers():
+                ctx.stop_event.wait(0.25)
+            else:
+                ctx.wait_while_stopped_or_paused(0.25)
 
     def _arm_timers(self, timers) -> None:
         """Start timers for a new hunt so each configured key is due once."""

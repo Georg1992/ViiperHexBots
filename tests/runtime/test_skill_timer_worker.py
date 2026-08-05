@@ -215,18 +215,13 @@ class SkillTimerWorkerTests(unittest.TestCase):
 
         self.assertTrue(was_healing)
         self.assertEqual(presses, [59, 59])
-        arm_logs = [
-            call.args[0]
-            for call in ctx.logger.behavior.call_args_list
-            if call.args and "armed" in call.args[0]
-        ]
-        pause_logs = [
-            call.args[0]
-            for call in ctx.logger.behavior.call_args_list
-            if call.args and "paused" in call.args[0]
-        ]
-        self.assertEqual(len(arm_logs), 1)
-        self.assertEqual(pause_logs, [])
+        # Timers keep firing through the heal session: nothing here ever
+        # disarms or re-arms the schedule (a new hunt generation is the only
+        # re-arm source, and healing never changes it). The legacy run loop's
+        # "armed"/"paused" diagnostics were removed with the collapsed loop;
+        # the scheduling behavior itself is asserted by the presses above.
+        self.assertFalse(gates.healing_event.is_set())
+        gates.end_heal_ops()
 
     def test_teleport_pause_preserves_180_second_timer(self) -> None:
         timers = (
@@ -349,18 +344,9 @@ class SkillTimerWorkerTests(unittest.TestCase):
         self.assertEqual([p[0] for p in presses], [59, 59])
         # A sit creates a new hunt generation, so startup re-arm is immediate.
         self.assertLess(presses[1][1] - presses[0][1], 60_000)
-        pause_logs = [
-            call.args[0]
-            for call in ctx.logger.behavior.call_args_list
-            if call.args and "paused" in call.args[0]
-        ]
-        arm_logs = [
-            call.args[0]
-            for call in ctx.logger.behavior.call_args_list
-            if call.args and "armed" in call.args[0]
-        ]
-        self.assertTrue(pause_logs)
-        self.assertGreaterEqual(len(arm_logs), 2)
+        # The legacy run loop's "armed"/"paused" diagnostics were removed with
+        # the collapsed loop; the re-arm behavior is asserted by the presses.
+        self.assertFalse(ctx.hunt_generation == 0)
 
 
 if __name__ == "__main__":

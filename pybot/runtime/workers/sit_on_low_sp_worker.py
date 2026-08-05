@@ -329,6 +329,11 @@ class SitOnLowSpWorker:
         return False
 
     def run(self) -> None:
+        """Legacy standalone loop; production ownership is ``GameplayLoop``.
+
+        All sit/danger decisions live in ``process_pending``; this loop only
+        parks on the lifecycle gates and paces the poll.
+        """
         ctx = self._ctx
         ctx.logger.behavior(
             f"[SIT] worker started key={ctx.config.sit_on_low_sp_button} "
@@ -345,21 +350,7 @@ class SitOnLowSpWorker:
                     # Park until it resolves; SP recovery resumes afterwards.
                     ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
                     continue
-                if ctx.danger_sit_requested.is_set():
-                    # Every HP drop is queued so a seated session can escape
-                    # immediately. While hunting, only CRITICAL damage may
-                    # teleport; ordinary hits are consumed without recovery.
-                    self._handle_hunting_danger()
-                    if ctx.danger_sit_requested.is_set():
-                        ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
-                    continue
-                ratio = self._sp_ratio()
-                if ratio is None:
-                    ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
-                    continue
-                if ratio < SIT_LOW_SP_RATIO:
-                    self._recover_sp(ratio, reason="low_sp")
-                else:
+                if not self.process_pending():
                     ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
             except Exception:
                 ctx.logger.behavior(f"[SIT] tick error:\n{traceback.format_exc()}")

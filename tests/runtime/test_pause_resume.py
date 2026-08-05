@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 
 from pybot.app.bot_lifecycle import BotLifecycleManager, BotState
 from pybot.runtime.hunt_runtime import HuntRuntime
-from pybot.runtime.input import viiper_backend as vb
 from pybot.runtime.input.viiper_backend import ViiperBackend
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.workers.discovery_worker import DiscoveryWorker
@@ -138,7 +137,7 @@ class HuntRuntimePauseTests(unittest.TestCase):
         runtime._ctx = ctx
         runtime._input_backend = backend
 
-        vb._shared_operation_lock.acquire()
+        backend._store.operation_lock.acquire()
         try:
             result: list[bool] = []
             thread = threading.Thread(
@@ -152,7 +151,7 @@ class HuntRuntimePauseTests(unittest.TestCase):
             self.assertEqual(result, [False])
             ctx.mark_running.assert_not_called()
         finally:
-            vb._shared_operation_lock.release()
+            backend._store.operation_lock.release()
             backend.begin_session()
 
     def test_pause_cancels_input_before_workers_are_paused(self) -> None:

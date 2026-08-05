@@ -24,12 +24,15 @@ class BotController:
         on_log: Callable[[str], None] | None = None,
         overlay: HuntOverlay | None = None,
         vitals: PlayerVitals | None = None,
+        stream_store=None,
     ) -> None:
         self._app_config = app_config
         self._session_id = session_id
         self._on_log = on_log
         self._overlay = NullOverlay() if overlay is None else overlay
         self._vitals = PlayerVitals() if vitals is None else vitals
+        # Process-wide VIIPER stream store shared with ViiperManager.
+        self._stream_store = stream_store
         self._runtime: HuntRuntime | None = None
         self._thread: threading.Thread | None = None
 
@@ -69,6 +72,7 @@ class BotController:
             behavior_callback=self._on_log,
             overlay=self._overlay,
             vitals=self._vitals,
+            stream_store=self._stream_store,
         )
         self._runtime = HuntRuntime(deps)
         self._thread = threading.Thread(

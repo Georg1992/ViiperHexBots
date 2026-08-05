@@ -7,21 +7,28 @@ import time
 import unittest
 from unittest.mock import MagicMock
 
-from pybot.runtime.input import viiper_backend as vb
-from pybot.runtime.input.viiper_backend import ViiperBackend
+from pybot.runtime.input.viiper_backend import (
+    ViiperBackend,
+    ViiperStreamStore,
+)
 
 
 class ViiperBackendStreamLifetimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = ViiperStreamStore()
+
     def tearDown(self) -> None:
-        ViiperBackend.close_shared_streams()
+        self.store.close()
+
+    def _seed_shared_streams(self, kb, mouse) -> None:
+        """Record already-open streams on the shared store (test seam)."""
+        self.store.open_once(lambda: (kb, mouse))
 
     def test_shutdown_releases_keys_without_closing_shared_streams(self) -> None:
-        backend = ViiperBackend()
+        backend = ViiperBackend(stream_store=self.store)
         kb = MagicMock()
         mouse = MagicMock()
-        with vb._shared_lock:
-            vb._shared_kb = kb
-            vb._shared_mouse = mouse
+        self._seed_shared_streams(kb, mouse)
         backend._kb_stream = kb
         backend._mouse_stream = mouse
         backend._connected = True
@@ -31,19 +38,21 @@ class ViiperBackendStreamLifetimeTests(unittest.TestCase):
         kb.write.assert_called_once()
         kb.close.assert_not_called()
         mouse.close.assert_not_called()
-        self.assertIs(vb._shared_kb, kb)
-        self.assertIs(vb._shared_mouse, mouse)
+        # The shared store must retain the streams so Stop/Start never
+        # triggers VIIPER device auto-removal: a fresh backend reuses them.
+        revived = ViiperBackend(stream_store=self.store)
+        revived.connect()
+        self.assertIs(revived._kb_stream, kb)
+        self.assertIs(revived._mouse_stream, mouse)
 
     def test_connect_reuses_shared_streams(self) -> None:
         kb = MagicMock()
         mouse = MagicMock()
-        with vb._shared_lock:
-            vb._shared_kb = kb
-            vb._shared_mouse = mouse
+        self._seed_shared_streams(kb, mouse)
 
-        first = ViiperBackend()
+        first = ViiperBackend(stream_store=self.store)
         first.connect()
-        second = ViiperBackend()
+        second = ViiperBackend(stream_store=self.store)
         second.connect()
 
         self.assertIs(first._kb_stream, kb)
@@ -52,12 +61,10 @@ class ViiperBackendStreamLifetimeTests(unittest.TestCase):
         self.assertTrue(second._connected)
 
     def test_shutdown_releases_mouse_buttons_as_well_as_keys(self) -> None:
-        backend = ViiperBackend()
+        backend = ViiperBackend(stream_store=self.store)
         kb = MagicMock()
         mouse = MagicMock()
-        with vb._shared_lock:
-            vb._shared_kb = kb
-            vb._shared_mouse = mouse
+        self._seed_shared_streams(kb, mouse)
         backend._kb_stream = kb
         backend._mouse_stream = mouse
         backend._connected = True
@@ -70,30 +77,34 @@ class ViiperBackendStreamLifetimeTests(unittest.TestCase):
         self.assertEqual(backend._mouse_buttons, 0)
 
     def test_move_and_double_click_emits_two_atomic_clicks(self) -> None:
-        backend = ViiperBackend()
+        backend = ViiperBackend(stream_store=self.store)
         backend._connected = True
         backend._kb_stream = MagicMock()
         backend._mouse_stream = MagicMock()
         backend._cancel_event.clear()
 
-        with unittest.mock.patch.object(vb.user32, "SetCursorPos") as set_cursor, \
-             unittest.mock.patch.object(backend, "_wait_or_cancel", return_value=True), \
-             unittest.mock.patch.object(backend, "_mouse_button") as mouse_button:
+        with unittest.mock.patch(
+            "pybot.runtime.input.viiper_backend.user32"
+        ) as mock_user32, unittest.mock.patch.object(
+            backend, "_wait_or_cancel", return_value=True
+        ), unittest.mock.patch.object(
+            backend, "_mouse_button"
+        ) as mouse_button:
             self.assertTrue(backend.move_and_double_click(120, 240))
 
-        set_cursor.assert_called_once_with(120, 240)
+        mock_user32.SetCursorPos.assert_called_once_with(120, 240)
         self.assertEqual(
             [call for call in mouse_button.call_args_list],
             [
-                unittest.mock.call(vb.MOUSE_BUTTON_LEFT, down=True),
-                unittest.mock.call(vb.MOUSE_BUTTON_LEFT, down=False),
-                unittest.mock.call(vb.MOUSE_BUTTON_LEFT, down=True),
-                unittest.mock.call(vb.MOUSE_BUTTON_LEFT, down=False),
+                unittest.mock.call(0, down=True),
+                unittest.mock.call(0, down=False),
+                unittest.mock.call(0, down=True),
+                unittest.mock.call(0, down=False),
             ],
         )
 
     def test_cancel_interrupts_key_tap_and_releases_key(self) -> None:
-        backend = ViiperBackend()
+        backend = ViiperBackend(stream_store=self.store)
         backend._connected = True
         backend._kb_stream = MagicMock()
         backend._mouse_stream = MagicMock()
@@ -119,7 +130,7 @@ class ViiperBackendStreamLifetimeTests(unittest.TestCase):
         )
 
     def test_toggle_key_stays_accepted_after_cancellation(self) -> None:
-        backend = ViiperBackend()
+        backend = ViiperBackend(stream_store=self.store)
         backend._connected = True
         backend._kb_stream = MagicMock()
         backend._mouse_stream = MagicMock()
@@ -140,7 +151,7 @@ class ViiperBackendStreamLifetimeTests(unittest.TestCase):
         self.assertEqual(backend._kb_stream.write.call_count, 2)
 
     def test_cancelled_session_still_releases_left_button(self) -> None:
-        backend = ViiperBackend()
+        backend = ViiperBackend(stream_store=self.store)
         kb = MagicMock()
         mouse = MagicMock()
         backend._kb_stream = kb
@@ -153,19 +164,31 @@ class ViiperBackendStreamLifetimeTests(unittest.TestCase):
         self.assertEqual(backend._mouse_buttons, 0)
         mouse.write.assert_called_once()
 
-    def test_close_shared_streams_closes_tcp(self) -> None:
+    def test_store_close_closes_tcp_streams(self) -> None:
         kb = MagicMock()
         mouse = MagicMock()
-        with vb._shared_lock:
-            vb._shared_kb = kb
-            vb._shared_mouse = mouse
+        self._seed_shared_streams(kb, mouse)
 
-        ViiperBackend.close_shared_streams()
+        self.store.close()
 
         kb.close.assert_called_once()
         mouse.close.assert_called_once()
-        self.assertIsNone(vb._shared_kb)
-        self.assertIsNone(vb._shared_mouse)
+
+    def test_open_once_opens_streams_exactly_once(self) -> None:
+        store = ViiperStreamStore()
+        opened = 0
+
+        def _opener():
+            nonlocal opened
+            opened += 1
+            return MagicMock(), MagicMock()
+
+        first_kb, first_mouse = store.open_once(_opener)
+        second_kb, second_mouse = store.open_once(_opener)
+
+        self.assertEqual(opened, 1)
+        self.assertIs(first_kb, second_kb)
+        self.assertIs(first_mouse, second_mouse)
 
 
 if __name__ == "__main__":
