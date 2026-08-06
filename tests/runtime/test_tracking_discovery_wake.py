@@ -29,6 +29,26 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         )
         self.worker = CoordTrackingWorker(self.ctx)
 
+    def test_discovery_timeout_does_not_consume_post_teleport_wake(self) -> None:
+        """A wake arriving at the cadence boundary must survive for the next scan."""
+        from pybot.runtime.workers.discovery_worker import DiscoveryWorker
+
+        ctx = MagicMock()
+        ctx.stop_event = threading.Event()
+        ctx.config.discovery_interval_ms = 1
+        ctx.should_run_discovery.return_value = True
+        ctx.discovery_wake = threading.Event()
+        # Simulate a teleport setting the wake while the cadence wait reports
+        # timeout. The worker must not clear that signal before scanning.
+        ctx.discovery_wake.set()
+        worker = DiscoveryWorker(ctx, MagicMock())
+        worker._wait_for_discovery_wake = MagicMock(return_value=False)
+        worker._scan = lambda: ctx.stop_event.set()
+
+        worker.run()
+
+        self.assertTrue(ctx.discovery_wake.is_set())
+
     def test_coord_worker_treats_dead_flag_as_miss(self) -> None:
         """Coord worker no longer special-cases dead=True — it's just a miss."""
         track = self.tracks.create_track(

@@ -75,8 +75,13 @@ class DiscoveryWorker:
                 # Keep the observer on its cadence even during an area
                 # transition. _scan() rejects the result at the epoch/suspend
                 # publication boundary, rather than starving capture itself.
-                self._wait_for_discovery_wake(interval_s)
-                ctx.discovery_wake.clear()
+                woke = self._wait_for_discovery_wake(interval_s)
+                # Only consume a wake that this wait actually received. If the
+                # cadence timed out, a teleport may set the event at the same
+                # boundary; clearing it here would lose the required
+                # post-teleport discovery wake.
+                if woke:
+                    ctx.discovery_wake.clear()
                 if not ctx.should_run_discovery():
                     continue
                 self._scan()
