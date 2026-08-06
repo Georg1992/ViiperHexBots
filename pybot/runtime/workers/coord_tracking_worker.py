@@ -23,7 +23,6 @@ from pybot.runtime.constants import (
     LOG_REPEAT_INTERVAL_MS,
     SLOW_SCAN_WARN_MS,
     TRACKING_LOOP_INTERVAL_S,
-    TRACKING_OVERLAY_INTERVAL_S,
     WORKER_POLL_INTERVAL_S,
 )
 from pybot.runtime.hunt_tracks import monotonic_ms
@@ -40,7 +39,6 @@ class CoordTrackingWorker:
         self._last_slow_track_log_ms = 0
         # Track IDs whose first-tick data has been logged (one shot per track).
         self._logged_first_tick: set[tuple[int, int]] = set()
-        self._last_overlay_ms = 0
 
     def run(self) -> None:
         ctx = self._ctx
@@ -368,18 +366,19 @@ class CoordTrackingWorker:
         )
 
     def _update_overlay(self, now_ms: int) -> None:
+        """Push the freshest stored coords to the overlay every tick.
+
+        Runs right after each tracking pass, so the positions published are
+        the latest written under the store lock. The overlay setters dedupe
+        identical values (no repaint when nothing changed) and painting is
+        coalesced on the UI thread, so publishing at the full tracking
+        cadence only costs a lock + list compare per tick — never a stale
+        dot up to 100 ms behind the mob.
+        """
         ctx = self._ctx
         track_count, alive = ctx.tracks.overlay_track_state(now_ms)
         current_epoch = ctx.tracks.area_epoch
         active_keys = {(current_epoch, track.id) for track in alive}
         self._logged_first_tick.intersection_update(active_keys)
-        if (
-            self._last_overlay_ms
-            and now_ms - self._last_overlay_ms < int(
-                TRACKING_OVERLAY_INTERVAL_S * 1000
-            )
-        ):
-            return
-        self._last_overlay_ms = now_ms
         ctx.overlay.set_track_stats(track_count=track_count, alive_count=len(alive))
         ctx.overlay.set_track_positions([(t.x, t.y) for t in alive])

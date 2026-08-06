@@ -32,6 +32,18 @@ if TYPE_CHECKING:
     from pybot.recognition.detector.detector import MobDetector
 
 _LOCAL_SUPPRESS_RADIUS_FLOOR_PX = 8
+# Same floor as detector._MIN_DESCRIPTOR_PX (kept local to avoid a circular
+# import from detector.py which lazily imports this module).
+_FAST_BBOX_MIN_PX = 8
+# Fast-path peaks must clear a multiple of the local-follow heat floor before
+# they are accepted WITHOUT the native silhouette gate. A real hit is a strong
+# palette peak; this rejects weak marginal blobs that a red-tinted terrain
+# fragment could produce.
+_LOCAL_FAST_MIN_HEAT_MULT = 2.0
+# The sprite-recenter window is 1.5x the descriptor size so a hit that sits
+# off the sprite edge still contains the full body (a descriptor-sized window
+# would clip the palette bbox and bias the center toward the window center).
+_REFINE_WINDOW_SCALE = 1.5
 _LOCAL_CROSS_TRACK_SUPPRESS_DIV = 2
 _LOCAL_PEAK_SUPPRESS_DIV = 4
 _LOCAL_FOLLOW_MIN_HEAT_FRAC = 0.5
@@ -405,8 +417,27 @@ def _follow_cached_template(
         _template_store(detector).pop(track_id, None)
         return None
 
+    # Re-center the follow point on the mob's sprite (palette-CC bbox center)
+    # instead of the template patch center, then re-anchor the cached patch so
+    # the next match is centered too. The patch keeps its size (no drift).
+    hit_x, hit_y = _refine_hit_to_sprite_center(
+        detector, frame_bgr, descriptor, hit_x, hit_y, scale,
+    )
+    bbox = (
+        hit_x - native_w // 2,
+        hit_y - native_h // 2,
+        native_w,
+        native_h,
+    )
+
     previous_hits = int(getattr(template, "verified_hits", 0)) + 1
-    if previous_hits % _TEMPLATE_VERIFY_EVERY == 0:
+    # Static GRF descriptors skip the periodic native verify entirely — the
+    # every-hit ``_template_identity_ok`` color/body check is their identity
+    # guarantee, and skipping the gate removes the flicker-miss class.
+    if (
+        previous_hits % _TEMPLATE_VERIFY_EVERY == 0
+        and not _fast_track_accept(detector, descriptor)
+    ):
         accepted, _verified_bbox, _similarity = detector.score_at(
             frame_bgr, descriptor, hit_x, hit_y, scale,
         )
@@ -565,11 +596,35 @@ def _find_local_peak(
         peak_y_local, peak_x_local = np.unravel_index(int(work.argmax()), work.shape)
         peak_x = int(round(peak_x_local * pyramid + x0 + (pyramid - 1) / 2))
         peak_y = int(round(peak_y_local * pyramid + y0 + (pyramid - 1) / 2))
-        accepted, bbox, sim = detector.score_at(
-            frame_bgr, descriptor, peak_x, peak_y, scale,
-        )
-        if accepted and bbox is not None:
-            return peak_x, peak_y, peak_val, sim, bbox
+        if _fast_track_accept(detector, descriptor):
+            # Static modified sprites (distinctive red, one frame): the local
+            # follow heatmap peak is already palette-driven, so accept it via a
+            # cheap sprite/body color-fraction check instead of the expensive
+            # native-resolution silhouette gate. This is the dominant per-tick
+            # cost for large sprites (Anubis) and a common miss source when the
+            # gate flickers on a deformed extract. The peak must clear a strong
+            # heat multiple (not just the floor) since no silhouette verify runs.
+            bbox = _descriptor_sized_bbox(descriptor, peak_x, peak_y, scale)
+            if (
+                bbox is not None
+                and peak_val >= _LOCAL_FAST_MIN_HEAT_MULT * min_heat
+                and _template_identity_ok(detector, frame_bgr, descriptor, bbox)
+            ):
+                # Re-center on the sprite body: the heat peak can sit on the
+                # densest color region instead of the sprite center, which made
+                # the bot aim off the mob. Heat (palette match strength) doubles
+                # as confidence — the fast path has no silhouette similarity.
+                peak_x, peak_y = _refine_hit_to_sprite_center(
+                    detector, frame_bgr, descriptor, peak_x, peak_y, scale,
+                )
+                bbox = _descriptor_sized_bbox(descriptor, peak_x, peak_y, scale)
+                return peak_x, peak_y, peak_val, float(peak_val), bbox
+        else:
+            accepted, bbox, sim = detector.score_at(
+                frame_bgr, descriptor, peak_x, peak_y, scale,
+            )
+            if accepted and bbox is not None:
+                return peak_x, peak_y, peak_val, sim, bbox
         cv2.circle(
             work,
             (int(peak_x_local), int(peak_y_local)),
@@ -579,6 +634,114 @@ def _find_local_peak(
         )
 
     return None
+
+
+def _fast_track_accept(
+    detector: MobDetector,
+    descriptor: MobDescriptor,
+) -> bool:
+    """True when local follow may accept a peak without the native silhouette gate.
+
+    Modified sprite.grf assets are a single deterministic static frame with a
+    distinctive red palette. The heatmap peak is already palette-driven, so the
+    native-resolution verify adds little for a static descriptor while costing
+    a large part of every tracking tick on big sprites (Anubis). Enabled only
+    when the mode flag is set AND the descriptor is truly single-frame, so the
+    animated-original path keeps its full verification.
+    """
+    return (
+        detector.use_sprite_grf
+        and bool(getattr(detector, "grf_local_track_skip_native_gate", True))
+        and detector.descriptor_is_static(descriptor)
+    )
+
+
+def _descriptor_sized_bbox(
+    descriptor: MobDescriptor,
+    cx: int,
+    cy: int,
+    scale: float,
+) -> tuple[int, int, int, int] | None:
+    """Descriptor-sized window around a peak (mirrors ``score_at``'s crop)."""
+    w = max(_FAST_BBOX_MIN_PX, int(round(descriptor.avg_width * scale)))
+    h = max(_FAST_BBOX_MIN_PX, int(round(descriptor.avg_height * scale)))
+    x = int(round(cx - w / 2))
+    y = int(round(cy - h / 2))
+    return (x, y, w, h)
+
+
+def _refine_hit_to_sprite_center(
+    detector: MobDetector,
+    frame_bgr: np.ndarray,
+    descriptor: MobDescriptor,
+    cx: int,
+    cy: int,
+    scale: float,
+) -> tuple[int, int]:
+    """Re-center a hit on the mob's sprite (palette-CC bbox center).
+
+    Heat peaks and template-patch centers can sit off the sprite body (a dense
+    color region or asymmetric pose). The palette-CC bounding box of the mob
+    inside a 1.5x descriptor-sized window around the hit is the same sprite
+    anchor discovery and ``score_at`` use, so every consumer sees one
+    consistent on-sprite point and the aim click lands on the mob. The
+    connected component overlapping the window center (the hit) is isolated so
+    an adjacent mob's pixels cannot drag the anchor between two sprites. Falls
+    back to the input when no palette match is visible.
+    """
+    w = max(
+        _FAST_BBOX_MIN_PX,
+        int(round(descriptor.avg_width * scale * _REFINE_WINDOW_SCALE)),
+    )
+    h = max(
+        _FAST_BBOX_MIN_PX,
+        int(round(descriptor.avg_height * scale * _REFINE_WINDOW_SCALE)),
+    )
+    fh, fw = frame_bgr.shape[:2]
+    x0 = max(0, int(round(cx - w / 2)))
+    y0 = max(0, int(round(cy - h / 2)))
+    x1 = min(fw, x0 + w)
+    y1 = min(fh, y0 + h)
+    x0 = max(0, x1 - w)
+    y0 = max(0, y1 - h)
+    if x1 <= x0 or y1 <= y0:
+        return int(cx), int(cy)
+    region = frame_bgr[y0:y1, x0:x1]
+    heat = sprite_palette_heatmap(
+        region,
+        descriptor.match_palette_bgr,
+        float(descriptor.max_sprite_palette_distance),
+    )
+    mask = heat >= float(detector.config["minSpritePaletteMatch"])
+    if not np.any(mask):
+        return int(cx), int(cy)
+
+    local_cx = int(cx) - x0
+    local_cy = int(cy) - y0
+    nlab, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        mask.astype(np.uint8), connectivity=8,
+    )
+    chosen = 0
+    if (
+        nlab > 1
+        and 0 <= local_cx < mask.shape[1]
+        and 0 <= local_cy < mask.shape[0]
+    ):
+        chosen = int(labels[local_cy, local_cx])
+    if chosen <= 0 and nlab > 1:
+        # Hit fell between components (e.g. on a gap) — use the largest one.
+        areas = {
+            label: int(stats[label, cv2.CC_STAT_AREA])
+            for label in range(1, nlab)
+        }
+        chosen = max(areas, key=areas.get)  # type: ignore[arg-type]
+    if chosen <= 0:
+        return int(cx), int(cy)
+
+    ys, xs = np.where(labels == chosen)
+    center_x = x0 + int(round((float(xs.min()) + float(xs.max())) / 2.0))
+    center_y = y0 + int(round((float(ys.min()) + float(ys.max())) / 2.0))
+    return center_x, center_y
 
 
 def _build_local_follow_heatmap(

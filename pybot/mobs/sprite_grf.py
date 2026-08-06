@@ -517,7 +517,12 @@ def sync_sprite_grf(
 
     def _log(msg: str) -> None:
         if logger and hasattr(logger, "__call__"):
-            logger(msg)
+            try:
+                logger(msg)
+            except UnicodeEncodeError:
+                # Paths can carry non-UTF-8 bytes (Korean dirs); a logger that
+                # encodes to the console codepage must never abort a sync.
+                pass
 
     changed = 0
     if not MOBS_DIR.is_dir():

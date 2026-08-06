@@ -313,19 +313,27 @@ class AttackLoop:
 
         # A configured debuff is cast once for this stable track before its
         # first attack. Failed input leaves the flag unset so the next cycle
-        # can retry instead of attacking an unprepared target.
+        # can retry instead of attacking an unprepared target. It re-reads the
+        # freshest position so the debuff click lands on the sprite, matching
+        # the attack click.
         try:
-            prepared = self._perform_target_input(
-                target_id,
-                snap_epoch,
-                lambda: self._mob_behavior.prepare_target(
+            def _prepare_fresh_target() -> bool:
+                fresh = ctx.tracks.snapshot_for_track(target_id, monotonic_ms())
+                if fresh is None:
+                    return False
+                return self._mob_behavior.prepare_target(
                     target_id,
-                    click_x,
-                    click_y,
+                    fresh.x,
+                    fresh.y,
                     self._input,
                     target_debuffed=getattr(snap, "debuff_applied", False),
                     mark_debuffed=lambda: ctx.tracks.mark_debuff_applied(target_id),
-                ),
+                )
+
+            prepared = self._perform_target_input(
+                target_id,
+                snap_epoch,
+                _prepare_fresh_target,
             )
         except Exception:
             ctx.logger.behavior(
@@ -361,13 +369,24 @@ class AttackLoop:
         try:
             # Atomic target move + skill key + click. This prevents a periodic
             # self-buff or heal worker from stealing the cursor between move
-            # and attack input.
+            # and attack input. Click at the freshest stored position: debuff,
+            # pre-attack hooks and SP sampling run between the snapshot above
+            # and this click, and a re-read under the store lock lands the
+            # cursor on the sprite instead of where the mob was a moment ago.
+            def _click_freshest_target() -> bool:
+                fresh = ctx.tracks.snapshot_for_track(target_id, monotonic_ms())
+                if fresh is None:
+                    return False
+                return self._input.skill_click_at(
+                    ctx.config.skill_scan_code,
+                    fresh.x,
+                    fresh.y,
+                )
+
             attack_started = self._perform_target_input(
                 target_id,
                 snap_epoch,
-                lambda: self._input.skill_click_at(
-                    ctx.config.skill_scan_code, click_x, click_y
-                ),
+                _click_freshest_target,
             )
         except Exception:
             ctx.logger.behavior(

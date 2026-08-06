@@ -228,10 +228,11 @@ class AttackLoopSitRaceTests(unittest.TestCase):
             discovery_stationary=False, moving=False,
             idle_attack_count=0, attack_count=0, area_epoch=0,
         )
-        # Initial snapshot, preparation admission, skill admission, then
-        # removal during the skill delay. This exercises the post-delay guard.
+        # Initial snapshot, preparation admission + freshest debuff re-read,
+        # skill admission, the freshest-position click re-read, then removal
+        # during the skill delay. This exercises the post-delay guard.
         ctx.tracks.snapshot_for_track.side_effect = [
-            snapshot, snapshot, snapshot, snapshot, None,
+            snapshot, snapshot, snapshot, snapshot, snapshot, snapshot, None,
         ]
         ctx.tracks.positions_snapshot.return_value = [(10, 20)]
         ctx.logger = MagicMock()

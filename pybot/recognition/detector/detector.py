@@ -40,6 +40,10 @@ REQUIRED_CONFIG_KEYS = {
     "gateRefUniqueIoU",
     "minSilhouetteRecall",
     "minSilhouettePrecision",
+    "grfMinSilhouetteRecall",
+    "grfMinSilhouettePrecision",
+    "grfLocalTrackSkipNativeGate",
+    "grfAspectBandScale",
     "minRequiredPaletteGroups",
     "minSecondPaletteGroupShare",
     "minRequiredPaletteCoverage",
@@ -308,6 +312,24 @@ class MobDetector:
         )
         self.local_track_max_search_radius_px = int(
             self.config.get("localTrackMaxSearchRadiusPx", 360)
+        )
+        # GRF mode (modified sprite.grf) relaxes the silhouette gate and lets
+        # static-descriptor local tracking skip the native verify. Defaults
+        # keep programmatic/older configs working.
+        self.grf_min_silhouette_recall = float(
+            self.config.get("grfMinSilhouetteRecall", 0.32)
+        )
+        self.grf_min_silhouette_precision = float(
+            self.config.get("grfMinSilhouettePrecision", 0.55)
+        )
+        self.grf_local_track_skip_native_gate = bool(
+            self.config.get("grfLocalTrackSkipNativeGate", True)
+        )
+        # GRF mode widens the descriptor aspect band: a static red sprite's
+        # palette CC is often clipped (head/feet shade outside the match radius),
+        # which shifts the extract aspect beyond the build-time tight band.
+        self.grf_aspect_band_scale = float(
+            self.config.get("grfAspectBandScale", 1.3)
         )
 
     def descriptor_path(self, mob_name: str) -> Path:
@@ -806,6 +828,24 @@ class MobDetector:
         descriptor._min_area_ratio = result
         return result
 
+    def _effective_aspect_band(self, descriptor: MobDescriptor) -> tuple[float, float]:
+        """Aspect band for the active mode (GRF widens the build-time band).
+
+        Modified sprites are static and palette-distinctive, but their palette CC
+        extract is frequently clipped (a head/feet shade outside the match radius
+        shortens one axis), which pushes the extract aspect past the build-time
+        tight band — Anubis' clipped extract measured 1.17 vs a 1.03 max. GRF mode
+        therefore scales the band outward; the red palette keeps wrong-size blobs
+        from passing anyway.
+        """
+        if self.use_sprite_grf:
+            scale = max(1.0, self.grf_aspect_band_scale)
+            return (
+                descriptor.min_aspect_ratio / scale,
+                descriptor.max_aspect_ratio * scale,
+            )
+        return descriptor.min_aspect_ratio, descriptor.max_aspect_ratio
+
     def _passes_size_aspect_vs_descriptor(
         self,
         width: int,
@@ -814,6 +854,7 @@ class MobDetector:
         *,
         require_min_area: bool,
         enforce_max_area: bool = True,
+        grf_wide_aspect: bool = False,
     ) -> bool:
         """Descriptor-relative area + aspect band shared by heat and extract.
 
@@ -822,6 +863,11 @@ class MobDetector:
         are measured from sprite tight-bboxes at build time (with margin) and
         floored by ``MIN_ASPECT_FLOOR`` so the band is expressed in the same
         normalized units the gate uses.
+
+        ``grf_wide_aspect`` opts the *extract* check into GRF mode's widened band
+        (``_effective_aspect_band``) — a clipped palette CC of a static red sprite
+        often measures past the build-time band. The heat geometry pre-gate keeps
+        the tight band so terrain mega-blobs still fail early.
         """
         if width < 1 or height < 1:
             return False
@@ -833,11 +879,16 @@ class MobDetector:
         desc_aspect = desc_w / desc_h
         area_ratio = (float(width) * float(height)) / desc_area
         aspect_ratio = (float(width) / float(height)) / desc_aspect
+        if grf_wide_aspect and self.use_sprite_grf:
+            min_aspect, max_aspect = self._effective_aspect_band(descriptor)
+        else:
+            min_aspect = descriptor.min_aspect_ratio
+            max_aspect = descriptor.max_aspect_ratio
         if require_min_area and area_ratio < self._descriptor_min_area_ratio(descriptor):
             return False
         if enforce_max_area and area_ratio > _GEOMETRY_AREA_MAX_RATIO:
             return False
-        if aspect_ratio < descriptor.min_aspect_ratio or aspect_ratio > descriptor.max_aspect_ratio:
+        if aspect_ratio < min_aspect or aspect_ratio > max_aspect:
             return False
         return True
 
@@ -897,15 +948,73 @@ class MobDetector:
         if cached is not None:
             return cached
         refs: list[tuple[np.ndarray, np.ndarray]] = []
+        seen: list[tuple[np.ndarray, np.ndarray]] = []
         for mask in masks:
             if not mask.stable_mask or not any(mask.stable_mask):
                 continue
-            refs.append((
-                np.array(mask.avg_mask, dtype=np.float32).reshape(mask.height, mask.width),
-                np.array(mask.stable_mask, dtype=bool).reshape(mask.height, mask.width),
-            ))
+            avg = np.array(mask.avg_mask, dtype=np.float32).reshape(mask.height, mask.width)
+            stable = np.array(mask.stable_mask, dtype=bool).reshape(mask.height, mask.width)
+            # Static modified sprites carry the same canonical frame under every
+            # facing; dedup identical refs so the gate literally scores against
+            # the one frame (matching how the sprite renders) and skips the
+            # duplicated comparison. Rounding absorbs float noise across rebuilds.
+            duplicate = False
+            for prev_avg, prev_stable in seen:
+                if (
+                    avg.shape == prev_avg.shape
+                    and np.array_equal(np.round(avg, 3), np.round(prev_avg, 3))
+                    and np.array_equal(stable, prev_stable)
+                ):
+                    duplicate = True
+                    break
+            if duplicate:
+                continue
+            seen.append((avg, stable))
+            refs.append((avg, stable))
         self._silhouette_ref_cache[cache_key] = refs
         return refs
+
+    def silhouette_gate_thresholds(self) -> tuple[float, float]:
+        """Return (min_recall, min_precision) for the active rendering mode.
+
+        Modified sprite.grf assets are a single deterministic static frame with
+        a distinctive red palette — far easier to recognize than the animated
+        originals. GRF mode therefore relaxes the silhouette gate so a partially
+        occluded or heavily deformed extract still passes, reducing discovery
+        misses (and the teleport-away risk) for static modified sprites.
+        """
+        if self.use_sprite_grf:
+            return (
+                self.grf_min_silhouette_recall,
+                self.grf_min_silhouette_precision,
+            )
+        return (
+            float(self.config["minSilhouetteRecall"]),
+            float(self.config["minSilhouettePrecision"]),
+        )
+
+    def descriptor_is_static(self, descriptor: MobDescriptor) -> bool:
+        """True when every silhouette ref is the same frame (modified static sprite).
+
+        Modified sprites are generated as one canonical frame, so the descriptor
+        carries a single unique pose across all facings. A static descriptor has
+        a deterministic appearance: the animation-diversity gate adds nothing and
+        local tracking can follow it without the native-resolution verify.
+        """
+        cached = getattr(descriptor, "_static_descriptor", None)
+        if cached is not None:
+            return bool(cached)
+        masks = descriptor.silhouette_masks
+        if not masks:
+            descriptor._static_descriptor = False
+            return False
+        first = tuple(round(float(v), 3) for v in masks[0].avg_mask)
+        for mask in masks[1:]:
+            if tuple(round(float(v), 3) for v in mask.avg_mask) != first:
+                descriptor._static_descriptor = False
+                return False
+        descriptor._static_descriptor = True
+        return True
 
 
 
@@ -1011,6 +1120,7 @@ class MobDetector:
             descriptor,
             require_min_area=True,
             enforce_max_area=False,
+            grf_wide_aspect=True,
         ):
             extract_bbox = (
                 search_x + comp_left,
@@ -1078,9 +1188,10 @@ class MobDetector:
         solid_fill = (
             grid_n > 0 and (float(hard_n) / float(grid_n)) >= _SOLID_FILL_HARD_FRACTION
         )
+        min_recall, min_precision = self.silhouette_gate_thresholds()
         dual_ok = (
-            recall >= float(self.config["minSilhouetteRecall"])
-            and precision >= float(self.config["minSilhouettePrecision"])
+            recall >= min_recall
+            and precision >= min_precision
         )
         # Content veto: solid palette fill of the gate grid (color smear in a
         # desc-sized window). Bloated CCs may still shrink after pre-shrink
@@ -1226,7 +1337,8 @@ class MobDetector:
         _sim0, facing_idx, _scores0, _prec0, rec0 = best_silhouette_match(
             candidate, refs,
         )
-        if rec0 < float(self.config["minSilhouetteRecall"]):
+        min_recall, _min_precision = self.silhouette_gate_thresholds()
+        if rec0 < min_recall:
             return candidate
         ref_avg, ref_stable = refs[facing_idx]
         deformed_mask = self._deform_silhouette_occupancy(

@@ -86,12 +86,28 @@ def _build_descriptor(asset_name: str, spr_stem: str, _logger) -> None:
     _logger(f"[AUTO-BUILD] {asset_name}: descriptor ready (v{DESCRIPTOR_VERSION})")
 
 
+def _modified_assets_present(asset_name: str, spr_stem: str) -> bool:
+    """True when the generated ``modified_sprite/`` SPR+ACT pair exists on disk.
+
+    The pair is the staging area for ``sprite.grf``; the descriptor alone is
+    not proof the assets exist.  A missing pair must trigger a rebuild even
+    when the descriptor JSON is up to date.
+    """
+    modified_dir = MOBS_DIR / asset_name / "modified_sprite"
+    return bool(
+        (modified_dir / f"{spr_stem}.spr").is_file()
+        and (modified_dir / f"{spr_stem}.act").is_file()
+    )
+
+
 def _build_modified_descriptor(
     asset_name: str, spr_stem: str, builder, _logger
 ) -> None:
     """Build the big+red modified-sprite descriptor (best-effort)."""
     modified_path = modified_sprite_descriptor_path(spr_stem)
-    if not _descriptor_needs_rebuild(modified_path):
+    if not _descriptor_needs_rebuild(modified_path) and _modified_assets_present(
+        asset_name, spr_stem
+    ):
         return
     try:
         if modified_path.is_file():
