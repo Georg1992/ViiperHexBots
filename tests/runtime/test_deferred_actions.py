@@ -54,6 +54,47 @@ class DeferredActionSchedulerTests(unittest.TestCase):
         self.assertEqual(calls, ["executed"])
         self.assertFalse(scheduler.get("timer").pending)
 
+    def test_buff_and_timer_tick_during_teleport_suspend_without_executing(self) -> None:
+        """Deadlines advance on black screens; keypresses wait for landing."""
+        import threading
+
+        suspend = threading.Event()
+        suspend.set()
+        calls: list[str] = []
+        scheduler = DeferredActionScheduler(clock=lambda: 500)
+        scheduler.register(
+            "buff",
+            interval_ms=100,
+            priority=30,
+            ready=lambda: not suspend.is_set(),
+            execute=lambda: calls.append("buff") or True,
+        )
+        scheduler.register(
+            "timer",
+            interval_ms=100,
+            priority=40,
+            ready=lambda: not suspend.is_set(),
+            execute=lambda: calls.append("timer") or True,
+        )
+        scheduler.sync_generation(1, now_ms=0)
+
+        scheduler.run_pending(now_ms=500)
+
+        self.assertEqual(calls, [])
+        self.assertTrue(scheduler.get("buff").expired)
+        self.assertTrue(scheduler.get("buff").pending)
+        self.assertTrue(scheduler.get("timer").expired)
+        self.assertTrue(scheduler.get("timer").pending)
+        self.assertEqual(scheduler.get("buff").next_due_ms, 0)
+        self.assertEqual(scheduler.get("timer").next_due_ms, 0)
+
+        suspend.clear()
+        scheduler.run_pending(now_ms=500)
+
+        self.assertEqual(calls, ["buff", "timer"])
+        self.assertFalse(scheduler.get("buff").pending)
+        self.assertFalse(scheduler.get("timer").pending)
+
     def test_failure_does_not_restart_timer_or_allow_success_state(self) -> None:
         attempts = {"count": 0}
         scheduler = DeferredActionScheduler(clock=lambda: 900)

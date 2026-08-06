@@ -207,25 +207,33 @@ class GateController:
         return not self.stop_event.is_set() and not self.pause_event.is_set()
 
     def should_run_discovery(self) -> bool:
-        """True whenever the observation pipeline may scan.
+        """True whenever discovery may sample a usable game frame.
 
-        Discovery is observation, not gameplay. Sit/storage/heal/danger
-        sessions may stop actions, but they must never stop fresh screen
-        sampling. A teleport transition is handled by epoch/suspend checks at
-        the publication boundary, so a capture already in progress cannot
-        commit old-screen state; it is not a reason to starve the observer.
+        Discovery remains live through sit/storage/heal/danger sessions, but a
+        teleport transition is different: RO can show a black/loading frame
+        during the configured settle delay. Suspend discovery for that window
+        so it neither captures nor tries to interpret that frame; the UI
+        status/memory feeds are separate and continue independently.
         """
-        return not self.stop_event.is_set() and not self.pause_event.is_set()
+        return (
+            not self.stop_event.is_set()
+            and not self.pause_event.is_set()
+            and not self.discovery_suspend.is_set()
+        )
 
     def should_run_tracking(self) -> bool:
-        """True whenever the tracking observer may take a fresh frame.
+        """True whenever tracking may take a fresh usable game frame.
 
-        Tracking must remain live through sit, storage, healing, and danger
-        handling. Gameplay workers own the action gates; this method only
-        represents the observation lifecycle. Stale transition results are
-        rejected by area-epoch checks before they are applied.
+        Tracking remains live through sit/storage/heal/danger sessions, but it
+        must sleep during teleport settle because the client can be black or
+        loading. Gameplay workers own the action gates; stale transition
+        results are still rejected by area-epoch checks before publication.
         """
-        return not self.stop_event.is_set() and not self.pause_event.is_set()
+        return (
+            not self.stop_event.is_set()
+            and not self.pause_event.is_set()
+            and not self.discovery_suspend.is_set()
+        )
 
     def _session_held(self) -> bool:
         return (

@@ -240,6 +240,29 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.assertTrue(self.ctx.try_begin_storage_ops())
         self.ctx.end_storage_ops()
 
+    def test_teleport_settle_pauses_hunt_observation_but_not_ui_vitals(self) -> None:
+        """Black/loading RO frames are ignored while UI feeds remain separate."""
+        self.ctx.mark_running()
+        self.assertTrue(self.ctx.should_run_discovery())
+        self.assertTrue(self.ctx.should_run_tracking())
+
+        self.ctx.discovery_suspend.set()
+        self.assertFalse(self.ctx.should_run_combat())
+        self.assertFalse(self.ctx.should_run_timers())
+        self.assertFalse(self.ctx.should_run_discovery())
+        self.assertFalse(self.ctx.should_run_tracking())
+
+        # UI status/memory readers publish through PlayerVitals independently;
+        # this gate only controls hunt observation and gameplay workers.
+        self.vitals.publish_hp(80, 100)
+        self.vitals.publish_sp(40, 100)
+        self.assertEqual(self.vitals.hp_pair(), (80, 100))
+        self.assertEqual(self.vitals.sp_pair(), (40, 100))
+
+        self.ctx.discovery_suspend.clear()
+        self.assertTrue(self.ctx.should_run_discovery())
+        self.assertTrue(self.ctx.should_run_tracking())
+
     def test_storage_ops_pause_combat_not_timers(self) -> None:
         self.assertTrue(self.ctx.begin_storage_ops())
         self.assertTrue(self.ctx.should_run_workers())

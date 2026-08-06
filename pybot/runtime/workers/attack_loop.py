@@ -681,6 +681,11 @@ class GameplayLoop:
                     max_priority=40,
                     ignore_keys={"hp_restore"},
                 ):
+                    # A due buff/timer may be intentionally unsafe during a
+                    # teleport settle. Keep its deadline pending and give the
+                    # independent UI/danger workers time to run; do not spin
+                    # the gameplay owner at 100% CPU while waiting for landing.
+                    self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
                     continue
                 self._attack.process_pending()
             except Exception:
