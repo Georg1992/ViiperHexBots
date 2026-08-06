@@ -286,11 +286,18 @@ class DiscoveryWorker:
             # Teleport clear = nothing attackable (no alive tracks, no new candidates).
             # Corpse heat held only by death sites must not block teleport — sites are
             # screen-local and wiped when we leave the area.
-            living_for_clear = (
-                0
-                if summary.alive_after == 0 and summary.added_count == 0
-                else max(len(filtered), summary.alive_after)
-            )
+            # Sprite GRF mode has no corpse/death-animation interpretation:
+            # every filtered detection must block clear, even before tracking
+            # has created its track. Legacy mode keeps the existing corpse-heat
+            # exception when the reconciliation leaves no live track/candidate.
+            if ctx.config.use_sprite_grf:
+                living_for_clear = max(len(filtered), summary.alive_after)
+            else:
+                living_for_clear = (
+                    0
+                    if summary.alive_after == 0 and summary.added_count == 0
+                    else max(len(filtered), summary.alive_after)
+                )
             self._hunt_mode.note_discovery_scan_completed(
                 living_count=living_for_clear,
                 added_count=summary.added_count,
