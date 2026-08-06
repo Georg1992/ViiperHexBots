@@ -5,6 +5,10 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from pybot.recognition.detector.scoring.heatmap_detector import (
+    _palette_min_dist_sq_gemv,
+)
+
 # Occupancy at/above this is a hard cell (same cutoff as soft-membership cores).
 HARD_OCCUPANCY = 0.5
 
@@ -39,15 +43,11 @@ def candidate_silhouette(
     palette = np.asarray(palette_bgr, dtype=np.float32)
     if palette.size == 0:
         return np.zeros((height, width), dtype=np.float32)
-    # |p-c|² via BLAS — same metric as sprite_palette_heatmap.
-    p_norm = np.sum(pixels * pixels, axis=1, keepdims=True)
-    c_norm = np.sum(palette * palette, axis=1, keepdims=True)
-    dist_sq = np.dot(pixels, palette.T)
-    dist_sq *= np.float32(-2.0)
-    dist_sq += p_norm
-    dist_sq += c_norm.T
-    np.maximum(dist_sq, np.float32(0.0), out=dist_sq)
-    min_dist_sq = dist_sq.min(axis=1)
+    # GEMV min loop — same metric as sprite_palette_heatmap, but only (N,)
+    # intermediates instead of a full (N, C) matrix per gate. The silhouette
+    # gate runs this per candidate; on a multi-blob post-transition frame the
+    # GEMM version's shared temporaries were the gate's dominant cost.
+    min_dist_sq = _palette_min_dist_sq_gemv(pixels, palette)
     max_dist_sq = np.float32(max_distance) * np.float32(max_distance)
     match = (min_dist_sq <= max_dist_sq).reshape(region.shape[:2])
     match_uint8 = (match.astype(np.uint8)) * 255
