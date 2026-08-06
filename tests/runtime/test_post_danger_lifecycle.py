@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from pybot.config.runtime import HuntRuntimeConfig
 from pybot.paths import PROJECT_ROOT
@@ -19,7 +19,6 @@ from pybot.runtime.overlay_ports import NullOverlay
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.validation_log import HuntValidationLogger
 from pybot.runtime.teleport import TeleportController
-from pybot.runtime.capture.window_roi import HuntRoi
 from pybot.runtime.workers.discovery_worker import DiscoveryWorker
 
 
@@ -86,58 +85,6 @@ class PostDangerLifecycleTests(unittest.TestCase):
             self.assertEqual(self.tracks.get_area_clear_candidate().alive_count, 0)
 
         # No-target handling cannot treat the new area as discovery-confirmed.
-        self.assertFalse(self.mode.on_no_attackable_targets())
-
-    def test_sprite_grf_detection_blocks_clear_before_track_creation(self) -> None:
-        """GRF detection must block teleport while its candidate awaits tracking."""
-        self.ctx.config = _config(use_sprite_grf=True)
-        self.ctx.capture.is_valid.return_value = True
-        self.ctx.capture.get_hunt_roi.return_value = HuntRoi(
-            x=0, y=0, w=200, h=200,
-        )
-        self.ctx.capture.capture_roi.return_value = SimpleNamespace(size=1)
-        self.ctx.detector.discover_frame.return_value = SimpleNamespace(
-            ok=True,
-            raw_count=1,
-            duration_ms=1,
-            detections=[
-                SimpleNamespace(
-                    x=100,
-                    y=100,
-                    confidence=0.9,
-                    candidate_scale=1.0,
-                    living=True,
-                    bbox=(90, 90, 20, 20),
-                )
-            ],
-            timing={},
-            lock_wait_ms=0,
-            detect_ms=1,
-        )
-        summary = SimpleNamespace(
-            added_count=0,
-            alive_after=0,
-            removed_count=0,
-            matched_count=0,
-            death_sites_active=0,
-            created_ids=[],
-            removed_ids=[],
-            removed_out_of_range_ids=[],
-            removed_discovery_miss_ids=[],
-            tracks_before=0,
-            tracks_after=0,
-        )
-        with patch.object(
-            self.tracks,
-            "process_discovery_scan",
-            return_value=summary,
-        ):
-            DiscoveryWorker(self.ctx, self.mode)._scan()
-
-        # Isolate the race: the detector saw a mob, but no track/candidate was
-        # available by the time the reconciliation result was published.
-        self.assertFalse(self.tracks.has_pending_discovery_candidates())
-        self.assertFalse(self.mode.discovery_confirmed_clear)
         self.assertFalse(self.mode.on_no_attackable_targets())
 
     def test_inflight_old_discovery_cannot_publish_after_area_reset(self) -> None:

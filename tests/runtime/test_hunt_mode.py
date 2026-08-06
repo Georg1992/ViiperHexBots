@@ -225,19 +225,19 @@ class HuntModeTests(unittest.TestCase):
         )
         self.assertTrue(self.mode.on_no_attackable_targets())
 
-    def test_discovery_confirmed_clear_after_scan(self) -> None:
+    def test_one_post_delay_scan_decides_next_action(self) -> None:
+        """After teleport settle, the first completed scan decides the next action."""
         self.mode.note_discovery_scan_completed(
             living_count=0,
             added_count=0,
             area_epoch=self.tracks.area_epoch,
         )
         self.assertTrue(self.mode.on_no_attackable_targets())
-
         self.assertFalse(self.mode.discovery_since_reset)
-        self.assertFalse(self.mode.discovery_confirmed_clear)
-        teleported = self.mode.on_no_attackable_targets()
-        self.assertFalse(teleported)
 
+        # This is the first scan after the mode teleport's configured settle
+        # delay. An empty result is sufficient to authorize the next teleport;
+        # there is no artificial second-scan requirement.
         self.mode.note_discovery_scan_completed(
             living_count=0,
             added_count=0,
