@@ -29,6 +29,7 @@ where = ["."]
 include = ["pybot*"]
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = [
     "tests/runtime",
     "tests/app",
