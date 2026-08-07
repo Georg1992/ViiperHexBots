@@ -755,6 +755,9 @@ class GameplayLoop:
         while not self._ctx.is_stopped():
             try:
                 if self._ctx.danger_escape_active.is_set():
+                    # An independent escape owns character input. Park without
+                    # busy-spinning so OCR/danger/tracking keep CPU time.
+                    self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
                     continue
                 if self._sit is not None and self._sit.process_pending():
                     continue

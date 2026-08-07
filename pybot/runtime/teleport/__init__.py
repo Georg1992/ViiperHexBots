@@ -128,6 +128,9 @@ class TeleportController:
             danger = self._ctx.danger_detector
             if danger is not None:
                 danger.reset_after_teleport(teleport_started)
+            # Drop pre-teleport tracks here so no caller can forget and leave
+            # the next hunt cycle acting on mobs from the previous area.
+            self._reset_tracking("teleport", log_tag="TP")
         return settled
 
     def retry_post_teleport_heal(self) -> bool:
@@ -145,13 +148,8 @@ class TeleportController:
         ctx.discovery_wake.clear()
         try:
             with ctx.area_transition_lock:
-                if not self.teleport_once(scan_code=tp):
-                    return False
-                self._reset_tracking(
-                    "post_teleport_heal_retry",
-                    log_tag="HEAL",
-                )
-                return True
+                # Track reset happens inside ``teleport_once`` after settle.
+                return bool(self.teleport_once(scan_code=tp))
         finally:
             ctx.discovery_suspend.clear()
             ctx.discovery_wake.set()
@@ -226,7 +224,6 @@ class TeleportController:
             return False
         if not self.teleport_once():
             return False
-        self._reset_tracking(f"{log_tag.lower()}_teleport", log_tag=log_tag)
         return True
 
     # ── Danger teleport ──────────────────────────────────────────
@@ -240,7 +237,8 @@ class TeleportController:
         """Press the danger teleport key and clear tracks after.
 
         Suspends discovery for the claim → key → settle window so a concurrent
-        scan cannot confirm clear on a loading frame.
+        scan cannot confirm clear on a loading frame. Track reset is owned by
+        :meth:`teleport_once` after a successful landing.
 
         ``prefer_safe_key`` selects the same key used for sit/storage placement
         (creamy / save point first) instead of the urgent random fly wing. A
@@ -272,15 +270,9 @@ class TeleportController:
             # Hold the lifecycle boundary through input, settle, and reset.
             # No-target decisions cannot observe the old strategy state while
             # the critical worker is already in the danger transition.
+            # ``teleport_once`` clears tracks under the same re-entrant lock.
             with ctx.area_transition_lock:
-                if not self.teleport_once(scan_code=tp):
-                    return False
-                # Publish the strategy marker and track epoch as one lifecycle
-                # transaction. The lock is re-entrant because ctx.area_reset
-                # also protects direct callers with the same boundary.
-                self._notify_area_reset()
-                ctx.area_reset(reason="danger_teleport")
-                return True
+                return bool(self.teleport_once(scan_code=tp))
         finally:
             ctx.discovery_suspend.clear()
             ctx.discovery_wake.set()
@@ -334,9 +326,6 @@ class TeleportController:
                 return False
             if not self.teleport_once():
                 return False
-            self._reset_tracking(
-                f"{log_tag.lower()}_teleport", log_tag=log_tag
-            )
         return False
 
     def _critical_request_is_set(self) -> bool | None:

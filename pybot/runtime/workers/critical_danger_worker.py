@@ -33,12 +33,17 @@ class CriticalDangerWorker:
         # request queued for a later resume when paused.
         if ctx.is_stopped() or ctx.pause_event.is_set():
             return False
-        # Sitting and storage do NOT block the escape: critical danger always
-        # overrides any active session. The claim preempts the session owner
-        # (which abandons on seeing ``danger_escape_active``) and the bounded
-        # release wait below lets storage close its UI panels before the key
-        # is pressed.
         if not ctx.critical_danger_requested.is_set():
+            return False
+        # True SP-sit recovery owns seated danger on the gameplay thread.
+        # Never steal that session: preemption clears sitting_event, sit
+        # abandons mid-regen, and SP is often already above the low-SP start
+        # threshold so recovery never restarts (hunt goes stale).
+        sit_owned = (
+            ctx.sitting_event.is_set()
+            and not ctx.critical_danger_escape_active.is_set()
+        )
+        if sit_owned:
             return False
         # The character may have recovered (sit regeneration, a heal, or the
         # damage simply aged out) since the drop was observed. Never fire a
@@ -50,7 +55,7 @@ class CriticalDangerWorker:
             ctx.pop_critical_danger()
             ctx.pop_danger_sit_request()
             return True
-        # Critical danger always preempts active sessions.
+        # Preempt storage/heal UI sessions, but not SP-sit recovery (above).
         if not ctx.try_begin_critical_escape_ops(override=True):
             return False
         ctx.wait_for_preempted_session_release(CRITICAL_PREEMPT_RELEASE_TIMEOUT_S)

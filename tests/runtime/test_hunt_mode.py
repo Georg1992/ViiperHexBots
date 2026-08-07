@@ -136,7 +136,9 @@ class HuntModeTests(unittest.TestCase):
         teleported = self.mode.on_no_attackable_targets()
         self.assertTrue(teleported)
         self.assertEqual(self.tracks.get_track_count(), 0)
-        self.assertEqual(self.tracks.area_epoch, 1)
+        # Claim clears before the key (epoch +1); successful land resets again
+        # inside teleport_once so post-settle state cannot keep prior tracks.
+        self.assertEqual(self.tracks.area_epoch, 2)
         # Post-settle: discovery may scan again; suspend must be clear + wake set.
         self.assertFalse(self.ctx.discovery_suspend.is_set())
         self.assertTrue(self.ctx.discovery_wake.is_set())

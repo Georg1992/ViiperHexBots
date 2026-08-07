@@ -440,9 +440,6 @@ class HuntRuntimeContext:
     def try_begin_sit_ops(self) -> bool:
         return self.gates.try_begin_sit_ops()
 
-    def consume_critical_preempted_sit(self) -> bool:
-        return self.gates.consume_critical_preempted_sit()
-
     def begin_sit_ops(self) -> bool:
         return self.gates.begin_sit_ops()
 

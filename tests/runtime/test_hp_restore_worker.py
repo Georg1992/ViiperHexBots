@@ -190,8 +190,26 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.assertFalse(self.ctx.critical_danger_requested.is_set())
 
     def test_damage_during_escape_gate_does_not_start_sit_recovery(self) -> None:
+        # Sit-owned urgent escape borrows danger_escape_active. Settle damage
+        # must not enqueue sit or mirrored critical — sit observes danger_level
+        # after its own teleport.
         self.ctx.sitting_event.set()
         self.ctx.danger_escape_active.set()
+        self.ctx.discovery_suspend.set()
+        self.vitals.publish_hp(80, 100)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(40, 100)
+        self.danger._poll_hp()
+
+        self.assertFalse(self.ctx.danger_sit_requested.is_set())
+        self.assertFalse(self.ctx.critical_danger_requested.is_set())
+
+    def test_damage_during_critical_escape_requeues_critical(self) -> None:
+        # Critical hunting escape borrows sitting_event only as an input gate.
+        # Settle damage must re-queue critical so the hunting escape can retry.
+        self.ctx.sitting_event.set()
+        self.ctx.danger_escape_active.set()
+        self.ctx.critical_danger_escape_active.set()
         self.ctx.discovery_suspend.set()
         self.vitals.publish_hp(80, 100)
         self.danger._poll_hp()
@@ -256,8 +274,9 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.teleport.danger_teleport.assert_not_called()
 
     def test_critical_damage_during_sit_gate_keeps_escape_request_queued(self) -> None:
-        # An active seated recovery session owns the ordinary danger request;
-        # critical damage also keeps the independent hunting escape queued.
+        # An active seated recovery session owns the ordinary danger request
+        # and its urgent escape — including settle samples while sit_owned.
+        # Mirrored critical must not be queued during sit_owned at all.
         self.ctx.sitting_event.set()
         self.vitals.publish_hp(80, 100)
         self.danger._poll_hp()
@@ -265,7 +284,16 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.danger._poll_hp()
 
         self.assertTrue(self.ctx.danger_sit_requested.is_set())
-        self.assertTrue(self.ctx.critical_danger_requested.is_set())
+        self.assertFalse(self.ctx.critical_danger_requested.is_set())
+
+        # Sit-owned urgent escape still must not mirror critical (that race
+        # abandons SP recovery after the sit teleport).
+        self.ctx.danger_escape_active.set()
+        self.ctx.danger_sit_requested.clear()
+        self.vitals.publish_hp(20, 100)
+        self.danger._poll_hp()
+        self.assertFalse(self.ctx.danger_sit_requested.is_set())
+        self.assertFalse(self.ctx.critical_danger_requested.is_set())
 
     def test_critical_damage_during_escape_is_retried_then_hunt_resumes(self) -> None:
         # Exercise the complete ownership transition: damage arrives while the

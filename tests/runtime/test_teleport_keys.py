@@ -94,6 +94,13 @@ class TeleportKeySelectionTests(unittest.TestCase):
         self.input.teleport_key.assert_called_once_with(17)
         self.ctx.note_teleport_for_wings.assert_not_called()
 
+    def test_teleport_once_clears_tracks_after_settle(self) -> None:
+        """Every successful teleport must drop prior-area tracks."""
+        self.ctx.danger_detector = MagicMock()
+        self.assertTrue(self.tport.teleport_once())
+        self.ctx.area_reset.assert_called_once_with("teleport")
+        self.ctx.overlay.set_track_positions.assert_called_once_with([])
+
     def _set_escape_in_flight(self) -> None:
         self.ctx.danger_escape_active = MagicMock()
         self.ctx.danger_escape_active.is_set.return_value = True

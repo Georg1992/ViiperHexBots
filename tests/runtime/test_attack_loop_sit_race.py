@@ -298,18 +298,20 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         # Simulate the verification window expiring without any HP change.
         last_changed_ms = vitals.hp_sample()[3]
         loop._last_skill_heal_ms = last_changed_ms
-        # The cast must get the full 600ms verification window before it is
+        # The cast must get the full verification window before it is
         # classified as blocked and allowed to trigger a retry teleport.
+        from pybot.runtime.constants import HEAL_VERIFY_DELAY_MS
+
         with patch(
             "pybot.runtime.workers.attack_loop.monotonic_ms",
-            return_value=last_changed_ms + 599,
+            return_value=last_changed_ms + HEAL_VERIFY_DELAY_MS - 1,
         ):
             self.assertFalse(loop.process_pending())
         teleport.retry_post_teleport_heal.assert_not_called()
 
         with patch(
             "pybot.runtime.workers.attack_loop.monotonic_ms",
-            return_value=last_changed_ms + 600,
+            return_value=last_changed_ms + HEAL_VERIFY_DELAY_MS,
         ):
             self.assertFalse(loop.process_pending())
 

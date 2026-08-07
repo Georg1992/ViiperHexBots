@@ -80,34 +80,39 @@ class DangerDetector:
             sitting = getattr(self._ctx, "sitting_event", None)
             suspend = getattr(self._ctx, "discovery_suspend", None)
             escape = getattr(self._ctx, "danger_escape_active", None)
+            critical_escape = getattr(
+                self._ctx, "critical_danger_escape_active", None
+            )
             # Lightweight/mock contexts report ``None`` here and are treated
             # as "no gate held" — the same as the previous defensive reads.
             is_sitting = event_is_set(sitting) is True
             is_teleporting = event_is_set(suspend) is True
             is_escaping = event_is_set(escape) is True
+            is_critical_escape = event_is_set(critical_escape) is True
+            # ``sitting_event`` is also borrowed by the critical hunting escape
+            # as an input gate. Only a non-critical holder is true SP recovery.
+            sit_owned = is_sitting and not is_critical_escape
             request = getattr(self._ctx, "request_danger_sit", None)
-            # During an escape teleport, ``sitting_event`` is deliberately held
-            # as an input gate. It does not mean the character entered SP
-            # recovery. Never turn damage sampled during teleport settle into a
-            # new sit session; the critical/urgent owner already owns escape.
+            # During any escape teleport, never enqueue a fresh sit session —
+            # the escape owner already holds the character. Sit recovery still
+            # observes settle damage via danger_level() after its own escape.
             sit_queued = bool(
                 request()
-                if is_sitting
+                if sit_owned
                 and not is_teleporting
                 and not is_escaping
                 and callable(request)
                 else False
             )
             critical_queued = False
-            # Critical damage must remain queued even while a sit/teleport
-            # gate is held. The critical worker temporarily holds
-            # ``sitting_event`` during danger teleport; a new HP drop during
-            # settle would otherwise create only ``danger_sit_requested``.
-            # The sit worker intentionally leaves critical hunting damage
-            # alone, so that request would then survive the escape forever and
-            # keep ``should_run_combat()`` false. Seated recovery consumes the
-            # mirrored critical request when it owns the damage event.
-            if level is DangerLevel.CRITICAL:
+            # SP-sit recovery (including its own urgent escape) owns seated
+            # danger on the gameplay thread. Queuing critical while sit_owned
+            # lets CriticalDangerWorker clear sitting_event mid-regen: sit
+            # abandons, SP is often already >5% so process_pending will not
+            # restart recovery, and the hunt resumes incomplete / stale.
+            # Hunting critical escapes remain independent; settle damage
+            # during a critical hunting escape may re-queue critical.
+            if level is DangerLevel.CRITICAL and not sit_owned:
                 request_critical = getattr(self._ctx, "request_critical_danger", None)
                 if callable(request_critical):
                     request_critical()

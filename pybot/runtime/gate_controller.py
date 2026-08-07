@@ -122,9 +122,11 @@ class GateController:
         # no-target decisions. Capture/detection may run outside this lock;
         # state publication and reset are one deterministic transaction.
         self.area_transition_lock = threading.RLock()
-        # Set after teleport and held until a fresh full-HP reading clears it.
-        # Combat must not resume merely because a short grace timer expired.
+        # Set after teleport and held until a fresh full-HP reading clears it
+        # or the bounded grace window expires. The window is bounded so a blind
+        # status-panel/OCR feed cannot park the gameplay loop forever.
         self._post_teleport_heal_required = False
+        self._post_teleport_heal_deadline = 0.0
         # Shared stagger + buff priority between buff casts and skill-timer
         # presses (both are character keypresses on separate threads).
         self.character_action_gate = CharacterActionGate()
@@ -149,14 +151,6 @@ class GateController:
         # only to bound the pre-teleport wait for the preempted owners to
         # release; teardown always releases the gate the escape itself set.
         self._preempted_sessions = (False, False, False)
-        # Durable marker that a critical escape preempted an active sit
-        # session. Unlike danger_escape_active/sitting_event (which the escape
-        # clears on completion), this survives end_critical_escape_ops so a sit
-        # teardown that only wakes AFTER the escape has finished still knows the
-        # escape stood the character. Without it, a late sit/stand toggle would
-        # invert the post-teleport pose (character ends up seated while hunting)
-        # and a redundant end_sit_ops would start an extra hunt generation.
-        self.critical_preempted_sit = threading.Event()
         # A seated toggle could not be undone during worker cleanup. Runtime
         # shutdown must retry this before releasing input ownership.
         self.sit_cleanup_unresolved = threading.Event()
@@ -353,20 +347,21 @@ class GateController:
         with self._sit_storage_lock:
             if self.danger_escape_active.is_set():
                 return False
+            # SP-sit recovery owns seated danger. Never steal its sitting_event:
+            # clearing it mid-regen abandons recovery while SP is often already
+            # above the low-SP start threshold, so the hunt resumes stale.
+            if (
+                self.sitting_event.is_set()
+                and not self.critical_danger_escape_active.is_set()
+            ):
+                return False
             if not override and self._session_held():
                 return False
             self._preempted_sessions = (
-                self.sitting_event.is_set(),
+                False,
                 self.storage_event.is_set(),
                 self.healing_event.is_set(),
             )
-            # A preempted sit session's teardown must become a no-op even when
-            # this escape completes (clearing sitting_event/danger_escape_active)
-            # before the sit worker observes the preemption. The marker is
-            # consumed by that teardown and cleared again when a fresh sit
-            # session starts.
-            if self._preempted_sessions[0]:
-                self.critical_preempted_sit.set()
             self.danger_escape_active.set()
             self.critical_danger_escape_active.set()
             self.sitting_event.set()
@@ -439,10 +434,6 @@ class GateController:
         with self._sit_storage_lock:
             if self._session_held():
                 return False
-            # A fresh sit session starts clean: discard any preemption marker
-            # left behind by a previous session's critical escape so it cannot
-            # cancel this session's teardown.
-            self.critical_preempted_sit.clear()
             # The observation workers use this same short boundary before
             # publishing detector results. A sit claim therefore cannot race
             # with track mutation or discovery reconciliation.
@@ -450,19 +441,6 @@ class GateController:
                 self.sitting_event.set()
                 self.resume_gate.clear()
             return True
-
-    def consume_critical_preempted_sit(self) -> bool:
-        """Return and clear whether a critical escape preempted the sit session.
-
-        The sit worker calls this during teardown. When true, the escape's
-        teleport already stood the character and released the gate, so the sit
-        worker must not press the sit/stand toggle or run ``end_sit_ops``.
-        """
-        with self._sit_storage_lock:
-            if self.critical_preempted_sit.is_set():
-                self.critical_preempted_sit.clear()
-                return True
-            return False
 
     def begin_sit_ops(self) -> bool:
         """Wait until sit ops can start. False if stopped first."""
@@ -494,6 +472,15 @@ class GateController:
             # new hunt with the previous hunt's completion events.
             self.startup.begin_new_hunt(trusted_clear=trusted_clear)
             self.sitting_event.clear()
+            # Damage sampled while sitting_event was still held (stand settle,
+            # teardown retries) can leave this set with no owner left to
+            # consume it. That permanently blocks combat/timers/startup.
+            self.danger_sit_requested.clear()
+            # The sit-placement teleport's post-TP heal gate is not meaningful
+            # after a completed SP recovery at a trusted spot. Leaving it set
+            # forces AttackLoop to wait on HP (and OCR) before the new hunt.
+            self._post_teleport_heal_required = False
+            self._post_teleport_heal_deadline = 0.0
             self._restore_resume_gate()
         # The discovery worker may be asleep in its cadence wait while the sit
         # session owns the worker gate. Wake it only after the gate and startup
@@ -574,17 +561,36 @@ class GateController:
     # ── Post-teleport heal window ────────────────────────────────
 
     def mark_post_teleport_heal(self, duration_s: float) -> None:
-        """Require full HP after teleport until a valid full reading arrives."""
-        del duration_s
+        """Require full HP after teleport until a valid full reading arrives.
+
+        The requirement is bounded by ``duration_s`` so that a blind
+        status-panel/OCR feed cannot stall gameplay forever waiting for an HP
+        reading that may never arrive (loading frame, panel hidden). A valid
+        full reading clears it earlier.
+        """
         self._post_teleport_heal_required = True
+        self._post_teleport_heal_deadline = time.monotonic() + max(
+            0.0, float(duration_s)
+        )
 
     def clear_post_teleport_heal(self) -> None:
         """Release the post-teleport combat gate after HP reaches max."""
         self._post_teleport_heal_required = False
+        self._post_teleport_heal_deadline = 0.0
 
     def in_post_teleport_heal_window(self) -> bool:
-        """True while the post-teleport full-HP requirement is unresolved."""
-        return self._post_teleport_heal_required
+        """True while the post-teleport full-HP requirement is unresolved.
+
+        Pure read: expires at the bounded deadline even when no full-HP
+        reading arrived, so a blind status-panel/OCR feed cannot park the
+        gameplay loop forever. The stale flag is left set; callers gate only
+        on this deadline-aware query, and ``clear_post_teleport_heal`` resets
+        it for the next teleport.
+        """
+        return (
+            self._post_teleport_heal_required
+            and time.monotonic() < self._post_teleport_heal_deadline
+        )
 
     # ── Wait helpers ─────────────────────────────────────────────
 

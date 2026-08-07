@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import (
@@ -508,23 +508,18 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertEqual(self.teleport.danger_teleport.call_count, 2)
         self.assertFalse(self.ctx.critical_danger_requested.is_set())
 
-    def test_critical_escape_overrides_sitting_session(self) -> None:
-        """Critical danger preempts an active sit session and teleports."""
+    def test_critical_escape_does_not_steal_active_sit_session(self) -> None:
+        """SP-sit recovery owns seated danger; critical must not preempt it."""
         self.danger.danger_level.return_value = DangerLevel.CRITICAL
         self.ctx.request_critical_danger()
         self.ctx.sitting_event.set()
         self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
         escape = CriticalDangerWorker(self.ctx, self.teleport)
 
-        self.assertTrue(escape.process_pending())
-        # A preempted sit session keeps the safe-key escape (creamy / save
-        # point first) so the character can sit and finish SP recovery.
-        self.teleport.danger_teleport.assert_called_once_with(
-            reason="critical_hunt", prefer_safe_key=True
-        )
-        self.assertFalse(self.ctx.critical_danger_requested.is_set())
-        # The escape released the borrowed sit gate after the teleport.
-        self.assertFalse(self.ctx.sitting_event.is_set())
+        self.assertFalse(escape.process_pending())
+        self.teleport.danger_teleport.assert_not_called()
+        self.assertTrue(self.ctx.critical_danger_requested.is_set())
+        self.assertTrue(self.ctx.sitting_event.is_set())
         self.assertFalse(self.ctx.danger_escape_active.is_set())
 
     def test_ok_to_act_yields_to_pending_critical_escape(self) -> None:
@@ -541,51 +536,72 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertFalse(worker._tap(82, why="enter_sit"))
         self.input.toggle_key.assert_not_called()
 
-    def test_recovery_abandons_when_critical_escape_claims(self) -> None:
-        """A sit session yields to the escape without touching the toggle."""
-        worker = self._worker(_ScriptedVitals([0.02, 0.02]))
+    def test_leftover_critical_is_consumed_not_waited(self) -> None:
+        """Regression: a critical request latched before the sit claim must be
+        consumed by the seated owner, never waited on. Waiting used to park the
+        gameplay thread forever (the critical worker yields to a true SP sit).
+        """
+        worker = self._worker(_ScriptedVitals([0.99, 0.99]))
         self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
         self.teleport.teleport_once_for_sit = MagicMock(return_value=True)  # type: ignore[method-assign]
-        worker._seated = False
+        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
+        # Damage is still live when the leftover is consumed: the session must
+        # escape once with the safe key, then continue recovery to completion.
+        levels = [DangerLevel.CRITICAL]
+        self.danger.danger_level.side_effect = (
+            lambda: levels.pop(0) if levels else DangerLevel.SAFE
+        )
+        worker._sit_until_done = MagicMock(  # type: ignore[method-assign]
+            return_value="recovered"
+        )
+        self.ctx.request_critical_danger()
 
-        def claim_during_regen(_scan: int) -> str:
-            self.ctx.request_critical_danger()
-            self.ctx.danger_escape_active.set()
-            return "recovered"
-
-        worker._sit_until_done = claim_during_regen  # type: ignore[method-assign]
         worker._recover_sp(0.02)
 
-        self.input.toggle_key.assert_not_called()
+        self.assertFalse(self.ctx.critical_danger_requested.is_set())
+        self.teleport.danger_teleport.assert_called_once_with(
+            reason="sit_danger_request",
+            prefer_safe_key=True,
+        )
+        self.assertFalse(self.ctx.sitting_event.is_set())
         self.assertFalse(worker._seated)
-        # The escape owns the sit gate; the sit worker must not release it.
-        self.assertTrue(self.ctx.sitting_event.is_set())
+        worker._sit_until_done.assert_called_once_with(82)
 
-    def test_finish_recovery_after_completed_critical_escape_is_noop(self) -> None:
-        """Race: the critical escape claims AND finishes before the sit
-        teardown wakes. ``danger_escape_active``/``sitting_event`` are already
-        cleared, so the durable preemption marker is what prevents a late
-        toggle (which would invert the post-teleport pose and leave the
-        character seated) and a redundant new hunt generation.
+    def test_stale_leftover_critical_is_consumed_without_escape(self) -> None:
+        """A critical request whose damage has aged out is dropped by the
+        seated owner without wasting a teleport."""
+        worker = self._worker(_ScriptedVitals([0.99, 0.99]))
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
+        self.ctx.request_critical_danger()
+
+        # SP is already high, so the recovery path consumes the leftover and
+        # completes without any escape.
+        worker._recover_sp(0.02)
+
+        self.assertFalse(self.ctx.critical_danger_requested.is_set())
+        self.teleport.danger_teleport.assert_not_called()
+        self.assertFalse(self.ctx.sitting_event.is_set())
+        self.assertFalse(worker._seated)
+
+    def test_finish_recovery_consumes_leftover_critical_and_stands(self) -> None:
+        """Teardown must consume a leftover critical instead of blocking the
+        stand forever on an escape that can never preempt this session.
         """
         worker = self._worker()
         self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        # Active sit session; character seated.
         self.assertTrue(self.ctx.try_begin_sit_ops())
         worker._seated = True
-        # Critical escape preempts the sit and completes: its teleport stood
-        # the character and end_critical_escape_ops released the gates.
-        self.assertTrue(self.ctx.try_begin_critical_escape_ops(override=True))
-        self.ctx.end_critical_escape_ops()
-        self.assertFalse(self.ctx.danger_escape_active.is_set())
-        self.assertFalse(self.ctx.sitting_event.is_set())
+        self.ctx.request_critical_danger()
 
         gen_before = self.ctx.hunt_generation
         worker._finish_recovery_session(sit_scan=82)
 
-        self.input.toggle_key.assert_not_called()
-        self.assertEqual(self.ctx.hunt_generation, gen_before)
+        self.assertFalse(self.ctx.critical_danger_requested.is_set())
+        self.input.toggle_key.assert_called_once_with(82)
         self.assertFalse(worker._seated)
+        self.assertFalse(self.ctx.sitting_event.is_set())
+        self.assertEqual(self.ctx.hunt_generation, gen_before + 1)
 
     def test_finish_recovery_normal_completion_stands_and_starts_new_hunt(self) -> None:
         """Without a preemption the teardown must still stand and begin a new
@@ -603,6 +619,43 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertFalse(worker._seated)
         self.assertFalse(self.ctx.sitting_event.is_set())
         self.assertEqual(self.ctx.hunt_generation, gen_before + 1)
+
+    def test_end_sit_ops_clears_stale_danger_sit_and_post_tp_heal(self) -> None:
+        """Damage during stand settle must not leave combat blocked forever."""
+        self.assertTrue(self.ctx.try_begin_sit_ops())
+        self.ctx.request_danger_sit()
+        self.ctx.mark_post_teleport_heal(2.0)
+        self.assertTrue(self.ctx.danger_sit_requested.is_set())
+        self.assertTrue(self.ctx.in_post_teleport_heal_window())
+
+        self.ctx.end_sit_ops()
+
+        self.assertFalse(self.ctx.danger_sit_requested.is_set())
+        self.assertFalse(self.ctx.in_post_teleport_heal_window())
+        self.assertFalse(self.ctx.sitting_event.is_set())
+
+    def test_post_teleport_heal_window_is_time_bounded(self) -> None:
+        """A blind OCR feed must not park gameplay on the full-HP gate forever."""
+        from pybot.runtime import gate_controller
+
+        with patch.object(gate_controller.time, "monotonic", return_value=100.0):
+            self.ctx.mark_post_teleport_heal(2.0)
+            self.assertTrue(self.ctx.in_post_teleport_heal_window())
+        with patch.object(gate_controller.time, "monotonic", return_value=103.0):
+            self.assertFalse(self.ctx.in_post_teleport_heal_window())
+        # The expired gate never re-opens on later reads, and a fresh teleport
+        # re-arms it.
+        with patch.object(gate_controller.time, "monotonic", return_value=200.0):
+            self.assertFalse(self.ctx.in_post_teleport_heal_window())
+            self.ctx.mark_post_teleport_heal(2.0)
+            self.assertTrue(self.ctx.in_post_teleport_heal_window())
+
+
+    def test_process_pending_drops_stale_danger_sit_when_sp_ok(self) -> None:
+        worker = self._worker(_ScriptedVitals([0.99]))
+        self.ctx.request_danger_sit()
+        self.assertFalse(worker.process_pending())
+        self.assertFalse(self.ctx.danger_sit_requested.is_set())
 
     def test_critical_escape_waits_while_paused_without_repeating_teleport(self) -> None:
         self.danger.danger_level.return_value = DangerLevel.CRITICAL

@@ -24,6 +24,7 @@ from pybot.runtime.constants import (
     SIT_RESUME_SP_RATIO,
     SIT_SP_POLL_INTERVAL_S,
     SIT_STAND_RESUME_DELAY_S,
+    WORKER_POLL_INTERVAL_S,
 )
 from pybot.runtime.danger_detector import DangerDetector, DangerLevel
 from pybot.runtime.input.input_backend import InputBackend
@@ -93,9 +94,10 @@ class SitOnLowSpWorker:
         ctx = self._ctx
         if ctx.is_stopped():
             return False
-        # A pending or in-flight critical escape owns urgent input and the
-        # sit gate. Yield to it; the outer loop abandons the session so the
-        # escape worker can teleport without competing for the toggle.
+        # A leftover critical request (latched before this session claimed the
+        # gate) is owned by the seated session, not by an in-flight escape —
+        # the recovery loop consumes it before acting. Only an actual in-flight
+        # escape may hold input; yield to it without pressing the toggle.
         if ctx.critical_danger_requested.is_set() or ctx.danger_escape_active.is_set():
             return False
         while ctx.pause_event.is_set():
@@ -253,6 +255,11 @@ class SitOnLowSpWorker:
         if ratio is not None and ratio < SIT_LOW_SP_RATIO:
             self._recover_sp(ratio, reason="low_sp")
             return True
+        # ``danger_sit_requested`` is only meaningful inside an owned sit
+        # session. Outside recovery it permanently blocks combat/timers; drop
+        # a leftover so a completed stand/teardown cannot stale the hunt.
+        if ctx.danger_sit_requested.is_set():
+            ctx.pop_danger_sit_request()
         return False
 
     def run(self) -> None:
@@ -313,6 +320,26 @@ class SitOnLowSpWorker:
                 f"SP>={SIT_RESUME_SP_RATIO:.0%}"
             )
             while not ctx.is_stopped():
+                # A critical request can only be latched before this session
+                # claimed the sit gate: DangerDetector never queues critical
+                # while a true SP sit owns ``sitting_event``, and the critical
+                # worker deliberately yields to this session. That leftover
+                # belongs to the seated owner, not to an in-flight escape.
+                # Consume it and, if the damage is still live, escape with
+                # the safe key. Never wait for a "critical handoff" — the
+                # critical worker cannot preempt this session, so waiting
+                # would park the gameplay thread forever.
+                if ctx.critical_danger_requested.is_set():
+                    ctx.pop_critical_danger()
+                    live = self._danger.danger_level() is not DangerLevel.SAFE
+                    if live:
+                        escape_first = True
+                    ctx.logger.behavior(
+                        "[SIT] consumed leftover critical request "
+                        f"live={live} — sit session owns seated danger"
+                    )
+                    continue
+
                 # A seated danger retry and a fresh hit preserved during the
                 # preceding teleport settle belong to this recovery owner.
                 # Inspect them before _ok_to_act(), which intentionally yields
@@ -332,14 +359,16 @@ class SitOnLowSpWorker:
                     continue
 
                 if teleported_for_session and not escape_first and self._sit_danger_detected():
-                    # Consume a settle-time request before the independent
-                    # critical worker can preempt this still-owned recovery.
+                    # Consume a settle-time request; seated recovery owns the
+                    # escape and must not leave the event latched forever.
                     ctx.pop_critical_danger()
                     escape_first = True
                     continue
 
                 if not self._ok_to_act():
-                    break
+                    # Pending critical/escape — park, do not end recovery.
+                    ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
+                    continue
 
                 # A normal sit-toggle interruption must be cleaned up by
                 # standing before retrying. A damage escape is different: it
@@ -454,61 +483,28 @@ class SitOnLowSpWorker:
         finally:
             self._finish_recovery_session(sit_scan)
 
-    def _critical_escape_took_over(self) -> bool:
-        """True when a critical escape owns the character during sit teardown.
-
-        Consumes the durable preemption marker so a teardown that only wakes
-        after the escape already completed still detects it — by then the
-        escape's ``end_critical_escape_ops`` has cleared ``danger_escape_active``
-        and ``sitting_event``, so checking those transient events alone would
-        miss the preemption and press a late toggle that inverts the pose.
-        """
-        ctx = self._ctx
-        consume = getattr(ctx, "consume_critical_preempted_sit", None)
-        # Consume unconditionally (do not short-circuit) so the marker never
-        # leaks into a later session even when danger_escape_active is also set.
-        preempted = bool(consume()) if callable(consume) else False
-        return preempted or ctx.danger_escape_active.is_set()
-
     def _finish_recovery_session(self, sit_scan: int) -> None:
-        """Release the sit session after recovery, yielding to a critical escape.
+        """Release the sit session after recovery and start a fresh hunt.
 
-        A critical escape can claim ownership while the teardown is running.
-        Once it does, the escape's teleport stands the character and its
-        ``end_critical_escape_ops`` clears the gate it set. Never press the
-        sit toggle or run ``end_sit_ops`` after that point: a late toggle
-        would invert the post-teleport pose. The escape may also finish before
-        this teardown wakes, so the check consults the durable preemption
-        marker, not only the transient ``danger_escape_active`` event.
+        A critical request can only be latched before this session claimed
+        the sit gate (the critical worker deliberately yields to a true SP
+        sit). It belongs to the seated owner, so consume it here — leaving it
+        set would block ``should_run_combat``/``should_run_timers`` forever
+        because no escape is in flight to clear it. Standing then releases
+        the gate and begins the next hunt generation.
         """
         ctx = self._ctx
-        if self._critical_escape_took_over():
-            self._seated = False
-            ctx.logger.behavior(
-                "[SIT] recovery session preempted by critical escape"
-            )
-            return
         if ctx.critical_danger_requested.is_set():
-            # The escape is queued but not yet claimed. Yield one poll so the
-            # critical worker can take ownership; if the request is consumed
-            # as stale instead, fall through to the normal teardown on the
-            # next wake.
-            ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
-            if self._critical_escape_took_over():
-                self._seated = False
-                return
+            ctx.pop_critical_danger()
+            ctx.logger.behavior(
+                "[SIT] teardown consumed leftover critical request"
+            )
         # Do not release the sit gate while we still believe the character
         # is seated. Retry transient input rejection while running; Pause
         # intentionally waits for resume. Stop uses the shutdown-only
         # toggle path because normal input has already been cancelled.
         shutdown_cleanup_attempts = 0
         while self._seated:
-            if self._critical_escape_took_over():
-                self._seated = False
-                ctx.logger.behavior(
-                    "[SIT] stand aborted — critical escape owns the character"
-                )
-                return
             if ctx.is_stopped():
                 shutdown_cleanup_attempts += 1
                 if self._cleanup_stand(sit_scan):
@@ -570,14 +566,11 @@ class SitOnLowSpWorker:
         ctx.logger.behavior("[SIT] waiting for regen")
 
         while not ctx.is_stopped():
-            # The sit worker owns damage observed during its seated recovery,
-            # including the mirrored critical notification. Consume and route
-            # that fresh event before yielding to the independent critical
-            # worker; otherwise _ok_to_act() would leave the character seated
-            # with the request pending and the recovery would never re-escape.
+            # The sit worker owns damage observed during its seated recovery.
+            # Escape here on the gameplay thread; do not wait for the
+            # independent critical worker (which no longer queues while a
+            # true SP sit owns sitting_event).
             if self._sit_danger_detected():
-                # A seated session owns any damage request; prevent a mirrored
-                # critical hunting request from escaping a second time.
                 ctx.pop_critical_danger()
                 ctx.logger.behavior(
                     "[SIT] danger — urgently escaping without stand toggle"
@@ -615,5 +608,8 @@ class SitOnLowSpWorker:
                     return None
                 return "recovered"
 
-            ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
+            # Poll SP on the sit cadence, but wake often enough that seated
+            # danger (owned here) remains reactive without a second control
+            # thread pressing teleport keys.
+            ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
         return None

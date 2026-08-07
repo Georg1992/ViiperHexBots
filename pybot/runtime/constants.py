@@ -57,7 +57,7 @@ CRITICAL_PREEMPT_RELEASE_TIMEOUT_S = 3.0
 HP_POST_TELEPORT_HEAL_S = 2.0
 # After a custom heal cast, wait this long before deciding the cast was blocked
 # and retrying with a teleport. The HP publisher/OCR can lag behind the game.
-HEAL_VERIFY_DELAY_MS = 600
+HEAL_VERIFY_DELAY_MS = 800
 
 # Minimum gap between distinct skill-timer key presses when several are due.
 SKILL_TIMER_STAGGER_MS = 500
