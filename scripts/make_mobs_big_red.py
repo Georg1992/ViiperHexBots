@@ -6,7 +6,7 @@ For a mob folder, the modified output is deliberately static:
 * the first living ACT frame is composited into one canonical SPR frame;
 * the output SPR contains exactly that one frame;
 * every ACT layer points at SPR frame 0 with the same origin/transform;
-* the last eight death actions remain transparent;
+* the Die actions (32-39) remain transparent;
 * the original ACT action/frame table is preserved for client compatibility.
 
 Keeping the action table matters because the descriptor builder and RO clients
@@ -42,7 +42,12 @@ from pybot.recognition.spr_reader import SprFile, SprReader
 
 SCALE_FACTOR = 1.5
 RED = (255, 0, 0)
-DEAD_ACTION_COUNT = 8
+# Ragnarok monster sprites use a fixed action layout: 0-7 stand, 8-15 walk,
+# 16-23 attack, 24-31 hit, 32-39 die (death). Some mobs add living special
+# actions after 39 (e.g. idle poses 40-47), so the death range is fixed here
+# instead of derived from the total action count.
+DEAD_ACTION_FIRST = 32
+DEAD_ACTION_LAST_EXCLUSIVE = 40
 
 
 class Reader:
@@ -128,7 +133,16 @@ def parse(data: bytes) -> tuple[int, int, list[Clip], int]:
 
 
 def _dead_actions(num_actions: int) -> set[int]:
-    return set(range(max(0, num_actions - DEAD_ACTION_COUNT), num_actions))
+    """Return the fixed RO death action range, clamped to what exists.
+
+    Death is always actions 32-39 regardless of how many actions the sprite
+    has: mobs with extra living actions after 39 (e.g. desert wolf's specials
+    at 40-47) must not be mistaken for death, and truncated sprites only
+    expose the death actions they actually contain.
+    """
+    return set(
+        range(DEAD_ACTION_FIRST, min(DEAD_ACTION_LAST_EXCLUSIVE, num_actions))
+    )
 
 
 def transform_act_bytes(data: bytes) -> tuple[bytes, dict]:
@@ -174,8 +188,10 @@ def transform_act_bytes(data: bytes) -> tuple[bytes, dict]:
 
 def _canonical_frame(act_file: ActFile) -> ActFrameRef:
     """Return the first renderable living frame used for the static sprite."""
-    living_end = max(1, len(act_file.actions) - DEAD_ACTION_COUNT)
-    for action in act_file.actions[:living_end]:
+    dead_actions = _dead_actions(len(act_file.actions))
+    for action in act_file.actions:
+        if action.index in dead_actions:
+            continue
         for frame in action.frames:
             if frame.layers:
                 return frame
