@@ -14,13 +14,14 @@ Signal  Discovery Tracking    Attack Timers
 ======= ========= =========== ====== ======
 (none)  yes       yes         yes    yes
 pause   no        no          no     no
-sit     yes       yes         no     no
+sit     no        no          no     no
 storage yes       yes         no     yes
 heal    yes       yes         no     yes
 ======= ========= =========== ====== ======
 
 Sit, storage, and heal are mutually exclusive. Discovery and tracking are
-observation pipelines and are suspended only by explicit stop/user pause.
+suspended while sitting, as well as during explicit stop/user pause or
+teleport settle. Storage and healing keep observation active.
 """
 
 from __future__ import annotations
@@ -230,11 +231,9 @@ class HuntRuntimeContext:
         """Admit one short input action against session transitions."""
         return self.gates.perform_input_if_allowed(allowed, action)
 
-    def perform_heal_if_allowed(self, allowed, action, *, cooldown_s: float = 1.0) -> bool:
-        """Admit healing through the shared cross-worker cooldown."""
-        return self.gates.perform_heal_if_allowed(
-            allowed, action, cooldown_s=cooldown_s
-        )
+    def try_heal_if_allowed(self, allowed, action) -> str:
+        """Atomically admit one skill heal and return its precise result."""
+        return self.gates.try_heal_if_allowed(allowed, action)
 
     def should_run_timers(self) -> bool:
         """True when skill timers may fire (lifecycle + no active danger).
@@ -312,17 +311,6 @@ class HuntRuntimeContext:
         if danger is None:
             return True
         return bool(danger.is_safe_for_heal())
-
-    def should_run_heal_actions(self) -> bool:
-        """True when healing is allowed in the post-teleport safety window.
-
-        This is the conservative gate for the HP-item worker: consumables are
-        spent only in the short grace window right after a teleport.
-        """
-        return (
-            self.should_run_character_actions()
-            and self.in_post_teleport_heal_window()
-        )
 
     def should_run_custom_heal_actions(self) -> bool:
         """True when the custom skill heal may run.
@@ -478,6 +466,9 @@ class HuntRuntimeContext:
 
     def mark_post_teleport_heal(self, duration_s: float) -> None:
         self.gates.mark_post_teleport_heal(duration_s)
+
+    def clear_post_teleport_heal(self) -> None:
+        self.gates.clear_post_teleport_heal()
 
     def in_post_teleport_heal_window(self) -> bool:
         return self.gates.in_post_teleport_heal_window()

@@ -22,6 +22,7 @@ is a cheap local header check for the fast poll path.
 
 from __future__ import annotations
 
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
@@ -46,6 +47,10 @@ DIGIT_EARLY_EXIT_SCORE = 0.97
 BINARIZE_THRESHOLD = 45
 # Single glyphs are typically 3–6px wide; wider blobs are touching digits.
 MAX_GLYPH_WIDTH = 7
+# A clean status row contains only a small number of glyphs. Treat a noisy
+# frame with many candidate blobs as unreadable before template matching can
+# turn it into an expensive per-glyph search.
+MAX_STATUS_PANEL_COMPONENTS = 64
 # Real digit boxes sit ~1px apart; label leftovers (e.g. trailing ``t`` of
 # ``Weight``) sit farther left with a wide gap before the value digits.
 MAX_LEADING_ORPHAN_GAP_PX = 6
@@ -62,6 +67,9 @@ PANEL_HEIGHT = 143
 HP_SCAN_ZONE   = (42, 45, 138, 18)   # x=42..180
 SP_SCAN_ZONE   = (42, 66, 138, 16)   # x=42..180
 WEIGHT_SCAN_ZONE = (70, 116, 110, 14) # x=70..180
+# Union of the three changing-value rows. The fixed hot path captures only
+# this band; the static header and surrounding client are never recaptured.
+VALUE_ROWS_ROI = (42, 45, 138, 85)
 
 # Pixels to expand left/right from "/" center — enough for 5 digits + gaps
 _SLASH_LEFT_EXPAND = 52
@@ -109,8 +117,19 @@ def _load_digit_templates() -> dict[str, tuple[np.ndarray, ...]]:
     return {ch: tuple(glyphs) for ch, glyphs in by_char.items()}
 
 
-def find_status_panel(frame_bgr: np.ndarray) -> tuple[int, int] | None:
-    """Return top-left of the Basic Info panel in *frame_bgr*, or None."""
+def find_status_panel(
+    frame_bgr: np.ndarray,
+    *,
+    deadline: float | None = None,
+) -> tuple[int, int] | None:
+    """Return top-left of the Basic Info panel in *frame_bgr*, or None.
+
+    ``deadline`` is a monotonic absolute deadline used by the live status
+    feed. It keeps a pathological frame from consuming the feed's entire
+    bounded-read budget.
+    """
+    if deadline is not None and time.monotonic() >= deadline:
+        return None
     if frame_bgr is None or frame_bgr.size == 0:
         return None
     header = _load_header_template()
@@ -126,6 +145,8 @@ def find_status_panel(frame_bgr: np.ndarray) -> tuple[int, int] | None:
     )
     result = cv2.matchTemplate(gray, header, cv2.TM_CCOEFF_NORMED)
     _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(result)
+    if deadline is not None and time.monotonic() >= deadline:
+        return None
     if max_val < HEADER_MATCH_THRESHOLD:
         return None
     hx, hy = int(max_loc[0]), int(max_loc[1])
@@ -159,10 +180,13 @@ def read_status_panel_hp(
     frame_bgr: np.ndarray,
     *,
     origin: tuple[int, int] | None = None,
+    deadline: float | None = None,
 ) -> tuple[int, int] | None:
     """Read only HP/HP-max so damage detection survives other OCR misses."""
+    if deadline is not None and time.monotonic() >= deadline:
+        return None
     if origin is None:
-        origin = find_status_panel(frame_bgr)
+        origin = find_status_panel(frame_bgr, deadline=deadline)
     if origin is None:
         return None
     result = _parse_anchored(
@@ -171,8 +195,55 @@ def read_status_panel_hp(
         HP_SCAN_ZONE,
         min_width=2,
         stop_at_slash=False,
+        deadline=deadline,
     )
     return result if isinstance(result, tuple) else None
+
+
+def read_status_panel_sp(
+    frame_bgr: np.ndarray,
+    *,
+    origin: tuple[int, int] | None = None,
+    previous: StatusPanelValues | None = None,
+    refresh_max: bool = True,
+    deadline: float | None = None,
+) -> tuple[int, int] | None:
+    """Read SP independently of HP and Weight.
+
+    SP recovery is a control dependency: a transient HP/Weight OCR miss must
+    not prevent the sit worker from seeing regenerated SP. Full panel reads
+    therefore have a narrow SP-only path, while fast polls reuse the confirmed
+    SP maximum and parse only the current value.
+    """
+    if deadline is not None and time.monotonic() >= deadline:
+        return None
+    if origin is None:
+        origin = find_status_panel(frame_bgr, deadline=deadline)
+    if origin is None:
+        return None
+    if refresh_max or previous is None:
+        result = _parse_anchored(
+            frame_bgr,
+            origin,
+            SP_SCAN_ZONE,
+            min_width=2,
+            stop_at_slash=False,
+            deadline=deadline,
+        )
+        return result if isinstance(result, tuple) else None
+    current = _parse_anchored(
+        frame_bgr,
+        origin,
+        SP_SCAN_ZONE,
+        min_width=2,
+        stop_at_slash=True,
+        deadline=deadline,
+    )
+    if not isinstance(current, int) or previous.sp_max <= 0:
+        return None
+    if current > previous.sp_max:
+        return None
+    return current, previous.sp_max
 
 
 def read_status_panel(
@@ -181,6 +252,7 @@ def read_status_panel(
     origin: tuple[int, int] | None = None,
     skip_hp: bool = False,
     previous: StatusPanelValues | None = None,
+    deadline: float | None = None,
 ) -> StatusPanelValues | None:
     """Parse HP/SP/Weight from the Basic Info panel.
 
@@ -200,18 +272,34 @@ def read_status_panel(
         Last full-read result providing max values for the fast poll.
         Required when ``skip_hp=True``.
     """
+    if deadline is not None and time.monotonic() >= deadline:
+        return None
     if origin is None:
-        origin = find_status_panel(frame_bgr)
+        origin = find_status_panel(frame_bgr, deadline=deadline)
     if origin is None:
         return None
 
     if skip_hp:
         if previous is None:
             raise ValueError("previous must be provided when skip_hp=True")
-        sp = _parse_anchored(frame_bgr, origin, SP_SCAN_ZONE, min_width=2, stop_at_slash=True)
+        sp = _parse_anchored(
+            frame_bgr,
+            origin,
+            SP_SCAN_ZONE,
+            min_width=2,
+            stop_at_slash=True,
+            deadline=deadline,
+        )
         if sp is None:
             return None
-        weight = _parse_anchored(frame_bgr, origin, WEIGHT_SCAN_ZONE, min_width=3, stop_at_slash=True)
+        weight = _parse_anchored(
+            frame_bgr,
+            origin,
+            WEIGHT_SCAN_ZONE,
+            min_width=3,
+            stop_at_slash=True,
+            deadline=deadline,
+        )
         return StatusPanelValues(
             hp=previous.hp,
             hp_max=previous.hp_max,
@@ -224,13 +312,34 @@ def read_status_panel(
         )
 
     # Full read — parse current+max for all three bands.
-    hp = _parse_anchored(frame_bgr, origin, HP_SCAN_ZONE, min_width=2, stop_at_slash=False)
+    hp = _parse_anchored(
+        frame_bgr,
+        origin,
+        HP_SCAN_ZONE,
+        min_width=2,
+        stop_at_slash=False,
+        deadline=deadline,
+    )
     if hp is None:
         return None
-    sp = _parse_anchored(frame_bgr, origin, SP_SCAN_ZONE, min_width=2, stop_at_slash=False)
+    sp = _parse_anchored(
+        frame_bgr,
+        origin,
+        SP_SCAN_ZONE,
+        min_width=2,
+        stop_at_slash=False,
+        deadline=deadline,
+    )
     if sp is None:
         return None
-    weight = _parse_anchored(frame_bgr, origin, WEIGHT_SCAN_ZONE, min_width=3, stop_at_slash=False)
+    weight = _parse_anchored(
+        frame_bgr,
+        origin,
+        WEIGHT_SCAN_ZONE,
+        min_width=3,
+        stop_at_slash=False,
+        deadline=deadline,
+    )
     return StatusPanelValues(
         hp=hp[0],
         hp_max=hp[1],
@@ -238,6 +347,114 @@ def read_status_panel(
         sp_max=sp[1],
         weight=None if weight is None else weight[0],
         weight_max=None if weight is None else weight[1],
+        panel_origin=origin,
+    )
+
+
+def read_status_panel_fixed_rois(
+    frame_bgr: np.ndarray,
+    *,
+    origin: tuple[int, int] = (0, 0),
+    previous: StatusPanelValues | None = None,
+    refresh_max: bool = True,
+    deadline: float | None = None,
+) -> StatusPanelValues | None:
+    """Read the already-anchored HP/SP/Weight ROIs without panel discovery.
+
+    The Basic Info layout is static during a bot session. Callers should run
+    :func:`find_status_panel` once, then use this function on the fixed panel
+    crop for every subsequent frame. It never searches for the header and it
+    never verifies the panel; a failed band simply returns ``None`` so the
+    caller can keep the anchor for a transient frame or re-anchor after a
+    streak of failures.
+    """
+    if deadline is not None and time.monotonic() >= deadline:
+        return None
+    if refresh_max or previous is None:
+        hp = _parse_anchored(
+            frame_bgr,
+            origin,
+            HP_SCAN_ZONE,
+            min_width=2,
+            stop_at_slash=False,
+            deadline=deadline,
+        )
+        sp = _parse_anchored(
+            frame_bgr,
+            origin,
+            SP_SCAN_ZONE,
+            min_width=2,
+            stop_at_slash=False,
+            deadline=deadline,
+        )
+        weight = _parse_anchored(
+            frame_bgr,
+            origin,
+            WEIGHT_SCAN_ZONE,
+            min_width=3,
+            stop_at_slash=False,
+            deadline=deadline,
+        )
+        if not isinstance(hp, tuple) or not isinstance(sp, tuple):
+            return None
+        if not isinstance(weight, tuple):
+            return None
+        return StatusPanelValues(
+            hp=hp[0],
+            hp_max=hp[1],
+            sp=sp[0],
+            sp_max=sp[1],
+            weight=weight[0],
+            weight_max=weight[1],
+            panel_origin=origin,
+        )
+
+    # Fast fixed-ROI poll: maxima are static, so parse only changing current
+    # values and reuse the confirmed maxima. This is the normal session path.
+    hp_current = _parse_anchored(
+        frame_bgr,
+        origin,
+        HP_SCAN_ZONE,
+        min_width=2,
+        stop_at_slash=True,
+        deadline=deadline,
+    )
+    sp_current = _parse_anchored(
+        frame_bgr,
+        origin,
+        SP_SCAN_ZONE,
+        min_width=2,
+        stop_at_slash=True,
+        deadline=deadline,
+    )
+    weight_current = _parse_anchored(
+        frame_bgr,
+        origin,
+        WEIGHT_SCAN_ZONE,
+        min_width=3,
+        stop_at_slash=True,
+        deadline=deadline,
+    )
+    if not isinstance(hp_current, int) or not isinstance(sp_current, int):
+        return None
+    if not isinstance(weight_current, int):
+        return None
+    if (
+        previous.hp_max <= 0
+        or previous.sp_max <= 0
+        or previous.weight_max is None
+        or weight_current > previous.weight_max
+        or hp_current > previous.hp_max
+        or sp_current > previous.sp_max
+    ):
+        return None
+    return StatusPanelValues(
+        hp=hp_current,
+        hp_max=previous.hp_max,
+        sp=sp_current,
+        sp_max=previous.sp_max,
+        weight=weight_current,
+        weight_max=previous.weight_max,
         panel_origin=origin,
     )
 
@@ -251,6 +468,7 @@ def _parse_anchored(
     *,
     min_width: int,
     stop_at_slash: bool,
+    deadline: float | None = None,
 ) -> int | tuple[int, int] | None:
     """Parse OCR values using a single classify pass over *scan_roi*.
 
@@ -263,6 +481,8 @@ def _parse_anchored(
 
     Returns ``None`` when ``/`` is not found or any digit validation fails.
     """
+    if deadline is not None and time.monotonic() >= deadline:
+        return None
     crop = _crop_roi(frame_bgr, origin, scan_roi)
     if crop is None:
         return None
@@ -272,9 +492,11 @@ def _parse_anchored(
     if not comps:
         return None
 
-    classified: list[tuple[int, str | None, float, np.ndarray]] = [
-        (x, *_classify_glyph(glyph), glyph) for x, glyph in comps
-    ]
+    classified: list[tuple[int, str | None, float, np.ndarray]] = []
+    for x, glyph in comps:
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
+        classified.append((x, *_classify_glyph(glyph), glyph))
 
     slash_x: int | None = None
     for x, ch, score, glyph in classified:
@@ -462,6 +684,11 @@ def _glyph_components(
     count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
         cleaned, connectivity=8
     )
+    # Do not classify a pathological noisy row. Returning no components makes
+    # the caller use its normal unreadable/HP-only fallback and keeps the next
+    # UI poll available instead of spending seconds on template matching.
+    if count - 1 > MAX_STATUS_PANEL_COMPONENTS:
+        return []
     comps: list[tuple[int, np.ndarray]] = []
     for index in range(1, count):
         x, y, w, h, area = stats[index]

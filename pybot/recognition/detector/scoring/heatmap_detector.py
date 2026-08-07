@@ -59,11 +59,40 @@ _EDGE_DENSITY_WEIGHT = np.float32(0.5)
 _PALETTE_DIST_CHUNK_ELEMENTS = 8192 * 32  # 1 MiB of float32 output
 
 
+def _pixel_dot(pixels: np.ndarray, vector: np.ndarray) -> np.ndarray:
+    """Dot each BGR pixel with a 3-vector without entering BLAS.
+
+    ``numpy.dot`` on a very wide pixel matrix can hand each tiny 3-column
+    multiply to the process BLAS pool. Discovery, tracking, and OCR can then
+    all trigger native pools at once even though OpenCV itself is configured
+    single-threaded. The explicit three-channel expression has bounded,
+    deterministic native work and avoids that post-stand oversubscription.
+    """
+    return (
+        pixels[:, 0] * vector[0]
+        + pixels[:, 1] * vector[1]
+        + pixels[:, 2] * vector[2]
+    )
+
+
+def _pixel_palette_dot(
+    pixels: np.ndarray,
+    palette: np.ndarray,
+) -> np.ndarray:
+    """Return ``pixels @ palette.T`` without invoking the BLAS thread pool."""
+    return (
+        pixels[:, None, 0] * palette[None, :, 0]
+        + pixels[:, None, 1] * palette[None, :, 1]
+        + pixels[:, None, 2] * palette[None, :, 2]
+    )
+
+
 def _palette_dist_sq(pixels: np.ndarray, palette: np.ndarray) -> np.ndarray:
     """Squared Euclidean distances (N, C) via |p-c|² = |p|² + |c|² - 2p·c.
 
-    Routes through BLAS ``dot`` and avoids a (N, C, 3) intermediate. The matrix
-    is built in bounded row chunks so the peak allocation is ~1 MiB regardless
+    Uses a bounded three-channel multiply and avoids a (N, C, 3)
+    intermediate. The matrix is built in bounded row chunks so the peak
+    allocation is ~1 MiB regardless
     of frame size; per-row arithmetic is identical to the single-GEMM version.
     """
     n_pixels = pixels.shape[0]
@@ -78,7 +107,7 @@ def _palette_dist_sq(pixels: np.ndarray, palette: np.ndarray) -> np.ndarray:
     for start in range(0, n_pixels, chunk):
         pc = pixels[start : start + chunk]
         p_norm = np.sum(pc * pc, axis=1, keepdims=True)  # (chunk, 1)
-        dist_sq = np.dot(pc, palette.T)  # (chunk, C)
+        dist_sq = _pixel_palette_dot(pc, palette)  # (chunk, C)
         dist_sq *= neg2
         dist_sq += p_norm
         dist_sq += c_norm.T
@@ -106,7 +135,7 @@ def _palette_min_dist_sq_gemv(pixels: np.ndarray, palette: np.ndarray) -> np.nda
     neg2 = np.float32(-2.0)
     zero = np.float32(0.0)
     for j in range(n_colors):
-        col = np.dot(pixels, palette[j])
+        col = _pixel_dot(pixels, palette[j])
         col *= neg2
         col += c_norms[j]
         col += p_sq
@@ -136,7 +165,7 @@ def _palette_argmin_dist_sq_gemv(
     neg2 = np.float32(-2.0)
     zero = np.float32(0.0)
     for j in range(n_colors):
-        col = np.dot(pixels, palette[j])
+        col = _pixel_dot(pixels, palette[j])
         col *= neg2
         col += c_norms[j]
         col += p_sq
@@ -250,7 +279,7 @@ def weighted_sprite_palette_heatmap(
     inv_max_dist = np.float32(1.0) / max_dist
     one = np.float32(1.0)
     for j in range(n_colors):
-        col = np.dot(pixels, palette[j])
+        col = _pixel_dot(pixels, palette[j])
         col *= neg2
         col += c_norms[j]
         col += p_sq
@@ -276,12 +305,10 @@ def _group_presence_maps(
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Per-group max-sim and local presence maps (hard color-structure gate)."""
     denom = _PRESENCE_SIMILARITY_HIGH - _PRESENCE_SIMILARITY_LOW
-    group_similarity: list[np.ndarray] = []
     group_present: list[np.ndarray] = []
     for indices in groups:
         idx = np.asarray(indices, dtype=np.int32)
         g_sim = similarity_hwc[:, :, idx].max(axis=2).astype(np.float32)
-        group_similarity.append(g_sim)
         matched = np.clip(
             (g_sim - _PRESENCE_SIMILARITY_LOW) / denom,
             0.0,
@@ -294,7 +321,50 @@ def _group_presence_maps(
             local_presence / _MIN_GROUP_AREA_FRACTION, 0.0, 1.0,
         ).astype(np.float32)
         group_present.append(present)
-    return group_similarity, group_present
+    return [], group_present
+
+
+def _group_presence_maps_from_frame(
+    frame_bgr: np.ndarray,
+    descriptor: MobDescriptor,
+    groups: list[list[int]],
+    ksize: tuple[int, int],
+    max_distance: float,
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """Build group presence maps without a full-frame ``(H, W, palette)`` map.
+
+    The discovery diversity pass used to retain every palette similarity for the
+    whole ROI. For a 1024x1024 Anubis frame that is a large temporary tensor and
+    it competed with tracking immediately after sit recovery. Each group only
+    needs its maximum similarity and local presence, so compute one 2-D map per
+    group and release it before moving to the next group.
+    """
+    denom = _PRESENCE_SIMILARITY_HIGH - _PRESENCE_SIMILARITY_LOW
+    group_present: list[np.ndarray] = []
+    palette = descriptor.match_palette_bgr
+    for indices in groups:
+        group_palette = [palette[index] for index in indices]
+        g_sim = sprite_palette_heatmap(
+            frame_bgr,
+            group_palette,
+            max_distance,
+        )
+        matched = np.clip(
+            (g_sim - _PRESENCE_SIMILARITY_LOW) / denom,
+            0.0,
+            1.0,
+        ).astype(np.float32)
+        local_presence = cv2.boxFilter(
+            matched, ddepth=-1, ksize=ksize, normalize=True,
+        )
+        group_present.append(
+            np.clip(
+                local_presence / _MIN_GROUP_AREA_FRACTION,
+                0.0,
+                1.0,
+            ).astype(np.float32)
+        )
+    return [], group_present
 
 
 def mass_body_clusters(descriptor: MobDescriptor) -> list[ColorCluster]:
@@ -417,7 +487,7 @@ def _multi_cluster_match_max(bgr_f: np.ndarray, clusters: list[ColorCluster]) ->
     zero = np.float32(0.0)
     one = np.float32(1.0)
     for j in range(n_clusters):
-        col = np.dot(pixels, centers[j])
+        col = _pixel_dot(pixels, centers[j])
         col *= neg2
         col += c_norms[j]
         col += p_sq
@@ -482,10 +552,19 @@ def apply_body_cluster_diversity(
         local_body = ones.copy()
 
     n_required = len(required_groups)
-    if n_required > 0 and similarity_hwc is not None and similarity_hwc.size > 0:
-        _sims, req_present = _group_presence_maps(
-            similarity_hwc, required_groups, ksize,
-        )
+    if n_required > 0:
+        if similarity_hwc is not None and similarity_hwc.size > 0:
+            _sims, req_present = _group_presence_maps(
+                similarity_hwc, required_groups, ksize,
+            )
+        else:
+            _sims, req_present = _group_presence_maps_from_frame(
+                frame_bgr,
+                descriptor,
+                required_groups,
+                ksize,
+                float(descriptor.max_sprite_palette_distance),
+            )
         required_effective = np.zeros((h, w), dtype=np.float32)
         for present in req_present:
             required_effective += present
@@ -499,10 +578,19 @@ def apply_body_cluster_diversity(
 
     n_optional = len(optional_groups)
     optional_effective = np.zeros((h, w), dtype=np.float32)
-    if n_optional > 0 and similarity_hwc is not None and similarity_hwc.size > 0:
-        _opt_sims, opt_present = _group_presence_maps(
-            similarity_hwc, optional_groups, ksize,
-        )
+    if n_optional > 0:
+        if similarity_hwc is not None and similarity_hwc.size > 0:
+            _opt_sims, opt_present = _group_presence_maps(
+                similarity_hwc, optional_groups, ksize,
+            )
+        else:
+            _opt_sims, opt_present = _group_presence_maps_from_frame(
+                frame_bgr,
+                descriptor,
+                optional_groups,
+                ksize,
+                float(descriptor.max_sprite_palette_distance),
+            )
         for present in opt_present:
             optional_effective += present
 
@@ -698,17 +786,20 @@ class HeatmapDetector:
 
         # --- 1. Weighted sprite-palette-distance heatmap ---
         if descriptor.use_body_cluster_diversity:
-            base_sprite, similarity = weighted_sprite_palette_heatmap(
+            # Keep the weighted base heatmap, but do not retain a full-frame
+            # per-palette similarity tensor. Diversity only needs one 2-D
+            # presence map per color group; building those maps on demand keeps
+            # the 1024x1024 Anubis path bounded after sit recovery.
+            base_sprite = weighted_sprite_palette_heatmap(
                 work_bgr,
                 descriptor,
                 descriptor.max_sprite_palette_distance,
-                return_similarity=True,
             )
             sprite, div_maps = apply_body_cluster_diversity(
                 base_sprite,
                 work_bgr,
                 descriptor,
-                similarity_hwc=similarity,
+                similarity_hwc=None,
                 min_body_strong=self.min_body_cluster_strong,
                 min_required_groups=self.min_required_groups,
                 avg_width=descriptor.size.avg_width,

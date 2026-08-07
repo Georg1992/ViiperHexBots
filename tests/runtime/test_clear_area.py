@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import threading
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+from pybot.runtime.constants import SIT_SP_POLL_INTERVAL_S
 from pybot.runtime.teleport import TeleportController
 
 
@@ -23,11 +24,25 @@ class TeleportUntilQuietTests(unittest.TestCase):
     def test_proceeds_when_still_clear_after_idle(self) -> None:
         self.tport._scan_living_count = MagicMock(return_value=0)  # type: ignore[method-assign]
         self.tport.teleport_until_clear = MagicMock(return_value=True)  # type: ignore[method-assign]
-        ok = self.tport.teleport_until_quiet(
-            log_tag="STORAGE", idle_s=1.0
-        )
+
+        clock = [0.0]
+
+        def fake_monotonic() -> float:
+            return clock[0]
+
+        def advance_clock(timeout_s: float) -> bool:
+            clock[0] += timeout_s
+            return True
+
+        self.ctx.wait_unless_stopped.side_effect = advance_clock
+        with patch("pybot.runtime.teleport.time.monotonic", side_effect=fake_monotonic):
+            ok = self.tport.teleport_until_quiet(
+                log_tag="STORAGE", idle_s=1.0
+            )
         self.assertTrue(ok)
-        self.ctx.wait_unless_stopped.assert_called_once_with(1.0)
+        waits = [call.args[0] for call in self.ctx.wait_unless_stopped.call_args_list]
+        self.assertGreater(len(waits), 1)
+        self.assertTrue(all(0 < timeout <= SIT_SP_POLL_INTERVAL_S for timeout in waits))
         self.tport._scan_living_count.assert_called_once()
 
     def test_retries_when_mobs_appear_during_idle(self) -> None:

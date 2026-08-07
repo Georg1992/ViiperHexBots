@@ -123,7 +123,6 @@ class MainWindow:
             config=self.config,
             vitals=self.vitals,
             overlay=self._status_panel_overlay,
-            panel_active=self._panel_lookup_active,
             log=self.log_pipe.log,
             post_to_tk=self._post_ui_callback,
             on_hp=self._set_memory_hp,
@@ -785,8 +784,13 @@ class MainWindow:
         main.rowconfigure(3, weight=1)
         self._sync_memory_reading_from_profile()
         self._update_search_label()
+        self._memory_feed.set_active(False)
+        self._status_feed.set_active(False)
         self._memory_feed.start()
         self._status_feed.start()
+        # Observation feeds are intentionally idle until the bot owns a live
+        # session. The labels remain visible, but stopped/paused states must
+        # not read process memory or OCR the game window.
         self.root.after(50, self._drain_ui_callbacks)
         self._settings_apply_enabled = True
 
@@ -1110,16 +1114,6 @@ class MainWindow:
     def _set_memory_weight(self, text: str) -> None:
         self.memory_weight.configure(text=text)
 
-    def _panel_lookup_active(self) -> bool:
-        """Run status OCR whenever the bot session is active.
-
-        OCR is an observation pipeline and must not depend on foreground focus;
-        the game can be covered by the bot window while its client remains
-        rendered. Minimized/invalid windows are rejected inside the background
-        status reader, without blocking or stopping future polls.
-        """
-        return self.lifecycle.state in (BotState.STARTING, BotState.RUNNING)
-
     def _persist_log_line(self, message: str) -> None:
         """LogPipe sink — mirror every UI log line into the session log.
 
@@ -1300,8 +1294,20 @@ class MainWindow:
         self.log_pipe.log("All set — select or launch the game window")
         self.refresh_windows()
 
+    def _set_observation_feeds_active(self, active: bool) -> None:
+        """Allow UI observation only while the bot is starting/running.
+
+        ``set_active`` invalidates in-flight generations, preventing a native
+        memory/OCR completion from updating vitals after pause or stop.
+        """
+        self._memory_feed.set_active(active)
+        self._status_feed.set_active(active)
+
     def _on_bot_state_changed(self, state: BotState) -> None:
         """Update UI widgets to reflect the current bot state."""
+        self._set_observation_feeds_active(
+            state in (BotState.STARTING, BotState.RUNNING)
+        )
         if state == BotState.RUNNING:
             self.bot_button.configure(text="Stop Bot")
             self.continue_button.configure(state=tk.DISABLED)

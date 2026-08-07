@@ -124,6 +124,21 @@ class MemoryStatsFeedTests(unittest.TestCase):
         self.assertEqual(feed._on_name.calls, [])
         self.assertEqual(feed._vitals.sp, None)
 
+    def test_memory_reads_stop_when_feed_is_inactive(self) -> None:
+        feed = _memory_feed()
+        feed.set_active(False)
+        with patch("pybot.app.memory_stats_feed.load_client_profile") as load:
+            self.assertIsNone(feed.should_submit())
+        load.assert_not_called()
+
+    def test_inactive_memory_feed_drops_completed_result(self) -> None:
+        feed = _memory_feed()
+        feed.set_active(False)
+        snap = SimpleNamespace(ok=True, char_name="Hero", sp=1, sp_max=2,
+                               weight=3, weight_max=4)
+        feed.apply_result((123, snap))
+        self.assertEqual(feed._vitals.sp, None)
+
 
 def _status_feed(**overrides) -> StatusPanelFeed:
     labels = {name: _Recorder() for name in ("hp", "sp", "weight")}
@@ -132,7 +147,6 @@ def _status_feed(**overrides) -> StatusPanelFeed:
         config=SimpleNamespace(window_id=123, use_memory_reading=False),
         vitals=_FakeVitals(),
         overlay=MagicMock(),
-        panel_active=lambda: True,
         log=lambda _msg: None,
         post_to_tk=lambda cb: None,
         on_hp=labels["hp"],
@@ -154,11 +168,27 @@ class StatusPanelFeedTests(unittest.TestCase):
         feed._status_panel_confirmed = SimpleNamespace()
         self.assertEqual(feed.should_submit(), STATUS_PANEL_VALUE_MS)
 
-    def test_skips_when_session_inactive_and_hides_overlay(self) -> None:
+    def test_reads_stop_when_feed_is_inactive(self) -> None:
         feed = _status_feed()
-        feed._panel_active = lambda: False
+        feed.set_active(False)
         self.assertIsNone(feed.should_submit())
-        feed._status_panel_overlay.hide.assert_called_once_with()
+        feed._status_panel_confirmed = SimpleNamespace()
+        self.assertIsNone(feed.should_submit())
+
+    def test_reads_resume_when_feed_is_reactivated(self) -> None:
+        feed = _status_feed()
+        feed.set_active(False)
+        feed.set_active(True)
+        self.assertEqual(feed.should_submit(), STATUS_PANEL_SEARCH_MS)
+        feed._status_panel_confirmed = SimpleNamespace()
+        self.assertEqual(feed.should_submit(), STATUS_PANEL_VALUE_MS)
+
+    def test_inactive_feed_drops_completed_result(self) -> None:
+        feed = _status_feed()
+        feed.set_active(False)
+        result = SimpleNamespace(hwnd=123, state="hp_only", hp=(50, 100))
+        feed.apply_result(result)
+        self.assertEqual(feed._vitals.hp, None)
 
     def test_hp_only_result_publishes_hp(self) -> None:
         feed = _status_feed()
@@ -168,6 +198,60 @@ class StatusPanelFeedTests(unittest.TestCase):
         feed.apply_result(result)
         self.assertEqual(feed._vitals.hp, (50, 100))
         self.assertEqual(feed._on_hp.calls, [("50/100",)])
+
+    def test_sp_only_result_publishes_sp_during_sit_ocr_gap(self) -> None:
+        """SP recovery must not depend on HP/Weight succeeding in the frame."""
+        feed = _status_feed()
+        result = SimpleNamespace(
+            hwnd=123, state="sp_only", sp=(98, 100),
+        )
+        feed.apply_result(result)
+        self.assertEqual(feed._vitals.sp, (98, 100))
+        self.assertEqual(feed._on_sp.calls, [("98/100",)])
+
+    def test_reanchors_only_after_three_fixed_roi_misses(self) -> None:
+        feed = _status_feed()
+        for _ in range(2):
+            feed.apply_result(SimpleNamespace(
+                hwnd=123,
+                state="roi_missing",
+                client_left=10,
+                client_top=20,
+                client_width=300,
+                client_height=200,
+            ))
+        self.assertFalse(feed._status_panel_geometry_refresh)
+        self.assertFalse(feed._status_panel_reanchor)
+
+        feed.apply_result(SimpleNamespace(
+            hwnd=123,
+            state="roi_missing",
+            client_left=10,
+            client_top=20,
+            client_width=300,
+            client_height=200,
+        ))
+        self.assertTrue(feed._status_panel_geometry_refresh)
+        self.assertTrue(feed._status_panel_reanchor)
+
+    def test_valid_fixed_roi_result_resets_miss_streak(self) -> None:
+        feed = _status_feed()
+        feed._status_panel_miss_count = 2
+        feed.apply_result(SimpleNamespace(
+            hwnd=123,
+            state="sp_only",
+            sp=(98, 100),
+        ))
+        self.assertEqual(feed._status_panel_miss_count, 0)
+
+    def test_hp_sp_only_result_publishes_both_independently(self) -> None:
+        feed = _status_feed()
+        result = SimpleNamespace(
+            hwnd=123, state="hp_sp_only", hp=(80, 100), sp=(98, 100),
+        )
+        feed.apply_result(result)
+        self.assertEqual(feed._vitals.hp, (80, 100))
+        self.assertEqual(feed._vitals.sp, (98, 100))
 
     def test_panel_missing_clears_vision_stats(self) -> None:
         feed = _status_feed()

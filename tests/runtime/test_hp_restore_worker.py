@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from pybot.game_state import PlayerVitals
@@ -62,8 +63,10 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self.input.key_tap.assert_called_once_with(59, after_s=0.0)
         self.assertLess(49 / 100, HP_RESTORE_RATIO)
 
-    def test_does_not_heal_during_active_hunt_even_when_hp_is_low(self) -> None:
-        self.vitals.publish_hp(40, 100)
+    def test_does_not_use_hp_item_above_fifty_percent_after_teleport(self) -> None:
+        """Teleport state does not change the simple HP-item threshold."""
+        self.vitals.publish_hp(60, 100)
+        self.ctx.mark_post_teleport_heal(10.0)
 
         def stop_soon(*_args, **_kwargs) -> bool:
             self.ctx.stop_event.set()
@@ -71,7 +74,22 @@ class HpRestoreWorkerTests(unittest.TestCase):
 
         self.ctx.stop_event.wait = stop_soon  # type: ignore[method-assign]
         self._worker().run()
+
         self.input.key_tap.assert_not_called()
+
+    def test_presses_hp_item_during_active_hunt_when_below_fifty_percent(self) -> None:
+        self.ctx.mark_running()
+        self.vitals.publish_hp(40, 100)
+
+        def stop_after_press(scan: int, *, after_s: float) -> bool:
+            self.assertEqual(scan, 59)
+            self.assertEqual(after_s, 0.0)
+            self.ctx.stop_event.set()
+            return True
+
+        self.input.key_tap.side_effect = stop_after_press
+        self._worker().run()
+        self.input.key_tap.assert_called_once_with(59, after_s=0.0)
 
     def test_does_not_press_hp_item_key_at_or_above_fifty_percent(self) -> None:
         self.vitals.publish_hp(50, 100)
@@ -84,29 +102,14 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self._worker().run()
         self.input.key_tap.assert_not_called()
 
-    def test_full_hp_race_is_rejected_at_input_boundary(self) -> None:
-        """A heal preflight must not press after HP becomes full."""
-        self.vitals.publish_hp(40, 100)
-        self.ctx.mark_post_teleport_heal(10.0)
-        calls = {"count": 0}
+    def test_full_hp_item_heal_is_a_noop_before_gate_admission(self) -> None:
+        """Full HP must not even enter character-action admission."""
+        self.vitals.publish_hp(100, 100)
+        self.ctx.should_run_character_actions = MagicMock(return_value=False)
 
-        def allowed() -> bool:
-            calls["count"] += 1
-            if calls["count"] == 2:
-                self.vitals.publish_hp(100, 100)
-            return True
-
-        self.ctx.should_run_heal_actions = allowed
-
-        def stop_after_rejection(*_args, **_kwargs) -> bool:
-            self.ctx.stop_event.set()
-            return False
-
-        self.ctx.stop_event.wait = stop_after_rejection  # type: ignore[method-assign]
-        self._worker().run()
-
+        self.assertFalse(self._worker().process_pending())
         self.input.key_tap.assert_not_called()
-        self.assertGreaterEqual(calls["count"], 2)
+        self.ctx.should_run_character_actions.assert_not_called()
 
     def test_item_worker_does_not_use_skill_click(self) -> None:
         self.vitals.publish_hp(40, 100)
@@ -119,41 +122,6 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self.input.key_tap.side_effect = stop_after_press
         self._worker().run()
         self.input.skill_click_at.assert_not_called()
-
-    def test_heal_gate_is_rechecked_at_input_boundary(self) -> None:
-        self.vitals.publish_hp(40, 100)
-        self.ctx.mark_post_teleport_heal(10.0)
-        self.ctx.should_run_heal_actions = MagicMock(side_effect=[True, False])
-
-        def stop_after_rejection(*_args, **_kwargs) -> bool:
-            self.ctx.stop_event.set()
-            return False
-
-        self.ctx.stop_event.wait = stop_after_rejection  # type: ignore[method-assign]
-        self._worker().run()
-
-        self.input.key_tap.assert_not_called()
-        self.assertEqual(self.ctx.should_run_heal_actions.call_count, 2)
-
-    def test_shared_heal_admission_allows_only_one_worker_action(self) -> None:
-        self.ctx.mark_post_teleport_heal(10.0)
-        actions: list[str] = []
-
-        self.assertTrue(
-            self.ctx.perform_heal_if_allowed(
-                lambda: True,
-                lambda: actions.append("custom") or True,
-                cooldown_s=60.0,
-            )
-        )
-        self.assertFalse(
-            self.ctx.perform_heal_if_allowed(
-                lambda: True,
-                lambda: actions.append("item") or True,
-                cooldown_s=60.0,
-            )
-        )
-        self.assertEqual(actions, ["custom"])
 
 
 class DangerTeleportPriorityTests(unittest.TestCase):
@@ -464,7 +432,7 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.assertTrue(self.ctx.begin_sit_ops())
 
         self.assertFalse(self.ctx.should_run_combat())
-        self.assertTrue(self.ctx.should_run_tracking())
+        self.assertFalse(self.ctx.should_run_tracking())
 
         self.ctx.end_sit_ops()
 

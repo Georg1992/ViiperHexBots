@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import unittest
 
 import cv2
@@ -87,6 +88,13 @@ class StatusPanelTests(unittest.TestCase):
         blanked = frame.copy()
         blanked[:30, :] = (40, 40, 40)
         self.assertIsNone(find_status_panel(blanked))
+
+    def test_parser_honors_expired_deadline(self) -> None:
+        """A live OCR budget must be able to abandon a stale frame promptly."""
+        frame = self._load("StatusPanel.png")
+        self.assertIsNone(
+            read_status_panel(frame, deadline=time.monotonic() - 1.0)
+        )
 
     def test_verify_status_panel_at_locked_origin(self) -> None:
         frame = self._load("FalseWeight2.png")

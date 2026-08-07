@@ -50,9 +50,7 @@ class SitOnLowSpWorker:
         self._danger = danger
         self._last_fail_log = ""
         self._seated = False
-        register_cleanup = getattr(ctx, "register_sit_cleanup", None)
-        if callable(register_cleanup):
-            register_cleanup(self._retry_cleanup_stand)
+        ctx.register_sit_cleanup(self._retry_cleanup_stand)
 
     def _tap(self, sit_scan: int, *, why: str) -> bool:
         """Send one toggle and report whether the input was accepted.
@@ -72,12 +70,7 @@ class SitOnLowSpWorker:
             return False
         self._ctx.logger.behavior(f"[SIT] tap sit-key reason={why}")
         try:
-            toggle = getattr(self._input, "toggle_key", None)
-            if callable(toggle):
-                accepted = bool(toggle(sit_scan))
-            else:
-                # Compatibility for narrow legacy test/custom backends.
-                accepted = bool(self._input.key_tap(sit_scan, after_s=0.0))
+            accepted = bool(self._input.toggle_key(sit_scan))
         except Exception:
             self._ctx.logger.behavior(
                 f"[SIT] sit-key input failed reason={why}:\n"
@@ -146,11 +139,8 @@ class SitOnLowSpWorker:
         runtime's first toggle invert the state. The dedicated backend method
         is allowed to emit only this final key pair after cancellation.
         """
-        cleanup = getattr(self._input, "cleanup_toggle_key", None)
-        if not callable(cleanup):
-            return False
         try:
-            return bool(cleanup(sit_scan))
+            return bool(self._input.cleanup_toggle_key(sit_scan))
         except Exception:
             self._ctx.logger.behavior(
                 f"[SIT] shutdown stand failed:\n{traceback.format_exc()}"
@@ -208,58 +198,7 @@ class SitOnLowSpWorker:
         """
         if self._ctx.pop_danger_sit_request():
             return True
-        try:
-            level = self._danger.danger_level()
-        except Exception:
-            self._ctx.logger.behavior(
-                "[DANGER] seated damage classification failed — no new escape"
-            )
-            return False
-        # MagicMock/lightweight doubles are not a danger classification. Only
-        # the concrete enum values may trigger the detector-state fallback.
-        return isinstance(level, DangerLevel) and level is not DangerLevel.SAFE
-
-    def _hunting_danger_is_critical(self) -> bool | None:
-        """Return whether a pending hunting damage event warrants teleport.
-
-        The detector queues every HP drop so damage can interrupt a seated
-        recovery session. While hunting, ordinary damage is intentionally
-        ignored; only the detector's CRITICAL classification may escape.
-        """
-        try:
-            return self._danger.danger_level() is DangerLevel.CRITICAL
-        except Exception:
-            self._ctx.logger.behavior(
-                "[DANGER] critical check failed — keeping hunt in place"
-            )
-            return None
-
-    def _handle_hunting_danger(self) -> None:
-        """Consume hunting damage; teleport only for critical danger."""
-        ctx = self._ctx
-        critical = self._hunting_danger_is_critical()
-        if critical is None:
-            # A detector failure must fail closed: never resume combat while a
-            # damage request cannot be classified safely.
-            ctx.logger.behavior(
-                "[DANGER] damage classification unavailable — request retained"
-            )
-            return
-        # The independent critical-danger worker owns hunting teleports. This
-        # sit worker only consumes ordinary mirrored requests; the critical
-        # request remains for the escape worker.
-        if not critical:
-            ctx.pop_danger_sit_request()
-        else:
-            ctx.logger.behavior(
-                "[DANGER] critical hunting damage — delegated to escape worker"
-            )
-        if not critical:
-            # Ordinary hits must not claim the sit gate: doing so would reset
-            # hunt startup/buff state on every attack.
-            ctx.logger.behavior(
-                "[DANGER] ordinary hunting damage — no teleport"
-            )
+        return self._danger.danger_level() is not DangerLevel.SAFE
 
     def _urgent_escape(self, *, reason: str) -> bool:
         """Escape danger, retaining the request until teleport succeeds.
@@ -277,9 +216,7 @@ class SitOnLowSpWorker:
         if self._ctx.pause_event.is_set():
             self._ctx.request_danger_sit()
             return False
-        begin_escape = getattr(self._ctx, "begin_danger_escape", None)
-        escape_owned = bool(begin_escape()) if callable(begin_escape) else False
-        if callable(begin_escape) and not escape_owned:
+        if not self._ctx.begin_danger_escape():
             return False
         try:
             try:
@@ -299,14 +236,7 @@ class SitOnLowSpWorker:
                 )
             return bool(escaped)
         finally:
-            if escape_owned:
-                end_escape = getattr(self._ctx, "end_danger_escape", None)
-                if callable(end_escape):
-                    end_escape()
-        # A successful teleport resets the old damage sample, but it must not
-        # clear a request raised by a newer HP drop during teleport settle.
-        # The sit session consumed the request it owns before calling here.
-        return bool(escaped)
+            self._ctx.end_danger_escape()
 
     def process_pending(self) -> bool:
         """Advance one sit/danger decision synchronously.
@@ -318,9 +248,6 @@ class SitOnLowSpWorker:
         if ctx.is_stopped() or not ctx.should_run_workers():
             return False
         if ctx.critical_danger_requested.is_set() or ctx.danger_escape_active.is_set():
-            return False
-        if ctx.danger_sit_requested.is_set():
-            self._handle_hunting_danger()
             return False
         ratio = self._sp_ratio()
         if ratio is not None and ratio < SIT_LOW_SP_RATIO:
@@ -375,9 +302,7 @@ class SitOnLowSpWorker:
             # The sit worker owns this danger escape, so consume the mirrored
             # critical request as well. Otherwise the independent escape
             # worker can issue a duplicate teleport after this session ends.
-            pop_critical = getattr(ctx, "pop_critical_danger", None)
-            if callable(pop_critical):
-                pop_critical()
+            ctx.pop_critical_danger()
         elif not ctx.begin_sit_ops():
             return
         escape_first = reason == "danger"
@@ -409,9 +334,7 @@ class SitOnLowSpWorker:
                 if teleported_for_session and not escape_first and self._sit_danger_detected():
                     # Consume a settle-time request before the independent
                     # critical worker can preempt this still-owned recovery.
-                    pop_critical = getattr(ctx, "pop_critical_danger", None)
-                    if callable(pop_critical):
-                        pop_critical()
+                    ctx.pop_critical_danger()
                     escape_first = True
                     continue
 
@@ -614,9 +537,7 @@ class SitOnLowSpWorker:
             # critical hunting request that may have been raised in the small
             # race immediately before the sit gate was acquired, otherwise the
             # independent critical worker could duplicate the escape later.
-            pop_critical = getattr(ctx, "pop_critical_danger", None)
-            if callable(pop_critical):
-                pop_critical()
+            ctx.pop_critical_danger()
             ctx.logger.behavior(
                 "[SIT] danger observed before sitting — urgent escape "
                 "and finding a new spot"
@@ -639,9 +560,7 @@ class SitOnLowSpWorker:
             if self._sit_danger_detected():
                 # A seated session owns any damage request; prevent a mirrored
                 # critical hunting request from escaping a second time.
-                pop_critical = getattr(ctx, "pop_critical_danger", None)
-                if callable(pop_critical):
-                    pop_critical()
+                ctx.pop_critical_danger()
                 ctx.logger.behavior(
                     "[SIT] danger — urgently escaping without stand toggle"
                 )
@@ -667,6 +586,10 @@ class SitOnLowSpWorker:
                     return None
                 if not ctx.wait_unless_stopped(SIT_STAND_RESUME_DELAY_S):
                     return None
+                # Do not release the recovery session until the post-stand
+                # client frame is settled. The gameplay owner then starts the
+                # new generation; discovery/tracking cannot overlap the stand
+                # animation or the first buff/timer input.
                 if not self._sp_recovered():
                     ctx.logger.behavior(
                         "[SIT] SP dropped below resume after stand — not done"

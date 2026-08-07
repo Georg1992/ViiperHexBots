@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from pybot.game_state import PlayerVitals
 from pybot.runtime.workers.attack_loop import AttackLoop
@@ -18,6 +18,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
             skill_scan_code=16,
             skill_delay_ms=1,
             use_sprite_grf=False,
+            custom_behavior=SimpleNamespace(heal_scan_code=16),
         )
         events: list[str] = []
         ctx.stop_event = MagicMock()
@@ -66,13 +67,18 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         self.assertEqual(events, ["debuff", "marked", "before", "attack", "kite", "delay"])
         ctx.tracks.mark_debuff_applied.assert_called_once_with(1)
 
-    def test_low_hp_successful_heal_has_priority_over_combat(self) -> None:
-        """A successful low-HP heal gets the tick before combat."""
+    def test_post_teleport_non_full_hp_has_heal_priority_over_combat(self) -> None:
+        """Any missing HP after teleport gets the tick before combat."""
         ctx = MagicMock()
-        ctx.config = SimpleNamespace(skill_scan_code=16, skill_delay_ms=1)
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_delay_ms=1,
+            custom_behavior=SimpleNamespace(heal_scan_code=16),
+        )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
         ctx.should_run_custom_heal_actions.return_value = True
+        ctx.in_post_teleport_heal_window.return_value = True
         ctx.character_screen_pos.return_value = (100, 100)
         ctx.tracks.tracks_for_policy.return_value = []
         ctx.policy.select_target.return_value = 1
@@ -80,7 +86,394 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         vitals = PlayerVitals()
         vitals.publish_hp(49, 100)
         mob_behavior = MagicMock()
-        mob_behavior.heal_if_needed.return_value = True
+        input_backend = MagicMock()
+        input_backend.skill_click_at.return_value = True
+        ctx.try_heal_if_allowed.side_effect = (
+            lambda allowed, action: "cast" if allowed() and action() else "blocked"
+        )
+        loop = AttackLoop(
+            ctx,
+            MagicMock(),
+            input_backend,
+            mob_behavior=mob_behavior,
+            vitals=vitals,
+        )
+        loop._attack_one = MagicMock()
+
+        self.assertFalse(loop.process_pending())
+
+        input_backend.skill_click_at.assert_called_once_with(16, 100, 100)
+        ctx.policy.select_target.assert_not_called()
+        loop._attack_one.assert_not_called()
+        ctx.logger.behavior.assert_any_call(
+            unittest.mock.ANY
+        )
+
+    def test_normal_hunt_non_full_hp_does_not_veto_combat(self) -> None:
+        """The full-HP gate applies only during the post-teleport window."""
+        ctx = MagicMock()
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_delay_ms=1,
+            custom_behavior=SimpleNamespace(heal_scan_code=16),
+        )
+        ctx.logger = MagicMock()
+        ctx.should_run_combat.return_value = True
+        ctx.in_post_teleport_heal_window.return_value = False
+        ctx.character_screen_pos.return_value = (100, 100)
+        ctx.tracks.tracks_for_policy.return_value = []
+        ctx.policy.select_target.return_value = 1
+
+        vitals = PlayerVitals()
+        vitals.publish_hp(60, 100)
+        mob_behavior = MagicMock()
+        loop = AttackLoop(
+            ctx,
+            MagicMock(),
+            MagicMock(),
+            mob_behavior=mob_behavior,
+            vitals=vitals,
+        )
+        loop._attack_one = MagicMock()
+
+        self.assertTrue(loop.process_pending())
+        ctx.policy.select_target.assert_called_once()
+        loop._attack_one.assert_called_once()
+
+    def test_post_teleport_unknown_hp_does_not_start_combat(self) -> None:
+        """Unknown post-teleport HP must fail closed before combat."""
+        ctx = MagicMock()
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_delay_ms=1,
+            custom_behavior=SimpleNamespace(heal_scan_code=16),
+        )
+        ctx.logger = MagicMock()
+        ctx.should_run_combat.return_value = True
+        ctx.in_post_teleport_heal_window.return_value = True
+        ctx.character_screen_pos.return_value = (100, 100)
+        ctx.stop_event = MagicMock()
+        ctx.tracks.tracks_for_policy.return_value = []
+        ctx.policy.select_target.return_value = 1
+
+        vitals = PlayerVitals()
+        mob_behavior = MagicMock()
+        loop = AttackLoop(
+            ctx,
+            MagicMock(),
+            MagicMock(),
+            mob_behavior=mob_behavior,
+            vitals=vitals,
+        )
+        loop._attack_one = MagicMock()
+
+        self.assertFalse(loop.process_pending())
+        ctx.policy.select_target.assert_not_called()
+        loop._attack_one.assert_not_called()
+        ctx.stop_event.wait.assert_called_once()
+
+    def test_post_teleport_blocked_heal_retries_teleport(self) -> None:
+        """A blocked post-teleport heal starts a fresh teleport retry."""
+        ctx = MagicMock()
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_delay_ms=1,
+            custom_behavior=SimpleNamespace(heal_scan_code=16),
+        )
+        ctx.logger = MagicMock()
+        ctx.should_run_combat.return_value = True
+        ctx.should_run_custom_heal_actions.return_value = False
+        ctx.in_post_teleport_heal_window.return_value = True
+        ctx.character_screen_pos.return_value = (100, 100)
+        ctx.stop_event = MagicMock()
+        ctx.tracks.tracks_for_policy.return_value = []
+        ctx.policy.select_target.return_value = 1
+
+        vitals = PlayerVitals()
+        vitals.publish_hp(40, 100)
+        mob_behavior = MagicMock()
+        input_backend = MagicMock()
+        ctx.try_heal_if_allowed.side_effect = (
+            lambda allowed, action: "cast" if allowed() and action() else "blocked"
+        )
+        teleport = MagicMock()
+        teleport.retry_post_teleport_heal.return_value = True
+        loop = AttackLoop(
+            ctx,
+            MagicMock(),
+            input_backend,
+            mob_behavior=mob_behavior,
+            vitals=vitals,
+            teleport_controller=teleport,
+        )
+        loop._attack_one = MagicMock()
+
+        self.assertFalse(loop.process_pending())
+
+        teleport.retry_post_teleport_heal.assert_called_once_with()
+        ctx.policy.select_target.assert_not_called()
+        loop._attack_one.assert_not_called()
+        ctx.logger.behavior.assert_any_call(
+            "[HEAL] post-teleport skill heal blocked; teleported to retry"
+        )
+
+    def test_blocked_skill_teleports_then_retries_once_after_settle(self) -> None:
+        """A successful retry teleport permits exactly one next skill attempt."""
+        ctx = MagicMock()
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_delay_ms=1,
+            custom_behavior=SimpleNamespace(heal_scan_code=16),
+        )
+        ctx.logger = MagicMock()
+        ctx.should_run_combat.return_value = True
+        ctx.should_run_custom_heal_actions.side_effect = [False, True]
+        ctx.try_heal_if_allowed.side_effect = (
+            lambda allowed, action: "cast" if allowed() and action() else "blocked"
+        )
+        ctx.in_post_teleport_heal_window.return_value = True
+        ctx.character_screen_pos.return_value = (100, 100)
+        ctx.stop_event = MagicMock()
+        ctx.tracks.tracks_for_policy.return_value = []
+        ctx.policy.select_target.return_value = 1
+
+        vitals = PlayerVitals()
+        vitals.publish_hp(40, 100)
+        input_backend = MagicMock()
+        input_backend.skill_click_at.return_value = True
+        teleport = MagicMock()
+        teleport.retry_post_teleport_heal.return_value = True
+        loop = AttackLoop(
+            ctx,
+            MagicMock(),
+            input_backend,
+            vitals=vitals,
+            teleport_controller=teleport,
+        )
+        loop._attack_one = MagicMock()
+
+        self.assertFalse(loop.process_pending())
+        self.assertFalse(loop.process_pending())
+
+        teleport.retry_post_teleport_heal.assert_called_once_with()
+        input_backend.skill_click_at.assert_called_once_with(16, 100, 100)
+        ctx.policy.select_target.assert_not_called()
+        loop._attack_one.assert_not_called()
+
+    def test_unchanged_hp_after_verification_window_teleports(self) -> None:
+        """A cast with no HP progress is blocked, not retried in place."""
+        ctx = MagicMock()
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_delay_ms=1,
+            custom_behavior=SimpleNamespace(heal_scan_code=16),
+        )
+        ctx.logger = MagicMock()
+        ctx.should_run_combat.return_value = True
+        ctx.should_run_custom_heal_actions.return_value = True
+        ctx.try_heal_if_allowed.side_effect = (
+            lambda allowed, action: "cast" if allowed() and action() else "blocked"
+        )
+        ctx.in_post_teleport_heal_window.return_value = True
+        ctx.character_screen_pos.return_value = (100, 100)
+        ctx.stop_event = MagicMock()
+        ctx.tracks.tracks_for_policy.return_value = []
+        ctx.policy.select_target.return_value = 1
+
+        vitals = PlayerVitals()
+        vitals.publish_hp(40, 100)
+        input_backend = MagicMock()
+        input_backend.skill_click_at.return_value = True
+        teleport = MagicMock()
+        teleport.retry_post_teleport_heal.return_value = True
+        loop = AttackLoop(
+            ctx,
+            MagicMock(),
+            input_backend,
+            vitals=vitals,
+            teleport_controller=teleport,
+        )
+
+        self.assertFalse(loop.process_pending())
+        # Simulate the verification window expiring without any HP change.
+        last_changed_ms = vitals.hp_sample()[3]
+        loop._last_skill_heal_ms = last_changed_ms
+        # The cast must get the full 600ms verification window before it is
+        # classified as blocked and allowed to trigger a retry teleport.
+        with patch(
+            "pybot.runtime.workers.attack_loop.monotonic_ms",
+            return_value=last_changed_ms + 599,
+        ):
+            self.assertFalse(loop.process_pending())
+        teleport.retry_post_teleport_heal.assert_not_called()
+
+        with patch(
+            "pybot.runtime.workers.attack_loop.monotonic_ms",
+            return_value=last_changed_ms + 600,
+        ):
+            self.assertFalse(loop.process_pending())
+
+        input_backend.skill_click_at.assert_called_once_with(16, 100, 100)
+        teleport.retry_post_teleport_heal.assert_called_once_with()
+        ctx.policy.select_target.assert_not_called()
+
+    def test_blocked_skill_does_not_retry_in_place_when_teleport_fails(self) -> None:
+        """A failed teleport retry suppresses repeated skill casts in place."""
+        ctx = MagicMock()
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_delay_ms=1,
+            custom_behavior=SimpleNamespace(heal_scan_code=16),
+        )
+        ctx.logger = MagicMock()
+        ctx.should_run_combat.return_value = True
+        ctx.should_run_custom_heal_actions.return_value = False
+        ctx.in_post_teleport_heal_window.return_value = True
+        ctx.character_screen_pos.return_value = (100, 100)
+        ctx.stop_event = MagicMock()
+        ctx.tracks.tracks_for_policy.return_value = []
+        ctx.policy.select_target.return_value = 1
+
+        vitals = PlayerVitals()
+        vitals.publish_hp(40, 100)
+        input_backend = MagicMock()
+        ctx.try_heal_if_allowed.side_effect = (
+            lambda allowed, action: "cast" if allowed() and action() else "blocked"
+        )
+        teleport = MagicMock()
+        teleport.retry_post_teleport_heal.return_value = False
+        loop = AttackLoop(
+            ctx,
+            MagicMock(),
+            input_backend,
+            vitals=vitals,
+            teleport_controller=teleport,
+        )
+
+        self.assertFalse(loop.process_pending())
+        self.assertFalse(loop.process_pending())
+
+        input_backend.skill_click_at.assert_not_called()
+        self.assertEqual(teleport.retry_post_teleport_heal.call_count, 2)
+        ctx.policy.select_target.assert_not_called()
+
+    def test_successful_heal_does_not_immediately_retry_teleport(self) -> None:
+        """Heal verification/cooldown must not trigger a second teleport."""
+        ctx = MagicMock()
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_delay_ms=1,
+            custom_behavior=SimpleNamespace(heal_scan_code=16),
+        )
+        ctx.logger = MagicMock()
+        ctx.should_run_combat.return_value = True
+        ctx.should_run_custom_heal_actions.return_value = True
+        ctx.try_heal_if_allowed.side_effect = (
+            lambda allowed, action: "cast" if allowed() and action() else "blocked"
+        )
+        ctx.in_post_teleport_heal_window.return_value = True
+        ctx.character_screen_pos.return_value = (100, 100)
+        ctx.stop_event = MagicMock()
+        ctx.tracks.tracks_for_policy.return_value = []
+
+        vitals = PlayerVitals()
+        vitals.publish_hp(40, 100)
+        mob_behavior = MagicMock()
+        teleport = MagicMock()
+        input_backend = MagicMock()
+        loop = AttackLoop(
+            ctx,
+            MagicMock(),
+            input_backend,
+            mob_behavior=mob_behavior,
+            vitals=vitals,
+            teleport_controller=teleport,
+        )
+
+        self.assertFalse(loop.process_pending())
+        self.assertFalse(loop.process_pending())
+        teleport.retry_post_teleport_heal.assert_not_called()
+        self.assertEqual(input_backend.skill_click_at.call_count, 1)
+
+    def test_post_teleport_cooldown_wait_does_not_retry_teleport(self) -> None:
+        ctx = MagicMock()
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_delay_ms=1,
+            custom_behavior=SimpleNamespace(heal_scan_code=16),
+        )
+        ctx.logger = MagicMock()
+        ctx.should_run_combat.return_value = True
+        ctx.should_run_custom_heal_actions.return_value = True
+        ctx.in_post_teleport_heal_window.return_value = True
+        ctx.character_screen_pos.return_value = (100, 100)
+        ctx.stop_event = MagicMock()
+        ctx.tracks.tracks_for_policy.return_value = []
+        vitals = PlayerVitals()
+        vitals.publish_hp(40, 100)
+        teleport = MagicMock()
+        loop = AttackLoop(
+            ctx,
+            MagicMock(),
+            MagicMock(),
+            vitals=vitals,
+            teleport_controller=teleport,
+        )
+        # The attack loop owns skill-heal verification timing. Simulate the
+        # first cast still inside its verification window; no gate cooldown
+        # query or teleport retry is involved.
+        loop._last_skill_heal_ms = 1000
+
+        with patch(
+            "pybot.runtime.workers.attack_loop.monotonic_ms",
+            return_value=1000 + 100,
+        ):
+            self.assertFalse(loop.process_pending())
+        teleport.retry_post_teleport_heal.assert_not_called()
+
+    def test_post_teleport_without_skill_keeps_recovery_gate(self) -> None:
+        ctx = MagicMock()
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_delay_ms=1,
+            custom_behavior=SimpleNamespace(heal_scan_code=0),
+        )
+        ctx.logger = MagicMock()
+        ctx.should_run_combat.return_value = True
+        ctx.in_post_teleport_heal_window.return_value = True
+        ctx.character_screen_pos.return_value = (100, 100)
+        ctx.stop_event = MagicMock()
+        ctx.tracks.tracks_for_policy.return_value = []
+        ctx.policy.select_target.return_value = None
+        vitals = PlayerVitals()
+        vitals.publish_hp(40, 100)
+        loop = AttackLoop(ctx, MagicMock(), MagicMock(), vitals=vitals)
+
+        self.assertFalse(loop.process_pending())
+        ctx.clear_post_teleport_heal.assert_not_called()
+        ctx.policy.select_target.assert_not_called()
+
+    def test_post_teleport_non_full_hp_without_heal_vetoes_combat(self) -> None:
+        """Post-teleport HP must be full before combat, even if heal is blocked."""
+        ctx = MagicMock()
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_delay_ms=1,
+            custom_behavior=SimpleNamespace(heal_scan_code=16),
+        )
+        ctx.logger = MagicMock()
+        ctx.should_run_combat.return_value = True
+        ctx.should_run_custom_heal_actions.return_value = False
+        ctx.try_heal_if_allowed.return_value = "blocked"
+        ctx.in_post_teleport_heal_window.return_value = True
+        ctx.character_screen_pos.return_value = (100, 100)
+        ctx.stop_event = MagicMock()
+        ctx.tracks.tracks_for_policy.return_value = []
+        ctx.policy.select_target.return_value = 1
+
+        vitals = PlayerVitals()
+        vitals.publish_hp(40, 100)
+        mob_behavior = MagicMock()
         loop = AttackLoop(
             ctx,
             MagicMock(),
@@ -92,77 +485,55 @@ class AttackLoopSitRaceTests(unittest.TestCase):
 
         self.assertFalse(loop.process_pending())
 
-        mob_behavior.heal_if_needed.assert_called_once_with(100, 100, loop._input)
         ctx.policy.select_target.assert_not_called()
         loop._attack_one.assert_not_called()
-        ctx.logger.behavior.assert_any_call(
-            unittest.mock.ANY
-        )
+        ctx.stop_event.wait.assert_called_once()
 
-    def test_low_hp_without_available_heal_falls_through_to_combat(self) -> None:
-        """Low HP without an admissible heal must not freeze combat."""
+    def test_run_does_not_heal_during_normal_target_and_idle_paths(self) -> None:
         ctx = MagicMock()
-        ctx.config = SimpleNamespace(skill_scan_code=16, skill_delay_ms=1)
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_delay_ms=1,
+            custom_behavior=SimpleNamespace(heal_scan_code=16),
+        )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
-        ctx.should_run_custom_heal_actions.return_value = False
-        ctx.character_screen_pos.return_value = (100, 100)
+        ctx.in_post_teleport_heal_window.return_value = False
+        ctx.is_stopped.side_effect = [False, False, True]
         ctx.tracks.tracks_for_policy.return_value = []
-        ctx.policy.select_target.return_value = 1
+        ctx.policy.select_target.side_effect = [1, None]
+        ctx.stop_event = MagicMock()
+        ctx.character_screen_pos.return_value = (100, 100)
 
+        mob_behavior = MagicMock()
+        input_backend = MagicMock()
+        input_backend.skill_click_at.return_value = True
         vitals = PlayerVitals()
         vitals.publish_hp(40, 100)
-        mob_behavior = MagicMock()
-        mob_behavior.heal_if_needed.return_value = False
         loop = AttackLoop(
             ctx,
             MagicMock(),
-            MagicMock(),
+            input_backend,
             mob_behavior=mob_behavior,
             vitals=vitals,
         )
         loop._attack_one = MagicMock()
 
-        self.assertTrue(loop.process_pending())
-
-        mob_behavior.heal_if_needed.assert_not_called()
-        ctx.policy.select_target.assert_called_once()
-        loop._attack_one.assert_called_once()
-
-    def test_run_keeps_healing_in_normal_target_and_idle_paths(self) -> None:
-        ctx = MagicMock()
-        ctx.config = SimpleNamespace(skill_scan_code=16, skill_delay_ms=1)
-        ctx.logger = MagicMock()
-        ctx.should_run_combat.return_value = True
-        ctx.should_run_custom_heal_actions.return_value = True
-        ctx.is_stopped.side_effect = [False, False, True]
-        ctx.tracks.tracks_for_policy.return_value = []
-        ctx.policy.select_target.side_effect = [1, None]
-        ctx.stop_event = MagicMock()
-        ctx.character_screen_pos.return_value = (100, 100)
-
-        mob_behavior = MagicMock()
-        loop = AttackLoop(
-            ctx,
-            MagicMock(),
-            MagicMock(),
-            mob_behavior=mob_behavior,
-            vitals=PlayerVitals(),
-        )
-        loop._attack_one = MagicMock()
-
         loop.run()
 
-        self.assertEqual(mob_behavior.heal_if_needed.call_count, 2)
-        mob_behavior.heal_if_needed.assert_any_call(100, 100, loop._input)
-        self.assertEqual(ctx.should_run_custom_heal_actions.call_count, 2)
+        input_backend.skill_click_at.assert_not_called()
         loop._attack_one.assert_called_once_with(1, unittest.mock.ANY)
 
     def test_run_blocks_custom_healing_when_unsafe_and_outside_window(self) -> None:
         ctx = MagicMock()
-        ctx.config = SimpleNamespace(skill_scan_code=16, skill_delay_ms=1)
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_delay_ms=1,
+            custom_behavior=SimpleNamespace(heal_scan_code=16),
+        )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
+        ctx.in_post_teleport_heal_window.return_value = False
         ctx.should_run_custom_heal_actions.return_value = False
         ctx.is_stopped.side_effect = [False, False, True]
         ctx.tracks.tracks_for_policy.return_value = []
@@ -182,17 +553,24 @@ class AttackLoopSitRaceTests(unittest.TestCase):
 
         loop.run()
 
-        mob_behavior.heal_if_needed.assert_not_called()
         loop._attack_one.assert_called_once_with(1, unittest.mock.ANY)
 
     def test_run_heals_during_post_teleport_window_even_while_unsafe(self) -> None:
         """The custom heal fires right after a danger teleport even when recent
         damage keeps the normal safe-heal gate closed (low-HP cascade)."""
         ctx = MagicMock()
-        ctx.config = SimpleNamespace(skill_scan_code=16, skill_delay_ms=1)
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_delay_ms=1,
+            custom_behavior=SimpleNamespace(heal_scan_code=16),
+        )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
+        ctx.in_post_teleport_heal_window.return_value = True
         ctx.should_run_custom_heal_actions.return_value = True
+        ctx.try_heal_if_allowed.side_effect = (
+            lambda allowed, action: "cast" if allowed() and action() else "blocked"
+        )
         ctx.is_stopped.side_effect = [False, False, True]
         ctx.tracks.tracks_for_policy.return_value = []
         ctx.policy.select_target.side_effect = [None, None]
@@ -200,24 +578,32 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx.character_screen_pos.return_value = (100, 100)
 
         mob_behavior = MagicMock()
+        input_backend = MagicMock()
+        input_backend.skill_click_at.return_value = True
+        vitals = PlayerVitals()
+        vitals.publish_hp(40, 100)
         loop = AttackLoop(
             ctx,
             MagicMock(),
-            MagicMock(),
+            input_backend,
             mob_behavior=mob_behavior,
-            vitals=PlayerVitals(),
+            vitals=vitals,
         )
         loop._attack_one = MagicMock()
 
         loop.run()
 
-        self.assertEqual(mob_behavior.heal_if_needed.call_count, 2)
-        self.assertEqual(ctx.should_run_custom_heal_actions.call_count, 2)
+        self.assertEqual(input_backend.skill_click_at.call_count, 1)
 
     def test_attack_drops_target_removed_during_skill_delay(self) -> None:
         """A discovery removal must prevent stale post-delay bookkeeping."""
         ctx = MagicMock()
-        ctx.config = SimpleNamespace(skill_scan_code=16, skill_delay_ms=1, use_sprite_grf=True)
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_delay_ms=1,
+            use_sprite_grf=True,
+            custom_behavior=SimpleNamespace(heal_scan_code=16),
+        )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
         ctx.stop_event = MagicMock()
@@ -252,7 +638,11 @@ class AttackLoopSitRaceTests(unittest.TestCase):
 
     def test_attack_kites_before_sit_blocks_combat_during_skill_delay(self) -> None:
         ctx = MagicMock()
-        ctx.config = SimpleNamespace(skill_scan_code=16, skill_delay_ms=50)
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_delay_ms=50,
+            custom_behavior=SimpleNamespace(heal_scan_code=16),
+        )
         events: list[str] = []
         ctx.stop_event = MagicMock()
         ctx.stop_event.wait.side_effect = lambda _timeout: events.append("delay")
@@ -265,7 +655,6 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         input_backend = MagicMock()
         input_backend.skill_click_at.side_effect = lambda *_args: events.append("attack") or True
         mob_behavior = MagicMock()
-        mob_behavior.heal_if_needed = MagicMock()
         mob_behavior.kite_after_attack.side_effect = lambda *_args, **_kwargs: events.append("kite")
         vitals = PlayerVitals()
         vitals.publish_sp(100, 200)
@@ -286,7 +675,6 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         input_backend.skill_click_at.assert_not_called()
         mob_behavior.kite_after_attack.assert_not_called()
         self.assertEqual(events, [])
-        mob_behavior.heal_if_needed.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -251,6 +251,7 @@ def _build_core_workers(
         ctx, hunt_mode, input_backend,
         mob_behavior=mob_behavior,
         vitals=player_vitals,
+        teleport_controller=tport,
         char_x=char_x, char_y=char_y,
     )
     critical_escape = CriticalDangerWorker(ctx, tport)
@@ -386,8 +387,6 @@ def create_runtime_deps(
         if config.custom_behavior.configured:
             mob_behavior = get_configured_mob_behavior(
                 config.custom_behavior,
-                player_vitals,
-                danger,
                 legacy_behavior=legacy_behavior,
             )
         else:

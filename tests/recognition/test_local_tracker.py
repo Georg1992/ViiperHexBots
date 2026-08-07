@@ -18,6 +18,7 @@ from pybot.recognition.fixtures import (
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
 from pybot.recognition.detector.tracking.local_tracker import (
     LocalTrackResult,
+    transfer_track_template,
     _effective_search_radius,
     _local_follow_scales,
     track_local,
@@ -71,7 +72,7 @@ class LocalTrackerTests(unittest.TestCase):
     def test_finds_mob_at_discovery_coords(self) -> None:
         detector = self._detector()
         anchor = self._living_anchor(detector)
-        track = self._build_track_dict(anchor, trackId=1)
+        track = self._build_track_dict(anchor, trackId=-1)
         result = track_local(detector, self.roi, "horn", track)
         self.assertIsInstance(result, LocalTrackResult)
         self.assertTrue(result.found)
@@ -81,10 +82,21 @@ class LocalTrackerTests(unittest.TestCase):
         dist = abs(result.x - anchor.center_x) + abs(result.y - anchor.center_y)
         self.assertLess(dist, 40)
 
+    def test_zero_track_id_is_rejected(self) -> None:
+        detector = self._detector()
+        result = track_local(
+            detector,
+            self.roi,
+            "horn",
+            {"trackId": 0, "x": 100, "y": 100, "scale": 0.9},
+        )
+        self.assertFalse(result.found)
+        self.assertEqual(result.miss_reason, "invalid_track_id")
+
     def test_miss_returns_meaningful_reason(self) -> None:
         detector = self._detector()
         # -1000,-1000 is well off-screen → heatmap peak search returns miss.
-        track = {"trackId": 99, "x": -1000, "y": -1000, "scale": 0.9}
+        track = {"trackId": -99, "x": -1000, "y": -1000, "scale": 0.9}
         result = track_local(detector, self.roi, "horn", track, search_radius_px=20)
         self.assertFalse(result.found)
         self.assertIn(result.miss_reason, ("no_peak", "below_threshold"))
@@ -92,7 +104,7 @@ class LocalTrackerTests(unittest.TestCase):
     def test_finds_mob_within_search_radius_after_offset_seed(self) -> None:
         detector = self._detector()
         anchor = self._living_anchor(detector)
-        track = self._build_track_dict(anchor, trackId=3,
+        track = self._build_track_dict(anchor, trackId=-3,
             x=anchor.center_x + 12, y=anchor.center_y + 8)
         result = track_local(detector, self.roi, "horn", track, search_radius_px=60)
         self.assertTrue(result.found)
@@ -107,7 +119,7 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertLess(lag, detector.local_track_moving_search_radius_px)
         track = self._build_track_dict(
             anchor,
-            trackId=5,
+            trackId=-5,
             x=anchor.center_x - lag,
             y=anchor.center_y,
         )
@@ -158,7 +170,7 @@ class LocalTrackerTests(unittest.TestCase):
         radius = detector.local_track_moving_search_radius_px
         track = self._build_track_dict(
             anchor,
-            trackId=6,
+            trackId=-6,
             x=anchor.center_x,
             y=anchor.center_y,
             moving=True,
@@ -174,7 +186,7 @@ class LocalTrackerTests(unittest.TestCase):
     def test_finds_mob_at_center_no_cache_state(self) -> None:
         detector = self._detector()
         anchor = self._living_anchor(detector)
-        track = self._build_track_dict(anchor, trackId=4)
+        track = self._build_track_dict(anchor, trackId=-4)
         result = track_local(detector, self.roi, "horn", track)
         self.assertTrue(result.found)
         self.assertGreater(result.confidence, 0.0)
@@ -206,7 +218,7 @@ class LocalTrackerTests(unittest.TestCase):
         anchor = discovery.accepted[0]
         track = self._build_track_dict(
             anchor,
-            trackId=77,
+            trackId=-77,
             x=anchor.center_x - 400,
             y=anchor.center_y - 30,
             moving=True,
@@ -223,7 +235,7 @@ class LocalTrackerTests(unittest.TestCase):
         """A second frame follows the cached patch instead of reacquiring."""
         detector = self._detector()
         anchor = self._living_anchor(detector)
-        track = self._build_track_dict(anchor, track_id=88)
+        track = self._build_track_dict(anchor, track_id=-88)
 
         first = track_local(detector, self.roi, "horn", track)
         self.assertTrue(first.found, first.miss_reason)
@@ -238,7 +250,8 @@ class LocalTrackerTests(unittest.TestCase):
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=(0, 0, 0),
         )
-        moved = dict(track, x=first.x - 18, y=first.y - 7)
+        transfer_track_template(detector, -88, 88)
+        moved = dict(track, trackId=88, x=first.x - 18, y=first.y - 7)
         started = time.perf_counter()
         second = track_local(detector, shifted, "horn", moved)
         elapsed = time.perf_counter() - started
@@ -262,7 +275,7 @@ class LocalTrackerTests(unittest.TestCase):
 
         one = [
             {
-                "trackId": 1,
+                "trackId": -1,
                 "x": living[0].center_x,
                 "y": living[0].center_y,
                 "scale": living[0].candidate_scale,
@@ -270,7 +283,7 @@ class LocalTrackerTests(unittest.TestCase):
         ]
         three = [
             {
-                "trackId": index + 1,
+                "trackId": -(index + 1),
                 "x": candidate.center_x,
                 "y": candidate.center_y,
                 "scale": candidate.candidate_scale,
@@ -279,7 +292,7 @@ class LocalTrackerTests(unittest.TestCase):
         ]
         six = [
             {
-                "trackId": index + 1,
+                "trackId": -(index + 1),
                 "x": candidate.center_x,
                 "y": candidate.center_y,
                 "scale": candidate.candidate_scale,

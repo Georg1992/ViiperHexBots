@@ -118,7 +118,7 @@ class GrfDetectorModeTests(unittest.TestCase):
         self.assertGreater(len(discovery.accepted), 0)
         anchor = discovery.accepted[0]
         track = {
-            "trackId": 1,
+            "trackId": -1,
             "x": anchor.center_x,
             "y": anchor.center_y,
             "scale": anchor.candidate_scale,
@@ -142,7 +142,7 @@ class GrfDetectorModeTests(unittest.TestCase):
         living = [c for c in discovery.accepted]
         self.assertGreater(len(living), 0)
         track = {
-            "trackId": 2,
+            "trackId": -2,
             "x": living[0].center_x,
             "y": living[0].center_y,
             "scale": living[0].candidate_scale,
@@ -175,7 +175,7 @@ class GrfDetectorModeTests(unittest.TestCase):
         self.assertGreater(len(discovery.accepted), 0)
         anchor = discovery.accepted[0]
         track = {
-            "trackId": 7,
+            "trackId": -7,
             "x": anchor.center_x + 45,
             "y": anchor.center_y - 60,
             "scale": anchor.candidate_scale,

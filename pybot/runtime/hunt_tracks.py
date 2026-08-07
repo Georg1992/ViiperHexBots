@@ -710,6 +710,14 @@ class HuntTracks:
             track.idle_attack_count = 0
             return "none", 0
 
+    def remove_track(self, track_id: int) -> bool:
+        """Remove one just-created track when its observation cannot be committed."""
+        with self._lock:
+            if self._get_track_by_id_locked(track_id) is None:
+                return False
+            self._remove_tracks_locked({track_id})
+            return True
+
     def create_track(
         self,
         mob_name: str,

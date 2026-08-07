@@ -17,6 +17,7 @@ from collections.abc import Callable
 from pybot.app.periodic_task_runner import PeriodicTaskRunner
 from pybot.app.status_display import format_pair, status_panel_numbers
 from pybot.app.status_panel_worker import (
+    STATUS_PANEL_READ_TIMEOUT_S,
     StatusPanelReadResult,
     read_status_panel_snapshot_bounded,
 )
@@ -30,11 +31,6 @@ STATUS_PANEL_VALUE_MS = 200
 STATUS_PANEL_MAX_REFRESH_S = 1.0
 # Avoid flooding the application log when SP/weight OCR is transiently bad.
 STATUS_PANEL_HP_ONLY_LOG_S = 5.0
-# A status-panel read must never pin its pending flag forever: a wedged
-# capture/OCR would otherwise silently kill the HP/SP feed (and with it
-# danger protection) with no error and no log line. After this long the
-# worker is abandoned and recreated.
-STATUS_PANEL_READ_TIMEOUT_S = 6.0
 
 
 class StatusPanelFeed(PeriodicTaskRunner):
@@ -47,7 +43,6 @@ class StatusPanelFeed(PeriodicTaskRunner):
         config,
         vitals,
         overlay,
-        panel_active: Callable[[], bool],
         log: Callable[[str], None],
         post_to_tk: Callable[[Callable[[], None]], None],
         on_hp: Callable[[str], None],
@@ -65,7 +60,6 @@ class StatusPanelFeed(PeriodicTaskRunner):
         self._config = config
         self._vitals = vitals
         self._status_panel_overlay = overlay
-        self._panel_active = panel_active
         self._on_hp = on_hp
         self._on_sp = on_sp
         self._on_weight = on_weight
@@ -78,8 +72,16 @@ class StatusPanelFeed(PeriodicTaskRunner):
         # Throttle for the panel-open-but-digits-unreadable diagnostic so a
         # persistently blind feed is visible in the log instead of silent.
         self._last_digits_missing_log_at = 0.0
+        self._last_read_timeout_log_at = 0.0
         # Last known Basic Info origin — anchors the open-panel prompt.
         self._status_panel_anchor: tuple[int, int] = (0, 0)
+        # Cache client geometry after the first successful read. Re-querying
+        # GetClientRect/ClientToScreen on every 200 ms poll is unnecessary and
+        # is the native call that can wedge during a teleport transition.
+        self._status_panel_client_hint: tuple[int, int, int, int] | None = None
+        self._status_panel_geometry_refresh = False
+        self._status_panel_reanchor = False
+        self._status_panel_miss_count = 0
 
     # ── Submit / job ────────────────────────────────────────────────
 
@@ -89,13 +91,8 @@ class StatusPanelFeed(PeriodicTaskRunner):
         return STATUS_PANEL_VALUE_MS
 
     def should_submit(self) -> int | None:
-        if not self._panel_active():
-            # No OCR while off/paused — cheaply re-check later. Also drop any
-            # stale missing/recovery bookkeeping so a panel gap from a previous
-            # run is not attributed to the next one, and hide the overlay so
-            # the "open Basic Info" prompt cannot linger over the game.
-            self._status_panel_missing_since = None
-            self._status_panel_overlay.hide()
+        """Schedule reads only while the application lifecycle permits them."""
+        if not self.active:
             return None
         confirmed = self._status_panel_confirmed
         return (
@@ -112,11 +109,23 @@ class StatusPanelFeed(PeriodicTaskRunner):
             confirmed is None
             or now - self._status_panel_max_read_at >= STATUS_PANEL_MAX_REFRESH_S
         )
+        refresh_client = self._status_panel_geometry_refresh
+        reanchor = self._status_panel_reanchor
+        # Consume the request now. A failed refresh falls back to the trusted
+        # hint; consecutive panel misses will schedule another bounded retry.
+        self._status_panel_geometry_refresh = False
+        self._status_panel_reanchor = False
 
         def _read() -> None:
             try:
                 result = read_status_panel_snapshot_bounded(
-                    hwnd, confirmed, refresh_max=refresh_max
+                    hwnd,
+                    confirmed,
+                    refresh_max=refresh_max,
+                    timeout_s=STATUS_PANEL_READ_TIMEOUT_S,
+                    client_hint=self._status_panel_client_hint,
+                    refresh_client=refresh_client,
+                    reanchor=reanchor,
                 )
             except Exception as exc:
                 self.fail(generation, exc)
@@ -128,34 +137,87 @@ class StatusPanelFeed(PeriodicTaskRunner):
     # ── Result handling ─────────────────────────────────────────────
 
     def apply_result(self, result: StatusPanelReadResult) -> None:
-        if result.hwnd != self._config.window_id:
+        if not self.active or result.hwnd != self._config.window_id:
             return
+        result_width = getattr(result, "client_width", 0)
+        result_height = getattr(result, "client_height", 0)
+        if (
+            result_width > 0
+            and result_height > 0
+            and result.state in {
+                "values",
+                "hp_only",
+                "sp_only",
+                "hp_sp_only",
+                "panel_open_digits_missing",
+            }
+        ):
+            # Any of these states proves the panel/header was found in the
+            # captured pixels. Keep its rectangle as a trusted fallback so a
+            # transient post-teleport frame never sends the next poll through
+            # synchronous Win32 geometry again.
+            self._status_panel_client_hint = (
+                result.client_left,
+                result.client_top,
+                result_width,
+                result_height,
+            )
         if result.state in ("inactive", "read_timeout", "read_failed"):
             self._status_panel_overlay.hide()
             if result.state == "read_timeout":
-                self._log(
-                    "[UI] Status-panel read timed out — discarded blocked OCR read"
-                )
+                now = time.monotonic()
+                if now - self._last_read_timeout_log_at >= STATUS_PANEL_HP_ONLY_LOG_S:
+                    self._last_read_timeout_log_at = now
+                    detail = getattr(result, "error", None)
+                    self._log(
+                        "[UI] Status-panel read timed out — discarded blocked OCR read"
+                        + (f": {detail}" if detail else "")
+                    )
             elif result.state == "read_failed":
-                self._log("[UI] Status-panel read failed")
+                detail = getattr(result, "error", None)
+                self._log(
+                    "[UI] Status-panel read failed"
+                    + (f": {detail}" if detail else "")
+                )
             return
         if result.state == "client_missing":
+            self._status_panel_client_hint = None
             self._reset_status_panel_tracking()
             self._status_panel_overlay.hide()
             self._clear_status_panel_ui()
             return
+        if result.state == "roi_missing":
+            self._status_panel_miss_count += 1
+            if self._status_panel_miss_count >= 3:
+                self._status_panel_geometry_refresh = True
+                self._status_panel_reanchor = True
+                self._status_panel_miss_count = 0
+            return
         if result.state == "panel_missing":
+            # Keep the last trusted rectangle across transient unreadable
+            # frames. After several fixed-ROI misses, refresh geometry and
+            # re-find the panel once; the normal hot path never searches.
+            self._status_panel_miss_count += 1
+            if self._status_panel_miss_count >= 3:
+                self._status_panel_geometry_refresh = True
+                self._status_panel_reanchor = True
+                self._status_panel_miss_count = 0
             self._show_panel_missing(
                 client_left=result.client_left,
                 client_top=result.client_top,
             )
             return
-        if result.state == "hp_only":
-            # HP damage detection must not depend on SP/weight OCR. A malformed
-            # SP or weight row is common during bar animation; retain the last
-            # confirmed panel for those values but publish the independently
-            # parsed HP pair immediately so DangerDetector can see damage.
-            self._apply_hp_only_result(result.hp)
+        if result.state in ("hp_only", "sp_only", "hp_sp_only"):
+            self._status_panel_miss_count = 0
+            # HP and SP are independent control signals. During SIT, SP must
+            # still publish even when HP or Weight is unreadable; otherwise
+            # recovery waits forever on a stale/empty vitals value.
+            hp = getattr(result, "hp", None)
+            sp = getattr(result, "sp", None)
+            if hp is not None:
+                self._apply_hp_only_result(hp)
+            if sp is not None:
+                self._apply_sp_only_result(sp)
             return
         if result.state == "panel_open_digits_missing":
             if self._status_panel_confirmed is None:
@@ -170,6 +232,7 @@ class StatusPanelFeed(PeriodicTaskRunner):
                 self._log_digits_missing()
             return
         if result.values is not None:
+            self._status_panel_miss_count = 0
             if result.full_refresh:
                 self._status_panel_max_read_at = time.monotonic()
             self._commit_status_panel(
@@ -198,6 +261,10 @@ class StatusPanelFeed(PeriodicTaskRunner):
         """
         super().reset()
         self._reset_status_panel_tracking()
+        self._status_panel_client_hint = None
+        self._status_panel_geometry_refresh = False
+        self._status_panel_reanchor = False
+        self._status_panel_miss_count = 0
 
     def _panel_owns_sp_weight(self) -> bool:
         """True when SP/Weight come from Basic Info OCR (Generic / no memory)."""
@@ -264,6 +331,14 @@ class StatusPanelFeed(PeriodicTaskRunner):
             "[UI] Status panel open but HP/SP/weight digits unreadable"
             f"{since} — feed paused until OCR recovers"
         )
+
+    def _apply_sp_only_result(self, sp: tuple[int, int] | None) -> None:
+        """Publish SP even when HP/Weight OCR failed in the same frame."""
+        if sp is None:
+            return
+        if self._panel_owns_sp_weight():
+            self._vitals.publish_sp(*sp)
+            self._on_sp(format_pair(*sp))
 
     def _apply_hp_only_result(self, hp: tuple[int, int] | None) -> None:
         """Publish HP even when another status-panel row failed OCR."""

@@ -275,6 +275,59 @@ class UiCaptureChannelTests(unittest.TestCase):
         old_sct.grab.assert_called_once()
         new_sct.grab.assert_called_once()
 
+    def test_ui_channel_wedged_session_creation_times_out_and_recovers(self) -> None:
+        """A blocked mss.MSS() must never hang the caller; the next read recovers.
+
+        Session creation used to run on the caller thread, so a wedged GDI
+        desktop (observed after a seated danger teleport) could pin every
+        status-panel read for its full multi-second timeout. Creation now
+        runs on the worker: the caller always returns within the grab bound
+        and the next read starts a fresh worker with a fresh session.
+        """
+        release = threading.Event()
+        old_sct = MagicMock()
+        new_sct = MagicMock()
+        shot = np.zeros((4, 4, 4), dtype=np.uint8)
+        mss_calls = {"count": 0}
+
+        def wedged_factory():
+            mss_calls["count"] += 1
+            if mss_calls["count"] == 1:
+                release.wait(timeout=5.0)
+                return old_sct
+            return new_sct
+
+        new_sct.grab.return_value = shot
+        channel = self.channel
+        try:
+            with patch(
+                "pybot.recognition.capture.mss.MSS",
+                side_effect=wedged_factory,
+            ):
+                with patch(
+                    "pybot.recognition.capture._CAPTURE_GRAB_TIMEOUT_S",
+                    0.2,
+                ):
+                    start = time.monotonic()
+                    first = channel.capture(10, 20, 4, 4)
+                    elapsed = time.monotonic() - start
+                    self.assertIsNone(first)
+                    self.assertLess(elapsed, 2.0)
+                    second = channel.capture(10, 20, 4, 4)
+        finally:
+            release.set()
+
+        self.assertIsNotNone(second)
+        new_sct.grab.assert_called_once()
+        # Once the wedge resolves, the abandoned worker drains its retired
+        # queue and closes its wedged session — no permanent native-handle
+        # leak across recovery.
+        for _ in range(100):
+            if old_sct.close.called:
+                break
+            time.sleep(0.02)
+        old_sct.close.assert_called_once()
+
     def test_ui_channel_is_distinct_from_runtime_worker(self) -> None:
         """The UI channel and runtime channel must not share a grab queue."""
         self.assertIsNot(

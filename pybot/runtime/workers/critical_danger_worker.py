@@ -46,74 +46,29 @@ class CriticalDangerWorker:
         # hunt continue; the safe-heal path tops HP back up. The mirrored
         # requests are popped between two level reads: a fresh critical hit
         # queued in that window is restored below instead of being lost.
-        danger = getattr(ctx, "danger_detector", None)
-        if danger is not None:
-            level = getattr(danger, "danger_level", None)
-            if callable(level):
-                try:
-                    if level() is not DangerLevel.CRITICAL:
-                        ctx.pop_critical_danger()
-                        ctx.pop_danger_sit_request()
-                        if level() is DangerLevel.CRITICAL:
-                            # A fresh critical hit landed between the reads.
-                            # Restore the request so the next poll escapes.
-                            ctx.request_critical_danger()
-                            return False
-                        behavior = getattr(ctx.logger, "behavior", None)
-                        if callable(behavior):
-                            behavior(
-                                "[DANGER] stale critical request consumed — "
-                                "character no longer in critical danger"
-                            )
-                        return True
-                except Exception:
-                    # run() has no exception guard; a detector failure must
-                    # not kill the worker thread. Fall through to the normal
-                    # claim/escape path with the request still queued.
-                    ctx.request_critical_danger()
-        claim_critical = getattr(ctx, "try_begin_critical_escape_ops", None)
-        if callable(claim_critical):
-            # Always override: critical danger preempts sit/storage/heal.
-            if not claim_critical(override=True):
-                return False
-            # A preempted storage session must close its panels before the
-            # teleport key is pressed or the wing is wasted. The wait is
-            # bounded; on timeout the escape presses anyway rather than
-            # leaving the character in critical danger.
-            wait_release = getattr(ctx, "wait_for_preempted_session_release", None)
-            if callable(wait_release):
-                wait_release(CRITICAL_PREEMPT_RELEASE_TIMEOUT_S)
-        elif not ctx.try_begin_sit_ops():
+        if ctx.danger_detector.danger_level() is not DangerLevel.CRITICAL:
+            ctx.pop_critical_danger()
+            ctx.pop_danger_sit_request()
+            return True
+        # Critical danger always preempts active sessions.
+        if not ctx.try_begin_critical_escape_ops(override=True):
             return False
+        ctx.wait_for_preempted_session_release(CRITICAL_PREEMPT_RELEASE_TIMEOUT_S)
 
         # A preempted sit session keeps the safe-key escape (creamy / save
         # point first, the same key the recovery session would use): the
         # character lands somewhere it can sit and finish SP recovery. The
         # random fly wing can drop it back next to mobs and cause a repeat
         # escape->sit loop. Standing hunting escapes keep the urgent wing.
-        prefer_safe_key = False
-        preempted = getattr(ctx, "preempted_sessions", None)
-        if callable(preempted):
-            try:
-                prefer_safe_key = bool(preempted()[0])
-            except Exception:
-                prefer_safe_key = False
+        prefer_safe_key = bool(ctx.preempted_sessions()[0])
         try:
             # Re-check after claiming the gate because focus can be lost between
             # the initial check and the ownership transition.
             if ctx.pause_event.is_set():
                 return False
-            # Compatibility contexts may not expose the atomic critical claim.
-            # Claim the explicit escape phase before consuming the event.
-            begin_escape = getattr(ctx, "begin_danger_escape", None)
-            if not callable(claim_critical) and callable(begin_escape):
-                if not begin_escape():
-                    return False
             # Consume both mirrored requests before teleport. A seated session
             # cannot claim this path because it already holds the sit gate.
             if not ctx.pop_critical_danger():
-                if not callable(claim_critical) and callable(begin_escape):
-                    ctx.end_danger_escape()
                 return False
             ctx.pop_danger_sit_request()
             # Pause may arrive while consuming the mirrored requests. Restore
@@ -141,18 +96,7 @@ class CriticalDangerWorker:
             ctx.request_critical_danger()
             return False
         finally:
-            end_critical = getattr(ctx, "end_critical_escape_ops", None)
-            if callable(end_critical):
-                end_critical()
-            else:
-                end_escape = getattr(ctx, "end_danger_escape", None)
-                if callable(end_escape):
-                    end_escape()
-                # Legacy contexts without end_critical_escape_ops release the
-                # borrowed sit gate here. A random fly-wing escape landing is
-                # not verified safe, so startup actions must wait for the
-                # first discovery scan rather than trusting the area clear.
-                ctx.end_sit_ops(trusted_clear=False)
+            ctx.end_critical_escape_ops()
 
     def run(self) -> None:
         ctx = self._ctx

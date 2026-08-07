@@ -51,6 +51,8 @@ class PeriodicTaskRunner:
         self._log = log
         self._after_id = None
         self._stopped = False
+        self._started = False
+        self._active = True
         self._pending = False
         self._generation = 0
         self._started_at = 0.0
@@ -95,11 +97,13 @@ class PeriodicTaskRunner:
     def start(self) -> None:
         """Begin the periodic poll loop."""
         self._stopped = False
+        self._started = True
         self._schedule_next()
 
     def stop(self) -> None:
         """Cancel the periodic poll loop."""
         self._stopped = True
+        self._started = False
         if self._after_id is not None:
             try:
                 self._root.after_cancel(self._after_id)
@@ -123,6 +127,27 @@ class PeriodicTaskRunner:
             self._generation += 1
             self._pending = False
             self._started_at = 0.0
+
+    def set_active(self, active: bool) -> None:
+        """Enable reads only for the lifecycle states that own this feed.
+
+        Disabling invalidates the current generation, so a read that was
+        already in native code cannot publish values after pause/stop. The
+        periodic Tk tick remains installed; it simply declines submissions
+        until the feed is enabled again.
+        """
+        active = bool(active)
+        if active == self._active:
+            return
+        self._active = active
+        self.reset()
+        if active and self._started:
+            self.request_now()
+
+    @property
+    def active(self) -> bool:
+        """Whether this feed is currently allowed to start/apply reads."""
+        return self._active
 
     def request_now(self) -> None:
         """Run one immediate submit cycle (window/profile changed)."""
@@ -174,6 +199,8 @@ class PeriodicTaskRunner:
         next read (the feeds' original consume-then-submit contract).
         """
         self.consume_results()
+        if not self._active:
+            return self._default_delay_ms
         if self._pending:
             # A wedged read must not pin the pending flag forever: after the
             # stall timeout the worker is abandoned and recreated so the next
@@ -207,9 +234,10 @@ class PeriodicTaskRunner:
                 generation, result = self._results.get_nowait()
             except queue.Empty:
                 return
-        if generation != self._generation:
+        if generation != self._generation or not self._active:
             # A newer request owns the pending flag now. Drop the stale
-            # result without releasing or overwriting the newer request.
+            # result without releasing or overwriting the newer request. An
+            # inactive feed also drops a completion from before pause/stop.
             return
         self._pending = False
         self._stall_count = 0

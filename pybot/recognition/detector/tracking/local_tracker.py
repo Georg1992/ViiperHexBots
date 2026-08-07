@@ -45,14 +45,12 @@ _LOCAL_FAST_MIN_HEAT_MULT = 2.0
 # would clip the palette bbox and bias the center toward the window center).
 _REFINE_WINDOW_SCALE = 1.5
 _LOCAL_CROSS_TRACK_SUPPRESS_DIV = 2
-_LOCAL_PEAK_SUPPRESS_DIV = 4
 _LOCAL_FOLLOW_MIN_HEAT_FRAC = 0.5
 _LOCAL_FOLLOW_BODY_W = 0.55
 _LOCAL_FOLLOW_ACCENT_W = 0.45
 _LOCAL_FOLLOW_SPRITE_W = 0.75
 _LOCAL_FOLLOW_COLOR_W = 0.55
-# Center-miss path: try top peaks until one passes silhouette.
-_LOCAL_PEAK_ATTEMPTS = 2
+# Tracking has one deterministic peak decision; failed validation is a miss.
 # Large sprites (especially Anubis) make a full-resolution local heatmap
 # unnecessarily expensive. A 2x image pyramid keeps the search geometry wide
 # while reducing the per-pixel palette/morphology work by roughly 4x. The final
@@ -109,11 +107,22 @@ def track_local(
 ) -> LocalTrackResult:
     """Follow one known track near its last known center.
 
+    Negative IDs are provisional and perform one-shot local acquisition.
+    Positive IDs require a transferred cached template and perform only the
+    temporal follow. Zero is invalid and returns a miss.
+
     ``suppress_positions``: ROI-relative (x, y) of other tracks whose heat
     signature should be suppressed in the peak search. Prevents track A from
     locking onto mob B when two mobs are close together.
     """
     track_id = int(track["trackId"])
+    if track_id == 0:
+        return _miss_result(
+            track_id=track_id,
+            x=int(track["x"]) + offset_x,
+            y=int(track["y"]) + offset_y,
+            reason="invalid_track_id",
+        )
     cx = int(track["x"])
     cy = int(track["y"])
     scale = float(track.get("scale", 0.0))
@@ -156,46 +165,26 @@ def track_local(
     search_cx = int(round(cx + prediction_dx))
     search_cy = int(round(cy + prediction_dy))
 
-    # Once a track has one confirmed visual patch, follow that patch first.
-    # This is the normal path: it is O(search-area) correlation at half
-    # resolution, not three full palette maps plus native silhouette scoring.
-    # A failed/ambiguous correlation falls back to the descriptor-based
-    # reacquisition path below.
-    template_hit = _follow_cached_template(
-        detector,
-        frame_bgr,
-        descriptor,
-        track_id=track_id,
-        cx=search_cx,
-        cy=search_cy,
-        scale=scale,
-        search_radius_px=radius,
-        suppress_positions=suppress_positions,
-        offset_x=offset_x,
-        offset_y=offset_y,
-    )
-    if template_hit is not None:
-        return template_hit
-
-    # Do not run the expensive native-resolution silhouette gate at the old
-    # center before searching. For a moving mob that center is stale; the
-    # pyramid search finds the current candidate cheaply, and score_at verifies
-    # only the winning peak(s) at full resolution.
-    peak = _find_local_peak(
-        detector, frame_bgr, descriptor, search_cx, search_cy, scale,
-        search_radius_px=radius,
-        suppress_positions=suppress_positions,
-    )
-    # A prediction can be wrong during a direction change. A second search
-    # around the last confirmed center preserves reacquisition without paying
-    # the old full-resolution center gate on every successful tick.
-    if peak is None and (search_cx != cx or search_cy != cy):
+    # Candidate resolution is an explicit one-shot phase. Real tracks never
+    # fall back from warm-template follow into a second reacquisition path.
+    if track_id < 0:
         peak = _find_local_peak(
-            detector, frame_bgr, descriptor, cx, cy, scale,
+            detector,
+            frame_bgr,
+            descriptor,
+            search_cx,
+            search_cy,
+            scale,
             search_radius_px=radius,
             suppress_positions=suppress_positions,
         )
-    if peak is not None:
+        if peak is None:
+            return _miss_result(
+                track_id=track_id,
+                x=screen_cx,
+                y=screen_cy,
+                reason="no_peak",
+            )
         _peak_x, _peak_y, _heat_score, peak_sim, peak_bbox = peak
         return _finalize_track_hit(
             detector=detector,
@@ -209,10 +198,27 @@ def track_local(
             offset_y=offset_y,
         )
 
-    return _miss_result(
-        track_id=track_id, x=screen_cx, y=screen_cy,
-        reason="no_peak", confidence=0.0,
+    template_hit = _follow_cached_template(
+        detector,
+        frame_bgr,
+        descriptor,
+        track_id=track_id,
+        cx=search_cx,
+        cy=search_cy,
+        scale=scale,
+        search_radius_px=radius,
+        suppress_positions=suppress_positions,
+        offset_x=offset_x,
+        offset_y=offset_y,
     )
+    if template_hit is None:
+        return _miss_result(
+            track_id=track_id,
+            x=screen_cx,
+            y=screen_cy,
+            reason="template_miss",
+        )
+    return template_hit
 
 
 def _effective_search_radius(
@@ -294,6 +300,27 @@ def _template_store(detector: MobDetector) -> dict[int, _TrackTemplate]:
         store = {}
         setattr(detector, "_local_track_templates", store)
     return store
+
+
+def transfer_track_template(
+    detector: MobDetector,
+    source_track_id: int,
+    target_track_id: int,
+) -> bool:
+    """Move a provisional template to the real track ID exactly once."""
+    if source_track_id == target_track_id:
+        return source_track_id in _template_store(detector)
+    store = _template_store(detector)
+    template = store.pop(source_track_id, None)
+    if template is None:
+        return False
+    store[target_track_id] = template
+    return True
+
+
+def discard_track_template(detector: MobDetector, track_id: int) -> None:
+    """Discard a provisional template that was not committed to a track."""
+    _template_store(detector).pop(track_id, None)
 
 
 def _remember_track_template(
@@ -584,19 +611,13 @@ def _find_local_peak(
     mask = dist_sq <= (radius_work * radius_work)
     work = np.where(mask, local_final, 0.0).copy()
     min_heat = detector.heatmap_detector.min_center_heat * _LOCAL_FOLLOW_MIN_HEAT_FRAC
-    suppress_radius = max(
-        _LOCAL_SUPPRESS_RADIUS_FLOOR_PX,
-        search_radius_px // _LOCAL_PEAK_SUPPRESS_DIV,
-    )
-
-    for _ in range(_LOCAL_PEAK_ATTEMPTS):
-        peak_val = float(work.max())
-        if peak_val < min_heat:
-            break
-        peak_y_local, peak_x_local = np.unravel_index(int(work.argmax()), work.shape)
-        peak_x = int(round(peak_x_local * pyramid + x0 + (pyramid - 1) / 2))
-        peak_y = int(round(peak_y_local * pyramid + y0 + (pyramid - 1) / 2))
-        if _fast_track_accept(detector, descriptor):
+    peak_val = float(work.max())
+    if peak_val < min_heat:
+        return None
+    peak_y_local, peak_x_local = np.unravel_index(int(work.argmax()), work.shape)
+    peak_x = int(round(peak_x_local * pyramid + x0 + (pyramid - 1) / 2))
+    peak_y = int(round(peak_y_local * pyramid + y0 + (pyramid - 1) / 2))
+    if _fast_track_accept(detector, descriptor):
             # Static modified sprites (distinctive red, one frame): the local
             # follow heatmap peak is already palette-driven, so accept it via a
             # cheap sprite/body color-fraction check instead of the expensive
@@ -619,20 +640,12 @@ def _find_local_peak(
                 )
                 bbox = _descriptor_sized_bbox(descriptor, peak_x, peak_y, scale)
                 return peak_x, peak_y, peak_val, float(peak_val), bbox
-        else:
-            accepted, bbox, sim = detector.score_at(
-                frame_bgr, descriptor, peak_x, peak_y, scale,
-            )
-            if accepted and bbox is not None:
-                return peak_x, peak_y, peak_val, sim, bbox
-        cv2.circle(
-            work,
-            (int(peak_x_local), int(peak_y_local)),
-            max(1, int(round(suppress_radius / pyramid))),
-            0.0,
-            thickness=-1,
+    else:
+        accepted, bbox, sim = detector.score_at(
+            frame_bgr, descriptor, peak_x, peak_y, scale,
         )
-
+        if accepted and bbox is not None:
+            return peak_x, peak_y, peak_val, sim, bbox
     return None
 
 

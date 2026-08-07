@@ -20,7 +20,6 @@ owns danger escape.
 from __future__ import annotations
 
 import time
-from contextlib import nullcontext
 
 from pybot.runtime.constants import (
     HP_POST_TELEPORT_HEAL_S,
@@ -126,12 +125,36 @@ class TeleportController:
             # observed before this teleport. Damage recorded during settle
             # remains a fresh danger signal.
             self._ctx.mark_post_teleport_heal(HP_POST_TELEPORT_HEAL_S)
-            danger = getattr(self._ctx, "danger_detector", None)
+            danger = self._ctx.danger_detector
             if danger is not None:
-                reset = getattr(danger, "reset_after_teleport", None)
-                if callable(reset):
-                    reset(teleport_started)
+                danger.reset_after_teleport(teleport_started)
         return settled
+
+    def retry_post_teleport_heal(self) -> bool:
+        """Teleport again so post-teleport healing can be retried safely."""
+        ctx = self._ctx
+        if self._escape_in_flight():
+            return False
+        tp = self.active_scan_code()
+        if tp <= 0:
+            ctx.logger.behavior(
+                "[HEAL] retry teleport skipped — no teleport key configured"
+            )
+            return False
+        ctx.discovery_suspend.set()
+        ctx.discovery_wake.clear()
+        try:
+            with ctx.area_transition_lock:
+                if not self.teleport_once(scan_code=tp):
+                    return False
+                self._reset_tracking(
+                    "post_teleport_heal_retry",
+                    log_tag="HEAL",
+                )
+                return True
+        finally:
+            ctx.discovery_suspend.clear()
+            ctx.discovery_wake.set()
 
     def _wait_for_settle(self, timeout_s: float) -> bool:
         """Wait for a teleport already in flight to finish landing.
@@ -168,8 +191,7 @@ class TeleportController:
             # finish the already-issued teleport's settle after that pause.
             if event_is_set(self._ctx.pause_event) is True:
                 continue
-            # A false result without pause means the wait was stopped or the
-            # compatibility context explicitly rejected the settle. Preserve
+            # A false result without pause means the wait was stopped. Preserve
             # that failure result rather than retrying an already-issued key.
             return False
 
@@ -182,9 +204,7 @@ class TeleportController:
         mode teleport) must yield so the escape key is never queued behind
         or alongside a competing teleport.
         """
-        return event_is_set(
-            getattr(self._ctx, "danger_escape_active", None)
-        ) is True
+        return event_is_set(self._ctx.danger_escape_active) is True
 
     def teleport_once_for_sit(self, *, log_tag: str = "SIT") -> bool:
         """Teleport exactly once before sitting to recover SP.
@@ -208,18 +228,6 @@ class TeleportController:
             return False
         self._reset_tracking(f"{log_tag.lower()}_teleport", log_tag=log_tag)
         return True
-
-    # ── Recovery-place compatibility helper ─────────────────────
-
-    def teleport_to_safe_place(self, *, log_tag: str = "SAFE") -> bool:
-        """Compatibility wrapper for recovery/sit placement.
-
-        Deferred storage no longer calls this method: storage is admitted only
-        after discovery confirms a clear area and performs its own final live
-        visibility checks. Existing recovery integrations may still use this
-        wrapper when they explicitly need a quiet-area placement.
-        """
-        return self.teleport_until_quiet(log_tag=log_tag)
 
     # ── Danger teleport ──────────────────────────────────────────
 
@@ -260,14 +268,11 @@ class TeleportController:
         )
         ctx.discovery_suspend.set()
         ctx.discovery_wake.clear()
-        transition_lock = getattr(ctx, "area_transition_lock", None)
-        if transition_lock is None:
-            transition_lock = nullcontext()
         try:
             # Hold the lifecycle boundary through input, settle, and reset.
             # No-target decisions cannot observe the old strategy state while
             # the critical worker is already in the danger transition.
-            with transition_lock:
+            with ctx.area_transition_lock:
                 if not self.teleport_once(scan_code=tp):
                     return False
                 # Publish the strategy marker and track epoch as one lifecycle
@@ -335,18 +340,12 @@ class TeleportController:
         return False
 
     def _critical_request_is_set(self) -> bool | None:
-        """Return critical-danger state when the context exposes a real event."""
-        return event_is_set(
-            getattr(self._ctx, "critical_danger_requested", None)
-        )
+        """Return the pending critical-danger event state."""
+        return event_is_set(self._ctx.critical_danger_requested)
 
     def _danger_request_is_set(self) -> bool | None:
-        """Return danger state when the context exposes a real boolean event."""
-        # MagicMock/lightweight contexts are treated as contexts without an
-        # interruptible danger event (``event_is_set`` returns ``None``).
-        return event_is_set(
-            getattr(self._ctx, "danger_sit_requested", None)
-        )
+        """Return the pending seated-danger event state."""
+        return event_is_set(self._ctx.danger_sit_requested)
 
     def teleport_until_quiet(
         self,
@@ -368,7 +367,6 @@ class TeleportController:
                 f"[{log_tag}] area clear — idle {idle_s:.0f}s before proceed"
             )
 
-            danger_is_real = self._danger_request_is_set() is not None
             deadline = time.monotonic() + idle_s
             while True:
                 if self._escape_in_flight():
@@ -381,16 +379,8 @@ class TeleportController:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                # Real runtime events are checked at the worker cadence so a
-                # damage request cannot wait through the whole idle window.
-                # Legacy/lightweight contexts retain their single wait call.
-                if not danger_is_real:
-                    # Lightweight test/custom contexts do not expose a real
-                    # danger event. Preserve their original single blocking
-                    # wait, then continue to the mandatory post-idle scan.
-                    if not self._ctx.wait_unless_stopped(idle_s):
-                        return False
-                    break
+                # Check at the worker cadence so a damage request cannot wait
+                # through the whole idle window.
                 wait_s = min(SIT_SP_POLL_INTERVAL_S, remaining)
                 if not self._ctx.wait_unless_stopped(wait_s):
                     return False
@@ -442,10 +432,7 @@ class TeleportController:
         ctx.discovery_wake.clear()
 
         try:
-            transition_lock = getattr(ctx, "area_transition_lock", None)
-            if transition_lock is None:
-                transition_lock = nullcontext()
-            with transition_lock:
+            with ctx.area_transition_lock:
                 # Claim under the tracks lock before input so a concurrent
                 # discovery reconcile cannot spawn tracks into the area we are
                 # leaving. The strategy reset stays in this same transaction.
@@ -499,14 +486,9 @@ class TeleportController:
     def _reset_tracking(self, reason: str, *, log_tag: str) -> None:
         """Clear tracks/policy/overlay and hunt-mode flags after teleport."""
         ctx = self._ctx
-        transition_lock = getattr(ctx, "area_transition_lock", None)
-        if transition_lock is None:
+        with ctx.area_transition_lock:
             self._notify_area_reset()
             ctx.area_reset(reason)
-        else:
-            with transition_lock:
-                self._notify_area_reset()
-                ctx.area_reset(reason)
         ctx.overlay.set_track_stats(track_count=0, alive_count=0)
         ctx.overlay.set_track_positions([])
         ctx.logger.behavior(f"[{log_tag}] tracking reset reason={reason}")

@@ -110,6 +110,9 @@ class GateController:
         self.discovery_suspend = threading.Event()
         # Set while regenerating SP (sit) — hunt + skill timers idle.
         self.sitting_event = threading.Event()
+        # Serializes the short observation-publication boundary with sit claims.
+        # Expensive capture/detection stays outside this lock.
+        self.observation_publication_lock = threading.Lock()
         # Set while ItemsToStorage / GetFlyWings runs — combat idles; timers keep going.
         self.storage_event = threading.Event()
         # Set while heal-until-full — combat idles; discovery/tracking/timers keep running.
@@ -119,11 +122,9 @@ class GateController:
         # no-target decisions. Capture/detection may run outside this lock;
         # state publication and reset are one deterministic transaction.
         self.area_transition_lock = threading.RLock()
-        # Shared cooldown for every HP-healing input path. Custom mob healing
-        # and the HP-item worker must not both decide to heal in one window.
-        self._last_heal_action_mono = 0.0
-        # Monotonic deadline: after teleport settle, heal freely until this time.
-        self._post_teleport_heal_until = 0.0
+        # Set after teleport and held until a fresh full-HP reading clears it.
+        # Combat must not resume merely because a short grace timer expired.
+        self._post_teleport_heal_required = False
         # Shared stagger + buff priority between buff casts and skill-timer
         # presses (both are character keypresses on separate threads).
         self.character_action_gate = CharacterActionGate()
@@ -209,8 +210,9 @@ class GateController:
     def should_run_discovery(self) -> bool:
         """True whenever discovery may sample a usable game frame.
 
-        Discovery remains live through sit/storage/heal/danger sessions, but a
-        teleport transition is different: RO can show a black/loading frame
+        Discovery is suspended during sit/storage/heal/danger sessions when
+        their lifecycle gate owns the character. A teleport transition is
+        different: RO can show a black/loading frame
         during the configured settle delay. Suspend discovery for that window
         so it neither captures nor tries to interpret that frame; the UI
         status/memory feeds are separate and continue independently.
@@ -218,20 +220,23 @@ class GateController:
         return (
             not self.stop_event.is_set()
             and not self.pause_event.is_set()
+            and not self.sitting_event.is_set()
             and not self.discovery_suspend.is_set()
         )
 
     def should_run_tracking(self) -> bool:
         """True whenever tracking may take a fresh usable game frame.
 
-        Tracking remains live through sit/storage/heal/danger sessions, but it
-        must sleep during teleport settle because the client can be black or
+        Tracking is suspended during sit/storage/heal/danger sessions when
+        their lifecycle gate owns the character. It must also sleep during
+        teleport settle because the client can be black or
         loading. Gameplay workers own the action gates; stale transition
         results are still rejected by area-epoch checks before publication.
         """
         return (
             not self.stop_event.is_set()
             and not self.pause_event.is_set()
+            and not self.sitting_event.is_set()
             and not self.discovery_suspend.is_set()
         )
 
@@ -279,19 +284,13 @@ class GateController:
             # rejected action; lightweight backends commonly return None.
             return result is not False
 
-    def perform_heal_if_allowed(self, allowed, action, *, cooldown_s: float = 1.0) -> bool:
-        """Admit one healing input and share its cooldown across workers."""
+    def try_heal_if_allowed(self, allowed, action) -> str:
+        """Atomically admit one skill heal and return its precise result."""
         with self._sit_storage_lock:
             if not allowed():
-                return False
-            now = time.monotonic()
-            if now - self._last_heal_action_mono < max(0.0, cooldown_s):
-                return False
+                return "blocked"
             result = action()
-            if result is not False:
-                self._last_heal_action_mono = time.monotonic()
-                return True
-            return False
+            return "cast" if result is not False else "failed"
 
     def request_danger_sit(self) -> None:
         """Ask the sit worker to move safe, sit, recover, and restart hunt."""
@@ -425,8 +424,12 @@ class GateController:
         with self._sit_storage_lock:
             if self._session_held():
                 return False
-            self.sitting_event.set()
-            self.resume_gate.clear()
+            # The observation workers use this same short boundary before
+            # publishing detector results. A sit claim therefore cannot race
+            # with track mutation or discovery reconciliation.
+            with self.observation_publication_lock:
+                self.sitting_event.set()
+                self.resume_gate.clear()
             return True
 
     def begin_sit_ops(self) -> bool:
@@ -539,12 +542,17 @@ class GateController:
     # ── Post-teleport heal window ────────────────────────────────
 
     def mark_post_teleport_heal(self, duration_s: float) -> None:
-        """Open the post-teleport heal window (mobs ignore the character briefly)."""
-        self._post_teleport_heal_until = time.monotonic() + duration_s
+        """Require full HP after teleport until a valid full reading arrives."""
+        del duration_s
+        self._post_teleport_heal_required = True
+
+    def clear_post_teleport_heal(self) -> None:
+        """Release the post-teleport combat gate after HP reaches max."""
+        self._post_teleport_heal_required = False
 
     def in_post_teleport_heal_window(self) -> bool:
-        """True for a short time after teleport settle completes."""
-        return time.monotonic() < self._post_teleport_heal_until
+        """True while the post-teleport full-HP requirement is unresolved."""
+        return self._post_teleport_heal_required
 
     # ── Wait helpers ─────────────────────────────────────────────
 

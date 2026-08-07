@@ -2,21 +2,14 @@
 
 from __future__ import annotations
 
-import time
-import traceback
-
 from pybot.game_state import PlayerVitals
-from pybot.runtime.constants import (
-    HP_RESTORE_COOLDOWN_S,
-    HP_RESTORE_POLL_S,
-    HP_RESTORE_RATIO,
-)
-from pybot.runtime.input.input_backend import InputBackend, perform_if_allowed
+from pybot.runtime.constants import HP_RESTORE_POLL_S, HP_RESTORE_RATIO
+from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.workers.worker_contexts import HpRestoreWorkerContext
 
 
 class HpRestoreWorker:
-    """Press the configured HP item key while HP is below 50%."""
+    """Press the configured HP item when HP is below 50%."""
 
     def __init__(
         self,
@@ -27,7 +20,6 @@ class HpRestoreWorker:
         self._ctx = ctx
         self._input = input_backend
         self._vitals = vitals
-        self._last_press_mono = 0.0
 
     def run(self) -> None:
         ctx = self._ctx
@@ -46,58 +38,28 @@ class HpRestoreWorker:
             ctx.stop_event.wait(HP_RESTORE_POLL_S)
 
     def needs_restore(self) -> bool:
-        """Return whether the current vitals require an HP-item action."""
+        """Return whether HP is below the item-use threshold."""
         ratio = self._hp_ratio()
         return ratio is not None and ratio < HP_RESTORE_RATIO
-
-    def can_restore_now(self) -> bool:
-        """Return whether a due item action is currently admissible."""
-        can_heal = getattr(self._ctx, "should_run_heal_actions", None)
-        return (
-            self.needs_restore()
-            and callable(can_heal)
-            and bool(can_heal())
-            and time.monotonic() - self._last_press_mono >= HP_RESTORE_COOLDOWN_S
-        )
 
     def process_pending(self) -> bool:
         """Evaluate one item-heal step; the gameplay loop owns scheduling."""
         ctx = self._ctx
         scan = int(ctx.config.hp_scan_code)
-        if scan <= 0 or not ctx.should_run_workers():
-            return False
-        can_heal = getattr(ctx, "should_run_heal_actions", None)
-        in_window = bool(can_heal()) if callable(can_heal) else False
         ratio = self._hp_ratio()
-        if not in_window or ratio is None or ratio >= HP_RESTORE_RATIO:
-            return False
-        if time.monotonic() - self._last_press_mono < HP_RESTORE_COOLDOWN_S:
+        if scan <= 0 or ratio is None or ratio >= HP_RESTORE_RATIO:
             return False
         ctx.logger.behavior(
             f"[HP] item key={ctx.config.hp_button!r} ratio={ratio:.1%}"
         )
-        if hasattr(type(ctx), "perform_heal_if_allowed"):
-            healed = bool(ctx.perform_heal_if_allowed(
-                ctx.should_run_heal_actions,
-                lambda: self._press_if_still_needed(scan),
-                cooldown_s=HP_RESTORE_COOLDOWN_S,
-            ))
-        else:
-            healed = perform_if_allowed(
-                self._input, ctx.should_run_heal_actions,
-                lambda: self._press_if_still_needed(scan), lifecycle=ctx,
-            )
-        if healed:
-            self._last_press_mono = time.monotonic()
+        # Item healing is deliberately simple and independent from skill-heal
+        # admission. It is never a blocked-heal transition and never requests
+        # a teleport: below 50% means press the configured item key.
+        healed = self._press_if_still_needed(scan)
         return healed
 
     def _press_if_still_needed(self, scan: int) -> bool:
-        """Recheck HP immediately before sending the item key.
-
-        The worker performs a preflight ratio check before entering the shared
-        admission gate. HP can become full between that check and the admitted
-        action, so the input boundary must fail closed as well.
-        """
+        """Recheck HP immediately before sending the item key."""
         ratio = self._hp_ratio()
         if ratio is None or ratio >= HP_RESTORE_RATIO:
             return False

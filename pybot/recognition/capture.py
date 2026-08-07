@@ -209,6 +209,15 @@ class _UiCaptureChannel:
     Resilience mirrors the runtime path: grabs run on one daemon worker with a
     bounded queue and a 2s caller timeout, and a broken session is dropped and
     recreated on ScreenShotError.
+
+    The channel's mss session is created inside the worker thread, never in the
+    caller. ``mss.MSS()`` itself can block just like ``grab()`` when the GDI
+    desktop is wedged (observed after a seated danger teleport): creating it on
+    the caller would leave the status read hanging with no bound, which is how
+    a single loading transition used to produce repeated multi-second OCR
+    timeouts. A stuck creation now only blocks this daemon worker; the caller
+    always waits at most ``_CAPTURE_GRAB_TIMEOUT_S`` and retires the channel,
+    so the next read starts a fresh worker with a fresh session.
     """
 
     def __init__(self) -> None:
@@ -216,7 +225,6 @@ class _UiCaptureChannel:
         # Kept as a descriptive compatibility alias for tests/integrations
         # that inspect the channel's session serialization primitive.
         self._session_lock = self._state_lock
-        self._session: mss.mss | None = None
         self._queue: "queue.Queue[_GrabRequest | None]" = queue.Queue(maxsize=16)
         self._worker_started = False
 
@@ -237,41 +245,44 @@ class _UiCaptureChannel:
     def _grab_worker_loop(
         self, work_queue: "queue.Queue[_GrabRequest | None]"
     ) -> None:
-        while True:
-            request = work_queue.get()
-            if request is None:
-                return
-            try:
-                request.result = request.sct.grab(request.monitor)
-            except BaseException as exc:  # noqa: BLE001 - surface any native failure
-                request.error = exc
-            finally:
-                request.done.set()
-                # A timed-out caller may have retired this session while the
-                # native grab was still blocked. Only the worker that owned the
-                # grab may close that old native handle.
-                with self._state_lock:
-                    current = self._session is request.sct
-                if not current:
-                    _close_capture_session(request.sct)
+        # The worker owns the channel's mss session. It is created lazily on
+        # the first request and closed when the worker exits via the ``None``
+        # sentinel, so a wedged desktop can only block this daemon thread.
+        sct: mss.mss | None = None
+        try:
+            while True:
+                request = work_queue.get()
+                if request is None:
+                    return
+                try:
+                    if sct is None:
+                        sct = mss.MSS()
+                    request.result = sct.grab(request.monitor)
+                except BaseException as exc:  # noqa: BLE001 - surface any native failure
+                    request.error = exc
+                finally:
+                    request.done.set()
+        finally:
+            # Only this worker ever touched the session, so it is safe to
+            # close here once the loop exits (or is abandoned after a wedge
+            # that never resolves; the thread is a daemon).
+            _close_capture_session(sct)
 
     def _retire_timed_out_grab(
         self,
-        sct: mss.mss,
         work_queue: "queue.Queue[_GrabRequest | None]",
     ) -> None:
         """Rotate a wedged UI channel so later reads use a fresh worker/session.
 
         Recreating only ``UiWorkQueue`` is insufficient: its replacement calls
         the same UI capture singleton, whose native worker and bounded queue
-        remain blocked forever. Retire the channel's queue/session pair here;
+        remain blocked forever. Retire the channel's queue/worker pair here;
         the old daemon worker finishes (or remains abandoned) on its private
         queue, while the next OCR request starts an independent worker.
         """
         with self._state_lock:
-            if self._session is not sct or self._queue is not work_queue:
+            if work_queue is not self._queue:
                 return
-            self._session = None
             self._queue = queue.Queue(maxsize=16)
             self._worker_started = False
             try:
@@ -289,42 +300,37 @@ class _UiCaptureChannel:
         grab_failures = 0
         while grab_failures < 2:
             with self._state_lock:
-                if self._session is None:
-                    self._session = mss.MSS()
-                sct = self._session
                 work_queue = self._queue
                 start_worker = not self._worker_started
             if start_worker:
                 self._ensure_worker(work_queue)
-            request = _GrabRequest(monitor, sct)
+            # The session is created inside the worker, so this caller thread
+            # is never exposed to a blocking mss.MSS()/grab call: the wait
+            # below is the only place it can pause, and it is bounded.
+            # ``request.sct`` is deliberately unused here: the UI worker owns
+            # its session and ignores that slot (the runtime worker needs it).
+            request = _GrabRequest(monitor, None)
             try:
                 work_queue.put_nowait(request)
             except queue.Full:
                 # A wedged grab backed the queue up. Rotate the channel so a
                 # replacement OCR request is not trapped behind that grab.
-                self._retire_timed_out_grab(sct, work_queue)
+                self._retire_timed_out_grab(work_queue)
                 return None
             if not request.done.wait(_CAPTURE_GRAB_TIMEOUT_S):
-                # Native grab hung (client/desktop wedge). Retire this entire
-                # channel pair, not just the caller's OCR task; otherwise every
-                # recreated UI worker queues behind the same blocked grab.
-                self._retire_timed_out_grab(sct, work_queue)
+                # Native grab or session creation hung (client/desktop wedge).
+                # Retire this entire channel pair, not just the caller's OCR
+                # task; otherwise every recreated UI worker queues behind the
+                # same blocked call.
+                self._retire_timed_out_grab(work_queue)
                 return None
             if request.error is not None:
                 if not isinstance(request.error, ScreenShotError):
                     raise request.error
-                # Broken session — drop it so the next attempt recreates.
-                # Closing from this thread is safe only because this channel
-                # has exactly one caller at a time (status-panel OCR is
-                # serialized by _status_request_pending): the errored grab
-                # already finished before ``done`` was set, so the worker is
-                # not mid-grab on this session. The runtime pipeline cannot
-                # share this session, so no other thread holds it.
+                # Broken session — rotate the channel so the next attempt
+                # starts a fresh worker with a fresh mss session.
                 grab_failures += 1
-                with self._state_lock:
-                    if self._session is sct:
-                        self._session = None
-                _close_capture_session(sct)
+                self._retire_timed_out_grab(work_queue)
                 continue
             shot = request.result
             frame = np.array(shot)

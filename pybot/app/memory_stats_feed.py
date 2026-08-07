@@ -59,6 +59,8 @@ class MemoryStatsFeed(PeriodicTaskRunner):
         self._poller.reset()
 
     def should_submit(self) -> int | None:
+        if not self.active:
+            return None
         if not self._config.use_memory_reading:
             self._on_name("—")
             return None
@@ -96,7 +98,11 @@ class MemoryStatsFeed(PeriodicTaskRunner):
 
     def apply_result(self, result) -> None:
         hwnd, snap = result
-        if hwnd != self._config.window_id or not self._config.use_memory_reading:
+        if (
+            not self.active
+            or hwnd != self._config.window_id
+            or not self._config.use_memory_reading
+        ):
             return
         if not snap.ok:
             self._on_name("—")

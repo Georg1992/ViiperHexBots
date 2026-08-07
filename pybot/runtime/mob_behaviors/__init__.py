@@ -17,13 +17,8 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Callable
 
-from pybot.game_state import PlayerVitals
 from pybot.config.runtime import CustomBehaviorRuntime
-from pybot.runtime.constants import (
-    CELL_SIZE_PX,
-    HEAL_VERIFY_DELAY_MS,
-    HP_RESTORE_COOLDOWN_S,
-)
+from pybot.runtime.constants import CELL_SIZE_PX
 
 DEFAULT_KITE_DISTANCE_PX = CELL_SIZE_PX * 5
 _KITE_DIRECTIONS: tuple[tuple[int, int], ...] = (
@@ -39,7 +34,6 @@ _KITE_DIRECTIONS: tuple[tuple[int, int], ...] = (
 from pybot.runtime.hunt_tracks import monotonic_ms
 
 if TYPE_CHECKING:
-    from pybot.runtime.danger_detector import DangerDetector
     from pybot.runtime.input.input_backend import InputBackend
 
 
@@ -176,25 +170,20 @@ class AnubisBehavior(MobBehavior):
 
 
 class ConfiguredMobBehavior(MobBehavior):
-    """Generic per-mob cycle: debuff, kite, and attack with safe healing.
+    """Generic per-mob cycle: debuff, kite, and attack.
 
-    Healing is deliberately kept out of the kiting hook so movement and
-    self-targeted recovery remain separate actions.
+    Character healing is owned by the synchronous hunt-loop recovery step;
+    this behavior only handles target preparation and movement.
     """
 
     def __init__(
         self,
         settings: CustomBehaviorRuntime,
-        vitals: PlayerVitals,
-        danger: DangerDetector,
         legacy_behavior: MobBehavior | None = None,
     ) -> None:
         self._settings = settings
-        self._vitals = vitals
-        self._danger = danger
         self._legacy_behavior = legacy_behavior
         self._last_kite_ms = 0
-        self._last_heal_ms: int | None = None
 
     def prepare_target(
         self,
@@ -218,51 +207,6 @@ class ConfiguredMobBehavior(MobBehavior):
             return False
         return mark_debuffed()
 
-    def heal_if_needed(
-        self,
-        char_x: int,
-        char_y: int,
-        input_backend: InputBackend,
-    ) -> bool:
-        hp, hp_max, _hp_observed_ms, hp_changed_ms = self._vitals.hp_sample()
-        now = monotonic_ms()
-        if self._last_heal_ms is not None:
-            # Post-heal verification window: give the vitals publisher time to
-            # refresh after the cast. A second heal fired on the pre-heal HP
-            # reading is what caused the double-heal when the first one filled
-            # the bar.
-            if now - self._last_heal_ms < HEAL_VERIFY_DELAY_MS:
-                return False
-            # Healthcheck: a second heal must be based on an HP *value* that
-            # changed since the last cast. The observation clock advances on
-            # every poll even when the value is unchanged, so an observed-only
-            # check still re-heals on a stale pre-heal sample while the
-            # publisher lags. Only a changed value proves the heal's result
-            # was read back.
-            if hp_changed_ms <= self._last_heal_ms:
-                return False
-        # A heal is never sent for a full (or invalid) HP reading. Keep the
-        # safety gate separate so this invariant is explicit at the input
-        # boundary.
-        if (
-            self._settings.heal_scan_code <= 0
-            or hp is None
-            or hp_max is None
-            or hp >= hp_max
-        ):
-            return False
-
-        # Safety admission is owned by AttackLoop/RuntimeContext. Keeping it
-        # out of this behavior is important: the context deliberately permits
-        # a custom heal during the short post-teleport grace window even when
-        # the danger detector still reports recent damage.
-        cast = input_backend.skill_click_at(
-            self._settings.heal_scan_code, char_x, char_y
-        )
-        if cast:
-            self._last_heal_ms = now
-        return cast
-
     def before_attack(
         self,
         char_x: int,
@@ -271,8 +215,8 @@ class ConfiguredMobBehavior(MobBehavior):
         *,
         all_mobs: list[tuple[int, int]],
     ) -> bool:
-        # Healing is owned by the attack loop's safe pre-attack and idle
-        # branches; kiting only handles movement.
+        # Character healing is handled by the hunt-loop recovery step; this
+        # hook only handles target-independent behavior before an attack.
         del char_x, char_y, input_backend, all_mobs
         return False
 
@@ -323,15 +267,11 @@ _BEHAVIOR_REGISTRY: dict[str, MobBehavior] = {
 
 def get_configured_mob_behavior(
     settings: CustomBehaviorRuntime,
-    vitals: PlayerVitals,
-    danger: DangerDetector,
     *,
     legacy_behavior: MobBehavior | None = None,
 ) -> MobBehavior:
     """Build the generic configured behavior for one mob."""
-    return ConfiguredMobBehavior(
-        settings, vitals, danger, legacy_behavior=legacy_behavior
-    )
+    return ConfiguredMobBehavior(settings, legacy_behavior=legacy_behavior)
 
 
 def get_mob_behavior(mob_name: str) -> MobBehavior:

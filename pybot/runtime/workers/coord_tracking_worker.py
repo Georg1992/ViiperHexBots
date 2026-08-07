@@ -18,6 +18,7 @@ to accept a hit; heatmap peaks only propose candidates.
 from __future__ import annotations
 
 import traceback
+from contextlib import nullcontext
 
 from pybot.runtime.constants import (
     LOG_REPEAT_INTERVAL_MS,
@@ -47,7 +48,7 @@ class CoordTrackingWorker:
             try:
                 if ctx.should_run_tracking():
                     self._tick()
-                    # Yield the shared capture session so discovery and
+                    # Yield the capture session so discovery and
                     # character-state sampling get predictable turns.
                     ctx.stop_event.wait(TRACKING_LOOP_INTERVAL_S)
                     if ctx.stop_event.is_set():
@@ -55,9 +56,9 @@ class CoordTrackingWorker:
                 elif not ctx.should_run_workers():
                     ctx.wait_while_stopped_or_paused(WORKER_POLL_INTERVAL_S)
                 else:
-                    # Gameplay/session gates never suspend observation. Retry
-                    # after a short stop-aware yield; do not wait on
-                    # resume_gate, which belongs only to action workers.
+                    # Session gates suspend observation. Retry after a short
+                    # stop-aware yield; do not wait on resume_gate, which
+                    # belongs only to action workers.
                     ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
             except Exception:
                 ctx.logger.behavior(f"[COORD] tick error:\n{traceback.format_exc()}")
@@ -66,9 +67,9 @@ class CoordTrackingWorker:
 
     def _tick(self) -> None:
         ctx = self._ctx
-        # ``run()`` checks this lifecycle gate. Gameplay transitions are not
-        # observation blockers; epoch checks below reject stale state before
-        # publication.
+        # ``run()`` checks this lifecycle gate. Sit/storage/heal transitions
+        # stop observation; epoch and publication checks below reject stale
+        # state before publication.
         if not ctx.should_run_tracking():
             return
         if not ctx.capture.is_valid():
@@ -106,6 +107,8 @@ class CoordTrackingWorker:
                 ctx.logger.behavior("[COORD] capture returned empty frame")
             return
 
+        publication_lock = getattr(ctx, "observation_publication_lock", None)
+
         # ── Step 1: Create tracks from discovery candidates ──────────────
         if candidates and not ctx.should_run_tracking():
             ctx.tracks.requeue_discovery_candidates(
@@ -116,15 +119,8 @@ class CoordTrackingWorker:
             new_count = self._process_discovery_candidates(
                 candidates, frame, roi, now_ms, area_epoch,
             )
-            if new_count > 0:
-                # The candidate pass already ran local follow on this exact
-                # fresh frame and created the tracks at its resolved centers.
-                # Do not immediately run local follow a second time on the
-                # same frame: that duplicate work was especially expensive for
-                # large Anubis sprites and could consume several seconds before
-                # the next fresh observation. New tracks enter the normal loop
-                # on the next frame; existing tracks still follow below.
-                pass
+            # Candidate resolution is complete; new tracks enter the normal
+            # warm-template path on the next frame.
 
         # ── Step 2: Follow existing tracks ───────────────────────────────
         if not alive_tracks:
@@ -165,6 +161,10 @@ class CoordTrackingWorker:
             return
 
         batch = ctx.tracker.track_locals_frame(frame, roi, snapshots)
+        if not getattr(batch, "ok", True) and getattr(batch, "fail_reason", "") == "detector_busy":
+            # Keep compatibility with injected/future bounded detector sessions:
+            # a skipped observation must not apply misses.
+            return
         self._warn_if_slow_tracking(batch, snapshots)
         results = batch.results
 
@@ -197,16 +197,29 @@ class CoordTrackingWorker:
         # Never publish a frame from the old screen into the new area, and do
         # not let an in-flight transition turn a stale hit into liveness.
         if (
-            ctx.tracks.area_epoch != area_epoch
-            or ctx.discovery_suspend.is_set()
+            not ctx.should_run_tracking()
+            or ctx.tracks.area_epoch != area_epoch
         ):
             return
 
-        missed_ids, opacity_deaths = ctx.tracks.apply_tracking(
-            results,
-            now_tick=now_ms,
-            area_epoch=area_epoch,
-        )
+        if publication_lock is None:
+            missed_ids, opacity_deaths = ctx.tracks.apply_tracking(
+                results,
+                now_tick=now_ms,
+                area_epoch=area_epoch,
+            )
+        else:
+            with publication_lock:
+                if (
+                    not ctx.should_run_tracking()
+                    or ctx.tracks.area_epoch != area_epoch
+                ):
+                    return
+                missed_ids, opacity_deaths = ctx.tracks.apply_tracking(
+                    results,
+                    now_tick=now_ms,
+                    area_epoch=area_epoch,
+                )
 
         # sprite.grf removes death animations — opacity death is meaningless.
         if not ctx.config.use_sprite_grf:
@@ -244,6 +257,7 @@ class CoordTrackingWorker:
         """
         ctx = self._ctx
         mob_name = ctx.config.mob_name
+        publication_lock = getattr(ctx, "observation_publication_lock", None)
 
         # Get existing track positions for dedup — don't create a track
         # for a mob that already has one.
@@ -270,11 +284,12 @@ class CoordTrackingWorker:
             if candidate.candidate_scale <= 0:
                 continue
 
-            # track_id=0 sentinel — only result x/y are used for creation.
-            # Batch all candidates on this frame so heatmap setup is shared.
+            # Negative IDs are provisional and never collide with real track
+            # IDs. Their one-shot template is transferred after create_track.
+            provisional_id = -(len(pending) + 1)
             snaps.append(
                 StateTrackSnapshot(
-                    track_id=0,
+                    track_id=provisional_id,
                     x=cx,
                     y=cy,
                     scale=candidate.candidate_scale,
@@ -287,65 +302,99 @@ class CoordTrackingWorker:
             return 0
 
         batch = ctx.tracker.track_locals_frame(frame, roi, snaps)
+        if not getattr(batch, "ok", True) and getattr(batch, "fail_reason", "") == "detector_busy":
+            # Keep compatibility with injected/future bounded detector sessions.
+            ctx.tracks.requeue_discovery_candidates(
+                pending, expected_epoch=area_epoch,
+            )
+            return 0
         self._warn_if_slow_tracking(batch, snaps)
-        if not batch.ok or len(batch.results) != len(pending):
+
+        if not getattr(batch, "ok", True) or len(batch.results) != len(pending):
+            self._discard_provisional_templates(batch.results)
             ctx.tracks.requeue_discovery_candidates(
                 pending, expected_epoch=area_epoch,
             )
             return 0
 
         created = 0
-        for index, (candidate, result) in enumerate(
-            zip(pending, batch.results, strict=True)
-        ):
+        commit_guard = (
+            nullcontext()
+            if publication_lock is None
+            else publication_lock
+        )
+        with commit_guard:
             if (
-                ctx.tracks.area_epoch != area_epoch
-                or ctx.discovery_suspend.is_set()
+                not ctx.should_run_tracking()
+                or ctx.tracks.area_epoch != area_epoch
             ):
-                # A transition won while local-follow was running. Do not
-                # create old-area tracks; the next discovery frame owns the
-                # fresh area.
+                self._discard_provisional_templates(batch.results)
                 ctx.tracks.requeue_discovery_candidates(
-                    pending[index:], expected_epoch=area_epoch,
+                    pending, expected_epoch=area_epoch,
                 )
-                return created
-            cx, cy = candidate.x, candidate.y
-            # Prefer the fresh local-follow hit; if the mob moved/occluded,
-            # still create at the discovery point so mode TP cannot claim
-            # clear while a published Anubis candidate is dropped.
-            create_x, create_y = (result.x, result.y) if result.found else (cx, cy)
+                return 0
+            for index, (candidate, result) in enumerate(
+                zip(pending, batch.results, strict=True)
+            ):
+                if (
+                    not ctx.should_run_tracking()
+                    or ctx.tracks.area_epoch != area_epoch
+                ):
+                    # A transition won while local-follow was running. Do not
+                    # create old-area tracks; the next discovery frame owns the
+                    # fresh area.
+                    self._discard_provisional_templates(batch.results[index:])
+                    ctx.tracks.requeue_discovery_candidates(
+                        pending[index:], expected_epoch=area_epoch,
+                    )
+                    return created
+                if not result.found:
+                    ctx.tracker.discard_track_template(result.track_id)
+                    continue
+                cx, cy = result.x, result.y
+                create_x, create_y = cx, cy
 
-            # Re-check dedup after earlier creates in this batch.
-            duplicate = False
-            for px, py in existing_positions:
-                if (create_x - px) ** 2 + (create_y - py) ** 2 <= dedup_sq:
-                    duplicate = True
-                    break
-            if duplicate:
-                continue
+                # Re-check dedup after earlier creates in this batch.
+                duplicate = False
+                for px, py in existing_positions:
+                    if (create_x - px) ** 2 + (create_y - py) ** 2 <= dedup_sq:
+                        duplicate = True
+                        break
+                if duplicate:
+                    ctx.tracker.discard_track_template(result.track_id)
+                    continue
 
-            # Create under the lock with epoch gate — rejects if teleport won.
-            track = ctx.tracks.create_track(
-                mob_name,
-                create_x,
-                create_y,
-                candidate.confidence,
-                candidate.candidate_scale,
-                now_tick=now_ms,
-                area_epoch=area_epoch,
-            )
-            if track is None:
-                # Area epoch advanced — do not requeue into the new screen.
-                return created
+                track = ctx.tracks.create_track(
+                    mob_name,
+                    create_x,
+                    create_y,
+                    candidate.confidence,
+                    candidate.candidate_scale,
+                    now_tick=now_ms,
+                    area_epoch=area_epoch,
+                )
+                if track is None:
+                    # Area epoch advanced — do not requeue into the new screen.
+                    self._discard_provisional_templates(batch.results[index:])
+                    return created
 
-            existing_positions.append((create_x, create_y))
-            created += 1
+                if not ctx.tracker.transfer_track_template(result.track_id, track.id):
+                    # Never publish a real track without its warm template.
+                    ctx.tracks.remove_track(track.id)
+                    return created
+                existing_positions.append((create_x, create_y))
+                created += 1
 
         if created > 0:
             ctx.logger.behavior(
                 f"[COORD] created {created} track(s) from discovery candidates"
             )
         return created
+
+    def _discard_provisional_templates(self, results) -> None:
+        """Drop one-shot templates that will not become live track IDs."""
+        for result in results:
+            self._ctx.tracker.discard_track_template(result.track_id)
 
     def _warn_if_slow_tracking(self, batch, snapshots) -> None:
         # getattr defaults keep fake batches (SimpleNamespace in tests) fast.

@@ -31,8 +31,10 @@ SIT_LOW_SP_RATIO = 0.05
 SIT_RESUME_SP_RATIO = 0.98
 SIT_SP_POLL_INTERVAL_S = 0.25
 SIT_IDLE_BEFORE_SIT_S = 1.0
-# After stand keypress, delay before hunt/timers resume.
-SIT_STAND_RESUME_DELAY_S = 0.5
+# After stand keypress, let the client settle before startup actions,
+# discovery, and tracking resume. This also keeps a post-stand buff from
+# sharing the first fresh frame with detector work.
+SIT_STAND_RESUME_DELAY_S = 0.6
 # Wait after sit/stand key tap for the toggle animation to finish.
 SIT_KEY_SETTLE_S = 0.35
 # Extra margin after a sit-placement / danger-escape teleport before the sit
@@ -53,9 +55,9 @@ CRITICAL_DANGER_POLL_INTERVAL_S = WORKER_POLL_INTERVAL_S
 CRITICAL_PREEMPT_RELEASE_TIMEOUT_S = 3.0
 # After teleport settle, custom self-heal may cast during this grace window.
 HP_POST_TELEPORT_HEAL_S = 2.0
-# After a custom heal cast, wait this long and require a fresh HP reading
-# before another heal may be sent (vitals refresh lags the game state).
-HEAL_VERIFY_DELAY_MS = 300
+# After a custom heal cast, wait this long before deciding the cast was blocked
+# and retrying with a teleport. The HP publisher/OCR can lag behind the game.
+HEAL_VERIFY_DELAY_MS = 600
 
 # Minimum gap between distinct skill-timer key presses when several are due.
 SKILL_TIMER_STAGGER_MS = 500

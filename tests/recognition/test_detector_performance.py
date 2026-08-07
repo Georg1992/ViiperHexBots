@@ -17,6 +17,11 @@ from pybot.recognition.detector.detector import (
 )
 from pybot.runtime.detection.detector_session import DetectorSession, StateTrackSnapshot
 from pybot.runtime.capture.window_roi import HuntRoi
+from pybot.recognition.detector.scoring.heatmap_detector import (
+    _palette_dist_sq,
+    _pixel_dot,
+    _pixel_palette_dot,
+)
 
 
 class DetectorPerformanceTests(unittest.TestCase):
@@ -31,6 +36,30 @@ class DetectorPerformanceTests(unittest.TestCase):
             / "Anubis"
         )
 
+    def test_pixel_dot_matches_numpy_dot(self) -> None:
+        """The bounded pixel arithmetic must preserve detector scores."""
+        rng = np.random.default_rng(7)
+        pixels = rng.random((257, 3), dtype=np.float32)
+        palette = rng.random((9, 3), dtype=np.float32)
+        np.testing.assert_allclose(
+            _pixel_dot(pixels, palette[0]),
+            np.dot(pixels, palette[0]),
+            rtol=2e-6,
+            atol=2e-6,
+        )
+        np.testing.assert_allclose(
+            _pixel_palette_dot(pixels, palette),
+            np.dot(pixels, palette.T),
+            rtol=2e-6,
+            atol=2e-6,
+        )
+        np.testing.assert_allclose(
+            _palette_dist_sq(pixels, palette),
+            np.sum((pixels[:, None, :] - palette[None, :, :]) ** 2, axis=2),
+            rtol=2e-6,
+            atol=2e-6,
+        )
+
     def test_runtime_explicitly_bounds_native_opencv_parallelism(self) -> None:
         # Detector construction is intentionally side-effect free; the live
         # runtime owns this process-wide setting. Restore the global OpenCV
@@ -43,13 +72,30 @@ class DetectorPerformanceTests(unittest.TestCase):
         finally:
             cv2.setNumThreads(previous)
 
-    def test_independent_observer_sessions_can_run_concurrently(self) -> None:
-        """Regression for the post-sit observer oversubscription path.
+    def test_detector_busy_skip_does_not_wait_or_mark_failure(self) -> None:
+        """A competing observer gets an immediate, non-destructive skip."""
+        from pybot.runtime.detection import detector_session
+
+        session = DetectorSession("anubis", PROJECT_ROOT, use_sprite_grf=True)
+        frame = np.zeros((32, 32, 3), dtype=np.uint8)
+        roi = HuntRoi(0, 0, 32, 32)
+        self.assertTrue(detector_session._DETECTOR_WORK_GATE.acquire(blocking=False))
+        try:
+            started = time.perf_counter()
+            result = session.discover_frame(frame, roi)
+            elapsed = time.perf_counter() - started
+        finally:
+            detector_session._DETECTOR_WORK_GATE.release()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.fail_reason, "detector_busy")
+        self.assertLess(elapsed, 0.1)
+
+    def test_competing_observer_sessions_use_one_detector_budget(self) -> None:
+        """A competing observer skips instead of waiting behind heavy work.
 
         Production deliberately has separate discovery/tracking sessions, so
-        their Python locks do not serialize native OpenCV work. Both calls must
-        be able to finish when launched together after runtime initialization;
-        this guards the topology that previously produced multi-second spikes.
+        their per-session locks do not serialize native OpenCV work. The shared
+        detector lock lets one call run and makes the other return immediately.
         """
         previous_threads = cv2.getNumThreads()
         configure_opencv_runtime()
@@ -76,16 +122,18 @@ class DetectorPerformanceTests(unittest.TestCase):
         barrier = threading.Barrier(3)
         errors: list[BaseException] = []
         durations: list[float] = []
+        results: list[object] = []
         duration_lock = threading.Lock()
 
         def run_discovery() -> None:
             try:
                 barrier.wait(timeout=5.0)
                 started = time.perf_counter()
-                discovery.discover_frame(frame, roi)
+                result = discovery.discover_frame(frame, roi)
                 elapsed = time.perf_counter() - started
                 with duration_lock:
                     durations.append(elapsed)
+                    results.append(result)
             except BaseException as exc:  # noqa: BLE001 - test thread transport
                 errors.append(exc)
 
@@ -93,10 +141,11 @@ class DetectorPerformanceTests(unittest.TestCase):
             try:
                 barrier.wait(timeout=5.0)
                 started = time.perf_counter()
-                tracking.track_locals_frame(frame, roi, [snapshot])
+                result = tracking.track_locals_frame(frame, roi, [snapshot])
                 elapsed = time.perf_counter() - started
                 with duration_lock:
                     durations.append(elapsed)
+                    results.append(result)
             except BaseException as exc:  # noqa: BLE001 - test thread transport
                 errors.append(exc)
 
@@ -113,12 +162,61 @@ class DetectorPerformanceTests(unittest.TestCase):
             self.assertFalse(tracking_thread.is_alive())
             self.assertEqual(errors, [])
             self.assertEqual(len(durations), 2)
-            # The old post-sit trace was 2.9–13.8s on this fixture. Keep a
-            # generous ceiling to catch a recurrence without making the test
-            # depend on sub-second hardware timing.
-            self.assertLess(max(durations), 5.0)
+            self.assertEqual(len(results), 2)
+            self.assertEqual(
+                sum(getattr(result, "fail_reason", "") == "detector_busy" for result in results),
+                1,
+            )
+            self.assertEqual(
+                sum(getattr(result, "ok", False) is True for result in results),
+                1,
+            )
+            self.assertLess(min(durations), 0.5)
         finally:
             cv2.setNumThreads(previous_threads)
+
+    def test_body_diversity_heatmap_does_not_materialize_full_similarity_tensor(self) -> None:
+        """Discovery diversity must stay 2-D on the live large-ROI path."""
+        detector = MobDetector(PROJECT_ROOT, load_detector_config(), use_sprite_grf=False)
+        descriptor = detector.ensure_descriptor("anubis")
+        self.assertTrue(descriptor.use_body_cluster_diversity)
+        frame_path = next(self._fixture_dir().glob("1Anubis*_Gray_ModifiedSprite.png"), None)
+        self.assertIsNotNone(frame_path)
+        assert frame_path is not None
+        frame = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
+        self.assertIsNotNone(frame)
+        assert frame is not None
+
+        from unittest.mock import patch
+        from pybot.recognition.detector.scoring import heatmap_detector
+
+        calls: list[bool] = []
+        original = heatmap_detector.weighted_sprite_palette_heatmap
+
+        def wrapped(*args, **kwargs):
+            calls.append(bool(kwargs.get("return_similarity", False)))
+            return original(*args, **kwargs)
+
+        with patch.object(
+            heatmap_detector,
+            "weighted_sprite_palette_heatmap",
+            side_effect=wrapped,
+        ):
+            heatmap = detector.heatmap_detector.build_sprite_heatmap(
+                frame,
+                descriptor,
+                downscale=2,
+            )
+
+        # The work image is half-resolution internally, but the public heatmap
+        # is upscaled back to frame coordinates for blob matching. Odd source
+        # dimensions can lose one pixel in each axis during integer resize.
+        self.assertLessEqual(frame.shape[0] - heatmap.shape[0], 1)
+        self.assertLessEqual(frame.shape[1] - heatmap.shape[1], 1)
+        self.assertGreaterEqual(heatmap.shape[0], frame.shape[0] - 1)
+        self.assertGreaterEqual(heatmap.shape[1], frame.shape[1] - 1)
+        self.assertTrue(calls)
+        self.assertNotIn(True, calls)
 
     def test_silhouette_palette_heatmap_is_reused_for_multiple_gates(self) -> None:
         detector = MobDetector(PROJECT_ROOT, load_detector_config(), use_sprite_grf=True)

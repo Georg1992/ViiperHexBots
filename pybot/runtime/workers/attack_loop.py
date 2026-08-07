@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import traceback
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pybot.runtime.teleport import TeleportController
 
 from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import (
     ATTACK_IDLE_SPIN_S,
-    HP_RESTORE_RATIO,
     IDLE_DEAD_ATTACK_COUNT,
     IDLE_UNREACHABLE_ATTACK_COUNT,
+    HEAL_VERIFY_DELAY_MS,
+    HP_RESTORE_COOLDOWN_S,
     LOG_REPEAT_INTERVAL_MS,
     WORKER_POLL_INTERVAL_S,
 )
@@ -32,6 +37,7 @@ class AttackLoop:
         *,
         mob_behavior: MobBehavior | None = None,
         vitals: PlayerVitals | None = None,
+        teleport_controller: TeleportController | None = None,
         char_x: int = 0,
         char_y: int = 0,
     ) -> None:
@@ -40,6 +46,9 @@ class AttackLoop:
         self._input = input_backend
         self._mob_behavior = MobBehavior() if mob_behavior is None else mob_behavior
         self._vitals = PlayerVitals() if vitals is None else vitals
+        self._teleport = teleport_controller
+        self._last_skill_heal_ms: int | None = None
+        self._skill_heal_retry_pending = False
         self._char_x = char_x
         self._char_y = char_y
         self._combat_observer = CombatObserver()
@@ -59,23 +68,35 @@ class AttackLoop:
         gameplay owner calls it after higher-priority danger/session steps.
         """
         try:
+            # A blocked/failed skill heal has already consumed this location's
+            # one attempt. Do not cast again until its teleport succeeds.
+            if self._skill_heal_retry_pending:
+                # Keep retrying the transition, never the blocked skill. A
+                # failed teleport must not strand the bot in a cast loop at
+                # the same location; a successful teleport clears this state
+                # and the next tick performs the one post-settle skill attempt.
+                if self._retry_post_teleport_heal():
+                    self._skill_heal_retry_pending = False
+                self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
+                return False
+
+            # Post-teleport skill recovery owns the first decision. It must run
+            # before the ordinary combat gate: a blocked skill cast is the
+            # evidence that this location cannot heal, and must trigger the
+            # teleport immediately instead of waiting at the same spot.
+            if self._post_teleport_hp_requires_heal():
+                if not self._post_teleport_recovery_step():
+                    self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
+                    return False
+
             if not self._ctx.should_run_combat():
                 self._ctx.wait_while_combat_blocked(WORKER_POLL_INTERVAL_S)
                 return False
 
-            # Low HP gives the configured custom heal first opportunity, but it
-            # is not a combat veto. If the heal is admissible and succeeds,
-            # yield this tick so the vitals publisher can verify it. If healing
-            # is unavailable, blocked, or on cooldown, continue normally; the
-            # independent critical-danger worker remains the only urgent veto.
-            heal_attempted = False
-            if self._low_hp_requires_defense():
-                heal_attempted = True
-                heal_result = self._attempt_heal()
-                self._log_low_hp_defense(heal_result)
-                if heal_result:
-                    return False
-
+            # After teleport, do not start fighting until the HP bar is full.
+            # Give the configured heal the first opportunity, then yield this
+            # tick even when the cast is blocked or unavailable. Normal hunting
+            # HP thresholds do not apply outside this post-teleport window.
             tick = monotonic_ms()
             policy_tracks = self._ctx.tracks.tracks_for_policy(tick)
             target_id = self._ctx.policy.select_target(policy_tracks, tick)
@@ -93,8 +114,6 @@ class AttackLoop:
                 # other action can yield to a teleport/reset. Track IDs are
                 # intentionally reusable after an area reset, so the ID alone
                 # is not a safe target identity.
-                if not heal_attempted:
-                    self._attempt_heal()
                 if selected_epoch is None:
                     # Preserve the compatibility path for lightweight callers
                     # that do not expose area epochs; real MobTrack snapshots
@@ -109,9 +128,13 @@ class AttackLoop:
                 self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
                 return True
 
-            if not heal_attempted:
-                self._attempt_heal()
-            self._hunt_mode.on_no_attackable_targets()
+            # A clear-area transition owns the next teleport. Do it before
+            # attempting a skill heal so the required order is:
+            # clear -> teleport -> inspect/heal -> hunt.
+            transitioned = self._hunt_mode.on_no_attackable_targets()
+            if transitioned is True:
+                self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
+                return False
             self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
             return False
         except Exception:
@@ -121,63 +144,156 @@ class AttackLoop:
             return False
 
 
-    def _low_hp_requires_defense(self) -> bool:
-        """Return whether a known HP sample should prioritize custom healing."""
-        hp, hp_max = self._vitals.hp_pair()
-        if hp is None or hp_max is None or hp_max <= 0:
+    def _post_teleport_hp_requires_heal(self) -> bool:
+        """Return whether post-teleport combat must wait for a full HP bar."""
+        in_window = getattr(self._ctx, "in_post_teleport_heal_window", None)
+        if not callable(in_window) or not bool(in_window()):
             return False
-        return hp / float(hp_max) < HP_RESTORE_RATIO
+        hp, hp_max = self._vitals.hp_pair()
+        if hp is not None and hp_max is not None and hp_max > 0 and hp >= hp_max:
+            clear = getattr(self._ctx, "clear_post_teleport_heal", None)
+            if callable(clear):
+                clear()
+            return False
+        # During post-teleport recovery, an unreadable HP bar is not proof of
+        # full health. Fail closed until a valid full reading arrives.
+        return True
 
-    def _log_low_hp_defense(self, heal_result: bool) -> None:
-        """Throttle the diagnostic for a low-HP healing-priority decision."""
+    def _post_teleport_recovery_step(self) -> bool:
+        """Run one deterministic post-teleport recovery transition.
+
+        Returns ``True`` only when combat may continue. A successful cast yields
+        until the next fresh HP sample. A blocked/failed cast is immediately
+        rechecked; if HP is still incomplete, the teleport controller starts a
+        fresh settled teleport before the next loop step.
+        """
+        hp, hp_max = self._vitals.hp_pair()
+        if hp is not None and hp_max is not None and hp_max > 0 and hp >= hp_max:
+            self._clear_post_teleport_heal()
+            return True
+        if hp is None or hp_max is None or hp_max <= 0:
+            self._log_post_teleport_heal("hp unknown; recovery paused")
+            return False
+
+        result = self._attempt_heal()
+        if result == "cast":
+            self._log_post_teleport_heal("heal cast; waiting for HP recheck")
+            return False
+        if result in {"waiting", "cooldown"}:
+            self._log_post_teleport_heal("waiting for fresh HP after heal")
+            return False
+
+        if result in {"blocked", "failed"}:
+            # The old cast is no longer a pending cooldown once this
+            # location has been rejected. Clear it before teleporting so the
+            # post-settle retry is a fresh skill attempt.
+            self._last_skill_heal_ms = None
+            self._skill_heal_retry_pending = True
+            # A skill heal that cannot execute must not be retried at the same
+            # location. Teleport immediately; the next settled recovery tick
+            # is the single retry point for this same skill-heal state machine.
+            retried = self._retry_post_teleport_heal()
+            if retried:
+                self._skill_heal_retry_pending = False
+            self._log_post_teleport_heal(
+                f"heal {result}; "
+                f"{'teleported for retry' if retried else 'teleport retry unavailable'}"
+            )
+        else:
+            # No configured recovery skill means there is no deterministic way
+            # to satisfy the post-teleport full-HP rule. Keep the recovery
+            # marker active: combat must not resume on a known low-HP sample.
+            self._log_post_teleport_heal("no skill configured; recovery remains active")
+        return False
+
+    def _clear_post_teleport_heal(self) -> None:
+        clear = getattr(self._ctx, "clear_post_teleport_heal", None)
+        if callable(clear):
+            clear()
+
+    def _retry_post_teleport_heal(self) -> bool:
+        """Teleport again when post-teleport healing cannot be admitted/cast."""
+        teleport = self._teleport
+        retry = getattr(teleport, "retry_post_teleport_heal", None)
+        if not callable(retry):
+            return False
+        critical = getattr(self._ctx, "critical_danger_requested", None)
+        if event_is_set(critical) is True:
+            return False
+        # This is intentionally immediate. A blocked skill heal means the
+        # current area/session cannot accept the cast; waiting here only
+        # repeats the same blocked decision at the same location.
+        try:
+            retried = bool(retry())
+        except Exception:
+            self._ctx.logger.behavior(
+                f"[HEAL] retry teleport error:\\n{traceback.format_exc()}"
+            )
+            return False
+        if retried:
+            self._ctx.logger.behavior(
+                "[HEAL] post-teleport skill heal blocked; teleported to retry"
+            )
+        return retried
+
+    def _log_post_teleport_heal(self, detail: str) -> None:
+        """Throttle diagnostics for post-teleport full-HP priority."""
         now = monotonic_ms()
         if now - self._last_low_hp_priority_log_ms < LOG_REPEAT_INTERVAL_MS:
             return
         self._last_low_hp_priority_log_ms = now
-        if heal_result:
-            detail = "heal cast; yielding this tick for HP verification"
-        else:
-            detail = "heal unavailable/blocked; combat continues"
         hp, hp_max = self._vitals.hp_pair()
         self._ctx.logger.behavior(
-            f"[HEAL] priority HP={hp}/{hp_max} "
-            f"threshold<{HP_RESTORE_RATIO:.0%}: {detail}"
+            f"[HEAL] post-teleport priority HP={hp}/{hp_max} "
+            f"until-full: {detail}"
         )
 
-    def _attempt_heal(self) -> bool:
-        """Attempt one custom heal through the shared heal admission gate."""
-        heal = getattr(self._mob_behavior, "heal_if_needed", None)
-        if not callable(heal):
-            return False
+    def _attempt_heal(self) -> str:
+        """Attempt one skill heal synchronously in the hunt decision loop."""
         try:
+            scan_code = int(self._ctx.config.custom_behavior.heal_scan_code)
+        except (AttributeError, TypeError, ValueError):
+            scan_code = 0
+        if scan_code <= 0:
+            return "unavailable"
+
+        hp, hp_max, _observed_ms, hp_changed_ms = self._vitals.hp_sample()
+        now_ms = monotonic_ms()
+        if hp is None or hp_max is None or hp_max <= 0 or hp >= hp_max:
+            return "not_needed"
+        if self._last_skill_heal_ms is not None:
+            elapsed_ms = now_ms - self._last_skill_heal_ms
+            if elapsed_ms < HEAL_VERIFY_DELAY_MS:
+                return "waiting"
+            # One verification window is enough. If the HP publisher has not
+            # reported any change by then, the skill did not take effect at
+            # this location (blocked input/session), so recovery must teleport
+            # instead of waiting indefinitely and standing still.
+            if hp_changed_ms <= self._last_skill_heal_ms:
+                return "blocked"
+            if elapsed_ms < int(HP_RESTORE_COOLDOWN_S * 1000):
+                return "waiting"
+
+        def cast() -> bool:
             hx, hy = self._character_pos()
-            allowed = getattr(
-                self._ctx,
-                "should_run_custom_heal_actions",
-                getattr(
-                    self._ctx,
-                    "should_run_character_actions",
-                    self._ctx.should_run_combat,
-                ),
+            return bool(self._input.skill_click_at(scan_code, hx, hy))
+
+        try:
+            result = self._ctx.try_heal_if_allowed(
+                self._ctx.should_run_custom_heal_actions,
+                cast,
             )
-            admit = getattr(type(self._ctx), "perform_heal_if_allowed", None)
-            if callable(admit):
-                return bool(self._ctx.perform_heal_if_allowed(
-                    allowed,
-                    lambda: bool(heal(hx, hy, self._input)),
-                    cooldown_s=1.0,
-                ))
-            return bool(perform_if_allowed(
-                self._input,
-                allowed,
-                lambda: bool(heal(hx, hy, self._input)),
-                lifecycle=self._ctx,
-            ))
         except Exception:
             self._ctx.logger.behavior(
-                f"[HEAL] self-heal error:\\n{traceback.format_exc()}"
+                f"[HEAL] skill cast error:\\n{traceback.format_exc()}"
             )
-            return False
+            return "failed"
+        if result == "cast":
+            self._last_skill_heal_ms = now_ms
+            return "cast"
+        if result in {"blocked", "cooldown", "failed"}:
+            return result
+        return "blocked"
 
     def _perform_target_input(
         self,
@@ -543,7 +659,10 @@ class GameplayLoop:
                 "hp_restore",
                 interval_ms=1000,
                 priority=20,
-                ready=lambda: bool(self._hp_restore.can_restore_now()),
+                # Let process_pending observe and report a blocked admission;
+                # suppressing it in ready() would hide the blocked state from
+                # the deterministic gameplay owner.
+                ready=lambda: bool(self._hp_restore.needs_restore()),
                 due_when=self._hp_restore.needs_restore,
                 execute=self._hp_restore.process_pending,
                 due_on_generation=False,
@@ -674,9 +793,9 @@ class GameplayLoop:
                     and hp_action.last_executed_ms != hp_before
                 ):
                     continue
-                # An HP item that is currently unsafe/ineligible is maintenance,
-                # not a combat gate. Critical danger remains a real gate and is
-                # handled by its independent emergency worker.
+                # Item healing is maintenance, not a combat gate. Critical
+                # danger remains a real gate and is handled independently.
+                # AttackLoop owns only the skill-heal recovery state above.
                 if self._scheduler.requires_retry(
                     max_priority=40,
                     ignore_keys={"hp_restore"},

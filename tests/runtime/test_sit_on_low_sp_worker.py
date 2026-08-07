@@ -12,6 +12,7 @@ from pybot.runtime.constants import (
     SIT_LOW_SP_RATIO,
     SIT_POST_TELEPORT_SETTLE_S,
     SIT_RESUME_SP_RATIO,
+    SIT_STAND_RESUME_DELAY_S,
 )
 from pybot.runtime.danger_detector import DangerDetector, DangerLevel
 from pybot.runtime.input.input_backend import ShadowInputBackend
@@ -65,6 +66,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.teleport = TeleportController(self.ctx, self.input, MagicMock())
         self.teleport.teleport_until_quiet = MagicMock(return_value=True)  # type: ignore[method-assign]
         self.danger = MagicMock(spec=DangerDetector)
+        self.danger.danger_level.return_value = DangerLevel.SAFE
+        self.ctx.danger_detector = self.danger
 
     def _worker(self, vitals: PlayerVitals | None = None) -> SitOnLowSpWorker:
         return SitOnLowSpWorker(
@@ -74,6 +77,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
 
     def test_thresholds(self) -> None:
         self.assertAlmostEqual(SIT_LOW_SP_RATIO, 0.05)
+        self.assertAlmostEqual(SIT_STAND_RESUME_DELAY_S, 0.6)
         self.assertAlmostEqual(SIT_RESUME_SP_RATIO, 0.98)
         self.assertGreaterEqual(SIT_KEY_SETTLE_S, 0.3)
 
@@ -180,6 +184,18 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker._recover_sp(SIT_LOW_SP_RATIO - 0.01)
         self.input.toggle_key.assert_not_called()
         self.assertFalse(self.ctx.sitting_event.is_set())
+
+    def test_stand_waits_600ms_before_recovery_finishes(self) -> None:
+        worker = self._worker(_ScriptedVitals([SIT_RESUME_SP_RATIO, SIT_RESUME_SP_RATIO]))
+        events: list[str] = []
+        self.ctx.wait_unless_stopped = lambda timeout: (
+            events.append(f"wait:{timeout}"), True
+        )[1]  # type: ignore[method-assign]
+        self.ctx.end_sit_ops = lambda: events.append("end")  # type: ignore[method-assign]
+        worker._seated = True
+        self.assertEqual(worker._sit_until_done(82), "recovered")
+        self.assertIn(f"wait:{SIT_STAND_RESUME_DELAY_S}", events)
+        self.assertNotIn("end", events)
 
     def test_end_sit_ops_wakes_discovery_after_generation_reset(self) -> None:
         self.ctx.discovery_wake.clear()
@@ -477,33 +493,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertFalse(self.ctx.critical_danger_requested.is_set())
         self.assertFalse(self.ctx.danger_sit_requested.is_set())
 
-    def test_ordinary_hunting_damage_is_consumed_without_teleport(self) -> None:
-        worker = self._worker(_ScriptedVitals([]))
-        self.ctx.request_danger_sit()
-        self.danger.danger_level.return_value = DangerLevel.DANGER
-        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
-
-        worker._handle_hunting_danger()
-
-        self.teleport.danger_teleport.assert_not_called()
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-        self.assertFalse(self.ctx.sitting_event.is_set())
-
-    def test_critical_hunting_damage_teleports_without_sp_regeneration(self) -> None:
-        worker = self._worker(_ScriptedVitals([]))
-        self.ctx.request_danger_sit()
-        self.ctx.request_critical_danger()
-        self.danger.danger_level.return_value = DangerLevel.CRITICAL
-        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
-        escape = CriticalDangerWorker(self.ctx, self.teleport)
-
-        worker._handle_hunting_danger()
-        escape.process_pending()
-
-        self.teleport.danger_teleport.assert_called_once_with(reason="critical_hunt")
-        self.assertFalse(self.ctx.sitting_event.is_set())
-
     def test_critical_hunting_escape_retries_after_failed_teleport(self) -> None:
+        self.danger.danger_level.return_value = DangerLevel.CRITICAL
         self.ctx.request_critical_danger()
         self.teleport.danger_teleport = MagicMock(  # type: ignore[method-assign]
             side_effect=[False, True]
@@ -519,6 +510,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
 
     def test_critical_escape_overrides_sitting_session(self) -> None:
         """Critical danger preempts an active sit session and teleports."""
+        self.danger.danger_level.return_value = DangerLevel.CRITICAL
         self.ctx.request_critical_danger()
         self.ctx.sitting_event.set()
         self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
@@ -570,6 +562,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertTrue(self.ctx.sitting_event.is_set())
 
     def test_critical_escape_waits_while_paused_without_repeating_teleport(self) -> None:
+        self.danger.danger_level.return_value = DangerLevel.CRITICAL
         self.ctx.request_critical_danger()
         self.ctx.mark_paused()
         self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]

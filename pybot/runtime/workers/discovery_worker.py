@@ -3,9 +3,9 @@
 Schedule: every ``discovery_interval_ms`` (default 1s), and immediately when
 ``discovery_wake`` is set after a teleport settle delay or when tracking
 wakes it on a local miss. While ``discovery_suspend`` is set (claim →
-teleport key → delay), or while storage UI is open (``should_run_discovery``
-false), this worker does not scan — only waits for the post-delay wake /
-storage end.
+teleport key → delay), or while a lifecycle session owns the character
+(``should_run_discovery`` is false), this worker does not scan — only waits
+for the post-delay or session-end wake.
 
 One discovery pass (same frame):
 1. Silhouette scan for living mobs (living refs only).
@@ -67,14 +67,12 @@ class DiscoveryWorker:
         while not ctx.stop_event.is_set():
             try:
                 if not ctx.should_run_discovery():
-                    # Only an explicit stop/pause may suspend observation. A
-                    # sit/storage/danger/teleport gate belongs to gameplay;
-                    # screen sampling continues independently.
+                    # Session gates suspend mob observation while HP/status and
+                    # danger feeds continue independently.
                     ctx.stop_event.wait(interval_s)
                     continue
-                # Keep the observer on its cadence even during an area
-                # transition. _scan() rejects the result at the epoch/suspend
-                # publication boundary, rather than starving capture itself.
+                # Keep the observer on its cadence. _scan() rejects a stale
+                # result at the epoch/session publication boundary.
                 woke = self._wait_for_discovery_wake(interval_s)
                 # Only consume a wake that this wait actually received. If the
                 # cadence timed out, a teleport may set the event at the same
@@ -152,7 +150,11 @@ class DiscoveryWorker:
             roi,
         )
         if not scan.ok:
-            self._hunt_mode.note_discovery_scan_failed(scan.fail_reason)
+            # A concurrent tracking pass may own the process-wide detector
+            # budget. This is an intentional observation skip, not a failed
+            # frame and must not poison the hunt clear/startup state.
+            if scan.fail_reason != "detector_busy":
+                self._hunt_mode.note_discovery_scan_failed(scan.fail_reason)
             return
 
         total_ms = capture_ms + scan.duration_ms
@@ -205,33 +207,37 @@ class DiscoveryWorker:
         transition_lock = getattr(ctx, "area_transition_lock", None)
         guard = nullcontext() if transition_lock is None else transition_lock
         with guard:
-            # A frame captured during teleport/loading is observation-only. Do
-            # not mutate tracks or clear candidates while the area transition
-            # owns the publication boundary.
-            if (
-                ctx.discovery_suspend.is_set()
-                or ctx.tracks.area_epoch != area_epoch
-                or expected_generation != int(getattr(ctx, "hunt_generation", 0))
-            ):
-                return
-            summary = ctx.tracks.process_discovery_scan(
-                detections,
-                mob_name=ctx.config.mob_name,
-                now_tick=now_ms,
-                existing_positions=existing_positions,
-                existing_track_positions=existing_track_positions,
-                area_epoch=area_epoch,
-                hunt_roi=roi,
+            publication_lock = getattr(
+                ctx, "observation_publication_lock", nullcontext()
             )
+            with publication_lock:
+                # A frame captured during teleport/loading is observation-only.
+                # Do not mutate tracks or clear candidates while the area
+                # transition or sit session owns the publication boundary.
+                if (
+                    not ctx.should_run_discovery()
+                    or ctx.tracks.area_epoch != area_epoch
+                    or expected_generation != int(getattr(ctx, "hunt_generation", 0))
+                ):
+                    return
+                summary = ctx.tracks.process_discovery_scan(
+                    detections,
+                    mob_name=ctx.config.mob_name,
+                    now_tick=now_ms,
+                    existing_positions=existing_positions,
+                    existing_track_positions=existing_track_positions,
+                    area_epoch=area_epoch,
+                    hunt_roi=roi,
+                )
 
-            # A scan that began on the old screen must fail closed before it can
-            # publish any observable state.
-            if (
-                ctx.tracks.area_epoch != area_epoch
-                or ctx.discovery_suspend.is_set()
-                or expected_generation != int(getattr(ctx, "hunt_generation", 0))
-            ):
-                return
+                # A scan that began on the old screen must fail closed before
+                # it can publish any observable state.
+                if (
+                    not ctx.should_run_discovery()
+                    or ctx.tracks.area_epoch != area_epoch
+                    or expected_generation != int(getattr(ctx, "hunt_generation", 0))
+                ):
+                    return
 
             ctx.overlay.set_scan_living(len(filtered))
             verbose = (
