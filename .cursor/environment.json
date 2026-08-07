@@ -1,0 +1,4 @@
+{
+  "name": "ViiperHexBots",
+  "install": "bash .cursor/install.sh"
+}
