@@ -454,6 +454,22 @@ class SitOnLowSpWorker:
         finally:
             self._finish_recovery_session(sit_scan)
 
+    def _critical_escape_took_over(self) -> bool:
+        """True when a critical escape owns the character during sit teardown.
+
+        Consumes the durable preemption marker so a teardown that only wakes
+        after the escape already completed still detects it — by then the
+        escape's ``end_critical_escape_ops`` has cleared ``danger_escape_active``
+        and ``sitting_event``, so checking those transient events alone would
+        miss the preemption and press a late toggle that inverts the pose.
+        """
+        ctx = self._ctx
+        consume = getattr(ctx, "consume_critical_preempted_sit", None)
+        # Consume unconditionally (do not short-circuit) so the marker never
+        # leaks into a later session even when danger_escape_active is also set.
+        preempted = bool(consume()) if callable(consume) else False
+        return preempted or ctx.danger_escape_active.is_set()
+
     def _finish_recovery_session(self, sit_scan: int) -> None:
         """Release the sit session after recovery, yielding to a critical escape.
 
@@ -461,10 +477,12 @@ class SitOnLowSpWorker:
         Once it does, the escape's teleport stands the character and its
         ``end_critical_escape_ops`` clears the gate it set. Never press the
         sit toggle or run ``end_sit_ops`` after that point: a late toggle
-        would invert the post-teleport pose.
+        would invert the post-teleport pose. The escape may also finish before
+        this teardown wakes, so the check consults the durable preemption
+        marker, not only the transient ``danger_escape_active`` event.
         """
         ctx = self._ctx
-        if ctx.danger_escape_active.is_set():
+        if self._critical_escape_took_over():
             self._seated = False
             ctx.logger.behavior(
                 "[SIT] recovery session preempted by critical escape"
@@ -476,7 +494,7 @@ class SitOnLowSpWorker:
             # as stale instead, fall through to the normal teardown on the
             # next wake.
             ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
-            if ctx.danger_escape_active.is_set():
+            if self._critical_escape_took_over():
                 self._seated = False
                 return
         # Do not release the sit gate while we still believe the character
@@ -485,7 +503,7 @@ class SitOnLowSpWorker:
         # toggle path because normal input has already been cancelled.
         shutdown_cleanup_attempts = 0
         while self._seated:
-            if ctx.danger_escape_active.is_set():
+            if self._critical_escape_took_over():
                 self._seated = False
                 ctx.logger.behavior(
                     "[SIT] stand aborted — critical escape owns the character"
