@@ -148,6 +148,14 @@ class GateController:
         # only to bound the pre-teleport wait for the preempted owners to
         # release; teardown always releases the gate the escape itself set.
         self._preempted_sessions = (False, False, False)
+        # Durable marker that a critical escape preempted an active sit
+        # session. Unlike danger_escape_active/sitting_event (which the escape
+        # clears on completion), this survives end_critical_escape_ops so a sit
+        # teardown that only wakes AFTER the escape has finished still knows the
+        # escape stood the character. Without it, a late sit/stand toggle would
+        # invert the post-teleport pose (character ends up seated while hunting)
+        # and a redundant end_sit_ops would start an extra hunt generation.
+        self.critical_preempted_sit = threading.Event()
         # A seated toggle could not be undone during worker cleanup. Runtime
         # shutdown must retry this before releasing input ownership.
         self.sit_cleanup_unresolved = threading.Event()
@@ -353,6 +361,13 @@ class GateController:
                 self.storage_event.is_set(),
                 self.healing_event.is_set(),
             )
+            # A preempted sit session's teardown must become a no-op even when
+            # this escape completes (clearing sitting_event/danger_escape_active)
+            # before the sit worker observes the preemption. The marker is
+            # consumed by that teardown and cleared again when a fresh sit
+            # session starts.
+            if self._preempted_sessions[0]:
+                self.critical_preempted_sit.set()
             self.danger_escape_active.set()
             self.critical_danger_escape_active.set()
             self.sitting_event.set()
@@ -425,9 +440,26 @@ class GateController:
         with self._sit_storage_lock:
             if self._session_held():
                 return False
+            # A fresh sit session starts clean: discard any preemption marker
+            # left behind by a previous session's critical escape so it cannot
+            # cancel this session's teardown.
+            self.critical_preempted_sit.clear()
             self.sitting_event.set()
             self.resume_gate.clear()
             return True
+
+    def consume_critical_preempted_sit(self) -> bool:
+        """Return and clear whether a critical escape preempted the sit session.
+
+        The sit worker calls this during teardown. When true, the escape's
+        teleport already stood the character and released the gate, so the sit
+        worker must not press the sit/stand toggle or run ``end_sit_ops``.
+        """
+        with self._sit_storage_lock:
+            if self.critical_preempted_sit.is_set():
+                self.critical_preempted_sit.clear()
+                return True
+            return False
 
     def begin_sit_ops(self) -> bool:
         """Wait until sit ops can start. False if stopped first."""

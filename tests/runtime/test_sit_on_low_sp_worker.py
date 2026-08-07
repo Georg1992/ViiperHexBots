@@ -569,6 +569,49 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         # The escape owns the sit gate; the sit worker must not release it.
         self.assertTrue(self.ctx.sitting_event.is_set())
 
+    def test_finish_recovery_after_completed_critical_escape_is_noop(self) -> None:
+        """Race: the critical escape claims AND finishes before the sit
+        teardown wakes. ``danger_escape_active``/``sitting_event`` are already
+        cleared, so the durable preemption marker is what prevents a late
+        toggle (which would invert the post-teleport pose and leave the
+        character seated) and a redundant new hunt generation.
+        """
+        worker = self._worker()
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        # Active sit session; character seated.
+        self.assertTrue(self.ctx.try_begin_sit_ops())
+        worker._seated = True
+        # Critical escape preempts the sit and completes: its teleport stood
+        # the character and end_critical_escape_ops released the gates.
+        self.assertTrue(self.ctx.try_begin_critical_escape_ops(override=True))
+        self.ctx.end_critical_escape_ops()
+        self.assertFalse(self.ctx.danger_escape_active.is_set())
+        self.assertFalse(self.ctx.sitting_event.is_set())
+
+        gen_before = self.ctx.hunt_generation
+        worker._finish_recovery_session(sit_scan=82)
+
+        self.input.toggle_key.assert_not_called()
+        self.assertEqual(self.ctx.hunt_generation, gen_before)
+        self.assertFalse(worker._seated)
+
+    def test_finish_recovery_normal_completion_stands_and_starts_new_hunt(self) -> None:
+        """Without a preemption the teardown must still stand and begin a new
+        hunt — the durable marker must not suppress the ordinary path.
+        """
+        worker = self._worker()
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        self.assertTrue(self.ctx.try_begin_sit_ops())
+        worker._seated = True
+
+        gen_before = self.ctx.hunt_generation
+        worker._finish_recovery_session(sit_scan=82)
+
+        self.input.toggle_key.assert_called_once_with(82)
+        self.assertFalse(worker._seated)
+        self.assertFalse(self.ctx.sitting_event.is_set())
+        self.assertEqual(self.ctx.hunt_generation, gen_before + 1)
+
     def test_critical_escape_waits_while_paused_without_repeating_teleport(self) -> None:
         self.ctx.request_critical_danger()
         self.ctx.mark_paused()
