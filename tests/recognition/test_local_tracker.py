@@ -18,6 +18,7 @@ from pybot.recognition.fixtures import (
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
 from pybot.recognition.detector.tracking.local_tracker import (
     LocalTrackResult,
+    clear_track_templates,
     transfer_track_template,
     _effective_search_radius,
     _local_follow_scales,
@@ -230,6 +231,13 @@ class LocalTrackerTests(unittest.TestCase):
         elapsed = time.perf_counter() - started
         self.assertTrue(result.found, result.miss_reason)
         self.assertLess(elapsed, 0.5)
+
+    def test_area_reset_cache_clear_drops_temporal_patches(self) -> None:
+        """Screen-local templates must not survive a teleport boundary."""
+        detector = self._detector()
+        detector._local_track_templates = {1: object(), 2: object()}
+        clear_track_templates(detector)
+        self.assertEqual(detector._local_track_templates, {})
 
     def test_confirmed_track_uses_fast_temporal_follow(self) -> None:
         """A second frame follows the cached patch instead of reacquiring."""

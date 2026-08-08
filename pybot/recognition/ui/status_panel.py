@@ -736,6 +736,51 @@ def _glyph_components(
     return comps
 
 
+def _match_template_zncc(
+    image: np.ndarray,
+    template: np.ndarray,
+) -> float:
+    """Return the best zero-mean normalized correlation in *image*.
+
+    Glyphs are tiny (the largest padded search here is only a few dozen
+    pixels), so a bounded NumPy sliding-window calculation is both simpler and
+    safer than entering OpenCV's native ``matchTemplate`` from the long-lived
+    OCR thread. A native OpenCV call was observed remaining inside
+    ``hp glyph_start`` for several seconds while the rest of the bot was
+    healthy; keeping this classifier free of OpenCV removes that exact
+    cross-worker native call from the OCR critical path.
+    """
+    th, tw = template.shape[:2]
+    if image.shape[0] < th or image.shape[1] < tw:
+        return -1.0
+    image_f = np.asarray(image, dtype=np.float32)
+    template_f = np.asarray(template, dtype=np.float32)
+    template_centered = template_f - np.float32(template_f.mean())
+    template_norm = float(np.sqrt(np.sum(template_centered * template_centered)))
+    if template_norm <= 1e-6:
+        return -1.0
+
+    # ``sliding_window_view`` keeps the search bounded by the already padded
+    # glyph image; no frame-sized allocation is introduced here.
+    windows = np.lib.stride_tricks.sliding_window_view(
+        image_f, (th, tw), axis=(0, 1),
+    )
+    window_centered = windows - windows.mean(axis=(-2, -1), keepdims=True)
+    numerator = np.sum(window_centered * template_centered, axis=(-2, -1))
+    window_norm = np.sqrt(
+        np.sum(window_centered * window_centered, axis=(-2, -1))
+    )
+    denominator = window_norm * np.float32(template_norm)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scores = np.divide(
+            numerator,
+            denominator,
+            out=np.zeros_like(numerator, dtype=np.float32),
+            where=denominator > 1e-6,
+        )
+    return float(scores.max()) if scores.size else -1.0
+
+
 def _classify_glyph(glyph: np.ndarray) -> tuple[str | None, float]:
     templates = _load_digit_templates()
     best_ch: str | None = None
@@ -751,11 +796,7 @@ def _classify_glyph(glyph: np.ndarray) -> tuple[str | None, float]:
             pad_w = gw + tw + 4
             pad = np.zeros((pad_h, pad_w), dtype=np.uint8)
             pad[2 : 2 + gh, 2 : 2 + gw] = glyph
-            score = float(
-                cv2.minMaxLoc(
-                    cv2.matchTemplate(pad, tpl, cv2.TM_CCOEFF_NORMED)
-                )[1]
-            )
+            score = _match_template_zncc(pad, tpl)
             if score > best_score:
                 best_score = score
                 best_ch = ch

@@ -30,6 +30,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+
 from pybot.runtime.capture.hunt_capture import HuntWindowCapture
 from pybot.config.runtime import HuntRuntimeConfig
 from pybot.runtime.control import RuntimeControl
@@ -521,5 +522,15 @@ class HuntRuntimeContext:
         # transition is one coherent lifecycle boundary.
         with self.gates.area_transition_lock:
             self.tracks.area_reset()
+            # Local tracker patches are screen-local. Retaining them after a
+            # teleport makes every new track ID live beside old image patches
+            # and gradually increases work/memory across long sessions.
+            clear_templates = getattr(self.tracker, "clear_track_templates", None)
+            # ``MagicMock`` fabricates every missing attribute, so a partial
+            # test double would appear to support this hook and record a
+            # meaningless call. Only invoke a concrete implementation; the
+            # production tracker is a DetectorSession.
+            if callable(clear_templates) and isinstance(self.tracker, DetectorSession):
+                clear_templates()
             self.policy.reset()
             self.validation.log_area_reset(reason)

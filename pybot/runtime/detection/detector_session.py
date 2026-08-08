@@ -14,6 +14,7 @@ from pybot.recognition.capture import capture_region
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
 from pybot.recognition.detector.tracking.local_tracker import (
     LocalTrackResult,
+    clear_track_templates,
     discard_track_template,
     transfer_track_template,
 )
@@ -214,6 +215,10 @@ class DetectorSession:
     def discard_track_template(self, track_id: int) -> None:
         """Discard an uncommitted provisional local-track template."""
         discard_track_template(self._detector, track_id)
+
+    def clear_track_templates(self) -> None:
+        """Drop all temporal local-track patches at an area boundary."""
+        clear_track_templates(self._detector)
 
     def track_locals_frame(
         self,

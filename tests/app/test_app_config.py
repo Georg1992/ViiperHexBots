@@ -9,8 +9,8 @@ from pathlib import Path
 
 from pybot.app.config_store import AppConfig, list_client_profiles
 from pybot.config.clients import memory_reading_enabled
-from pybot.config.runtime import resolve_mob_name
-from pybot.config.schema import MobCustomSettings
+from pybot.config.runtime import hunt_runtime_config_from_settings, resolve_mob_name
+from pybot.config.schema import AppSettings, MobCustomSettings
 from pybot.mobs.catalog import load_mob_catalog, mob_display_name
 from pybot.paths import PROJECT_ROOT
 
@@ -79,6 +79,18 @@ class AppConfigTests(unittest.TestCase):
 
         self.assertIn("Revenant", list_client_profiles(PROJECT_ROOT))
         self.assertTrue(client_supports_memory("Revenant", PROJECT_ROOT))
+
+    def test_search_range_validation_is_strict(self) -> None:
+        for value in (0, 8, 17, -1):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "Search range"):
+                    hunt_runtime_config_from_settings(
+                        AppSettings(search_range=value)
+                    )
+
+    def test_valid_search_range_is_preserved(self) -> None:
+        config = hunt_runtime_config_from_settings(AppSettings(search_range=9))
+        self.assertEqual(config.search_range_cells, 9)
 
 
 class MobCatalogTests(unittest.TestCase):

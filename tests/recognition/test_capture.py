@@ -155,6 +155,50 @@ class CaptureRegionTests(unittest.TestCase):
 
         self.assertIsNone(frame)
         self.assertLess(elapsed, 2.0)
+        # A timed-out runtime grab is retained for the worker that owns it and
+        # closed after the native call finally returns.
+        for _ in range(100):
+            if fake_sct.close.called:
+                break
+            time.sleep(0.01)
+        fake_sct.close.assert_called_once_with()
+
+    def test_consecutive_timeouts_retain_each_retired_session(self) -> None:
+        """Each rotated runtime worker must close its own native session."""
+        releases = [threading.Event(), threading.Event()]
+        sessions = [MagicMock(), MagicMock()]
+        shot = np.zeros((4, 4, 4), dtype=np.uint8)
+
+        def hung_grab(index: int):
+            def grab(_monitor):
+                releases[index].wait(timeout=5.0)
+                return shot
+
+            return grab
+
+        for index, session in enumerate(sessions):
+            session.grab.side_effect = hung_grab(index)
+
+        try:
+            with patch(
+                "pybot.recognition.capture.mss.MSS",
+                side_effect=sessions,
+            ):
+                with patch("pybot.recognition.capture._CAPTURE_GRAB_TIMEOUT_S", 0.1):
+                    self.assertIsNone(capture_mod.capture_region(10, 20, 4, 4))
+                    self.assertIsNone(capture_mod.capture_region(10, 20, 4, 4))
+                    self.assertEqual(len(capture_mod._retired_sessions), 2)
+        finally:
+            for release in releases:
+                release.set()
+
+        for _ in range(100):
+            if all(session.close.called for session in sessions):
+                break
+            time.sleep(0.01)
+        for session in sessions:
+            session.close.assert_called_once_with()
+        self.assertFalse(capture_mod._retired_sessions)
 
     def test_retries_once_after_grab_failure(self) -> None:
         shot = np.zeros((4, 4, 4), dtype=np.uint8)

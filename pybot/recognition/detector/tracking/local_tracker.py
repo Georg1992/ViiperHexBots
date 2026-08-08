@@ -323,6 +323,13 @@ def discard_track_template(detector: MobDetector, track_id: int) -> None:
     _template_store(detector).pop(track_id, None)
 
 
+def clear_track_templates(detector: MobDetector) -> None:
+    """Drop all temporal patches when the detector enters a new screen area."""
+    store = getattr(detector, "_local_track_templates", None)
+    if store is not None:
+        store.clear()
+
+
 def _remember_track_template(
     detector: MobDetector,
     *,

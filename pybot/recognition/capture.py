@@ -90,10 +90,20 @@ def _retire_runtime_capture(
     the log. The old daemon worker is left to finish on its private queue;
     future captures get a new session and worker immediately.
     """
-    global _sct, _grab_queue, _grab_worker_started
+    global _sct, _capture_lock, _grab_queue, _grab_worker_started
     with _capture_state_lock:
         if _sct is not sct or _grab_queue is not work_queue:
             return
+        # The worker may still be inside ``grab``. Retain the native handle
+        # until that same worker returns and calls
+        # ``_close_retired_session_for_sct``; dropping this reference here
+        # leaks one MSS/GDI session on every timed-out runtime capture.
+        # Rotate the lock as well as the queue. Without this, a second timeout
+        # would reuse the same lock identity and overwrite the first retired
+        # session entry before its worker could close it.
+        old_lock = _capture_lock
+        _retired_sessions[id(old_lock)] = (old_lock, sct)
+        _capture_lock = threading.Lock()
         _sct = None
         _grab_queue = queue.Queue(maxsize=16)
         with _grab_state_lock:

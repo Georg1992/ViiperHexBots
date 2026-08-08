@@ -40,6 +40,7 @@ class CoordTrackingWorker:
         self._last_slow_track_log_ms = 0
         # Track IDs whose first-tick data has been logged (one shot per track).
         self._logged_first_tick: set[tuple[int, int]] = set()
+        self._logged_first_tick_epoch: int | None = None
 
     def run(self) -> None:
         ctx = self._ctx
@@ -80,6 +81,12 @@ class CoordTrackingWorker:
 
         now_ms = monotonic_ms()
         area_epoch, alive_tracks = ctx.tracks.tracking_frame_snapshot(now_ms)
+        # Track IDs are intentionally monotonic across areas. Keep the
+        # one-shot diagnostic set scoped to the current area so long teleport
+        # sessions do not retain one tuple per historical track forever.
+        if self._logged_first_tick_epoch != area_epoch:
+            self._logged_first_tick.clear()
+            self._logged_first_tick_epoch = area_epoch
 
         # Check for new discovery candidates — tracking creates these tracks
         # on the current fresh frame at exact coordinates.

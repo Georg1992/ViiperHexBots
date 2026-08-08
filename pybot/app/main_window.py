@@ -54,6 +54,7 @@ from pybot.config.schema import (
 from pybot.mobs.catalog import load_mob_catalog
 from pybot.runtime.mob_behaviors import mob_has_custom_behavior
 from pybot.runtime.input.scan_codes import keysym_to_key_name
+from pybot.recognition.detector.detector import configure_opencv_runtime
 
 
 class MainWindow:
@@ -1436,6 +1437,11 @@ class MainWindow:
 
 
 def main() -> None:
+    # Configure OpenCV before preload or the autonomous status OCR reader can
+    # start. The GUI feed and hunt observers share this process, and leaving
+    # OpenCV's default native pool active during startup lets tiny OCR calls
+    # contend with discovery/tracking for the same CPU/native resources.
+    configure_opencv_runtime()
     # Build/refresh descriptors before the main GUI so hunt never races a rebuild.
     if not preload_mob_descriptors():
         return

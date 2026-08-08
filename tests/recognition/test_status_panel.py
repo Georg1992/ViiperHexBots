@@ -11,8 +11,12 @@ import numpy as np
 from pybot.paths import PROJECT_ROOT
 from pybot.recognition.ui.status_panel import (
     BINARIZE_THRESHOLD,
+    DIGIT_MATCH_THRESHOLD,
     SP_SCAN_ZONE,
     StatusPanelValues,
+    _classify_glyph,
+    _load_digit_templates,
+    _match_template_zncc,
     clear_template_cache,
     find_status_panel,
     read_status_panel,
@@ -95,6 +99,16 @@ class StatusPanelTests(unittest.TestCase):
         self.assertIsNone(
             read_status_panel(frame, deadline=time.monotonic() - 1.0)
         )
+
+    def test_glyph_classifier_is_bounded_numpy_zncc(self) -> None:
+        """Glyph matching must not enter OpenCV's native template matcher."""
+        templates = _load_digit_templates()
+        template = templates["8"][0]
+        glyph = template.copy()
+        self.assertAlmostEqual(_match_template_zncc(glyph, template), 1.0, places=5)
+        character, score = _classify_glyph(glyph)
+        self.assertEqual(character, "8")
+        self.assertGreaterEqual(score, DIGIT_MATCH_THRESHOLD)
 
     def test_verify_status_panel_at_locked_origin(self) -> None:
         frame = self._load("FalseWeight2.png")
