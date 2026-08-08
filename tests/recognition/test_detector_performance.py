@@ -72,31 +72,8 @@ class DetectorPerformanceTests(unittest.TestCase):
         finally:
             cv2.setNumThreads(previous)
 
-    def test_detector_busy_skip_does_not_wait_or_mark_failure(self) -> None:
-        """A competing observer gets an immediate, non-destructive skip."""
-        from pybot.runtime.detection import detector_session
-
-        session = DetectorSession("anubis", PROJECT_ROOT, use_sprite_grf=True)
-        frame = np.zeros((32, 32, 3), dtype=np.uint8)
-        roi = HuntRoi(0, 0, 32, 32)
-        self.assertTrue(detector_session._DETECTOR_WORK_GATE.acquire(blocking=False))
-        try:
-            started = time.perf_counter()
-            result = session.discover_frame(frame, roi)
-            elapsed = time.perf_counter() - started
-        finally:
-            detector_session._DETECTOR_WORK_GATE.release()
-        self.assertFalse(result.ok)
-        self.assertEqual(result.fail_reason, "detector_busy")
-        self.assertLess(elapsed, 0.1)
-
-    def test_competing_observer_sessions_use_one_detector_budget(self) -> None:
-        """A competing observer skips instead of waiting behind heavy work.
-
-        Production deliberately has separate discovery/tracking sessions, so
-        their per-session locks do not serialize native OpenCV work. The shared
-        detector lock lets one call run and makes the other return immediately.
-        """
+    def test_observer_sessions_run_in_parallel_without_shared_busy_state(self) -> None:
+        """Independent discovery/tracking sessions both execute concurrently."""
         previous_threads = cv2.getNumThreads()
         configure_opencv_runtime()
         frame = cv2.imread(
@@ -106,12 +83,8 @@ class DetectorPerformanceTests(unittest.TestCase):
         self.assertIsNotNone(frame)
         assert frame is not None
         roi = HuntRoi(0, 0, frame.shape[1], frame.shape[0])
-        discovery = DetectorSession(
-            "anubis", PROJECT_ROOT, use_sprite_grf=True,
-        )
-        tracking = DetectorSession(
-            "anubis", PROJECT_ROOT, use_sprite_grf=True,
-        )
+        discovery = DetectorSession("anubis", PROJECT_ROOT, use_sprite_grf=True)
+        tracking = DetectorSession("anubis", PROJECT_ROOT, use_sprite_grf=True)
         snapshot = StateTrackSnapshot(
             track_id=1,
             x=frame.shape[1] // 2,
@@ -120,33 +93,56 @@ class DetectorPerformanceTests(unittest.TestCase):
             now_tick=1,
         )
         barrier = threading.Barrier(3)
+        heavy_entered = threading.Barrier(2)
+        active = 0
+        max_active = 0
+        active_lock = threading.Lock()
         errors: list[BaseException] = []
-        durations: list[float] = []
         results: list[object] = []
-        duration_lock = threading.Lock()
+
+        def enter_heavy_work() -> None:
+            nonlocal active, max_active
+            with active_lock:
+                active += 1
+                max_active = max(max_active, active)
+            heavy_entered.wait(timeout=5.0)
+
+        def leave_heavy_work() -> None:
+            nonlocal active
+            with active_lock:
+                active -= 1
 
         def run_discovery() -> None:
             try:
                 barrier.wait(timeout=5.0)
-                started = time.perf_counter()
-                result = discovery.discover_frame(frame, roi)
-                elapsed = time.perf_counter() - started
-                with duration_lock:
-                    durations.append(elapsed)
-                    results.append(result)
-            except BaseException as exc:  # noqa: BLE001 - test thread transport
+                original = discovery._detector.detect
+                def detect(*args, **kwargs):
+                    enter_heavy_work()
+                    try:
+                        return original(*args, **kwargs)
+                    finally:
+                        leave_heavy_work()
+                discovery._detector.detect = detect
+                results.append(discovery.discover_frame(frame, roi))
+            except BaseException as exc:
                 errors.append(exc)
 
         def run_tracking() -> None:
             try:
                 barrier.wait(timeout=5.0)
-                started = time.perf_counter()
-                result = tracking.track_locals_frame(frame, roi, [snapshot])
-                elapsed = time.perf_counter() - started
-                with duration_lock:
-                    durations.append(elapsed)
-                    results.append(result)
-            except BaseException as exc:  # noqa: BLE001 - test thread transport
+                original = tracking._detector.track_local
+                def track(*args, **kwargs):
+                    enter_heavy_work()
+                    try:
+                        return original(*args, **kwargs)
+                    finally:
+                        leave_heavy_work()
+                tracking._detector.track_local = track
+                # A missing warm template is a valid independent-session call;
+                # the overlap barrier is the property under test, not tracking
+                # recognition quality.
+                results.append(tracking.track_locals_frame(frame, roi, [snapshot]))
+            except BaseException as exc:
                 errors.append(exc)
 
         try:
@@ -157,21 +153,16 @@ class DetectorPerformanceTests(unittest.TestCase):
             barrier.wait(timeout=5.0)
             discovery_thread.join(timeout=10.0)
             tracking_thread.join(timeout=10.0)
-
             self.assertFalse(discovery_thread.is_alive())
             self.assertFalse(tracking_thread.is_alive())
             self.assertEqual(errors, [])
-            self.assertEqual(len(durations), 2)
             self.assertEqual(len(results), 2)
-            self.assertEqual(
-                sum(getattr(result, "fail_reason", "") == "detector_busy" for result in results),
-                1,
-            )
-            self.assertEqual(
-                sum(getattr(result, "ok", False) is True for result in results),
-                1,
-            )
-            self.assertLess(min(durations), 0.5)
+            self.assertTrue(all(getattr(result, "ok", False) for result in results))
+            self.assertTrue(all(
+                getattr(result, "fail_reason", "") != "detector_busy"
+                for result in results
+            ))
+            self.assertEqual(max_active, 2)
         finally:
             cv2.setNumThreads(previous_threads)
 

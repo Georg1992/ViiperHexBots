@@ -154,9 +154,14 @@ class DangerDetector:
     def reset_after_teleport(self, tp_start_mono: float | None = None) -> None:
         """Forget pre-teleport damage without consuming sit requests.
 
-        The current HP becomes the new baseline so the first sample after a
-        teleport is not mistaken for damage merely because the area changed.
-        Damage observed during the settle window is preserved.
+        Only a *fresh* post-teleport HP observation may become the new
+        baseline. The status-panel/OCR feed is blind through the loading
+        transition, so the value at this instant may be the pre-teleport one:
+        rebaselining from it makes the first fresh landing reading look like
+        a phantom HP drop and re-triggers the escape — exactly the re-escape
+        loop seen when seated recovery teleports. The baseline is held
+        unknown until a fresh observation arrives. Damage observed during
+        the settle window is preserved.
         """
         with self._damage_lock:
             if (
@@ -165,8 +170,13 @@ class DangerDetector:
                 and self._last_damage_mono >= tp_start_mono
             ):
                 return
-            hp, _hp_max = self._vitals.hp_pair()
-            self._prev_hp = hp
+            hp, _hp_max, hp_observed_ms, _hp_changed_ms = self._vitals.hp_sample()
+            fresh = (
+                True
+                if tp_start_mono is None
+                else hp_observed_ms >= int(tp_start_mono * 1000)
+            )
+            self._prev_hp = hp if fresh else None
             self._last_damage_mono = None
             self._last_damage_ratio = None
 

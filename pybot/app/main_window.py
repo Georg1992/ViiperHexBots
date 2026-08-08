@@ -15,7 +15,6 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from pybot.app.bot_lifecycle import BotLifecycleManager, BotState
-from pybot.app.bot_controller import DEFAULT_STOP_JOIN_TIMEOUT_S
 from pybot.app.config_store import AppConfig, list_client_profiles
 from pybot.app.hotkey_manager import HotkeyManager
 from pybot.app.log_pipe import LogPipe
@@ -160,10 +159,9 @@ class MainWindow:
         self.root.protocol("WM_DELETE_WINDOW", self.on_exit)
         self._fit_window_to_content()
 
-        # Wire log pipe UI references after widgets exist
-        self.log_pipe.set_log_box(self.log_box)
+        # Wire the non-log status widget and durable session sink after widgets exist.
+        # Log messages intentionally have no Tk or in-game visual sink.
         self.log_pipe.set_status_widgets(self.input_status, self.input_hint)
-        self.log_pipe.set_overlay_callback(self._maybe_pipe_to_overlay)
         self.log_pipe.set_persist_callback(self._persist_log_line)
 
         # Async VIIPER init (descriptors were prepared on the splash before this window)
@@ -728,35 +726,9 @@ class MainWindow:
             self._add_timer_box(timer)
         self._refresh_timer_add_button()
 
-        # ── Log (full width, expands with window) ───────────────────
-        log_frame = ttk.LabelFrame(main, text="Log", padding=8)
-        log_frame.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
-        log_body = ttk.Frame(log_frame)
-        log_body.pack(fill=tk.BOTH, expand=True)
-        log_scroll = ttk.Scrollbar(log_body, orient=tk.VERTICAL)
-        self.log_box = tk.Text(
-            log_body,
-            height=10,
-            state=tk.DISABLED,
-            wrap=tk.WORD,
-            yscrollcommand=log_scroll.set,
-        )
-        log_scroll.config(command=self.log_box.yview)
-        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.log_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.overlay_var = tk.BooleanVar(value=self.config.hunt_log_overlay)
-        overlay_check = ttk.Checkbutton(
-            log_frame,
-            text="Hunt log overlay on game",
-            variable=self.overlay_var,
-            command=self._apply_ui_settings,
-        )
-        overlay_check.pack(anchor="w", pady=(6, 0))
-        self._settings_checkbuttons.append(overlay_check)
-
-        # ── Controls (pinned below log, never clipped) ──────────────
+        # ── Controls ────────────────────────────────────────────────
         controls = ttk.Frame(main)
-        controls.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(12, 0))
+        controls.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(12, 0))
         ttk.Label(controls, text="Press F12 to quickly toggle bot").pack()
         button_row = ttk.Frame(controls)
         button_row.pack(pady=8)
@@ -781,7 +753,6 @@ class MainWindow:
         main.columnconfigure(0, weight=1)
         main.columnconfigure(1, weight=1)
         main.columnconfigure(2, weight=1)
-        main.rowconfigure(3, weight=1)
         self._sync_memory_reading_from_profile()
         self._update_search_label()
         self._memory_feed.set_active(False)
@@ -1134,7 +1105,6 @@ class MainWindow:
         self.config.hunt_mode = self.hunt_mode_var.get()
         self.config.search_range = int(float(self.search_range.get()))
         self.config.take_fly_wings = self.fly_wings_var.get()
-        self.config.hunt_log_overlay = self.overlay_var.get()
         self.config.skill_button = self.skill_button.get().strip()
         raw = self.skill_delay.get().strip()
         self.config.skill_delay = int(raw) if raw else 500
@@ -1338,10 +1308,6 @@ class MainWindow:
             self.status_indicator.configure(text="  OFF  ", bg="#c62828")
             self._lock_ui(False)
 
-    def _maybe_pipe_to_overlay(self, message: str) -> None:
-        """Forward log lines to the hunt overlay when the bot is active."""
-        if self.lifecycle.state != BotState.OFF:
-            self._hunt_overlay.append_log(message, message)
     def _lock_ui(self, locked: bool) -> None:
         """Enable/disable configuration widgets when bot is running."""
         state = tk.DISABLED if locked else tk.NORMAL

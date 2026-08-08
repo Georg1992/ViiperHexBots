@@ -23,7 +23,6 @@ from pybot.recognition.ui.status_panel import (
     read_status_panel_hp,
     read_status_panel_sp,
     read_status_panel_fixed_rois,
-    verify_status_panel_at,
 )
 
 
@@ -48,10 +47,78 @@ class StatusPanelReadResult:
 
 STATUS_PANEL_READ_TIMEOUT_S = 6.0
 _GEOMETRY_PROBE_TIMEOUT_S = 0.25
-# At most one native status read may outlive its caller-side timeout. Without
-# this guard, a permanently blocked Win32/capture call would leave one daemon
-# helper behind per 200 ms poll after the first timeout.
-_NATIVE_READ_IN_FLIGHT = threading.Lock()
+# A bounded caller timeout cannot cancel a native/Win32 helper thread. Keep
+# status-panel OCR single-flight so a timed-out helper cannot overlap with a
+# restarted helper and multiply OpenCV/capture pressure against the parallel
+# discovery and tracking observers. This lock is intentionally OCR-only: it
+# does not serialize discovery and tracking detector sessions.
+_NATIVE_STATUS_READ_LOCK = threading.Lock()
+# Make native-lock acquisition and phase ownership one handoff: a retiring
+# helper cannot clear its marker in the gap before a successor installs theirs.
+_NATIVE_PHASE_HANDOFF_LOCK = threading.Lock()
+# One native status read is allowed at a time. Keep a phase marker so a caller
+# timeout says what the abandoned helper was doing (geometry, capture, or OCR
+# parsing) instead of reducing every failure to the same generic timeout.
+_NATIVE_PHASE_LOCK = threading.Lock()
+_NATIVE_PHASE = "idle"
+_NATIVE_PHASE_STARTED = 0.0
+_NATIVE_PHASE_DETAIL = ""
+_NATIVE_PHASE_READ_ID = 0
+_NATIVE_PHASE_OWNER: int | None = None
+_NATIVE_PHASE_LOCAL = threading.local()
+
+
+def _begin_native_read() -> int:
+    global _NATIVE_PHASE_READ_ID
+    with _NATIVE_PHASE_LOCK:
+        _NATIVE_PHASE_READ_ID += 1
+        read_id = _NATIVE_PHASE_READ_ID
+    _NATIVE_PHASE_LOCAL.read_id = read_id
+    return read_id
+
+
+def _set_native_phase(
+    phase: str,
+    detail: str = "",
+    *,
+    preserve_started: bool = False,
+) -> None:
+    global _NATIVE_PHASE, _NATIVE_PHASE_STARTED, _NATIVE_PHASE_DETAIL, _NATIVE_PHASE_OWNER
+    read_id = getattr(_NATIVE_PHASE_LOCAL, "read_id", None)
+    with _NATIVE_PHASE_LOCK:
+        same_owner_phase = _NATIVE_PHASE == phase and _NATIVE_PHASE_OWNER == read_id
+        _NATIVE_PHASE = phase
+        if not preserve_started or not same_owner_phase:
+            _NATIVE_PHASE_STARTED = time.monotonic()
+        _NATIVE_PHASE_DETAIL = detail
+        _NATIVE_PHASE_OWNER = read_id
+
+
+def _clear_native_phase(read_id: int) -> None:
+    global _NATIVE_PHASE, _NATIVE_PHASE_STARTED, _NATIVE_PHASE_DETAIL, _NATIVE_PHASE_OWNER
+    with _NATIVE_PHASE_LOCK:
+        # A newer helper may have acquired the native lock after this helper
+        # released it. Never clear the newer helper's diagnostic marker.
+        if _NATIVE_PHASE_OWNER != read_id:
+            return
+        _NATIVE_PHASE = "idle"
+        _NATIVE_PHASE_STARTED = 0.0
+        _NATIVE_PHASE_DETAIL = ""
+        _NATIVE_PHASE_OWNER = None
+
+
+def _native_phase_snapshot() -> str:
+    with _NATIVE_PHASE_LOCK:
+        phase = _NATIVE_PHASE
+        started = _NATIVE_PHASE_STARTED
+        detail = _NATIVE_PHASE_DETAIL
+        read_id = _NATIVE_PHASE_OWNER
+    if phase == "idle" or started <= 0.0:
+        return "idle"
+    age_ms = max(0, int((time.monotonic() - started) * 1000))
+    suffix = f" {detail}" if detail else ""
+    owner = f" read_id={read_id}" if read_id is not None else ""
+    return f"{phase}{suffix}{owner} age_ms={age_ms}"
 
 
 class _GeometryRequest:
@@ -172,6 +239,10 @@ def read_status_panel_snapshot(
     # panel origin is verified against the captured pixels before publishing.
     client = client_hint
     if client is None or refresh_client:
+        _set_native_phase(
+            "geometry",
+            "refresh=1" if refresh_client else "refresh=0",
+        )
         state, refreshed_client = _geometry_channel.read(
             hwnd,
             timeout_s=min(
@@ -179,6 +250,7 @@ def read_status_panel_snapshot(
                 max(0.0, deadline - time.monotonic()),
             ),
         )
+        _set_native_phase("geometry.result", f"state={state}")
         if state == "inactive" and client is None:
             return StatusPanelReadResult(hwnd=hwnd, state="inactive")
         if refreshed_client is not None:
@@ -205,6 +277,11 @@ def read_status_panel_snapshot(
                 client_height=height,
             )
         value_x, value_y, value_w, value_h = VALUE_ROWS_ROI
+        _set_native_phase(
+            "capture.fixed_value_band",
+            f"x={left + ox + value_x} y={top + oy + value_y} "
+            f"w={value_w} h={value_h}",
+        )
         panel_frame = ui_capture_region(
             left + ox + value_x,
             top + oy + value_y,
@@ -212,12 +289,19 @@ def read_status_panel_snapshot(
             value_h,
         )
         if panel_frame is not None and panel_frame.size > 0:
+            _set_native_phase(
+                "parse.fixed_rois",
+                f"shape={panel_frame.shape[1]}x{panel_frame.shape[0]}",
+            )
             values = read_status_panel_fixed_rois(
                 panel_frame,
                 origin=(-value_x, -value_y),
                 previous=confirmed,
                 refresh_max=refresh_max,
                 deadline=deadline,
+                telemetry=lambda detail: _set_native_phase(
+                    "parse.fixed_rois", detail, preserve_started=True
+                ),
             )
             if values is not None:
                 return StatusPanelReadResult(
@@ -232,6 +316,7 @@ def read_status_panel_snapshot(
                 )
             # Keep HP/SP independent even when one fixed row is
             # temporarily unreadable. This is the recovery-critical path.
+            _set_native_phase("parse.fixed_hp_sp_fallback")
             hp = read_status_panel_hp(
                 panel_frame,
                 origin=(-value_x, -value_y),
@@ -271,6 +356,10 @@ def read_status_panel_snapshot(
             client_width=width,
             client_height=height,
         )
+    _set_native_phase(
+        "capture.full_client",
+        f"x={left} y={top} w={width} h={height}",
+    )
     frame = ui_capture_region(left, top, width, height)
     if frame is None or frame.size == 0:
         return StatusPanelReadResult(
@@ -282,6 +371,10 @@ def read_status_panel_snapshot(
             client_height=height,
         )
 
+    _set_native_phase(
+        "parse.find_header",
+        f"shape={frame.shape[1]}x{frame.shape[0]}",
+    )
     origin = find_status_panel(frame, deadline=deadline)
     if origin is None:
         return StatusPanelReadResult(
@@ -293,8 +386,10 @@ def read_status_panel_snapshot(
             client_height=height,
         )
 
+    _set_native_phase("parse.full_values", f"origin={origin[0]},{origin[1]}")
     values = read_status_panel(frame, origin=origin, deadline=deadline)
     if values is None:
+        _set_native_phase("parse.full_hp_sp_fallback")
         hp = read_status_panel_hp(
             frame,
             origin=origin,
@@ -353,25 +448,24 @@ def read_status_panel_snapshot_bounded(
     The parser deadline protects its cooperative loops, while this daemon
     helper protects the UI work-queue thread from synchronous Win32 or native
     capture calls that cannot be interrupted from Python. A timed-out helper
-    is intentionally abandoned; the single-flight guard prevents another
-    native helper from being created until the abandoned call returns, and the
-    stale result cannot publish through the feed generation guard.
+    is intentionally abandoned. Because that helper may still be executing
+    OpenCV/capture work after the caller returns, the single-flight guard
+    rejects overlapping retries until the helper itself releases the lock.
+    Generation checks prevent an abandoned helper from publishing stale
+    results.
     """
-    # Keep the entire native read single-flight, including cached reads. The
-    # UI capture channel already bounds mss.grab; this guard prevents a stuck
-    # parser or unexpected native call from creating one abandoned OCR helper
-    # per watchdog restart.
-    if not _NATIVE_READ_IN_FLIGHT.acquire(blocking=False):
-        return StatusPanelReadResult(
-            hwnd=hwnd,
-            state="read_timeout",
-            error="previous native status read still in flight",
-        )
-
     result_queue: queue.Queue[StatusPanelReadResult] = queue.Queue(maxsize=1)
 
+    read_id: int | None = None
+
     def _read() -> None:
+        # The caller-side timeout below cannot interrupt a native helper. The
+        # parent claims the single-flight lock before starting this daemon so a
+        # delayed thread start is still visible as ``snapshot.start`` rather
+        # than an unexplained idle timeout.
+        assert read_id is not None
         try:
+            _set_native_phase("snapshot.start", f"hwnd={hwnd}")
             try:
                 result = read_status_panel_snapshot(
                     hwnd,
@@ -393,26 +487,50 @@ def read_status_panel_snapshot_bounded(
             except queue.Full:
                 pass
         finally:
-            _NATIVE_READ_IN_FLIGHT.release()
+            # Keep a visible owner marker through the lock handoff. A retry
+            # must never observe ``phase=idle`` while this read still owns the
+            # single-flight lock; the handoff lock prevents a successor from
+            # acquiring the native lock until this marker is cleared.
+            with _NATIVE_PHASE_HANDOFF_LOCK:
+                _set_native_phase("snapshot.releasing")
+                _NATIVE_STATUS_READ_LOCK.release()
+                _clear_native_phase(read_id)
 
-    try:
-        threading.Thread(
-            target=_read,
-            name="ui-status-read-native",
-            daemon=True,
-        ).start()
-    except Exception as exc:
-        _NATIVE_READ_IN_FLIGHT.release()
-        return StatusPanelReadResult(
-            hwnd=hwnd,
-            state="read_failed",
-            error=f"{type(exc).__name__}: {exc}",
-        )
+    with _NATIVE_PHASE_HANDOFF_LOCK:
+        if not _NATIVE_STATUS_READ_LOCK.acquire(blocking=False):
+            return StatusPanelReadResult(
+                hwnd=hwnd,
+                state="read_timeout",
+                error=(
+                    "previous native status read still in flight "
+                    f"phase={_native_phase_snapshot()}"
+                ),
+            )
+        read_id = _begin_native_read()
+        _set_native_phase("snapshot.start", f"hwnd={hwnd}")
+        try:
+            threading.Thread(
+                target=_read,
+                name="ui-status-read-native",
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            _set_native_phase("snapshot.releasing")
+            _NATIVE_STATUS_READ_LOCK.release()
+            _clear_native_phase(read_id)
+            return StatusPanelReadResult(
+                hwnd=hwnd,
+                state="read_failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
     try:
         return result_queue.get(timeout=max(0.0, float(timeout_s)))
     except queue.Empty:
         return StatusPanelReadResult(
             hwnd=hwnd,
             state="read_timeout",
-            error="native status read exceeded timeout",
+            error=(
+                "native status read exceeded timeout "
+                f"phase={_native_phase_snapshot()}"
+            ),
         )

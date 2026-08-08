@@ -20,11 +20,9 @@ from pybot.recognition.detector.tracking.local_tracker import (
 from pybot.runtime.capture.window_roi import HuntRoi
 
 
-# Discovery and tracking have separate template caches, but their native
-# NumPy/OpenCV work competes for the same process resources. Keep only one heavy
-# observer pass active at a time; the other worker skips this tick without
-# waiting. A plain lock is intentional: no fairness state or hidden retry loop.
-_DETECTOR_WORK_GATE = threading.Lock()
+# Discovery and tracking have separate detector sessions and separate locks.
+# They intentionally run in parallel; OpenCV's native worker count is bounded
+# once at runtime startup by ``configure_opencv_runtime``.
 
 
 @dataclass(frozen=True)
@@ -112,13 +110,6 @@ class DetectorSession:
         self._detector = MobDetector(root, config, use_sprite_grf=use_sprite_grf)
         self._lock = threading.RLock()
 
-    def is_busy(self) -> bool:
-        acquired = self._lock.acquire(blocking=False)
-        if acquired:
-            self._lock.release()
-            return False
-        return True
-
     def ensure_descriptor(self):
         """Return the cached MobDescriptor for the session's mob."""
         return self._detector.ensure_descriptor(self._mob_name)
@@ -168,25 +159,12 @@ class DetectorSession:
                 elapsed_s=0.0,
             )
         start = time.perf_counter()
-        if not _DETECTOR_WORK_GATE.acquire(blocking=False):
-            return DiscoveryScanResult(
-                ok=False,
-                fail_reason="detector_busy",
-                raw_count=0,
-                accepted_count=0,
-                detections=[],
-                duration_ms=0,
-                elapsed_s=0.0,
+        with self._lock:
+            locked_at = time.perf_counter()
+            result = self._detector.detect(
+                frame,
+                self._mob_name,
             )
-        try:
-            with self._lock:
-                locked_at = time.perf_counter()
-                result = self._detector.detect(
-                    frame,
-                    self._mob_name,
-                )
-        finally:
-            _DETECTOR_WORK_GATE.release()
         elapsed_s = time.perf_counter() - start
         duration_ms = int(elapsed_s * 1000)
         lock_wait_ms = int((locked_at - start) * 1000)
@@ -262,61 +240,49 @@ class DetectorSession:
                 coord_updates=0,
             )
         start = time.perf_counter()
-        if not _DETECTOR_WORK_GATE.acquire(blocking=False):
-            return LocalTrackBatchResult(
-                ok=False,
-                fail_reason="detector_busy",
-                results=[],
-                duration_ms=0,
-                found_count=0,
-                coord_updates=0,
-            )
         results: list[LocalTrackResult] = []
-        try:
-            with self._lock:
-                locked_at = time.perf_counter()
-                # Collect all track positions (ROI-relative) so each track's peak search
-                # can suppress heat near other tracks — prevents track swapping when mobs
-                # are close together.
-                all_roi_positions: list[tuple[int, int]] = [
-                    (snapshot.x - roi.x, snapshot.y - roi.y)
-                    for snapshot in track_snapshots
+        with self._lock:
+            locked_at = time.perf_counter()
+            # Collect all track positions (ROI-relative) so each track's peak search
+            # can suppress heat near other tracks — prevents track swapping when mobs
+            # are close together.
+            all_roi_positions: list[tuple[int, int]] = [
+                (snapshot.x - roi.x, snapshot.y - roi.y)
+                for snapshot in track_snapshots
+            ]
+            for i, snapshot in enumerate(track_snapshots):
+                track = {
+                    "trackId": snapshot.track_id,
+                    "x": snapshot.x - roi.x,
+                    "y": snapshot.y - roi.y,
+                }
+                if snapshot.scale > 0:
+                    track["scale"] = snapshot.scale
+                track["opacityBaseline"] = snapshot.opacity_baseline
+                track["opacityBaselineSamples"] = snapshot.opacity_baseline_samples
+                track["opacityDecayStreak"] = snapshot.opacity_decay_streak
+                track["moving"] = snapshot.moving
+                track["velX"] = snapshot.vel_x
+                track["velY"] = snapshot.vel_y
+                track["lostCount"] = snapshot.lost_count
+                track["attackCount"] = snapshot.attack_count
+                track["createdTick"] = snapshot.created_tick
+                track["nowTick"] = snapshot.now_tick
+                track["prediction_valid"] = snapshot.prediction_valid
+                # Other tracks' positions for heatmap suppression
+                other_positions = [
+                    pos for j, pos in enumerate(all_roi_positions) if j != i
                 ]
-                for i, snapshot in enumerate(track_snapshots):
-                    track = {
-                        "trackId": snapshot.track_id,
-                        "x": snapshot.x - roi.x,
-                        "y": snapshot.y - roi.y,
-                    }
-                    if snapshot.scale > 0:
-                        track["scale"] = snapshot.scale
-                    track["opacityBaseline"] = snapshot.opacity_baseline
-                    track["opacityBaselineSamples"] = snapshot.opacity_baseline_samples
-                    track["opacityDecayStreak"] = snapshot.opacity_decay_streak
-                    track["moving"] = snapshot.moving
-                    track["velX"] = snapshot.vel_x
-                    track["velY"] = snapshot.vel_y
-                    track["lostCount"] = snapshot.lost_count
-                    track["attackCount"] = snapshot.attack_count
-                    track["createdTick"] = snapshot.created_tick
-                    track["nowTick"] = snapshot.now_tick
-                    track["prediction_valid"] = snapshot.prediction_valid
-                    # Other tracks' positions for heatmap suppression
-                    other_positions = [
-                        pos for j, pos in enumerate(all_roi_positions) if j != i
-                    ]
-                    results.append(
-                        self._detector.track_local(
-                            frame,
-                            self._mob_name,
-                            track,
-                            offset_x=roi.x,
-                            offset_y=roi.y,
-                            suppress_positions=other_positions if other_positions else None,
-                        )
+                results.append(
+                    self._detector.track_local(
+                        frame,
+                        self._mob_name,
+                        track,
+                        offset_x=roi.x,
+                        offset_y=roi.y,
+                        suppress_positions=other_positions if other_positions else None,
                     )
-        finally:
-            _DETECTOR_WORK_GATE.release()
+                )
         end = time.perf_counter()
         duration_ms = int((end - start) * 1000)
         lock_wait_ms = int((locked_at - start) * 1000)

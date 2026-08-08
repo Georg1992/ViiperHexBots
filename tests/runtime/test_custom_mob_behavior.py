@@ -15,7 +15,6 @@ from pybot.runtime.gate_controller import CharacterActionGate
 from pybot.runtime.mob_behaviors import (
     AnubisBehavior,
     ConfiguredMobBehavior,
-    DEFAULT_KITE_DISTANCE_PX,
     get_configured_mob_behavior,
     kite_away_from_mobs,
 )

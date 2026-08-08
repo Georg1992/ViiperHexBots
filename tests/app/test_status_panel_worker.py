@@ -18,21 +18,28 @@ from pybot.app.status_panel_worker import (
 
 
 class StatusPanelWorkerTests(unittest.TestCase):
-    def test_bounded_read_returns_when_native_read_is_stuck(self) -> None:
-        """A wedged Win32/capture call must not pin the UI work-queue thread."""
+    def test_bounded_read_does_not_overlap_previous_native_read(self) -> None:
+        """A timed-out helper blocks overlap while a fresh retry returns fast."""
         started = threading.Event()
         release = threading.Event()
         finished = threading.Event()
+        calls = 0
+        calls_lock = threading.Lock()
 
-        def blocked_read(*_args, **_kwargs):
-            started.set()
-            release.wait(timeout=1.0)
-            finished.set()
+        def blocked_first_read(*_args, **_kwargs):
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+                call_number = calls
+            if call_number == 1:
+                started.set()
+                release.wait(timeout=1.0)
+                finished.set()
             return StatusPanelReadResult(hwnd=123, state="inactive")
 
         with patch(
             "pybot.app.status_panel_worker.read_status_panel_snapshot",
-            side_effect=blocked_read,
+            side_effect=blocked_first_read,
         ):
             result_holder: list[StatusPanelReadResult] = []
 
@@ -52,26 +59,39 @@ class StatusPanelWorkerTests(unittest.TestCase):
                 self.assertTrue(started.wait(timeout=1.0))
                 caller.join(timeout=1.0)
                 self.assertFalse(caller.is_alive())
-                result = result_holder[0]
+                self.assertEqual(result_holder[0].state, "read_timeout")
+
+                # The first helper is still abandoned. A retry must not spawn
+                # another native OCR operation while it owns the single-flight
+                # lock; it returns immediately instead.
                 second = read_status_panel_snapshot_bounded(
                     123,
                     None,
                     refresh_max=True,
-                    timeout_s=0.01,
+                    timeout_s=0.1,
                 )
-                self.assertEqual(result.state, "read_timeout")
                 self.assertEqual(second.state, "read_timeout")
-                self.assertIn("previous native status read", second.error or "")
+                self.assertIn("still in flight", second.error or "")
+                self.assertEqual(calls, 1)
             finally:
                 release.set()
             self.assertTrue(finished.wait(timeout=1.0))
-            third = read_status_panel_snapshot_bounded(
-                123,
-                None,
-                refresh_max=True,
-                timeout_s=0.1,
-            )
-            self.assertEqual(third.state, "inactive")
+
+            # Once the abandoned helper has actually exited, a later read may
+            # acquire the guard and execute normally again.
+            third = None
+            for _ in range(20):
+                candidate = read_status_panel_snapshot_bounded(
+                    123,
+                    None,
+                    refresh_max=True,
+                    timeout_s=0.1,
+                )
+                if candidate.state == "inactive":
+                    third = candidate
+                    break
+            self.assertIsNotNone(third)
+            self.assertEqual(calls, 2)
 
     @patch("pybot.app.status_panel_worker.is_window_minimized", return_value=True)
     @patch("pybot.app.status_panel_worker.window_exists", return_value=True)
@@ -161,7 +181,7 @@ class StatusPanelWorkerTests(unittest.TestCase):
         capture.assert_called_once_with(10, 20, 100, 100)
 
     @patch("pybot.app.status_panel_worker.find_status_panel", side_effect=AssertionError("hot path must not search"))
-    @patch("pybot.app.status_panel_worker.verify_status_panel_at", side_effect=AssertionError("hot path must not verify header"))
+    @patch("pybot.recognition.ui.status_panel.verify_status_panel_at", side_effect=AssertionError("hot path must not verify header"))
     @patch("pybot.app.status_panel_worker.read_status_panel_fixed_rois")
     @patch("pybot.app.status_panel_worker.ui_capture_region")
     def test_confirmed_read_captures_only_fixed_value_band(
@@ -269,7 +289,7 @@ class StatusPanelWorkerTests(unittest.TestCase):
     @patch("pybot.app.status_panel_worker.window_exists", return_value=True)
     @patch("pybot.app.status_panel_worker.client_rect_screen", return_value=(10, 20, 300, 200))
     @patch("pybot.app.status_panel_worker.ui_capture_region")
-    @patch("pybot.app.status_panel_worker.verify_status_panel_at", return_value=True)
+    @patch("pybot.recognition.ui.status_panel.verify_status_panel_at", return_value=True)
     @patch("pybot.app.status_panel_worker.read_status_panel", return_value=None)
     @patch("pybot.app.status_panel_worker.read_status_panel_hp", return_value=None)
     @patch("pybot.app.status_panel_worker.read_status_panel_sp", return_value=(10, 10))
@@ -305,7 +325,7 @@ class StatusPanelWorkerTests(unittest.TestCase):
     @patch("pybot.app.status_panel_worker.window_exists", return_value=True)
     @patch("pybot.app.status_panel_worker.client_rect_screen", return_value=(10, 20, 300, 200))
     @patch("pybot.app.status_panel_worker.ui_capture_region")
-    @patch("pybot.app.status_panel_worker.verify_status_panel_at", return_value=True)
+    @patch("pybot.recognition.ui.status_panel.verify_status_panel_at", return_value=True)
     @patch("pybot.app.status_panel_worker.read_status_panel", return_value=None)
     @patch("pybot.app.status_panel_worker.read_status_panel_hp", return_value=(35, 100))
     @patch("pybot.app.status_panel_worker.read_status_panel_sp", return_value=None)

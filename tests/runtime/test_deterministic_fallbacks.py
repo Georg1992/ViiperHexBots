@@ -8,11 +8,8 @@ from unittest.mock import MagicMock
 from pybot.app.bot_controller import BotController
 from pybot.config.runtime import hunt_runtime_config_from_settings
 from pybot.config.schema import AppSettings
-from pybot.game_state import PlayerVitals
 from pybot.runtime.gate_controller import GateController
 from pybot.runtime.input.input_backend import perform_if_allowed
-from pybot.runtime.mob_behaviors import MobBehavior
-from pybot.runtime.overlay_ports import NullOverlay
 from pybot.runtime.workers.attack_loop import AttackLoop
 
 

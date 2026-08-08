@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -358,6 +359,7 @@ def read_status_panel_fixed_rois(
     previous: StatusPanelValues | None = None,
     refresh_max: bool = True,
     deadline: float | None = None,
+    telemetry: Callable[[str], None] | None = None,
 ) -> StatusPanelValues | None:
     """Read the already-anchored HP/SP/Weight ROIs without panel discovery.
 
@@ -378,6 +380,10 @@ def read_status_panel_fixed_rois(
             min_width=2,
             stop_at_slash=False,
             deadline=deadline,
+            telemetry=(
+                (lambda detail: telemetry(f"hp {detail}"))
+                if telemetry is not None else None
+            ),
         )
         sp = _parse_anchored(
             frame_bgr,
@@ -386,6 +392,10 @@ def read_status_panel_fixed_rois(
             min_width=2,
             stop_at_slash=False,
             deadline=deadline,
+            telemetry=(
+                (lambda detail: telemetry(f"sp {detail}"))
+                if telemetry is not None else None
+            ),
         )
         weight = _parse_anchored(
             frame_bgr,
@@ -394,6 +404,10 @@ def read_status_panel_fixed_rois(
             min_width=3,
             stop_at_slash=False,
             deadline=deadline,
+            telemetry=(
+                (lambda detail: telemetry(f"weight {detail}"))
+                if telemetry is not None else None
+            ),
         )
         if not isinstance(hp, tuple) or not isinstance(sp, tuple):
             return None
@@ -418,6 +432,10 @@ def read_status_panel_fixed_rois(
         min_width=2,
         stop_at_slash=True,
         deadline=deadline,
+        telemetry=(
+            (lambda detail: telemetry(f"hp {detail}"))
+            if telemetry is not None else None
+        ),
     )
     sp_current = _parse_anchored(
         frame_bgr,
@@ -426,6 +444,10 @@ def read_status_panel_fixed_rois(
         min_width=2,
         stop_at_slash=True,
         deadline=deadline,
+        telemetry=(
+            (lambda detail: telemetry(f"sp {detail}"))
+            if telemetry is not None else None
+        ),
     )
     weight_current = _parse_anchored(
         frame_bgr,
@@ -434,6 +456,10 @@ def read_status_panel_fixed_rois(
         min_width=3,
         stop_at_slash=True,
         deadline=deadline,
+        telemetry=(
+            (lambda detail: telemetry(f"weight {detail}"))
+            if telemetry is not None else None
+        ),
     )
     if not isinstance(hp_current, int) or not isinstance(sp_current, int):
         return None
@@ -469,6 +495,7 @@ def _parse_anchored(
     min_width: int,
     stop_at_slash: bool,
     deadline: float | None = None,
+    telemetry: Callable[[str], None] | None = None,
 ) -> int | tuple[int, int] | None:
     """Parse OCR values using a single classify pass over *scan_roi*.
 
@@ -489,6 +516,8 @@ def _parse_anchored(
 
     mask = _to_ink_mask(crop)
     comps = _glyph_components(mask, min_width=min_width)
+    if telemetry is not None:
+        telemetry(f"components={len(comps)}")
     if not comps:
         return None
 
@@ -496,6 +525,10 @@ def _parse_anchored(
     for x, glyph in comps:
         if deadline is not None and time.monotonic() >= deadline:
             return None
+        if telemetry is not None:
+            telemetry(
+                f"glyph_start x={x} w={glyph.shape[1]} h={glyph.shape[0]}"
+            )
         classified.append((x, *_classify_glyph(glyph), glyph))
 
     slash_x: int | None = None

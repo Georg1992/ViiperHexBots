@@ -30,6 +30,14 @@ MELEE_IDLE_GUARD_RADIUS_PX = 150
 SIT_LOW_SP_RATIO = 0.05
 SIT_RESUME_SP_RATIO = 0.98
 SIT_SP_POLL_INTERVAL_S = 0.25
+# While seated, if the SP feed stays unreadable (OCR layout lost / panel gone /
+# stalled native read) this long, recovery relocates: a character parked on an
+# unreachable feed can neither finish regen nor react to damage.
+SIT_SP_FEED_BLIND_RELOCATE_S = 15.0
+# Spot failures (frozen SP or blind feed) per recovery session before the
+# session ends and the runtime loop takes over again. Each failure already
+# teleports to a fresh area, so this only bounds pathological repeat teleports.
+SIT_MAX_SPOT_RELOCATIONS = 3
 SIT_IDLE_BEFORE_SIT_S = 1.0
 # After stand keypress, let the client settle before startup actions,
 # discovery, and tracking resume. This also keeps a post-stand buff from
@@ -115,6 +123,8 @@ __all__ = [
     "SIT_LOW_SP_RATIO",
     "SIT_RESUME_SP_RATIO",
     "SIT_SP_POLL_INTERVAL_S",
+    "SIT_SP_FEED_BLIND_RELOCATE_S",
+    "SIT_MAX_SPOT_RELOCATIONS",
     "SIT_IDLE_BEFORE_SIT_S",
     "SIT_STAND_RESUME_DELAY_S",
     "SIT_KEY_SETTLE_S",

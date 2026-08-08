@@ -1,8 +1,8 @@
 """Discovery loop — own thread, detects living mobs and publishes candidates.
 
-Schedule: every ``discovery_interval_ms`` (default 1s), and immediately when
-``discovery_wake`` is set after a teleport settle delay or when tracking
-wakes it on a local miss. While ``discovery_suspend`` is set (claim →
+Schedule: every ``discovery_interval_ms`` (default 250ms), and immediately
+when ``discovery_wake`` is set after a teleport settle delay or when
+tracking wakes it on a local miss. While ``discovery_suspend`` is set (claim →
 teleport key → delay), or while a lifecycle session owns the character
 (``should_run_discovery`` is false), this worker does not scan — only waits
 for the post-delay or session-end wake.
@@ -150,11 +150,10 @@ class DiscoveryWorker:
             roi,
         )
         if not scan.ok:
-            # A concurrent tracking pass may own the process-wide detector
-            # budget. This is an intentional observation skip, not a failed
-            # frame and must not poison the hunt clear/startup state.
-            if scan.fail_reason != "detector_busy":
-                self._hunt_mode.note_discovery_scan_failed(scan.fail_reason)
+            # A failed observation (capture or detection error) must not
+            # poison the hunt clear/startup state. Discovery and tracking use
+            # independent detector sessions; there is no cross-pipeline skip.
+            self._hunt_mode.note_discovery_scan_failed(scan.fail_reason)
             return
 
         total_ms = capture_ms + scan.duration_ms
@@ -166,7 +165,8 @@ class DiscoveryWorker:
             ctx.logger.behavior(
                 f"[DISCOVERY] SLOW scan total={total_ms}ms "
                 f"capture={capture_ms}ms lock_wait={scan.lock_wait_ms}ms "
-                f"detect={scan.detect_ms}ms raw={scan.raw_count} "
+                f"detect={scan.detect_ms}ms "
+                f"raw={scan.raw_count} "
                 f"accepted={scan.accepted_count} "
                 f"blobCount={int(timing.get('blobCount', 0.0))} "
                 f"checks={int(timing.get('silhouetteCheckCount', 0.0))} "

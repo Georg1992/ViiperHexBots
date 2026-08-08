@@ -1,18 +1,9 @@
-"""Generic periodic background-read task with bounded queue + stall recovery.
+"""Generic Tk-scheduled background-read task with bounded queue recovery.
 
-MainWindow runs two observation feeds (process-memory reads and status-panel
-OCR). Both share the same request/pending/generation/result-queue/stall-
-watchdog machinery. :class:`PeriodicTaskRunner` owns that machinery once;
-each feed subclasses it and supplies only its own read condition, worker
-job, and result handling.
-
-Thread contract
----------------
-Polling and result application run on the Tk thread (``root.after``).
-Worker jobs run on an internal :class:`UiWorkQueue` thread and hand results
-back through :meth:`publish` / :meth:`fail`, which schedule the Tk-side
-:meth:`consume_results` via the injected ``post_to_tk`` callback — never
-``root.after`` from a worker thread.
+The process-memory feed still uses this runner. The status-panel feed keeps
+this class only for shared compatibility helpers, but owns its production
+reader loop separately so OCR scheduling and vitals publication do not depend
+on Tk callbacks.
 """
 
 from __future__ import annotations
@@ -42,6 +33,7 @@ class PeriodicTaskRunner:
         default_delay_ms: int,
         post_to_tk: Callable[[Callable[[], None]], None],
         log: Callable[[str], None],
+        use_work_queue: bool = True,
     ) -> None:
         self._root = root
         self._name = name
@@ -62,7 +54,7 @@ class PeriodicTaskRunner:
         # Tk. Keep the single-slot queue from allowing an older result to
         # evict a newer one after reset/restart.
         self._result_lock = threading.Lock()
-        self._work = UiWorkQueue(name=name)
+        self._work = UiWorkQueue(name=name) if use_work_queue else None
 
     # ── Subclass hooks ──────────────────────────────────────────────
 
@@ -114,12 +106,13 @@ class PeriodicTaskRunner:
     def close(self) -> None:
         """Stop polling and release the worker thread at app shutdown."""
         self.stop()
-        self._work.close()
+        if self._work is not None:
+            self._work.close()
 
     @property
     def idle(self) -> bool:
         """True when the worker queue has drained."""
-        return self._work.idle
+        return self._work is None or self._work.idle
 
     def reset(self) -> None:
         """Drop any in-flight read so the next submit is a fresh one."""
@@ -222,7 +215,17 @@ class PeriodicTaskRunner:
             self._pending = True
             self._generation += 1
             self._started_at = time.monotonic()
-        if not self._work.submit(job):
+        if self._work is None:
+            # Compatibility mode for small deterministic callers that disable
+            # the queue. Production feeds should provide a queue or own their
+            # reader loop; never silently drop a submitted job.
+            try:
+                job()
+            except Exception as exc:
+                self._pending = False
+                self._started_at = 0.0
+                self.on_failure(exc, self._generation)
+        elif not self._work.submit(job):
             self._pending = False
             self._started_at = 0.0
         return delay
@@ -257,8 +260,9 @@ class PeriodicTaskRunner:
             self._generation += 1
             self._pending = False
             self._started_at = 0.0
-        self._work.close()
-        self._work = UiWorkQueue(name=self._name)
+        if self._work is not None:
+            self._work.close()
+            self._work = UiWorkQueue(name=self._name)
         self._stall_count += 1
         self.on_recover(self._stall_count)
 

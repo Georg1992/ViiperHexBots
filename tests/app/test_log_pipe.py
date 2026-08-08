@@ -12,14 +12,18 @@ class _Root:
 
 
 class LogPipePersistTests(unittest.TestCase):
-    def test_persist_callback_receives_every_log_line(self) -> None:
+    def test_persist_callback_receives_logs_without_tk_drain(self) -> None:
         pipe = LogPipe(_Root())
         seen: list[str] = []
         pipe.set_persist_callback(seen.append)
         pipe.log("first")
         pipe.log("second")
-        pipe._drain()
         self.assertEqual(seen, ["first", "second"])
+
+    def test_log_does_not_enter_status_queue_or_need_visual_sinks(self) -> None:
+        pipe = LogPipe(_Root())
+        pipe.log("file only")
+        self.assertTrue(pipe._queue.empty())
 
     def test_persist_callback_not_called_when_unset(self) -> None:
         pipe = LogPipe(_Root())
@@ -31,11 +35,26 @@ class LogPipePersistTests(unittest.TestCase):
         seen: list[str] = []
         pipe.set_persist_callback(seen.append)
         pipe.log("before")
-        pipe._drain()
         pipe.set_persist_callback(None)
         pipe.log("after")
-        pipe._drain()
         self.assertEqual(seen, ["before"])
+
+    def test_status_updates_still_use_tk_queue(self) -> None:
+        class _Widget:
+            def __init__(self) -> None:
+                self.values: list[str] = []
+
+            def configure(self, *, text: str) -> None:
+                self.values.append(text)
+
+        pipe = LogPipe(_Root())
+        status = _Widget()
+        hint = _Widget()
+        pipe.set_status_widgets(status, hint)  # type: ignore[arg-type]
+        pipe.status("Ready", "Launch the game")
+        pipe._drain()
+        self.assertEqual(status.values, ["Ready"])
+        self.assertEqual(hint.values, ["Launch the game"])
 
 
 class AppSessionLogGuardTests(unittest.TestCase):

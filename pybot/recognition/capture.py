@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import queue
 import threading
-import time
 
 import cv2
 import mss
@@ -105,13 +104,15 @@ def _retire_runtime_capture(
             pass
 
 
-def _close_capture_session(sct: mss.mss | None) -> None:
+def _close_capture_session(sct: mss.mss | None) -> bool:
+    """Close a native capture session and report whether cleanup succeeded."""
     if sct is None:
-        return
+        return True
     try:
         sct.close()
     except Exception:
-        pass
+        return False
+    return True
 
 
 def _close_retired_session(lock: threading.Lock) -> None:
@@ -216,8 +217,9 @@ class _UiCaptureChannel:
     the caller would leave the status read hanging with no bound, which is how
     a single loading transition used to produce repeated multi-second OCR
     timeouts. A stuck creation now only blocks this daemon worker; the caller
-    always waits at most ``_CAPTURE_GRAB_TIMEOUT_S`` and retires the channel,
-    so the next read starts a fresh worker with a fresh session.
+    always waits at most ``_CAPTURE_GRAB_TIMEOUT_S`` and fails closed until the
+    retired worker actually exits. The next read starts a fresh worker only
+    after that native operation and session cleanup complete.
     """
 
     def __init__(self) -> None:
@@ -227,6 +229,20 @@ class _UiCaptureChannel:
         self._session_lock = self._state_lock
         self._queue: "queue.Queue[_GrabRequest | None]" = queue.Queue(maxsize=16)
         self._worker_started = False
+        # A timed-out native grab cannot be cancelled. Retiring its queue and
+        # immediately starting a replacement would only multiply the blocked
+        # mss/OpenCV work after a loading transition. Keep queue identities here
+        # until the old worker has returned from the native call and closed its
+        # session; captures fail closed during that interval.
+        self._retired_queues: set[int] = set()
+
+    def _mark_retired_worker_finished(
+        self,
+        work_queue: "queue.Queue[_GrabRequest | None]",
+    ) -> None:
+        """Allow replacement captures after an abandoned worker fully exits."""
+        with self._state_lock:
+            self._retired_queues.discard(id(work_queue))
 
     def _ensure_worker(
         self, work_queue: "queue.Queue[_GrabRequest | None]"
@@ -264,33 +280,50 @@ class _UiCaptureChannel:
                     request.done.set()
         finally:
             # Only this worker ever touched the session, so it is safe to
-            # close here once the loop exits (or is abandoned after a wedge
-            # that never resolves; the thread is a daemon).
-            _close_capture_session(sct)
+            # close here once the loop exits. A retired queue is cleared only
+            # after the native call has returned and its session is closed;
+            # if native cleanup fails, remain fail-closed rather than starting
+            # a replacement session beside a possibly-live old handle.
+            closed = _close_capture_session(sct)
+            if closed:
+                self._mark_retired_worker_finished(work_queue)
 
     def _retire_timed_out_grab(
         self,
         work_queue: "queue.Queue[_GrabRequest | None]",
+        *,
+        unresolved: bool = True,
     ) -> None:
-        """Rotate a wedged UI channel so later reads use a fresh worker/session.
+        """Retire a wedged UI queue without starting a replacement native grab.
 
         Recreating only ``UiWorkQueue`` is insufficient: its replacement calls
         the same UI capture singleton, whose native worker and bounded queue
-        remain blocked forever. Retire the channel's queue/worker pair here;
-        the old daemon worker finishes (or remains abandoned) on its private
-        queue, while the next OCR request starts an independent worker.
+        remain blocked forever. Retire the channel's queue/worker pair, but
+        keep this channel fail-closed until the old worker has returned from
+        its native operation and closed the old session. Discovery/tracking
+        channels have separate instances and are unaffected.
         """
         with self._state_lock:
             if work_queue is not self._queue:
                 return
+            if unresolved:
+                self._retired_queues.add(id(work_queue))
             self._queue = queue.Queue(maxsize=16)
             self._worker_started = False
-            try:
-                # Once the in-flight request finishes, the old worker exits
-                # instead of waiting forever on its retired queue.
-                work_queue.put_nowait(None)
-            except queue.Full:
-                pass
+            # Discard requests queued behind the in-flight native operation.
+            # Their callers already have bounded waits; allowing the retired
+            # worker to process stale captures would delay its exit and could
+            # leave the barrier stuck behind a full queue.
+            while True:
+                try:
+                    queued = work_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if queued is not None:
+                    queued.error = RuntimeError("retired UI capture request")
+                    queued.done.set()
+            # The queue is now guaranteed to have room for the exit sentinel.
+            work_queue.put_nowait(None)
 
     def capture(self, x: int, y: int, width: int, height: int) -> np.ndarray | None:
         """Capture one screen rectangle on this channel's private worker."""
@@ -300,6 +333,12 @@ class _UiCaptureChannel:
         grab_failures = 0
         while grab_failures < 2:
             with self._state_lock:
+                if self._retired_queues:
+                    # The previous native operation is still unresolved. Do
+                    # not create another mss worker/session that can compete
+                    # with discovery and tracking; the old worker will clear
+                    # this barrier after it returns and closes its handle.
+                    return None
                 work_queue = self._queue
                 start_worker = not self._worker_started
             if start_worker:
@@ -310,11 +349,23 @@ class _UiCaptureChannel:
             # ``request.sct`` is deliberately unused here: the UI worker owns
             # its session and ignores that slot (the runtime worker needs it).
             request = _GrabRequest(monitor, None)
-            try:
-                work_queue.put_nowait(request)
-            except queue.Full:
-                # A wedged grab backed the queue up. Rotate the channel so a
-                # replacement OCR request is not trapped behind that grab.
+            # Recheck the queue identity while holding the state lock before
+            # enqueueing. A timeout can retire this queue between the initial
+            # snapshot and this request; never add new work to a retired queue.
+            retire_full = False
+            with self._state_lock:
+                if (
+                    work_queue is not self._queue
+                    or self._retired_queues
+                ):
+                    return None
+                try:
+                    work_queue.put_nowait(request)
+                except queue.Full:
+                    retire_full = True
+            if retire_full:
+                # Rotate outside the state lock; retirement acquires that lock
+                # to atomically record the queue identity.
                 self._retire_timed_out_grab(work_queue)
                 return None
             if not request.done.wait(_CAPTURE_GRAB_TIMEOUT_S):
@@ -326,11 +377,22 @@ class _UiCaptureChannel:
                 return None
             if request.error is not None:
                 if not isinstance(request.error, ScreenShotError):
+                    # A request discarded while its queue was retired is an
+                    # expected bounded capture failure for that caller, not a
+                    # worker exception to propagate into the OCR feed.
+                    if isinstance(request.error, RuntimeError) and str(
+                        request.error
+                    ) == "retired UI capture request":
+                        return None
                     raise request.error
                 # Broken session — rotate the channel so the next attempt
                 # starts a fresh worker with a fresh mss session.
                 grab_failures += 1
-                self._retire_timed_out_grab(work_queue)
+                # The native call has already returned with a normal
+                # screenshot error, so this is not an unresolved grab. Rotate
+                # the worker/session for the next attempt without applying the
+                # timeout barrier used for a still-running native call.
+                self._retire_timed_out_grab(work_queue, unresolved=False)
                 continue
             shot = request.result
             frame = np.array(shot)

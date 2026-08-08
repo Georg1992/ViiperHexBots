@@ -6,22 +6,31 @@ character flapped sit↔stand.
 
 Contract
 --------
-* After area-clear the character is standing (teleport). ``sit()`` presses
-  the key **once** and marks ``_seated``.
+* After a teleport the character is standing. ``sit()`` presses the key
+  **once** and marks ``_seated``.
 * ``stand()`` presses **once** only while ``_seated``, then clears the flag.
-* No pose reads. No second tap. Hunt stays paused until SP ≥ resume or stop.
+* The same relocation applies when the SP feed stays unreadable (OCR layout
+  lost / panel gone) — a character parked on a dead feed can neither finish
+  regen nor react to damage.
+* Recovery is bounded: after ``SIT_MAX_SPOT_RELOCATIONS`` spot failures the
+  session ends and the runtime loop takes over; the sit gate is never held
+  forever by an unrecoverable spot.
+* Hunt stays paused until SP ≥ resume, a danger escape, or stop.
 """
 
 from __future__ import annotations
 
+import time
 import traceback
 
 from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import (
     SIT_KEY_SETTLE_S,
     SIT_LOW_SP_RATIO,
+    SIT_MAX_SPOT_RELOCATIONS,
     SIT_POST_TELEPORT_SETTLE_S,
     SIT_RESUME_SP_RATIO,
+    SIT_SP_FEED_BLIND_RELOCATE_S,
     SIT_SP_POLL_INTERVAL_S,
     SIT_STAND_RESUME_DELAY_S,
     WORKER_POLL_INTERVAL_S,
@@ -49,8 +58,10 @@ class SitOnLowSpWorker:
         self._teleport = teleport
         self._vitals = vitals
         self._danger = danger
-        self._last_fail_log = ""
         self._seated = False
+        # Spot failures (blind feed) per recovery session; resets at the start
+        # of each session.
+        self._spot_relocations = 0
         ctx.register_sit_cleanup(self._retry_cleanup_stand)
 
     def _tap(self, sit_scan: int, *, why: str) -> bool:
@@ -161,14 +172,18 @@ class SitOnLowSpWorker:
         return True
 
     def _sp_ratio(self) -> float | None:
+        """Return the current SP ratio, or ``None`` when SP is unavailable."""
         sp, sp_max = self._vitals.sp_pair()
         if sp is None or sp_max is None or sp_max <= 0:
-            if self._last_fail_log != "sp_unavailable":
-                self._last_fail_log = "sp_unavailable"
-                self._ctx.logger.behavior("[SIT] SP read failed: sp_unavailable")
             return None
-        self._last_fail_log = ""
         return sp / sp_max
+
+    def _sp_observed_ms(self) -> int:
+        """Last SP observation clock in monotonic ms (0 for bare fakes)."""
+        try:
+            return int(getattr(self._vitals, "observed_ms", 0) or 0)
+        except (AttributeError, TypeError):
+            return 0
 
     def _sp_recovered(self) -> bool:
         ratio = self._sp_ratio()
@@ -314,6 +329,7 @@ class SitOnLowSpWorker:
             return
         escape_first = reason == "danger"
         teleported_for_session = False
+        self._spot_relocations = 0
         try:
             ctx.logger.behavior(
                 f"[SIT] {reason} session ratio={low_ratio:.1%} — hunt paused until "
@@ -421,6 +437,7 @@ class SitOnLowSpWorker:
                     self._wait_post_teleport_settle()
 
                 outcome = self._sit_until_done(sit_scan)
+
                 if outcome == "recovered" and self._sp_recovered():
                     ratio = self._sp_ratio()
                     ctx.logger.behavior(
@@ -458,6 +475,32 @@ class SitOnLowSpWorker:
                     self._wait_post_teleport_settle()
                     ctx.logger.behavior(
                         "[SIT] danger escaped — sitting again for SP recovery"
+                    )
+                    continue
+
+                if outcome == "feed_lost":
+                    # The SP feed stayed unreadable. The escape already moved
+                    # to a fresh area, so sit again there. A feed failure is
+                    # not a danger escape: repeated failures mean recovery
+                    # cannot complete in any spot, so the session is bounded
+                    # and ends cleanly — never holding the sit gate forever on
+                    # an unrecoverable spot.
+                    self._spot_relocations += 1
+                    if self._spot_relocations > SIT_MAX_SPOT_RELOCATIONS:
+                        self._seated = False
+                        ctx.logger.behavior(
+                            "[SIT] sit spot failed "
+                            f"{self._spot_relocations} times — ending "
+                            "recovery session"
+                        )
+                        break
+                    escape_first = False
+                    teleported_for_session = True
+                    reason = "low_sp"
+                    self._wait_post_teleport_settle()
+                    ctx.logger.behavior(
+                        "[SIT] sit spot failed — relocating "
+                        "(hunt stays paused)"
                     )
                     continue
 
@@ -541,7 +584,16 @@ class SitOnLowSpWorker:
         ctx.discovery_wake.set()
 
     def _sit_until_done(self, sit_scan: int) -> str | None:
-        """Sit once → wait SP/damage → stand once."""
+        """Sit once, wait for fresh SP/damage observations, then stand once.
+
+        The sit key is a toggle and there is no reliable seated-pose signal.
+        Once the accepted sit key marks the worker seated, low but unchanged
+        SP is not evidence that the character is standing: ``changed_ms`` is
+        a historical value-change clock, not a sit-entry clock. Never press a
+        corrective toggle from that ambiguous state. Only a recovered SP
+        threshold, danger, stop, or an actually unreadable/stale feed may end
+        this wait.
+        """
         ctx = self._ctx
         # Damage during teleport/idle clearing means the location is no longer
         # safe. The queued request is consumed here and the caller finds a new
@@ -564,6 +616,8 @@ class SitOnLowSpWorker:
             ctx.logger.behavior("[SIT] sit interrupted — will retry")
             return None
         ctx.logger.behavior("[SIT] waiting for regen")
+
+        feed_unreadable_since: float | None = None
 
         while not ctx.is_stopped():
             # The sit worker owns damage observed during its seated recovery.
@@ -608,8 +662,49 @@ class SitOnLowSpWorker:
                     return None
                 return "recovered"
 
+            now = time.monotonic()
+            # SP unreadable (panel missing → feed clears the value) or the
+            # observation stream stalled (digits unreadable / wedged read).
+            # Recovery can neither confirm regeneration nor react to damage,
+            # so waiting here parks the runtime forever — the "OCR layout
+            # disappeared, bot doing nothing" state. Ride out a short spell
+            # while the feed self-heals, then relocate to a fresh area.
+            if ratio is None or self._sp_feed_stale(SIT_SP_FEED_BLIND_RELOCATE_S):
+                if feed_unreadable_since is None:
+                    feed_unreadable_since = now
+                elif now - feed_unreadable_since >= SIT_SP_FEED_BLIND_RELOCATE_S:
+                    ctx.logger.behavior(
+                        "[SIT] SP feed unreadable too long — relocating "
+                        "(hunt stays paused)"
+                    )
+                    if not self._urgent_escape(reason="sit_feed_lost"):
+                        return "danger_escape_failed"
+                    self._seated = False
+                    return "feed_lost"
+                ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
+                continue
+            feed_unreadable_since = None
+
             # Poll SP on the sit cadence, but wake often enough that seated
             # danger (owned here) remains reactive without a second control
             # thread pressing teleport keys.
             ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
         return None
+
+    def _sp_feed_stale(self, max_age_s: float) -> bool:
+        """True when no SP observation has arrived for ``max_age_s``.
+
+        Note: when the panel goes missing the feed clears SP via
+        ``publish_sp(None, None)``, which refreshes ``observed_ms`` — a
+        missing panel therefore looks *fresh* here, and the caller's
+        ``ratio is None`` check is what catches that case. This helper only
+        catches a stalled publish stream (digits unreadable / wedged read)
+        where the last value persists while observations stop — recovery
+        can neither confirm regeneration nor react to damage either way.
+        """
+        observed_ms = self._sp_observed_ms()
+        if observed_ms <= 0:
+            # Bare fakes / never-published feeds have no clock; never treat
+            # them as a stalled real feed.
+            return False
+        return (time.monotonic() * 1000) - observed_ms > int(max_age_s * 1000)

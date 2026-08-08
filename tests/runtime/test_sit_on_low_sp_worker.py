@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -33,6 +34,15 @@ class _ScriptedVitals(PlayerVitals):
         if ratio is None:
             return None, None
         return int(ratio * 100), 100
+
+    @property
+    def observed_ms(self) -> int:
+        # Scripted samples are always fresh — never mistaken for a stale feed.
+        return int(time.monotonic() * 1000)
+
+    @property
+    def changed_ms(self) -> int:
+        return int(time.monotonic() * 1000)
 
 
 class SitOnLowSpWorkerTests(unittest.TestCase):
@@ -883,6 +893,168 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.pop_danger_sit_request = MagicMock(return_value=False)  # type: ignore[method-assign]
         outcome = worker._sit_until_done(82)
         self.assertIsNone(outcome)
+
+    def test_low_unchanged_sp_does_not_retoggle_after_accepted_sit(self) -> None:
+        """A historical SP change clock cannot justify a second toggle.
+
+        The feed is alive and SP remains readable, but its numeric value stays
+        below the resume threshold. The worker must keep the accepted seated
+        state instead of treating the old ``changed_ms`` as proof that sitting
+        failed and toggling the character back to standing.
+        """
+        class _ReadableUnchangedVitals(PlayerVitals):
+            def sp_pair(self) -> tuple[int | None, int | None]:
+                return 50, 100
+
+            @property
+            def observed_ms(self) -> int:
+                return int(time.monotonic() * 1000)
+
+            @property
+            def changed_ms(self) -> int:
+                return 1
+
+        worker = self._worker(_ReadableUnchangedVitals())
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        self.input.toggle_key.return_value = True
+        polls = {"count": 0}
+
+        def wait_for_poll(timeout: float) -> bool:
+            polls["count"] += 1
+            if polls["count"] >= 2:
+                self.ctx.stop_event.set()
+            return False
+
+        self.ctx.stop_event.wait = wait_for_poll  # type: ignore[method-assign]
+        self.assertIsNone(worker._sit_until_done(82))
+        self.assertEqual(self.input.toggle_key.call_count, 1)
+        self.assertTrue(worker._seated)
+
+    def test_stale_readable_sp_relocates_without_retoggle(self) -> None:
+        """A stale last value is feed loss, not proof that sitting failed.
+
+        The worker may relocate after the observation clock expires, but it
+        must not press a second toggle first.
+        """
+        class _StaleReadableVitals(PlayerVitals):
+            def sp_pair(self) -> tuple[int | None, int | None]:
+                return 50, 100
+
+            @property
+            def observed_ms(self) -> int:
+                return 1
+
+            @property
+            def changed_ms(self) -> int:
+                return 1
+
+        worker = self._worker(_StaleReadableVitals())
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        self.input.toggle_key.return_value = True
+        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+        clock = [1000.0]
+
+        def fake_wait(timeout: float) -> bool:
+            clock[0] += timeout
+            return False
+
+        with patch(
+            "pybot.runtime.workers.sit_on_low_sp_worker.time.monotonic",
+            side_effect=lambda: clock[0],
+        ):
+            self.ctx.stop_event.wait = fake_wait  # type: ignore[method-assign]
+            outcome = worker._sit_until_done(82)
+
+        self.assertEqual(outcome, "feed_lost")
+        self.assertEqual(self.input.toggle_key.call_count, 1)
+        self.teleport.danger_teleport.assert_called_once_with(
+            reason="sit_feed_lost",
+            prefer_safe_key=True,
+        )
+        self.assertFalse(worker._seated)
+
+    def test_feed_blind_relocates_after_bound(self) -> None:
+        """When SP stays unreadable (OCR layout lost / panel gone) while
+        seated, recovery relocates after a bound instead of parking forever on
+        a dead feed."""
+        class _BlindVitals(PlayerVitals):
+            def sp_pair(self) -> tuple[int | None, int | None]:
+                return None, None
+
+            @property
+            def observed_ms(self) -> int:
+                return int(time.monotonic() * 1000)
+
+            @property
+            def changed_ms(self) -> int:
+                return int(time.monotonic() * 1000)
+
+        vitals = _BlindVitals()
+        worker = self._worker(vitals)
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+        clock = [1000.0]
+
+        def fake_wait(timeout: float) -> bool:
+            clock[0] += timeout
+            return False
+
+        with patch(
+            "pybot.runtime.workers.sit_on_low_sp_worker.time.monotonic",
+            side_effect=lambda: clock[0],
+        ):
+            self.ctx.stop_event.wait = fake_wait  # type: ignore[method-assign]
+            outcome = worker._sit_until_done(82)
+
+        self.assertEqual(outcome, "feed_lost")
+        self.teleport.danger_teleport.assert_called_once_with(
+            reason="sit_feed_lost",
+            prefer_safe_key=True,
+        )
+        self.assertFalse(worker._seated)
+
+    def test_spot_failure_relocations_are_bounded(self) -> None:
+        """Repeated blind-feed spot failures relocate to a
+        fresh area up to a per-session budget, then end the session cleanly —
+        the sit gate is never held forever by an unrecoverable spot."""
+        for outcome_name in ("feed_lost",):
+            with self.subTest(outcome=outcome_name):
+                worker = self._worker(
+                    _ScriptedVitals([0.02, 0.02, 0.02, 0.02, 0.99, 0.99])
+                )
+                self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+                self.teleport.teleport_once_for_sit = MagicMock(return_value=True)  # type: ignore[method-assign]
+                self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+                def spot_failure(_scan: int) -> str:
+                    # Mirrors the real _sit_until_done: the feed failure
+                    # escapes to a fresh area before reporting the outcome.
+                    worker._urgent_escape(reason="sit_feed_lost")
+                    worker._seated = False
+                    return outcome_name
+
+                worker._sit_until_done = MagicMock(  # type: ignore[method-assign]
+                    side_effect=spot_failure
+                )
+
+                gen_before = self.ctx.hunt_generation
+                worker._recover_sp(0.02)
+
+                # Budget is SIT_MAX_SPOT_RELOCATIONS (3): four spot failures
+                # end the session. The placement teleport happens once; each
+                # spot failure escapes to a fresh area.
+                self.assertEqual(worker._sit_until_done.call_count, 4)
+                self.teleport.teleport_once_for_sit.assert_called_once_with(log_tag="SIT")
+                self.assertEqual(self.teleport.danger_teleport.call_count, 4)
+                # Teardown releases the gate cleanly: the character is
+                # standing after the final spot-failure escape, so no stand
+                # toggle is needed.
+                self.input.toggle_key.assert_not_called()
+                self.assertFalse(self.ctx.sitting_event.is_set())
+                self.assertEqual(self.ctx.hunt_generation, gen_before + 1)
+                self.assertFalse(worker._seated)
 
 
 if __name__ == "__main__":

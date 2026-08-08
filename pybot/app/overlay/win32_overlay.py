@@ -2,7 +2,7 @@
 
 Creates a full-client-area layered window over the game showing:
 - Green dots at tracked mob positions
-- A dark right-side panel with track stats + scrolling log.
+- A dark right-side panel with track stats.
 The dots render on a transparent overlay and never appear in
 captured game frames, so detection is not affected.
 Repositions every ~100 ms via the tkinter UI timer.
@@ -11,7 +11,6 @@ Repositions every ~100 ms via the tkinter UI timer.
 from __future__ import annotations
 
 import ctypes
-import re
 import threading
 from ctypes import wintypes
 from dataclasses import dataclass, field
@@ -52,7 +51,6 @@ user32.DefWindowProcW.restype = wintypes.LRESULT
 COLOR_KEY = 0x00FF00FF  # BGR magenta
 
 COLOR_BLACK = 0x001A1A1A
-COLOR_TEXT = 0x00B8F0B8
 COLOR_STATUS = 0x00FFD966
 
 # Dot colour (GDI COLORREF = BGR)
@@ -62,7 +60,7 @@ COLOR_DOT_UNREACHABLE = 0x000000FF  # red — unreachable (idle attacks exhauste
 # Search region border colour
 COLOR_ROI = 0x00FFE066  # light amber — visible but unobtrusive
 
-PANEL_W = 300  # right-side panel width for status/log
+PANEL_W = 300  # right-side panel width for hunt stats
 SRCCOPY = 0x00CC0020
 
 
@@ -98,7 +96,6 @@ class PAINTSTRUCT(ctypes.Structure):
 class _OverlayState:
     hwnd: int = 0
     font_status: int = 0
-    font_log: int = 0
     visible: bool = False
     last_scan_living: int = 0
     track_count: int = 0
@@ -118,7 +115,6 @@ class _OverlayState:
     roi_w: int = 0
     roi_h: int = 0
     search_range_cells: int = DEFAULT_SEARCH_RANGE_CELLS
-    log_lines: list[str] = field(default_factory=list)
     running: bool = False
     paint_dirty: bool = False
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -127,19 +123,6 @@ class _OverlayState:
 
 _state = _OverlayState()
 _last_create_error: str = ""
-
-_HUNT_LINE_RE = re.compile(
-    r"^(\[(?:HUNT|TRACK|DISCOVERY|STATE|DIRECT|MODE)\])",
-    re.IGNORECASE,
-)
-_ALSO_LINES = re.compile(
-    r"^(Bot (?:started|stopped|paused|resumed)|WARNING:)", re.IGNORECASE
-)
-
-
-def _is_hunt_line(message: str) -> bool:
-    return bool(_HUNT_LINE_RE.match(message) or _ALSO_LINES.match(message))
-
 
 def _get_client_rect_screen(hwnd: int) -> tuple[int, int, int, int] | None:
     if not hwnd or not user32.IsWindow(hwnd):
@@ -242,8 +225,6 @@ def _snapshot_paint_state() -> tuple[int, int, int, dict] | None:
             "total_attacks": _state.total_attacks,
             "total_teleports": _state.total_teleports,
             "font_status": _state.font_status,
-            "font_log": _state.font_log,
-            "log_lines": list(_state.log_lines),
         }
     return hwnd, cw, ch, content
 
@@ -266,8 +247,6 @@ def _paint_overlay_content(hdc: int, cw: int, ch: int, content: dict) -> None:
     total_attacks = content["total_attacks"]
     total_teleports = content["total_teleports"]
     font_status = content["font_status"]
-    font_log = content["font_log"]
-    log_lines = content["log_lines"]
 
     # ── Game-area transparent fill ─────────────────────────────
     # Fill the entire window with COLOR_KEY (magenta).  The layered
@@ -326,14 +305,6 @@ def _paint_overlay_content(hdc: int, cw: int, ch: int, content: dict) -> None:
     status = f"T:{track_count} A:{alive_count} Atk:{total_attacks} TP:{total_teleports}"
     gdi32.TextOutW(hdc, px, 6, status, len(status))
 
-    # ── Log lines ──────────────────────────────────────────────
-    gdi32.SelectObject(hdc, font_log)
-    gdi32.SetTextColor(hdc, COLOR_TEXT)
-    y = 30
-    max_lines = (ch - 34) // 17
-    for line in log_lines[-max_lines:]:
-        gdi32.TextOutW(hdc, px, y, line, len(line))
-        y += 17
     gdi32.SelectObject(hdc, old_font)
 
 
@@ -421,13 +392,12 @@ def create(game_hwnd: int, *, search_range_cells: int = DEFAULT_SEARCH_RANGE_CEL
 
     _state.hwnd = hwnd
     _state.font_status = _create_font("Consolas", 14)
-    _state.font_log = _create_font("Consolas", 12)
     (
         _state.brush_living,
         _state.brush_unreachable,
         _state.brush_roi,
     ) = _create_brushes()
-    if not _state.font_status or not _state.font_log:
+    if not _state.font_status:
         _last_create_error = "CreateFontW failed"
         destroy()
         return False
@@ -475,38 +445,19 @@ def destroy() -> None:
         _state.running = False
         hwnd = _state.hwnd
         font_status = _state.font_status
-        font_log = _state.font_log
         _state.hwnd = 0
         _state.game_hwnd = 0
         _state.visible = False
         _state.paint_dirty = False
-        _state.log_lines.clear()
         _state.track_positions.clear()
         _state.unreachable_positions.clear()
         _state.font_status = 0
-        _state.font_log = 0
     if hwnd and user32.IsWindow(hwnd):
         user32.KillTimer(hwnd, 1)
         user32.DestroyWindow(hwnd)
     if font_status:
         gdi32.DeleteObject(font_status)
-    if font_log:
-        gdi32.DeleteObject(font_log)
     _destroy_brushes()
-
-
-def append_log(timestamped_line: str, raw_message: str) -> None:
-    """Add a log line to the overlay if it matches hunt patterns."""
-    if not _is_hunt_line(raw_message):
-        return
-    with _state._lock:
-        if _state.log_lines and _state.log_lines[-1] == timestamped_line:
-            return
-        _state.log_lines.append(timestamped_line)
-        if len(_state.log_lines) > 24:
-            _state.log_lines.pop(0)
-    _mark_dirty()
-
 
 def set_scan_living(count: int) -> None:
     """Update the 'scan living' count shown in the overlay status line."""
@@ -673,9 +624,6 @@ class Win32HuntOverlay:
 
     def last_error(self) -> str:
         return last_error()
-
-    def append_log(self, timestamped_line: str, raw_message: str) -> None:
-        append_log(timestamped_line, raw_message)
 
     def set_scan_living(self, count: int) -> None:
         set_scan_living(count)

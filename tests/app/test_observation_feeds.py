@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from unittest.mock import MagicMock, patch
 from pybot.app.memory_stats_feed import MEMORY_POLL_MS, MemoryStatsFeed
 from pybot.app.periodic_task_runner import PeriodicTaskRunner
 from pybot.app.status_panel_feed import (
+    STATUS_PANEL_READ_TIMEOUT_S,
     STATUS_PANEL_SEARCH_MS,
     STATUS_PANEL_VALUE_MS,
     StatusPanelFeed,
@@ -159,6 +161,12 @@ def _status_feed(**overrides) -> StatusPanelFeed:
 
 
 class StatusPanelFeedTests(unittest.TestCase):
+    def test_watchdog_waits_after_bounded_read_timeout(self) -> None:
+        feed = _status_feed()
+        # The watchdog must not share the exact deadline with the bounded
+        # native read: the read needs time to publish its timeout result.
+        self.assertGreater(feed._timeout_s, STATUS_PANEL_READ_TIMEOUT_S)
+
     def test_searches_slowly_when_panel_not_confirmed(self) -> None:
         feed = _status_feed()
         self.assertEqual(feed.should_submit(), STATUS_PANEL_SEARCH_MS)
@@ -282,6 +290,170 @@ class StatusPanelFeedTests(unittest.TestCase):
         self.assertEqual(feed._on_hp.calls, [("90/100",)])
         self.assertEqual(feed._on_sp.calls, [("70/100",)])
 
+    def test_timeout_then_next_successful_read_restores_status_overlay(self) -> None:
+        feed = _status_feed()
+        feed.apply_result(SimpleNamespace(
+            hwnd=123,
+            state="read_timeout",
+            error="native status read exceeded timeout",
+        ))
+        values = SimpleNamespace(
+            panel_origin=(1, 2),
+            hp=90,
+            hp_max=100,
+            sp=80,
+            sp_max=100,
+            weight=30,
+            weight_max=50,
+        )
+        feed.apply_result(SimpleNamespace(
+            hwnd=123,
+            state="values",
+            values=values,
+            client_left=10,
+            client_top=20,
+            full_refresh=True,
+        ))
+        feed._status_panel_overlay.hide.assert_not_called()
+        feed._status_panel_overlay.update.assert_called_once_with(
+            values,
+            client_left=10,
+            client_top=20,
+        )
+        self.assertEqual(feed._vitals.sp, (80, 100))
+
+    def test_timeout_result_then_fresh_read_through_runner(self) -> None:
+        """A timed-out OCR read must not prevent the next read from applying."""
+        feed = _status_feed()
+        feed._work = _SyncWork()
+        values = SimpleNamespace(
+            panel_origin=(1, 2),
+            hp=90,
+            hp_max=100,
+            sp=80,
+            sp_max=100,
+            weight=30,
+            weight_max=50,
+        )
+        with patch(
+            "pybot.app.status_panel_feed.read_status_panel_snapshot_bounded",
+            side_effect=[
+                SimpleNamespace(
+                    hwnd=123,
+                    state="read_timeout",
+                    error="native status read exceeded timeout",
+                ),
+                SimpleNamespace(
+                    hwnd=123,
+                    state="values",
+                    values=values,
+                    client_left=10,
+                    client_top=20,
+                    full_refresh=True,
+                ),
+            ],
+        ):
+            feed.request()
+            feed.request()
+            feed.request()
+
+        feed._status_panel_overlay.hide.assert_not_called()
+        feed._status_panel_overlay.update.assert_called_once_with(
+            values,
+            client_left=10,
+            client_top=20,
+        )
+        self.assertEqual(feed._vitals.sp, (80, 100))
+        self.assertEqual(feed._stall_count, 0)
+
+    def test_timeout_then_hung_retry_then_successful_read_recovers(self) -> None:
+        """A second hung read must not block a later fresh OCR result."""
+        feed = _status_feed()
+        submitted: list[int] = []
+        second_started = threading.Event()
+        release_second = threading.Event()
+        call_count = 0
+        first_finished = threading.Event()
+        third_finished = threading.Event()
+
+        class _ScriptedWork:
+            def submit(self, task) -> bool:
+                submitted.append(len(submitted) + 1)
+                threading.Thread(
+                    target=task,
+                    name="test-status-read",
+                    daemon=True,
+                ).start()
+                return True
+
+            def close(self) -> None:
+                pass
+
+            @property
+            def idle(self) -> bool:
+                return True
+
+        values = SimpleNamespace(
+            panel_origin=(1, 2),
+            hp=90,
+            hp_max=100,
+            sp=80,
+            sp_max=100,
+            weight=30,
+            weight_max=50,
+        )
+
+        def scripted_read(*_args, **_kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                first_finished.set()
+                return SimpleNamespace(hwnd=123, state="read_timeout")
+            if call_count == 2:
+                second_started.set()
+                release_second.wait(timeout=2.0)
+                return SimpleNamespace(hwnd=123, state="read_timeout")
+            third_finished.set()
+            return SimpleNamespace(
+                hwnd=123,
+                state="values",
+                values=values,
+                client_left=10,
+                client_top=20,
+                full_refresh=True,
+            )
+
+        with patch(
+            "pybot.app.status_panel_feed.read_status_panel_snapshot_bounded",
+            side_effect=scripted_read,
+        ):
+            feed._work = _ScriptedWork()
+            feed.request()  # generation 1 returns read_timeout
+            self.assertTrue(first_finished.wait(timeout=1.0))
+            feed.request()  # consume timeout; submit the hung generation 2
+            self.assertTrue(second_started.wait(timeout=1.0))
+            feed._started_at = time.monotonic() - feed._timeout_s - 0.01
+            feed.request()  # watchdog abandons generation 2
+            self.assertEqual(feed._stall_count, 1)
+            # The production runner replaced its queue; keep the scripted
+            # queue for this deterministic test so generation 3 can run.
+            feed._work = _ScriptedWork()
+            feed.request()  # next Tk tick submits generation 3
+            self.assertTrue(third_finished.wait(timeout=1.0))
+            # The worker posts its result through the test feed's no-op Tk
+            # callback; consume it explicitly on this simulated UI tick.
+            feed.consume_results()
+
+        release_second.set()
+        feed._work.close()
+        feed._status_panel_overlay.hide.assert_not_called()
+        feed._status_panel_overlay.update.assert_called_once_with(
+            values,
+            client_left=10,
+            client_top=20,
+        )
+        self.assertEqual(submitted, [1, 2, 3])
+
     def test_reset_forces_fresh_header_search(self) -> None:
         """A window/client change must forget the confirmed panel layout."""
         feed = _status_feed()
@@ -309,6 +481,76 @@ class StatusPanelFeedTests(unittest.TestCase):
         self.assertEqual(feed._vitals.sp, None)
         self.assertEqual(feed._vitals.weight, None)
         self.assertEqual(feed._on_sp.calls, [])
+
+    def test_autonomous_reader_publishes_without_tk_callback(self) -> None:
+        """OCR/vitals continue even when Tk has not drained presentation."""
+        feed = _status_feed()
+        reads = 0
+        read_started = threading.Event()
+        callbacks: list = []
+        values = SimpleNamespace(
+            panel_origin=(1, 2),
+            hp=90, hp_max=100, sp=70, sp_max=100,
+            weight=30, weight_max=50,
+        )
+
+        def read_snapshot():
+            nonlocal reads
+            reads += 1
+            read_started.set()
+            return SimpleNamespace(
+                hwnd=123,
+                state="values",
+                values=values,
+                client_left=10,
+                client_top=20,
+                client_width=300,
+                client_height=200,
+                full_refresh=True,
+            )
+
+        feed._read_snapshot = read_snapshot
+        feed._post_to_tk = callbacks.append
+        try:
+            feed.start()
+            self.assertTrue(read_started.wait(timeout=1.0))
+            self.assertEqual(feed._vitals.sp, (70, 100))
+            self.assertGreaterEqual(reads, 1)
+            self.assertEqual(feed._on_sp.calls, [])
+            self.assertEqual(len(callbacks), 1)
+        finally:
+            feed.close()
+            self.assertTrue(self._wait_until(lambda: feed.idle))
+
+    def test_reset_discards_queued_projection_from_previous_epoch(self) -> None:
+        feed = _status_feed()
+        callbacks: list = []
+        feed._post_to_tk = callbacks.append
+        values = SimpleNamespace(
+            panel_origin=(1, 2),
+            hp=90, hp_max=100, sp=70, sp_max=50,
+            weight=30, weight_max=50,
+        )
+        result = SimpleNamespace(
+            hwnd=123, state="values", values=values,
+            client_left=10, client_top=20, full_refresh=True,
+        )
+        feed._record_reader_result(result, feed._lifecycle_epoch)
+        feed._queue_ui_result(feed._lifecycle_epoch, result)
+        self.assertEqual(len(callbacks), 1)
+        feed.reset()
+        callbacks.pop()()
+        self.assertEqual(feed._on_hp.calls, [])
+        self.assertEqual(feed._status_panel_overlay.update.call_count, 0)
+
+    @staticmethod
+    def _wait_until(predicate, timeout: float = 1.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return predicate()
 
 
 class _SyncWork:
@@ -426,6 +668,25 @@ class PeriodicTaskRunnerTests(unittest.TestCase):
         self.assertFalse(feed._pending)
         self.assertEqual(feed._stall_count, 1)
         self.assertGreaterEqual(feed.request(), 100)
+        feed.close()
+
+    def test_result_at_read_deadline_is_consumed_before_stall_recovery(self) -> None:
+        submitted: list = []
+        applied: list = []
+        feed = _CountingFeed(submitted=submitted, applied=applied)
+        feed._work = _NeverRunsWork()
+        feed.request()  # generation 1
+        # Model the bounded read publishing its timeout result at the same
+        # instant the watchdog would otherwise inspect the pending request.
+        feed._started_at = time.monotonic() - feed._timeout_s
+        feed.publish(1, "read_timeout")
+        feed.request()
+        self.assertEqual(applied, ["read_timeout"])
+        self.assertEqual(feed._stall_count, 0)
+        # Consuming the timeout immediately starts the next periodic read;
+        # that fresh request is expected to be pending here.
+        self.assertTrue(feed._pending)
+        self.assertEqual(feed._submitted, [1, 2])
         feed.close()
 
     def test_result_from_abandoned_stall_is_ignored(self) -> None:

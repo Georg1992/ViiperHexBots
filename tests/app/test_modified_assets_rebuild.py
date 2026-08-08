@@ -15,7 +15,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from pybot.mobs.catalog import ensure_mob_assets
-from pybot.recognition.detector.descriptors.descriptor_builder import DESCRIPTOR_VERSION
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REAL_HORN_DESCRIPTOR = (

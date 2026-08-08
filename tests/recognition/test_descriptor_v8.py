@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import unittest
 
-import numpy as np
-
 from pybot.paths import PROJECT_ROOT
 from pybot.recognition.act_reader import ActReader
 from pybot.recognition.detector.descriptors.descriptor_builder import (

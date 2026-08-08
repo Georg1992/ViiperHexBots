@@ -161,10 +161,6 @@ class CoordTrackingWorker:
             return
 
         batch = ctx.tracker.track_locals_frame(frame, roi, snapshots)
-        if not getattr(batch, "ok", True) and getattr(batch, "fail_reason", "") == "detector_busy":
-            # Keep compatibility with injected/future bounded detector sessions:
-            # a skipped observation must not apply misses.
-            return
         self._warn_if_slow_tracking(batch, snapshots)
         results = batch.results
 
@@ -302,12 +298,6 @@ class CoordTrackingWorker:
             return 0
 
         batch = ctx.tracker.track_locals_frame(frame, roi, snaps)
-        if not getattr(batch, "ok", True) and getattr(batch, "fail_reason", "") == "detector_busy":
-            # Keep compatibility with injected/future bounded detector sessions.
-            ctx.tracks.requeue_discovery_candidates(
-                pending, expected_epoch=area_epoch,
-            )
-            return 0
         self._warn_if_slow_tracking(batch, snaps)
 
         if not getattr(batch, "ok", True) or len(batch.results) != len(pending):

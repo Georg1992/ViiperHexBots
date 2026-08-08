@@ -242,8 +242,8 @@ class UiCaptureChannelTests(unittest.TestCase):
         self.assertIsNotNone(frame)
         self.assertEqual(fake_sct.grab.call_count, 2)
 
-    def test_ui_channel_rotates_after_hung_grab(self) -> None:
-        """A later OCR read must escape a permanently blocked native grab."""
+    def test_ui_channel_does_not_replace_an_unresolved_native_grab(self) -> None:
+        """Retries fail closed until the abandoned native grab actually exits."""
         release_old = threading.Event()
         old_sct = MagicMock()
         new_sct = MagicMock()
@@ -267,11 +267,26 @@ class UiCaptureChannelTests(unittest.TestCase):
                 ):
                     first = channel.capture(10, 20, 4, 4)
                     self.assertIsNone(first)
+                    # The old native worker is still inside grab(). Do not
+                    # create a second mss session while it is unresolved.
                     second = channel.capture(10, 20, 4, 4)
+                    self.assertIsNone(second)
         finally:
             release_old.set()
 
-        self.assertIsNotNone(second)
+        # Once the original native call returns, the worker clears the
+        # retired-queue barrier and the next read may create one replacement.
+        for _ in range(100):
+            if not channel._retired_queues:
+                break
+            time.sleep(0.01)
+        with patch(
+            "pybot.recognition.capture.mss.MSS",
+            return_value=new_sct,
+        ):
+            third = channel.capture(10, 20, 4, 4)
+
+        self.assertIsNotNone(third)
         old_sct.grab.assert_called_once()
         new_sct.grab.assert_called_once()
 
@@ -314,10 +329,21 @@ class UiCaptureChannelTests(unittest.TestCase):
                     self.assertIsNone(first)
                     self.assertLess(elapsed, 2.0)
                     second = channel.capture(10, 20, 4, 4)
+                    self.assertIsNone(second)
         finally:
             release.set()
 
-        self.assertIsNotNone(second)
+        for _ in range(100):
+            if not channel._retired_queues:
+                break
+            time.sleep(0.01)
+        with patch(
+            "pybot.recognition.capture.mss.MSS",
+            return_value=new_sct,
+        ):
+            third = channel.capture(10, 20, 4, 4)
+
+        self.assertIsNotNone(third)
         new_sct.grab.assert_called_once()
         # Once the wedge resolves, the abandoned worker drains its retired
         # queue and closes its wedged session — no permanent native-handle

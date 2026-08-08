@@ -60,7 +60,6 @@ class HuntModeTests(unittest.TestCase):
         self.logger = HuntLogger(session_id="test_hunt_mode")
         self.tracks = HuntTracks()
         self.detector = MagicMock(spec=DetectorSession)
-        self.detector.is_busy.return_value = False
         self.ctx = HuntRuntimeContext(
             config=self.config,
             logger=self.logger,
