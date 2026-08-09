@@ -77,11 +77,9 @@ class ItemsToStorageWorker:
         an escape claimed during the settle is caught too.
         """
         ctx = self._ctx
-        critical_escape = getattr(ctx, "critical_danger_escape_active", None)
-        critical_escape_active = bool(
-            critical_escape is not None and critical_escape.is_set()
-        )
-        if critical_escape_active:
+        danger = getattr(ctx, "danger_detector", None)
+        from pybot.runtime.danger_detector import DangerLevel
+        if danger is not None and danger.danger_level() is DangerLevel.CRITICAL:
             raise InventoryUiError("critical danger preempted storage session")
         wait = getattr(self._input, "wait_interruptible", None)
         # Real input backends expose the interruptible wait. Lightweight
@@ -100,11 +98,9 @@ class ItemsToStorageWorker:
         stopped = self._ctx.is_stopped()
         if completed is False or stopped is True:
             raise InventoryUiError("storage input wait cancelled")
-        critical_escape = getattr(ctx, "critical_danger_escape_active", None)
-        critical_escape_active = bool(
-            critical_escape is not None and critical_escape.is_set()
-        )
-        if critical_escape_active:
+        danger = getattr(ctx, "danger_detector", None)
+        from pybot.runtime.danger_detector import DangerLevel
+        if danger is not None and danger.danger_level() is DangerLevel.CRITICAL:
             raise InventoryUiError("critical danger preempted storage session")
 
     def storage_due(self) -> bool:
@@ -150,9 +146,10 @@ class ItemsToStorageWorker:
         ctx = self._ctx
         if not self.storage_due():
             return False
+        danger = getattr(ctx, "danger_detector", None)
+        from pybot.runtime.danger_detector import DangerLevel
         if (
-            ctx.critical_danger_requested.is_set()
-            or ctx.danger_sit_requested.is_set()
+            (danger is not None and danger.danger_level() is not DangerLevel.SAFE)
             or ctx.danger_escape_active.is_set()
             or ctx.pause_event.is_set()
             or ctx.sitting_event.is_set()

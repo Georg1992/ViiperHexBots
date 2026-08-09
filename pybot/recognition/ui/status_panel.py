@@ -52,6 +52,12 @@ MAX_GLYPH_WIDTH = 7
 # frame with many candidate blobs as unreadable before template matching can
 # turn it into an expensive per-glyph search.
 MAX_STATUS_PANEL_COMPONENTS = 64
+# Even after wide-blob splitting, a genuine value row is at most ~15 glyphs
+# (e.g. ``99999/99999`` plus a label orphan). Candidate counts above this
+# prove the band is not the panel; bail before any template matching so a
+# post-teleport garbage frame (chat/text under a stale anchor) cannot burn
+# the whole 6 s OCR read budget on one parse.
+MAX_ROW_GLYPHS = 24
 # Real digit boxes sit ~1px apart; label leftovers (e.g. trailing ``t`` of
 # ``Weight``) sit farther left with a wide gap before the value digits.
 MAX_LEADING_ORPHAN_GAP_PX = 6
@@ -520,6 +526,12 @@ def _parse_anchored(
     if telemetry is not None:
         telemetry(f"components={len(comps)}")
     if not comps:
+        return None
+    # A real status row holds at most ~a dozen glyphs. Far more candidates
+    # mean the band is not the panel — every one of them would otherwise go
+    # through template matching, and a text-dense post-teleport frame can
+    # split into hundreds of fragments that burn the full OCR budget.
+    if len(comps) > MAX_ROW_GLYPHS:
         return None
 
     classified: list[tuple[int, str | None, float, np.ndarray]] = []

@@ -1041,8 +1041,6 @@ class MainWindow:
         # the next submit targets the freshly selected window.
         self._memory_feed.reset()
         self._memory_feed.request_now()
-        self._status_feed.reset()
-        self._status_feed.request_now()
         if self._settings_apply_enabled:
             self._save_config_async()
 
@@ -1051,8 +1049,6 @@ class MainWindow:
         self._sync_memory_reading_from_profile()
         self._memory_feed.reset()
         self._memory_feed.request_now()
-        self._status_feed.reset()
-        self._status_feed.request_now()
         memory = "on" if self.config.use_memory_reading else "off"
         if self.config.use_memory_reading:
             source = "memory (HP from status panel)"

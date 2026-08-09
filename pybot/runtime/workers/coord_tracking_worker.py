@@ -344,6 +344,7 @@ class CoordTrackingWorker:
                     ctx.tracks.requeue_discovery_candidates(
                         pending[index:], expected_epoch=area_epoch,
                     )
+                    self._wake_attack_if_created(created)
                     return created
                 if not result.found:
                     ctx.tracker.discard_track_template(result.track_id)
@@ -373,11 +374,13 @@ class CoordTrackingWorker:
                 if track is None:
                     # Area epoch advanced — do not requeue into the new screen.
                     self._discard_provisional_templates(batch.results[index:])
+                    self._wake_attack_if_created(created)
                     return created
 
                 if not ctx.tracker.transfer_track_template(result.track_id, track.id):
                     # Never publish a real track without its warm template.
                     ctx.tracks.remove_track(track.id)
+                    self._wake_attack_if_created(created)
                     return created
                 existing_positions.append((create_x, create_y))
                 created += 1
@@ -386,7 +389,16 @@ class CoordTrackingWorker:
             ctx.logger.behavior(
                 f"[COORD] created {created} track(s) from discovery candidates"
             )
+        self._wake_attack_if_created(created)
         return created
+
+    def _wake_attack_if_created(self, created: int) -> None:
+        """Publish the attack wake after any partial candidate commit."""
+        if created <= 0:
+            return
+        attack_wake = getattr(self._ctx, "attack_wake", None)
+        if attack_wake is not None:
+            attack_wake.set()
 
     def _discard_provisional_templates(self, results) -> None:
         """Drop one-shot templates that will not become live track IDs."""

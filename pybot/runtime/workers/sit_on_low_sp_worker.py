@@ -19,6 +19,12 @@ Contract
 * The same relocation applies when the SP feed stays unreadable (OCR layout
   lost / panel gone) — a character parked on a dead feed can neither finish
   regen nor react to damage.
+* A **readable but flat** SP value is treated the same way: a seated character's
+  SP changes on every regen tick, so a value that never moves for
+  ``SIT_SP_FEED_BLIND_RELOCATE_S`` means regen is blocked (re-sit toggle eaten
+  during a landing — character standing while the bot believes seated — or a
+  weight penalty). Recovery relocates to a fresh area, which deterministically
+  lands the character standing, and re-sits there.
 * Recovery is bounded: after ``SIT_MAX_SPOT_RELOCATIONS`` spot failures the
   session ends and the runtime loop takes over; the sit gate is never held
   forever by an unrecoverable spot.
@@ -39,10 +45,11 @@ from pybot.runtime.constants import (
     SIT_RESUME_SP_RATIO,
     SIT_SP_FEED_BLIND_RELOCATE_S,
     SIT_SP_POLL_INTERVAL_S,
+    SIT_SP_PROGRESS_LOG_S,
     SIT_STAND_RESUME_DELAY_S,
     WORKER_POLL_INTERVAL_S,
 )
-from pybot.runtime.danger_detector import DangerDetector, DangerLevel
+from pybot.runtime.danger_detector import DangerController, DangerDetector, DangerLevel
 from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.teleport import TeleportController
 from pybot.runtime.workers.worker_contexts import SitOnLowSpWorkerContext
@@ -59,16 +66,28 @@ class SitOnLowSpWorker:
         *,
         danger: DangerDetector,
         vitals: PlayerVitals,
+        danger_controller: DangerController | None = None,
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
         self._teleport = teleport
         self._vitals = vitals
         self._danger = danger
+        self._danger_controller = danger_controller or getattr(
+            ctx, "danger_controller", None
+        )
         self._seated = False
         # Spot failures (blind feed) per recovery session; resets at the start
         # of each session.
         self._spot_relocations = 0
+        # Seated regen watchdog state: last seen SP value and monotonic-ms time
+        # it last changed. A readable value frozen for a full relocation window
+        # means regeneration is blocked (mis-seated / weight penalty).
+        self._sp_last_value: int | None = None
+        self._sp_flat_since_ms: int | None = None
+        # Regen progress telemetry timestamps (monotonic ms).
+        self._regen_started_ms: int = 0
+        self._last_regen_log_ms: int = 0
         ctx.register_sit_cleanup(self._retry_cleanup_stand)
 
     def _tap(self, sit_scan: int, *, why: str) -> bool:
@@ -116,7 +135,7 @@ class SitOnLowSpWorker:
         # gate) is owned by the seated session, not by an in-flight escape —
         # the recovery loop consumes it before acting. Only an actual in-flight
         # escape may hold input; yield to it without pressing the toggle.
-        if ctx.critical_danger_requested.is_set() or ctx.danger_escape_active.is_set():
+        if ctx.danger_escape_active.is_set():
             return False
         while ctx.pause_event.is_set():
             if ctx.is_stopped():
@@ -211,16 +230,7 @@ class SitOnLowSpWorker:
             )
 
     def _sit_danger_detected(self) -> bool:
-        """Consume or recover a danger event for the seated owner.
-
-        Most damage arrives as ``danger_sit_requested``. Damage observed while
-        an urgent teleport is settling is deliberately not queued, because the
-        escape owner already holds the gate. The detector still preserves that
-        fresh damage timestamp; consult its real danger level here before
-        sitting again so that settle damage cannot become stale silently.
-        """
-        if self._ctx.pop_danger_sit_request():
-            return True
+        """Read the shared danger facts for the seated recovery owner."""
         return self._danger.danger_level() is not DangerLevel.SAFE
 
     def _urgent_escape(self, *, reason: str) -> bool:
@@ -237,29 +247,31 @@ class SitOnLowSpWorker:
         if self._ctx.is_stopped():
             return False
         if self._ctx.pause_event.is_set():
-            self._ctx.request_danger_sit()
             return False
-        if not self._ctx.begin_danger_escape():
+        if self._danger_controller is not None:
+            return bool(
+                self._danger_controller.escape(
+                    seated=True,
+                    reason=reason,
+                )
+            )
+        if not self._ctx.begin_danger_transition(allow_sitting=True):
             return False
         try:
-            try:
-                escaped = self._teleport.danger_teleport(
+            escaped = bool(
+                self._teleport.danger_teleport(
                     reason=reason,
                     prefer_safe_key=True,
                 )
-            except Exception:
-                self._ctx.logger.behavior(
-                    f"[SIT] urgent danger teleport failed:\n{traceback.format_exc()}"
-                )
-                return False
-            if not escaped:
-                self._ctx.logger.behavior(
-                    "[SIT] urgent danger teleport unavailable — retrying before "
-                    "safe-place search"
-                )
-            return bool(escaped)
+            )
+            return escaped
+        except Exception:
+            self._ctx.logger.behavior(
+                f"[SIT] urgent danger teleport failed:\n{traceback.format_exc()}"
+            )
+            return False
         finally:
-            self._ctx.end_danger_escape()
+            self._ctx.end_danger_transition()
 
     def process_pending(self) -> bool:
         """Advance one sit/danger decision synchronously.
@@ -270,17 +282,16 @@ class SitOnLowSpWorker:
         ctx = self._ctx
         if ctx.is_stopped() or not ctx.should_run_workers():
             return False
-        if ctx.critical_danger_requested.is_set() or ctx.danger_escape_active.is_set():
+        if ctx.danger_escape_active.is_set():
             return False
         ratio = self._sp_ratio()
         if ratio is not None and ratio < SIT_LOW_SP_RATIO:
             self._recover_sp(ratio, reason="low_sp")
             return True
-        # ``danger_sit_requested`` is only meaningful inside an owned sit
-        # session. Outside recovery it permanently blocks combat/timers; drop
-        # a leftover so a completed stand/teardown cannot stale the hunt.
-        if ctx.danger_sit_requested.is_set():
-            ctx.pop_danger_sit_request()
+        # Danger is a fact owned by the shared detector; seated recovery
+        # handles it synchronously rather than latching a request event.
+        if self._danger.danger_level() is not DangerLevel.SAFE:
+            return False
         return False
 
     def run(self) -> None:
@@ -300,7 +311,7 @@ class SitOnLowSpWorker:
                 if not ctx.should_run_workers():
                     ctx.wait_while_stopped_or_paused(SIT_SP_POLL_INTERVAL_S)
                     continue
-                if ctx.critical_danger_requested.is_set() or ctx.danger_escape_active.is_set():
+                if ctx.danger_escape_active.is_set():
                     # A critical escape owns urgent input and the sit gate.
                     # Park until it resolves; SP recovery resumes afterwards.
                     ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
@@ -326,11 +337,6 @@ class SitOnLowSpWorker:
             # session owns the input boundary, the outer loop retries later.
             if not ctx.try_begin_sit_ops():
                 return
-            ctx.pop_danger_sit_request()
-            # The sit worker owns this danger escape, so consume the mirrored
-            # critical request as well. Otherwise a separate danger controller
-            # could issue a duplicate teleport after this session ends.
-            ctx.pop_critical_danger()
         elif not ctx.begin_sit_ops():
             return
         escape_first = reason == "danger"
@@ -351,15 +357,8 @@ class SitOnLowSpWorker:
                 # the safe key. Never wait for a "critical handoff" — the
                 # gameplay owner cannot preempt this session, so waiting
                 # would park the gameplay thread forever.
-                if ctx.critical_danger_requested.is_set():
-                    ctx.pop_critical_danger()
-                    live = self._danger.danger_level() is not DangerLevel.SAFE
-                    if live:
-                        escape_first = True
-                    ctx.logger.behavior(
-                        "[SIT] consumed leftover critical request "
-                        f"live={live} — sit session owns seated danger"
-                    )
+                if self._danger.danger_level() is DangerLevel.CRITICAL:
+                    escape_first = True
                     continue
 
                 # A seated danger retry and a fresh hit preserved during the
@@ -385,9 +384,6 @@ class SitOnLowSpWorker:
                     continue
 
                 if teleported_for_session and not escape_first and self._sit_danger_detected():
-                    # Consume a settle-time request; seated recovery owns the
-                    # escape and must not leave the event latched forever.
-                    ctx.pop_critical_danger()
                     escape_first = True
                     continue
 
@@ -430,9 +426,8 @@ class SitOnLowSpWorker:
                 # A fresh damage event raised while the urgent escape was in
                 # flight takes priority over normal quiet-area searching.
                 if self._sit_danger_detected():
-                    # Consume fresh damage before retrying. Leaving this event
-                    # set replays one request forever after an urgent escape,
-                    # especially when damage arrives during teleport settle.
+                # Preserve the fresh detector fact until the seated owner
+                # handles it; no request event is latched or replayed.
                     escape_first = True
                     continue
 
@@ -488,13 +483,14 @@ class SitOnLowSpWorker:
                     )
                     continue
 
-                if outcome == "feed_lost":
-                    # The SP feed stayed unreadable. The escape already moved
-                    # to a fresh area, so sit again there. A feed failure is
-                    # not a danger escape: repeated failures mean recovery
-                    # cannot complete in any spot, so the session is bounded
-                    # and ends cleanly — never holding the sit gate forever on
-                    # an unrecoverable spot.
+                if outcome in ("feed_lost", "regen_stalled"):
+                    # The SP feed stayed unreadable (or readable but flat — no
+                    # regen ticks while seated). The escape already moved to a
+                    # fresh area, so sit again there. A spot failure is not a
+                    # danger escape: repeated failures mean recovery cannot
+                    # complete in any spot, so the session is bounded and ends
+                    # cleanly — never holding the sit gate forever on an
+                    # unrecoverable spot.
                     self._spot_relocations += 1
                     if self._spot_relocations > SIT_MAX_SPOT_RELOCATIONS:
                         self._seated = False
@@ -547,11 +543,6 @@ class SitOnLowSpWorker:
         the gate and begins the next hunt generation.
         """
         ctx = self._ctx
-        if ctx.critical_danger_requested.is_set():
-            ctx.pop_critical_danger()
-            ctx.logger.behavior(
-                "[SIT] teardown consumed leftover critical request"
-            )
         # Do not release the sit gate while we still believe the character
         # is seated. Retry transient input rejection while running; Pause
         # intentionally waits for resume. Stop uses the shutdown-only
@@ -601,8 +592,11 @@ class SitOnLowSpWorker:
         SP is not evidence that the character is standing: ``changed_ms`` is
         a historical value-change clock, not a sit-entry clock. Never press a
         corrective toggle from that ambiguous state. Only a recovered SP
-        threshold, danger, stop, or an actually unreadable/stale feed may end
-        this wait.
+        threshold, danger, stop, an unreadable/stale feed, or a readable SP
+        frozen for a full relocation window (regen blocked) may end this
+        wait. The flat-SP end case relocates instead of toggling: the escape
+        teleport lands the character standing, so the re-sit re-asserts the
+        pose deterministically.
         """
         ctx = self._ctx
         # Damage during teleport/idle clearing means the location is no longer
@@ -613,7 +607,6 @@ class SitOnLowSpWorker:
             # critical hunting request that may have been raised in the small
             # race immediately before the sit gate was acquired, otherwise the
             # separate danger controller could duplicate the escape later.
-            ctx.pop_critical_danger()
             ctx.logger.behavior(
                 "[SIT] danger observed before sitting — urgent escape "
                 "and finding a new spot"
@@ -628,6 +621,12 @@ class SitOnLowSpWorker:
         ctx.logger.behavior("[SIT] waiting for regen")
 
         feed_unreadable_since: float | None = None
+        self._regen_started_ms = int(time.monotonic() * 1000)
+        self._last_regen_log_ms = self._regen_started_ms
+        # The value change clock is local to this seated interval: the previous
+        # session's last value is not evidence that this sit is flat.
+        self._sp_last_value = None
+        self._sp_flat_since_ms = None
 
         while not ctx.is_stopped():
             # The sit worker owns damage observed during its seated recovery.
@@ -635,7 +634,6 @@ class SitOnLowSpWorker:
             # separate danger controller (which no longer queues while a
             # true SP sit owns sitting_event).
             if self._sit_danger_detected():
-                ctx.pop_critical_danger()
                 ctx.logger.behavior(
                     "[SIT] danger — urgently escaping without stand toggle"
                 )
@@ -652,7 +650,14 @@ class SitOnLowSpWorker:
             if not self._ok_to_act():
                 return None
 
-            ratio = self._sp_ratio()
+            # One atomic sample per iteration: the threshold, blind-feed, and
+            # regen-watchdog decisions must agree on the same SP value.
+            sp, sp_max = self._vitals.sp_pair()
+            ratio = (
+                sp / sp_max
+                if sp is not None and sp_max is not None and sp_max > 0
+                else None
+            )
             if ratio is not None and ratio >= SIT_RESUME_SP_RATIO:
                 ctx.logger.behavior(
                     f"[SIT] SP threshold met ratio={ratio:.1%} — standing"
@@ -694,6 +699,56 @@ class SitOnLowSpWorker:
                 ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
                 continue
             feed_unreadable_since = None
+
+            # Regen watchdog + progress visibility. While the feed is alive a
+            # seated character's SP changes on every regen tick, so a value
+            # frozen for the whole relocation window means regen is blocked —
+            # most often the character is not actually seated (the re-sit
+            # toggle was eaten during a landing transition) or a weight
+            # penalty has stopped regen. Waiting longer only parks the
+            # runtime, so relocate to a fresh area (teleport lands the
+            # character standing) and re-sit there.
+            # The flat clock is intentionally strict about *movement*: any
+            # value change — including a single OCR digit jitter — restarts it,
+            # so it never relocates a genuinely regenerating character. The
+            # trade-off is a jittery feed could keep the clock fresh and mask a
+            # truly stuck value; the blind-feed window still covers a feed that
+            # stops publishing altogether.
+            now_ms = int(now * 1000)
+            if sp != self._sp_last_value:
+                self._sp_last_value = sp
+                self._sp_flat_since_ms = now_ms
+            if (
+                self._sp_flat_since_ms is not None
+                and sp is not None
+                and now_ms - self._sp_flat_since_ms
+                >= int(SIT_SP_FEED_BLIND_RELOCATE_S * 1000)
+            ):
+                weight = self._vitals.weight_pair()
+                weight_text = (
+                    f"{weight[0]}/{weight[1]}"
+                    if weight[0] is not None
+                    else "n/a"
+                )
+                ctx.logger.behavior(
+                    f"[SIT] SP flat while seated sp={sp}/{sp_max} "
+                    f"weight={weight_text} — relocating (hunt stays paused)"
+                )
+                if not self._urgent_escape(reason="sit_regen_stalled"):
+                    return "danger_escape_failed"
+                self._seated = False
+                return "regen_stalled"
+            if now_ms - self._last_regen_log_ms >= int(
+                SIT_SP_PROGRESS_LOG_S * 1000
+            ):
+                self._last_regen_log_ms = now_ms
+                ratio_text = "—"
+                if sp is not None and sp_max:
+                    ratio_text = f"{sp / sp_max:.0%}"
+                ctx.logger.behavior(
+                    f"[SIT] regen sp={sp}/{sp_max} ratio={ratio_text} "
+                    f"elapsed={(now_ms - self._regen_started_ms) // 1000}s"
+                )
 
             # Poll SP on the sit cadence, but wake often enough that seated
             # danger (owned here) remains reactive without a second control

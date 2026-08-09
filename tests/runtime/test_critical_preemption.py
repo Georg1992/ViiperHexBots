@@ -1,4 +1,4 @@
-"""Critical danger is signalled by observation and consumed by GameplayLoop."""
+"""Danger observation and the single gameplay-owned escape path."""
 
 from __future__ import annotations
 
@@ -7,10 +7,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from pybot.game_state import PlayerVitals
-from pybot.runtime.danger_detector import DangerDetector, DangerLevel
+from pybot.runtime.danger_detector import DangerController, DangerDetector, DangerLevel
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.workers.attack_loop import GameplayLoop
-from pybot.runtime.workers.self_buff_worker import SelfBuffWorker
 
 
 class CriticalPreemptionTests(unittest.TestCase):
@@ -32,55 +31,17 @@ class CriticalPreemptionTests(unittest.TestCase):
             control=MagicMock(),
         )
         ctx.mark_running()
+        return ctx
+
+    def test_gameplay_owner_consumes_critical_fact(self) -> None:
+        """GameplayLoop delegates one critical escape to the controller."""
+        ctx = self._context()
         ctx.danger_detector = SimpleNamespace(
             danger_level=lambda: DangerLevel.CRITICAL,
         )
-        return ctx
-
-    def test_gameplay_owner_consumes_critical_escape(self) -> None:
-        """The registered gameplay owner performs the urgent teleport itself."""
-        ctx = self._context()
-        ctx.request_critical_danger()
-        teleport = MagicMock()
-        teleport.danger_teleport.return_value = True
-        input_backend = MagicMock()
-        input_backend.begin_session.return_value = True
-
-        gameplay = GameplayLoop(
-            ctx,
-            attack=MagicMock(),
-            teleport=teleport,
-            input_backend=input_backend,
-        )
-
-        self.assertTrue(gameplay._process_critical_danger())
-        self.assertFalse(ctx.critical_danger_requested.is_set())
-        teleport.danger_teleport.assert_called_once_with(reason="critical_hunt")
-        input_backend.begin_session.assert_called_once_with()
-
-    def test_hp_observer_cancels_input_but_does_not_teleport(self) -> None:
-        """The metric producer only publishes urgency and requests cancellation."""
-        ctx = self._context()
-        vitals = PlayerVitals()
-        cancel = MagicMock()
-        ctx.cancel_gameplay_input = cancel
-        detector = DangerDetector(ctx, vitals=vitals)
-
-        vitals.publish_hp(100, 100)
-        detector._poll_hp()
-        vitals.publish_hp(40, 100)
-        detector._poll_hp()
-
-        cancel.assert_called_once_with()
-        self.assertTrue(ctx.critical_danger_requested.is_set())
-
-    def test_preempted_session_timeout_releases_temporary_gates(self) -> None:
-        """A failed storage/heal handoff cannot leave gameplay permanently gated."""
-        ctx = self._context()
-        ctx.request_critical_danger()
-        ctx.storage_event.set()
-        # The real GateController wait path times out while storage remains
-        # held; no mock should hide the ownership cleanup being tested.
+        controller = MagicMock()
+        controller.process.return_value = True
+        ctx.danger_controller = controller
         gameplay = GameplayLoop(
             ctx,
             attack=MagicMock(),
@@ -88,46 +49,65 @@ class CriticalPreemptionTests(unittest.TestCase):
             input_backend=MagicMock(),
         )
 
-        self.assertFalse(gameplay._process_critical_danger())
-        self.assertTrue(ctx.critical_danger_requested.is_set())
-        self.assertFalse(ctx.danger_escape_active.is_set())
-        self.assertFalse(ctx.critical_danger_escape_active.is_set())
-        self.assertFalse(ctx.sitting_event.is_set())
+        self.assertTrue(gameplay._process_critical_danger())
+        controller.process.assert_called_once_with(seated=False)
 
-    def test_startup_wait_aborts_when_critical_request_arrives(self) -> None:
-        """Startup postponement must yield to the gameplay owner's urgent step."""
+    def test_hp_observer_only_records_fact_and_wakes_gameplay(self) -> None:
+        """The observation thread never cancels input or performs teleport."""
         ctx = self._context()
-        ctx.config.custom_behavior.buffs = (
-            SimpleNamespace(scan_code=59, delay_ms=10_000, button="f1"),
+        vitals = PlayerVitals()
+        cancel = MagicMock()
+        ctx.cancel_gameplay_input = cancel
+        detector = DangerDetector(
+            ctx,
+            vitals=vitals,
+            wake_event=ctx.danger_wake,
         )
-        ctx.wait_while_combat_blocked = MagicMock(
-            side_effect=lambda _timeout: (
-                ctx.request_critical_danger(), False
-            )[1]
-        )
-        worker = SelfBuffWorker(ctx, MagicMock())
 
-        self.assertFalse(
-            worker._run_startup_sequence(
-                tuple(ctx.config.custom_behavior.buffs),
-                expected_generation=ctx.hunt_generation,
-            )
-        )
-        self.assertTrue(ctx.critical_danger_requested.is_set())
+        vitals.publish_hp(100, 100)
+        detector._poll_hp()
+        vitals.publish_hp(40, 100)
+        detector._poll_hp()
 
-        # The same owner that aborted startup must consume the request and
-        # perform the escape; no second controller is involved.
+        cancel.assert_not_called()
+        self.assertTrue(ctx.danger_wake.is_set())
+        self.assertEqual(detector.danger_level(), DangerLevel.CRITICAL)
+
+    def test_controller_serializes_one_escape_transaction(self) -> None:
+        """Controller owns the gate and delegates one complete teleport."""
+        ctx = self._context()
+        vitals = PlayerVitals()
+        detector = DangerDetector(ctx, vitals=vitals)
         teleport = MagicMock()
         teleport.danger_teleport.return_value = True
-        gameplay = GameplayLoop(
-            ctx,
-            attack=MagicMock(),
-            teleport=teleport,
-            input_backend=MagicMock(),
+        controller = DangerController(ctx, detector, teleport, MagicMock())
+
+        vitals.publish_hp(100, 100)
+        detector._poll_hp()
+        vitals.publish_hp(40, 100)
+        detector._poll_hp()
+
+        self.assertTrue(controller.process(seated=False))
+        teleport.danger_teleport.assert_called_once_with(
+            reason="critical_hunt",
+            prefer_safe_key=False,
         )
-        self.assertTrue(gameplay._process_critical_danger())
-        teleport.danger_teleport.assert_called_once_with(reason="critical_hunt")
+        self.assertFalse(ctx.danger_escape_active.is_set())
 
+    def test_failed_escape_does_not_leave_gate_held(self) -> None:
+        """A failed teleport is retryable but cannot strand the input gate."""
+        ctx = self._context()
+        vitals = PlayerVitals()
+        detector = DangerDetector(ctx, vitals=vitals)
+        teleport = MagicMock()
+        teleport.danger_teleport.return_value = False
+        controller = DangerController(ctx, detector, teleport, MagicMock())
 
-if __name__ == "__main__":
-    unittest.main()
+        vitals.publish_hp(100, 100)
+        detector._poll_hp()
+        vitals.publish_hp(70, 100)
+        detector._poll_hp()
+
+        self.assertFalse(controller.process(seated=False))
+        self.assertFalse(ctx.danger_escape_active.is_set())
+        teleport.danger_teleport.assert_called_once()

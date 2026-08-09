@@ -176,7 +176,11 @@ def _build_context(
         control=control,
         overlay=NullOverlay() if overlay is None else overlay,
     )
-    ctx.danger_detector = DangerDetector(ctx, vitals=player_vitals)
+    ctx.danger_detector = DangerDetector(
+        vitals=player_vitals,
+        stop_event=ctx.stop_event,
+        wake_event=ctx.danger_wake,
+    )
     return ctx
 
 
@@ -303,7 +307,9 @@ def _build_conditional_workers(
             raise RuntimeError("Sit-on-low-SP requires a shared DangerDetector")
         sit_worker = SitOnLowSpWorker(
             ctx, input_backend, tport,
-            danger=danger, vitals=player_vitals,
+            danger=danger,
+            vitals=player_vitals,
+            danger_controller=ctx.danger_controller,
         )
         actions["sit"] = sit_worker
     if ctx.config.open_storage_steps:
@@ -368,7 +374,20 @@ def create_runtime_deps(
         ctx.cancel_gameplay_input = input_backend.cancel_pending
 
         # Create TeleportController early — every teleport concern lives here.
-        tport = TeleportController(ctx, input_backend)
+        tport = TeleportController(
+            ctx,
+            input_backend,
+            vitals=player_vitals,
+        )
+        if ctx.danger_detector is None:
+            raise RuntimeError("danger detector was not wired into the context")
+        from pybot.runtime.danger_detector import DangerController
+        ctx.danger_controller = DangerController(
+            ctx,
+            ctx.danger_detector,
+            tport,
+            input_backend,
+        )
         _validate_teleport_mode(config, tport)
 
         hunt_mode = create_hunt_mode(ctx, input_backend, teleport_controller=tport)
@@ -558,6 +577,9 @@ class HuntRuntime:
         self._ctx.stop_event.set()
         self._ctx.discovery_wake.set()
         self._ctx.resume_gate.set()
+        attack_wake = getattr(self._ctx, "attack_wake", None)
+        if attack_wake is not None:
+            attack_wake.set()
 
     def pause(self) -> None:
         # Focus loss must interrupt an in-flight VIIPER macro just like Stop.

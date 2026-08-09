@@ -218,6 +218,7 @@ def read_status_panel_snapshot(
     client_hint: tuple[int, int, int, int] | None = None,
     refresh_client: bool = False,
     reanchor: bool = False,
+    allow_partial: bool = True,
 ) -> StatusPanelReadResult:
     """Capture and parse one panel snapshot without touching Tk.
 
@@ -238,7 +239,11 @@ def read_status_panel_snapshot(
     # teleport/loading transition. A cached rectangle is safe because the
     # panel origin is verified against the captured pixels before publishing.
     client = client_hint
-    if client is None or refresh_client:
+    # The client/status-panel layout is session-static. Once a confirmed
+    # anchor exists, never switch the live reader back to a full-client header
+    # search because of a transient teleport frame; keep sampling the same
+    # value band and let the next frame publish fresh SP.
+    if client is None:
         _set_native_phase(
             "geometry",
             "refresh=1" if refresh_client else "refresh=0",
@@ -259,7 +264,7 @@ def read_status_panel_snapshot(
             return StatusPanelReadResult(hwnd=hwnd, state="client_missing")
 
     left, top, width, height = client
-    if confirmed is not None and not reanchor:
+    if confirmed is not None:
         ox, oy = confirmed.panel_origin
         panel_in_client = (
             ox >= 0
@@ -317,8 +322,18 @@ def read_status_panel_snapshot(
                     values=replace(values, panel_origin=(ox, oy)),
                     full_refresh=refresh_max,
                 )
-            # Keep HP/SP independent even when one fixed row is
-            # temporarily unreadable. This is the recovery-critical path.
+            if not allow_partial:
+                return StatusPanelReadResult(
+                    hwnd=hwnd,
+                    state="roi_missing",
+                    client_left=left,
+                    client_top=top,
+                    client_width=width,
+                    client_height=height,
+                )
+            # Compatibility path for callers that explicitly allow partial
+            # reads. The live producer disables this: it must be one simple
+            # full-value parse -> storage write, never a fallback cascade.
             _set_native_phase("parse.fixed_hp_sp_fallback")
             hp = read_status_panel_hp(
                 panel_frame,
@@ -392,6 +407,15 @@ def read_status_panel_snapshot(
     _set_native_phase("parse.full_values", f"origin={origin[0]},{origin[1]}")
     values = read_status_panel(frame, origin=origin, deadline=deadline)
     if values is None:
+        if not allow_partial:
+            return StatusPanelReadResult(
+                hwnd=hwnd,
+                state="panel_open_digits_missing",
+                client_left=left,
+                client_top=top,
+                client_width=width,
+                client_height=height,
+            )
         _set_native_phase("parse.full_hp_sp_fallback")
         hp = read_status_panel_hp(
             frame,

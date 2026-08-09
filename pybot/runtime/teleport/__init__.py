@@ -28,7 +28,9 @@ from pybot.runtime.constants import (
 )
 from pybot.runtime.detection.discovery_filter import filter_scan_candidates
 from pybot.runtime.event_utils import event_is_set
+from pybot.runtime.danger_detector import DangerLevel
 from pybot.runtime.input.input_backend import InputBackend
+from pybot.game_state import PlayerVitals
 
 
 class TeleportController:
@@ -39,10 +41,13 @@ class TeleportController:
         ctx,
         input_backend: InputBackend,
         hunt_mode=None,
+        *,
+        vitals: PlayerVitals | None = None,
     ) -> None:
         self._ctx = ctx
         self._input = input_backend
         self._hunt_mode = hunt_mode
+        self._vitals = vitals
 
     def bind_hunt_mode(self, hunt_mode) -> None:
         """Wire the hunt-mode area-reset notification after both exist.
@@ -111,16 +116,42 @@ class TeleportController:
             return False
         teleport_started = time.monotonic()
         try:
-            self._input.teleport_key(tp)
+            accepted = self._input.teleport_key(tp)
         except Exception as exc:
             self._ctx.logger.behavior(f"[TP] input error: {exc}")
             return False
+        if accepted is False:
+            self._ctx.logger.behavior(
+                f"[TP] key rejected scan={tp} — transition not started"
+            )
+            return False
+        # The key was accepted: invalidate every sample captured before this
+        # screen transition before the asynchronous OCR/memory producers can
+        # publish it. Producers remain alive; they only publish under the new
+        # epoch when their read began after this boundary.
+        transition_epoch = None
+        if self._vitals is not None:
+            begin_epoch = getattr(self._vitals, "begin_observation_epoch", None)
+            if callable(begin_epoch):
+                # Keep one quarantine token for the complete key→landing
+                # transition. Readers captured before the key, during settle,
+                # and before this completion all fail the same token check.
+                transition_epoch = begin_epoch()
         # Only decrement the fly-wing counter when the wing key was used.
         if tp == cfg.teleport_scan_code and cfg.teleport_scan_code > 0:
             self._ctx.note_teleport_for_wings()
         self._ctx.overlay.increment_teleports()
         settled = self._wait_for_settle(cfg.teleport_duration_ms / 1000.0)
         if settled:
+            # Open the same epoch only after the configured landing settle.
+            # Reads remain permanently alive during settle, but only samples
+            # captured after this boundary may become actionable.
+            if self._vitals is not None:
+                complete_epoch = getattr(
+                    self._vitals, "complete_observation_epoch", None
+                )
+                if callable(complete_epoch):
+                    complete_epoch(transition_epoch)
             # Every successful teleport starts a new area. Clear only damage
             # observed before this teleport. Damage recorded during settle
             # remains a fresh danger signal.
@@ -285,10 +316,7 @@ class TeleportController:
         while not self._ctx.is_stopped():
             if self._escape_in_flight():
                 return False
-            if (
-                self._danger_request_is_set() is True
-                or self._critical_request_is_set() is True
-            ):
+            if self._danger_is_active():
                 return False
             living = self._scan_living_count()
             if living is None:
@@ -307,23 +335,16 @@ class TeleportController:
             # Danger has priority even if it arrives after the scan but before
             # the storage clear teleport. Never issue a competing teleport
             # once the urgent request is visible.
-            if (
-                self._escape_in_flight()
-                or self._danger_request_is_set() is True
-                or self._critical_request_is_set() is True
-            ):
+            if self._escape_in_flight() or self._danger_is_active():
                 return False
             if not self.teleport_once():
                 return False
         return False
 
-    def _critical_request_is_set(self) -> bool | None:
-        """Return the pending critical-danger event state."""
-        return event_is_set(self._ctx.critical_danger_requested)
-
-    def _danger_request_is_set(self) -> bool | None:
-        """Return the pending seated-danger event state."""
-        return event_is_set(self._ctx.danger_sit_requested)
+    def _danger_is_active(self) -> bool:
+        """Read current observer facts without consulting request gates."""
+        danger = getattr(self._ctx, "danger_detector", None)
+        return danger is not None and danger.danger_level() is not DangerLevel.SAFE
 
     def teleport_until_quiet(
         self,
@@ -334,10 +355,7 @@ class TeleportController:
         while not self._ctx.is_stopped():
             if self._escape_in_flight():
                 return False
-            if (
-                self._danger_request_is_set() is True
-                or self._critical_request_is_set() is True
-            ):
+            if self._danger_is_active():
                 return False
             if not self.teleport_until_clear(log_tag=log_tag):
                 return False
@@ -349,10 +367,10 @@ class TeleportController:
             while True:
                 if self._escape_in_flight():
                     return False
-                if (
-                    self._danger_request_is_set() is True
-                    or self._critical_request_is_set() is True
-                ):
+                # The detector is fact-only; never consult removed request
+                # events while waiting in a quiet area. The gameplay owner
+                # will perform the escape on the next deterministic tick.
+                if self._danger_is_active():
                     return False
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -365,10 +383,7 @@ class TeleportController:
 
             if self._escape_in_flight():
                 return False
-            if (
-                self._danger_request_is_set() is True
-                or self._critical_request_is_set() is True
-            ):
+            if self._danger_is_active():
                 return False
             living = self._scan_living_count()
             if living is None:
@@ -413,6 +428,11 @@ class TeleportController:
             # reset stays in this same transaction.
             if not ctx.tracks.try_claim_clear_for_teleport():
                 return False
+            # The clear claim invalidates all old targets even if the key press
+            # or settle later fails. Do not leave an old-area wake pending.
+            attack_wake = getattr(ctx, "attack_wake", None)
+            if attack_wake is not None:
+                attack_wake.clear()
 
             ctx.policy.reset()
             ctx.validation.log_area_reset("pre_teleport")

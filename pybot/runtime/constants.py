@@ -32,8 +32,15 @@ SIT_RESUME_SP_RATIO = 0.98
 SIT_SP_POLL_INTERVAL_S = 0.25
 # While seated, if the SP feed stays unreadable (OCR layout lost / panel gone /
 # stalled native read) this long, recovery relocates: a character parked on an
-# unreachable feed can neither finish regen nor react to damage.
+# unreachable feed can neither finish regen nor react to damage. The same
+# window doubles as the regen watchdog: a *readable* SP value that never
+# changes for this long while seated means regen is blocked (re-sit toggle
+# eaten during a landing, weight penalty, ...), so recovery relocates and
+# re-asserts the seated pose in a fresh area.
 SIT_SP_FEED_BLIND_RELOCATE_S = 15.0
+# While seated, log regen progress at this cadence so a long recovery is
+# visibly regenerating instead of looking frozen.
+SIT_SP_PROGRESS_LOG_S = 5.0
 # Spot failures (frozen SP or blind feed) per recovery session before the
 # session ends and the runtime loop takes over again. Each failure already
 # teleports to a fresh area, so this only bounds pathological repeat teleports.
@@ -48,12 +55,15 @@ SIT_KEY_SETTLE_S = 0.35
 # Extra margin after a sit-placement / danger-escape teleport before the sit
 # toggle. The client's landing transition can eat or invert a key sent too
 # early, leaving the character standing while the bot believes it is seated.
-SIT_POST_TELEPORT_SETTLE_S = 0.8
+# 1.2s: the recorded danger-escape re-sit fired ~0.8s after landing and was
+# still inside the client's landing window on the private-server clients.
+SIT_POST_TELEPORT_SETTLE_S = 1.2
 # Press HP Item Key when vision HP/max is below this.
 HP_RESTORE_RATIO = 0.5
 # Vision HP poll / min gap between HP Item Key presses.
 HP_RESTORE_POLL_S = 1.0
-HP_RESTORE_COOLDOWN_S = 1.0
+# Minimum gap between successful custom skill-heal casts.
+HP_RESTORE_COOLDOWN_S = 1.5
 # No HP drop for this long before custom self-heal may run.
 HP_HEAL_DAMAGE_QUIET_S = 1.0
 # Critical danger must escape at the detector's cadence, not the sit poll.
@@ -124,6 +134,7 @@ __all__ = [
     "SIT_RESUME_SP_RATIO",
     "SIT_SP_POLL_INTERVAL_S",
     "SIT_SP_FEED_BLIND_RELOCATE_S",
+    "SIT_SP_PROGRESS_LOG_S",
     "SIT_MAX_SPOT_RELOCATIONS",
     "SIT_IDLE_BEFORE_SIT_S",
     "SIT_STAND_RESUME_DELAY_S",

@@ -11,7 +11,6 @@ if TYPE_CHECKING:
 from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import (
     ATTACK_IDLE_SPIN_S,
-    CRITICAL_PREEMPT_RELEASE_TIMEOUT_S,
     IDLE_DEAD_ATTACK_COUNT,
     IDLE_UNREACHABLE_ATTACK_COUNT,
     HEAL_VERIFY_DELAY_MS,
@@ -66,6 +65,8 @@ class AttackLoop:
     def process_pending(self) -> bool:
         """Advance one deterministic combat decision/action step.
 
+        The producer-side ``attack_wake`` is only a low-latency hint; the
+        shared track store remains authoritative and is sampled every step.
         This method deliberately performs no independent scheduling. The
         gameplay owner calls it after higher-priority danger/session steps.
         """
@@ -137,7 +138,15 @@ class AttackLoop:
             if transitioned is True:
                 self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
                 return False
-            self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
+            # A newly committed track publishes attack_wake. Wait on that
+            # producer signal instead of making attack discovery-bound or
+            # burning a fixed polling delay before the first target is seen.
+            attack_wake = getattr(self._ctx, "attack_wake", None)
+            if attack_wake is not None and callable(getattr(attack_wake, "wait", None)):
+                attack_wake.wait(ATTACK_IDLE_SPIN_S)
+                attack_wake.clear()
+            else:
+                self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
             return False
         except Exception:
             self._ctx.logger.behavior(
@@ -219,8 +228,9 @@ class AttackLoop:
         retry = getattr(teleport, "retry_post_teleport_heal", None)
         if not callable(retry):
             return False
-        critical = getattr(self._ctx, "critical_danger_requested", None)
-        if event_is_set(critical) is True:
+        danger = getattr(self._ctx, "danger_detector", None)
+        level = danger.danger_level() if danger is not None else None
+        if isinstance(level, DangerLevel) and level is not DangerLevel.SAFE:
             return False
         # This is intentionally immediate. A blocked skill heal means the
         # current area/session cannot accept the cast; waiting here only
@@ -363,19 +373,19 @@ class AttackLoop:
         return int(pos[0]), int(pos[1])
 
     def _wait_for_gameplay_delay(self, timeout_s: float) -> None:
-        """Wait a gameplay delay without hiding an urgent critical request."""
-        critical = getattr(self._ctx, "critical_danger_requested", None)
-        # Lightweight/mock contexts have no real critical event; their legacy
-        # behavior is a single blocking wait.
-        if event_is_set(critical) is None:
-            self._ctx.stop_event.wait(timeout_s)
-            return
+        """Wait without hiding the new danger observer wake."""
+        danger_wake = getattr(self._ctx, "danger_wake", None)
         deadline = monotonic_ms() + int(timeout_s * 1000)
-        while not self._ctx.is_stopped() and not critical.is_set():
+        while not self._ctx.is_stopped():
             remaining_ms = deadline - monotonic_ms()
             if remaining_ms <= 0:
                 return
-            if self._ctx.stop_event.wait(min(0.05, remaining_ms / 1000.0)):
+            if danger_wake is not None and danger_wake.wait(
+                min(0.05, remaining_ms / 1000.0)
+            ):
+                danger_wake.clear()
+                return
+            if self._ctx.stop_event.is_set():
                 return
 
     def _log_unknown_observation(
@@ -752,7 +762,8 @@ class GameplayLoop:
     def run(self) -> None:
         self._ctx.logger.behavior("[GAMEPLAY] loop started")
         # All character input, including urgent danger escape, is sequenced
-        # here. HP observation only publishes the request; it never owns input.
+        # here. HP observation only publishes facts; this owner performs the
+        # complete danger transaction.
         while not self._ctx.is_stopped():
             try:
                 if self._process_critical_danger():
@@ -772,11 +783,11 @@ class GameplayLoop:
                 # retryable and never resets a timer merely because it expired.
                 if self._buffs is not None:
                     self._buffs.process_pending(startup_only=True)
-                if self._ctx.critical_danger_requested.is_set():
+                if self._danger_is_active():
                     continue
                 if self._timers is not None:
                     self._timers.process_pending(startup_only=True)
-                if self._ctx.critical_danger_requested.is_set():
+                if self._danger_is_active():
                     continue
                 # Do not let the periodic scheduler observe generation-due
                 # actions until startup has completed. Startup callbacks already
@@ -831,6 +842,9 @@ class GameplayLoop:
                     self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
                     continue
                 self._attack.process_pending()
+                danger_wake = getattr(self._ctx, "danger_wake", None)
+                if danger_wake is not None and danger_wake.is_set():
+                    danger_wake.clear()
             except Exception:
                 # The gameplay owner is the runtime's last safety boundary.
                 # One malformed action must be logged and retried, not kill
@@ -840,81 +854,19 @@ class GameplayLoop:
                 )
                 self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
 
+    def _danger_is_active(self) -> bool:
+        """Read the pure observer fact; no request event is consulted."""
+        detector = getattr(self._ctx, "danger_detector", None)
+        level = detector.danger_level() if detector is not None else None
+        return isinstance(level, DangerLevel) and level is not DangerLevel.SAFE
+
     def _process_critical_danger(self) -> bool:
-        """Consume one urgent HP-danger signal on this gameplay owner.
+        """Run one clean danger transaction on the gameplay owner."""
+        controller = getattr(self._ctx, "danger_controller", None)
+        if controller is not None:
+            return bool(controller.process(seated=False))
 
-        The HP observer only sets the request and cancels an in-flight input
-        operation. This method is the sole path that turns the request into a
-        teleport, so no second gameplay controller can compete for input.
-        """
-        ctx = self._ctx
-        teleport = self._teleport
-        if teleport is None or ctx.is_stopped() or ctx.pause_event.is_set():
-            return False
-        if not ctx.critical_danger_requested.is_set():
-            return False
-
-        # SP recovery owns seated danger; its synchronous recovery path handles
-        # the escape without allowing this hunting path to tear down the sit
-        # lifecycle mid-regen.
-        if (
-            ctx.sitting_event.is_set()
-            and not ctx.critical_danger_escape_active.is_set()
-        ):
-            return False
-
-        # Damage can age out before this loop consumes the request. Never
-        # teleport for a stale critical signal.
-        if ctx.danger_detector.danger_level() is not DangerLevel.CRITICAL:
-            ctx.pop_critical_danger()
-            ctx.pop_danger_sit_request()
-            return True
-
-        if not ctx.try_begin_critical_escape_ops(override=True):
-            return False
-        try:
-            if not ctx.wait_for_preempted_session_release(
-                CRITICAL_PREEMPT_RELEASE_TIMEOUT_S
-            ):
-                # Never press the teleport key through a storage/heal owner
-                # that did not release in time. Keep the urgent request
-                # pending; the next gameplay tick retries after the owner has
-                # unwound. The finally below releases the temporary escape
-                # claim so this failure cannot stall the runtime forever.
-                ctx.request_critical_danger()
-                return False
-            prefer_safe_key = bool(ctx.preempted_sessions()[0])
-            if ctx.pause_event.is_set():
-                return False
-            if not ctx.pop_critical_danger():
-                return False
-            ctx.pop_danger_sit_request()
-            if ctx.pause_event.is_set():
-                ctx.request_critical_danger()
-                return False
-
-            # The observer may have canceled the previous input operation. It
-            # has unwound before this tick, so re-arm the backend before the
-            # emergency teleport key is emitted.
-            begin = getattr(self._input_backend, "begin_session", None)
-            if callable(begin) and begin() is False:
-                ctx.request_critical_danger()
-                return False
-
-            try:
-                escape_kwargs = {"reason": "critical_hunt"}
-                if prefer_safe_key:
-                    escape_kwargs["prefer_safe_key"] = True
-                escaped = bool(teleport.danger_teleport(**escape_kwargs))
-            except Exception as exc:
-                ctx.logger.behavior(
-                    f"[DANGER] critical hunting teleport failed: {exc}"
-                )
-                escaped = False
-            if escaped:
-                ctx.logger.behavior("[DANGER] critical hunting escape succeeded")
-                return True
-            ctx.request_critical_danger()
-            return False
-        finally:
-            ctx.end_critical_escape_ops()
+        # The production composition always installs DangerController. There
+        # is intentionally no request-event fallback: partial contexts must not
+        # resurrect the removed danger choreography.
+        return False

@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pybot.runtime.capture.hunt_capture import HuntWindowCapture
 from pybot.config.runtime import HuntRuntimeConfig
 from pybot.runtime.control import RuntimeControl
-from pybot.runtime.danger_detector import DangerDetector
+from pybot.runtime.danger_detector import DangerController, DangerDetector
 from pybot.runtime.gate_controller import GateController
 from pybot.runtime.hunt_policy import HuntPolicy
 from pybot.runtime.hunt_tracks import HuntTracks
@@ -71,6 +71,7 @@ class HuntRuntimeContext:
     # Assembled by the context factory so the gates and the detector always
     # observe the same session state.
     danger_detector: DangerDetector | None = field(default=None, repr=False)
+    danger_controller: DangerController | None = field(default=None, repr=False)
     # Set by the composition root. Observation may cancel an in-flight input
     # operation, but this callback never performs gameplay input itself.
     cancel_gameplay_input: Callable[[], None] | None = field(
@@ -109,12 +110,30 @@ class HuntRuntimeContext:
         self.gates.resume_gate = event
 
     @property
+    def danger_wake(self) -> threading.Event:
+        """Wake GameplayLoop so it can re-read danger facts immediately."""
+        return self.gates.danger_wake
+
+    @danger_wake.setter
+    def danger_wake(self, event: threading.Event) -> None:
+        self.gates.danger_wake = event
+
+    @property
     def discovery_wake(self) -> threading.Event:
         return self.gates.discovery_wake
 
     @discovery_wake.setter
     def discovery_wake(self, event: threading.Event) -> None:
         self.gates.discovery_wake = event
+
+    @property
+    def attack_wake(self) -> threading.Event:
+        """Wake gameplay when tracking publishes a newly live target."""
+        return self.gates.attack_wake
+
+    @attack_wake.setter
+    def attack_wake(self, event: threading.Event) -> None:
+        self.gates.attack_wake = event
 
     @property
     def discovery_suspend(self) -> threading.Event:
@@ -149,29 +168,14 @@ class HuntRuntimeContext:
         self.gates.healing_event = event
 
     @property
-    def danger_sit_requested(self) -> threading.Event:
-        """Pending seated-damage request raised by DangerDetector."""
-        return self.gates.danger_sit_requested
-
-    @property
     def character_action_gate(self) -> object:
         """Shared stagger + buff priority between buff casts and timer presses."""
         return self.gates.character_action_gate
 
     @property
-    def critical_danger_requested(self) -> threading.Event:
-        """Pending critical hunting escape request."""
-        return self.gates.critical_danger_requested
-
-    @property
     def danger_escape_active(self) -> threading.Event:
         """True while any urgent danger escape owns the transition."""
         return self.gates.danger_escape_active
-
-    @property
-    def critical_danger_escape_active(self) -> threading.Event:
-        """True only while the critical hunting escape owns the transition."""
-        return self.gates.critical_danger_escape_active
 
     @property
     def area_transition_lock(self):
@@ -359,8 +363,6 @@ class HuntRuntimeContext:
             or self.storage_event.is_set()
             or self.healing_event.is_set()
             or self.discovery_suspend.is_set()
-            or self.gates.danger_sit_requested.is_set()
-            or self.gates.critical_danger_requested.is_set()
         ):
             return False
         danger = self.danger_detector
@@ -371,50 +373,14 @@ class HuntRuntimeContext:
     def should_allow_danger_teleport(self) -> bool:
         return self.gates.should_allow_danger_teleport()
 
-    def request_danger_sit(self) -> bool:
-        """Request the sit worker to handle damage danger when a sit key exists.
+    def begin_danger_transition(self, *, allow_sitting: bool = False) -> bool:
+        return self.gates.begin_danger_transition(allow_sitting=allow_sitting)
 
-        A missing sit key must not leave ``danger_sit_requested`` set forever,
-        because that would permanently block combat without a worker able to
-        consume the request.
-        """
-        try:
-            sit_scan = int(getattr(self.config, "sit_on_low_sp_scan_code", 0))
-        except (TypeError, ValueError):
-            sit_scan = 0
-        if sit_scan <= 0:
-            return False
-        self.gates.request_danger_sit()
-        return True
+    def end_danger_transition(self) -> None:
+        self.gates.end_danger_transition()
 
-    def pop_danger_sit_request(self) -> bool:
-        return self.gates.pop_danger_sit_request()
-
-    def request_critical_danger(self) -> None:
-        self.gates.request_critical_danger()
-
-    def pop_critical_danger(self) -> bool:
-        return self.gates.pop_critical_danger()
-
-    def begin_danger_escape(self) -> bool:
-        return self.gates.begin_danger_escape()
-
-    def try_begin_critical_escape_ops(self, *, override: bool = False) -> bool:
-        return self.gates.try_begin_critical_escape_ops(override=override)
-
-    def wait_for_preempted_session_release(self, timeout_s: float) -> bool:
-        """Block until sessions the escape preempted release their gates."""
-        return self.gates.wait_for_preempted_session_release(timeout_s)
-
-    def preempted_sessions(self) -> tuple[bool, bool, bool]:
-        """Sessions (sit, storage, heal) the current escape overrode."""
-        return self.gates.preempted_sessions()
-
-    def end_danger_escape(self) -> None:
-        self.gates.end_danger_escape()
-
-    def end_critical_escape_ops(self) -> None:
-        self.gates.end_critical_escape_ops()
+    def finish_danger_transition(self, *, seated: bool) -> None:
+        self.gates.finish_danger_transition(seated=seated)
 
     def should_run_discovery(self) -> bool:
         return self.gates.should_run_discovery()
@@ -527,6 +493,10 @@ class HuntRuntimeContext:
         # transition is one coherent lifecycle boundary.
         with self.gates.area_transition_lock:
             self.tracks.area_reset()
+            # A track-created wake belongs to the old area. Clear it together
+            # with the track store so the next hunt cannot spin on a stale
+            # producer signal before discovery confirms the new screen.
+            self.attack_wake.clear()
             # Local tracker patches are screen-local. Retaining them after a
             # teleport makes every new track ID live beside old image patches
             # and gradually increases work/memory across long sessions.

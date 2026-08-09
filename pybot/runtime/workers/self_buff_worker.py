@@ -207,9 +207,12 @@ class SelfBuffWorker:
         return self._current_generation() == expected_generation
 
     def _critical_pending(self) -> bool:
-        """Return whether urgent danger should abort this owned action step."""
-        event = getattr(self._ctx, "critical_danger_requested", None)
-        return bool(event is not None and event.is_set())
+        """Return whether the pure danger observer requires preemption."""
+        danger = getattr(self._ctx, "danger_detector", None)
+        if danger is None:
+            return False
+        from pybot.runtime.danger_detector import DangerLevel
+        return danger.danger_level() is DangerLevel.CRITICAL
 
     def _startup_action_allowed(self) -> bool:
         checker = getattr(self._ctx, "should_run_startup_actions", None)

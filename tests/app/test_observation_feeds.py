@@ -6,6 +6,8 @@ import threading
 import time
 import unittest
 from types import SimpleNamespace
+
+from pybot.game_state import PlayerVitals
 from unittest.mock import MagicMock, patch
 
 from pybot.app.memory_stats_feed import MEMORY_POLL_MS, MemoryStatsFeed
@@ -113,6 +115,25 @@ class MemoryStatsFeedTests(unittest.TestCase):
         self.assertEqual(feed._vitals.sp, (80, 100))
         self.assertEqual(feed._vitals.weight, (40, 50))
 
+    def test_inflight_memory_result_from_before_teleport_cannot_publish(self) -> None:
+        """A completed pre-TP memory read cannot restore stale SP."""
+        vitals = PlayerVitals()
+        feed = _memory_feed()
+        feed._vitals = vitals
+        old_epoch = vitals.observation_epoch
+        vitals.begin_observation_epoch()
+        snap = SimpleNamespace(
+            ok=True,
+            char_name="Hero",
+            sp=574,
+            sp_max=1454,
+            weight=40,
+            weight_max=50,
+        )
+        feed.apply_result((123, snap, old_epoch))
+        self.assertIsNone(vitals.sp)
+        self.assertEqual(feed._on_sp.calls, [])
+
     def test_ignores_result_for_another_window(self) -> None:
         feed = _memory_feed()
         snap = SimpleNamespace(ok=True, char_name="Hero", sp=1, sp_max=2,
@@ -208,10 +229,9 @@ class StatusPanelFeedTests(unittest.TestCase):
             feed.close()
             self.assertTrue(self._wait_until(lambda: feed.idle))
 
-    def test_reset_discards_queued_projection_from_previous_epoch(self) -> None:
+    def test_consumer_controls_do_not_reconfigure_producer(self) -> None:
+        """Reset/wake/active calls cannot alter the OCR producer state."""
         feed = _status_feed()
-        callbacks: list = []
-        feed._post_to_tk = callbacks.append
         values = SimpleNamespace(
             panel_origin=(1, 2),
             hp=90, hp_max=100, sp=70, sp_max=50,
@@ -222,12 +242,174 @@ class StatusPanelFeedTests(unittest.TestCase):
             client_left=10, client_top=20, full_refresh=True,
         )
         feed._record_reader_result(result, feed._lifecycle_epoch)
-        feed._queue_ui_result(feed._lifecycle_epoch, result)
-        self.assertEqual(len(callbacks), 1)
+        confirmed = feed._status_panel_confirmed
         feed.reset()
-        callbacks.pop()()
-        self.assertEqual(feed._on_hp.calls, [])
-        self.assertEqual(feed._status_panel_overlay.update.call_count, 0)
+        feed.request_now()
+        feed.set_active(False)
+        feed.set_active(True)
+        self.assertIs(feed._status_panel_confirmed, confirmed)
+        self.assertEqual(feed._vitals.sp, (70, 50))
+
+    def test_failed_frames_retain_last_published_values(self) -> None:
+        """Misses do not clear storage or trigger fallback/re-anchor state."""
+        feed = _status_feed()
+        values = SimpleNamespace(
+            panel_origin=(1, 2),
+            hp=90, hp_max=100, sp=70, sp_max=100,
+            weight=30, weight_max=50,
+        )
+        good = SimpleNamespace(hwnd=123, state="values", values=values)
+        feed._record_reader_result(good, feed._lifecycle_epoch)
+        for state in ("panel_missing", "read_timeout", "roi_missing"):
+            feed._record_reader_result(
+                SimpleNamespace(hwnd=123, state=state), feed._lifecycle_epoch
+            )
+        self.assertEqual(feed._vitals.sp, (70, 100))
+        self.assertEqual(feed._vitals.clear_count, 0)
+
+    def test_live_read_does_not_enter_bounded_helper_thread(self) -> None:
+        """The permanent reader must call the parser directly.
+
+        The feed already owns one long-lived reader thread. Routing every poll
+        through the compatibility bounded helper added a second daemon thread
+        and a process-wide single-flight gate; after teleport that gate could
+        keep returning read_timeout instead of reaching the fixed ROI parser.
+        """
+        feed = _status_feed()
+        direct = SimpleNamespace(hwnd=123, state="values", values=None)
+        with patch(
+            "pybot.app.status_panel_feed.read_status_panel_snapshot",
+            return_value=direct,
+        ) as reader:
+            result = feed._read_snapshot()
+        reader.assert_called_once_with(
+            123,
+            None,
+            refresh_max=True,
+            timeout_s=6.0,
+            client_hint=None,
+            refresh_client=False,
+            reanchor=False,
+            allow_partial=False,
+        )
+        self.assertIs(result, direct)
+        # The producer has no consumer-driven search flags to consume.
+        self.assertIsNone(getattr(feed, "_status_panel_reanchor", None))
+        self.assertIsNone(getattr(feed, "_status_panel_geometry_refresh", None))
+
+    def test_inflight_reader_result_from_before_teleport_cannot_publish(self) -> None:
+        """A completed pre-TP OCR frame cannot restore stale SP after reset."""
+        vitals = PlayerVitals()
+        feed = _status_feed()
+        feed._vitals = vitals
+        values = SimpleNamespace(
+            panel_origin=(4, 5),
+            hp=90, hp_max=100, sp=574, sp_max=1454,
+            weight=20, weight_max=100,
+        )
+        result = SimpleNamespace(
+            hwnd=123, state="values", values=values,
+            client_left=10, client_top=20,
+            client_width=300, client_height=200,
+            full_refresh=True,
+        )
+        old_epoch = vitals.observation_epoch
+        vitals.begin_observation_epoch()
+        feed._record_reader_result(
+            result,
+            feed._lifecycle_epoch,
+            observation_epoch=old_epoch,
+        )
+        self.assertIsNone(vitals.sp)
+
+    def test_rejected_transition_frame_does_not_become_next_ocr_anchor(self) -> None:
+        """Quarantined OCR frames cannot seed the post-teleport anchor."""
+        vitals = PlayerVitals()
+        feed = _status_feed()
+        feed._vitals = vitals
+        epoch = vitals.begin_observation_epoch()
+        feed._last_observation_epoch = epoch
+        transition_values = SimpleNamespace(
+            panel_origin=(4, 5),
+            hp=90, hp_max=100, sp=574, sp_max=1454,
+            weight=20, weight_max=100,
+        )
+        result = SimpleNamespace(
+            hwnd=123, state="values", values=transition_values,
+            client_left=10, client_top=20,
+            client_width=300, client_height=200,
+            full_refresh=True,
+        )
+        feed._record_reader_result(
+            result,
+            feed._lifecycle_epoch,
+            observation_epoch=epoch,
+        )
+        self.assertIsNone(vitals.sp)
+        self.assertIsNone(feed._status_panel_confirmed)
+        self.assertIsNone(feed._status_panel_client_hint)
+
+        self.assertTrue(vitals.complete_observation_epoch(epoch))
+        fresh_values = SimpleNamespace(
+            panel_origin=(8, 9),
+            hp=90, hp_max=100, sp=350, sp_max=1454,
+            weight=20, weight_max=100,
+        )
+        feed._record_reader_result(
+            SimpleNamespace(
+                hwnd=123, state="values", values=fresh_values,
+                client_left=10, client_top=20,
+                client_width=300, client_height=200,
+                full_refresh=True,
+            ),
+            feed._lifecycle_epoch,
+            observation_epoch=epoch,
+        )
+        self.assertEqual(vitals.sp_pair(), (350, 1454))
+        self.assertIs(feed._status_panel_confirmed, fresh_values)
+
+    def test_live_reader_publishes_fresh_sp_after_teleport_misses(self) -> None:
+        """SP publication resumes after the sit/danger-TP/sit gap.
+
+        The game panel is static; transient teleport frames may fail, but they
+        must not terminate the producer or make the next fresh SP invisible to
+        PlayerVitals.
+        """
+        feed = _status_feed()
+        values = SimpleNamespace(
+            panel_origin=(4, 5),
+            hp=90, hp_max=100, sp=12, sp_max=100,
+            weight=20, weight_max=100,
+        )
+        results = iter(
+            [
+                SimpleNamespace(
+                    hwnd=123, state="values", values=values,
+                    client_left=10, client_top=20,
+                    client_width=300, client_height=200,
+                    full_refresh=True,
+                ),
+                SimpleNamespace(hwnd=123, state="panel_missing"),
+                SimpleNamespace(hwnd=123, state="read_timeout"),
+                SimpleNamespace(hwnd=123, state="sp_only", values=None, sp=(42, 100)),
+                SimpleNamespace(
+                    hwnd=123, state="values", values=SimpleNamespace(
+                        panel_origin=(4, 5),
+                        hp=90, hp_max=100, sp=77, sp_max=100,
+                        weight=20, weight_max=100,
+                    ),
+                    client_left=10, client_top=20,
+                    client_width=300, client_height=200,
+                    full_refresh=False,
+                ),
+            ]
+        )
+        with patch.object(feed, "_read_snapshot", side_effect=results):
+            for _ in range(5):
+                result = feed._read_snapshot()
+                feed._record_reader_result(result, feed._lifecycle_epoch)
+        self.assertEqual(feed._vitals.sp, (77, 100))
+        self.assertEqual(feed._vitals.clear_count, 0)
 
     @staticmethod
     def _wait_until(predicate, timeout: float = 1.0) -> bool:

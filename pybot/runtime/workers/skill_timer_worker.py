@@ -204,9 +204,12 @@ class SkillTimerWorker:
             self._last_press_ms[timer.scan_code] = -timer.interval_ms
 
     def _critical_pending(self) -> bool:
-        """Return whether urgent danger should abort this owned action step."""
-        event = getattr(self._ctx, "critical_danger_requested", None)
-        return bool(event is not None and event.is_set())
+        """Return whether the pure danger observer requires preemption."""
+        danger = getattr(self._ctx, "danger_detector", None)
+        if danger is None:
+            return False
+        from pybot.runtime.danger_detector import DangerLevel
+        return danger.danger_level() is DangerLevel.CRITICAL
 
     def _wait_stagger_gap(self) -> bool:
         """Ensure the shared buff/timer keypress slot is open before a press.

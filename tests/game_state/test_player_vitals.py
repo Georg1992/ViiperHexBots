@@ -70,6 +70,29 @@ class PlayerVitalsTests(unittest.TestCase):
         self.assertGreater(chg4, chg1)
         self.assertEqual(chg4, obs4)
 
+    def test_pre_teleport_epoch_cannot_publish_after_reset(self) -> None:
+        vitals = PlayerVitals()
+        old_epoch = vitals.observation_epoch
+        vitals.publish_sp(574, 1454)
+
+        vitals.begin_observation_epoch()
+        self.assertIsNone(vitals.sp)
+        self.assertFalse(vitals.publish_sp_if_current(574, 1454, old_epoch))
+        self.assertIsNone(vitals.sp)
+
+        current_epoch = vitals.observation_epoch
+        # Teleport keeps the producer alive but quarantines transition-frame
+        # reads until the landing boundary is complete.
+        self.assertFalse(vitals.publish_snapshot_if_current(
+            90, 100, 350, 1454, 20, 100, current_epoch,
+        ))
+        self.assertTrue(vitals.complete_observation_epoch(current_epoch))
+        self.assertTrue(vitals.publish_snapshot_if_current(
+            90, 100, 350, 1454, 20, 100, current_epoch,
+        ))
+        self.assertEqual(vitals.sp_pair(), (350, 1454))
+        self.assertEqual(vitals.hp_pair(), (90, 100))
+
     def test_hp_and_weight_publish_do_not_bump_sp_clocks(self) -> None:
         import time
 

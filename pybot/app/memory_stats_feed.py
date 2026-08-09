@@ -86,18 +86,29 @@ class MemoryStatsFeed(PeriodicTaskRunner):
         if profile is None or not profile.memory.has_any:
             return None
 
+        observation_epoch = getattr(self._vitals, "observation_epoch", None)
+
         def _read() -> None:
             try:
                 snap = self._poller.read(hwnd, profile.memory)
             except Exception as exc:
                 self.fail(generation, exc)
                 return
-            self.publish(generation, (hwnd, snap))
+            self.publish(generation, (hwnd, snap, observation_epoch))
 
         return _read
 
     def apply_result(self, result) -> None:
-        hwnd, snap = result
+        if len(result) == 3:
+            hwnd, snap, observation_epoch = result
+        else:
+            # Legacy callers cannot prove when this sample was captured. Keep
+            # compatibility before the first teleport; after an epoch change,
+            # reject the ambiguous result rather than restoring stale SP.
+            if getattr(self._vitals, "observation_epoch", 0):
+                return
+            hwnd, snap = result
+            observation_epoch = None
         if (
             not self.active
             or hwnd != self._config.window_id
@@ -110,11 +121,24 @@ class MemoryStatsFeed(PeriodicTaskRunner):
             self._on_weight("—")
             self._vitals.clear_sp()
             return
+        publish_sp = getattr(self._vitals, "publish_sp_if_current", None)
+        publish_weight = getattr(self._vitals, "publish_weight_if_current", None)
+        if observation_epoch is not None and callable(publish_sp):
+            if not publish_sp(snap.sp, snap.sp_max, observation_epoch):
+                return
+        else:
+            self._vitals.publish_sp(snap.sp, snap.sp_max)
+        if observation_epoch is not None and callable(publish_weight):
+            if not publish_weight(snap.weight, snap.weight_max, observation_epoch):
+                return
+        else:
+            self._vitals.publish_weight(snap.weight, snap.weight_max)
+        # Project only after the epoch-guarded store accepts the result. A
+        # late pre-teleport memory completion must not repaint stale SP/weight
+        # in the UI even though workers correctly reject its vitals.
         self._on_name(snap.char_name or "—")
         self._on_sp(format_pair(snap.sp, snap.sp_max))
         self._on_weight(format_pair(snap.weight, snap.weight_max))
-        self._vitals.publish_sp(snap.sp, snap.sp_max)
-        self._vitals.publish_weight(snap.weight, snap.weight_max)
         # HP is vision-only — never overwrite from memory polls.
 
     def on_failure(self, exc: Exception, generation: int) -> None:

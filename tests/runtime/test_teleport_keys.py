@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock
 
+from pybot.game_state import PlayerVitals
 from pybot.runtime.teleport import TeleportController
 
 
@@ -93,6 +94,27 @@ class TeleportKeySelectionTests(unittest.TestCase):
         self.assertTrue(self.tport.teleport_once())
         self.input.teleport_key.assert_called_once_with(17)
         self.ctx.note_teleport_for_wings.assert_not_called()
+
+    def test_successful_teleport_invalidates_stale_vitals_and_reopens_reader(self) -> None:
+        vitals = PlayerVitals()
+        vitals.publish_sp(574, 1454)
+        tport = TeleportController(
+            self.ctx,
+            self.input,
+            MagicMock(),
+            vitals=vitals,
+        )
+
+        self.assertTrue(tport.teleport_once(scan_code=17))
+        self.assertIsNone(vitals.sp)
+        self.assertIsNone(vitals.sp_max)
+        # The reader remains alive across the transition. Once settle completes,
+        # the new epoch must accept a genuinely fresh value again.
+        epoch = vitals.observation_epoch
+        self.assertTrue(
+            vitals.publish_sp_if_current(350, 1454, epoch),
+        )
+        self.assertEqual(vitals.sp_pair(), (350, 1454))
 
     def test_teleport_once_clears_tracks_after_settle(self) -> None:
         """Every successful teleport must drop prior-area tracks."""

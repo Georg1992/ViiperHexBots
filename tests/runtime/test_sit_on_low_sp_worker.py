@@ -1036,10 +1036,10 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertFalse(worker._seated)
 
     def test_spot_failure_relocations_are_bounded(self) -> None:
-        """Repeated blind-feed spot failures relocate to a
+        """Repeated blind-feed or regen-stalled spot failures relocate to a
         fresh area up to a per-session budget, then end the session cleanly —
         the sit gate is never held forever by an unrecoverable spot."""
-        for outcome_name in ("feed_lost",):
+        for outcome_name in ("feed_lost", "regen_stalled"):
             with self.subTest(outcome=outcome_name):
                 worker = self._worker(
                     _ScriptedVitals([0.02, 0.02, 0.02, 0.02, 0.99, 0.99])
@@ -1051,7 +1051,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
                 def spot_failure(_scan: int) -> str:
                     # Mirrors the real _sit_until_done: the feed failure
                     # escapes to a fresh area before reporting the outcome.
-                    worker._urgent_escape(reason="sit_feed_lost")
+                    worker._urgent_escape(reason=f"sit_{outcome_name}")
                     worker._seated = False
                     return outcome_name
 
@@ -1075,6 +1075,111 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
                 self.assertFalse(self.ctx.sitting_event.is_set())
                 self.assertEqual(self.ctx.hunt_generation, gen_before + 1)
                 self.assertFalse(worker._seated)
+
+    def test_flat_sp_while_seated_relocates_without_retoggle(self) -> None:
+        """A readable SP value frozen for a full relocation window means regen
+        is blocked (re-sit toggle eaten / weight penalty). The worker relocates
+        with an escape teleport — never a corrective toggle — and re-sits in
+        the fresh area, instead of waiting forever on a dead spot.
+        """
+        class _FlatVitals(PlayerVitals):
+            def sp_pair(self) -> tuple[int | None, int | None]:
+                return 50, 100
+
+            @property
+            def observed_ms(self) -> int:
+                return int(time.monotonic() * 1000)
+
+            @property
+            def changed_ms(self) -> int:
+                return int(time.monotonic() * 1000)
+
+        worker = self._worker(_FlatVitals())
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        self.input.toggle_key.return_value = True
+        self.teleport.danger_teleport = MagicMock(return_value=True)
+
+        clock = [1000.0]
+
+        def fake_wait(timeout: float) -> bool:
+            clock[0] += timeout
+            return False
+
+        with patch(
+            "pybot.runtime.workers.sit_on_low_sp_worker.time.monotonic",
+            side_effect=lambda: clock[0],
+        ):
+            self.ctx.stop_event.wait = fake_wait  # type: ignore[method-assign]
+            outcome = worker._sit_until_done(82)
+
+        self.assertEqual(outcome, "regen_stalled")
+        # Only the enter_sit toggle is ever sent — the flat state is resolved
+        # by relocation, never by a second corrective toggle.
+        self.assertEqual(self.input.toggle_key.call_count, 1)
+        self.teleport.danger_teleport.assert_called_once_with(
+            reason="sit_regen_stalled",
+            prefer_safe_key=True,
+        )
+        self.assertFalse(worker._seated)
+
+    def test_regen_progress_is_logged_while_seated(self) -> None:
+        """While waiting for regen the worker logs SP progress on a cadence, so
+        a long recovery is visibly regenerating instead of looking frozen.
+        """
+        class _RegenVitals(PlayerVitals):
+            def __init__(self) -> None:
+                super().__init__()
+                self._calls = 0
+
+            def sp_pair(self) -> tuple[int | None, int | None]:
+                # SP keeps changing every poll (like a regen tick) but stays
+                # below the resume threshold, so neither the stand branch nor
+                # the flat watchdog may fire.
+                self._calls += 1
+                return 50 + (self._calls % 30), 100
+
+            @property
+            def observed_ms(self) -> int:
+                return int(time.monotonic() * 1000)
+
+            @property
+            def changed_ms(self) -> int:
+                return int(time.monotonic() * 1000)
+
+        worker = self._worker(_RegenVitals())
+        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
+        self.input.toggle_key.return_value = True
+        self.teleport.danger_teleport = MagicMock(return_value=True)
+
+        clock = [1000.0]
+        iterations = {"n": 0}
+
+        def fake_wait(timeout: float) -> bool:
+            iterations["n"] += 1
+            clock[0] += timeout
+            # Run past the flat-SP window (15s) with room to spare to prove a
+            # changing SP never relocates.
+            if iterations["n"] >= 350:
+                self.ctx.stop_event.set()
+            return False
+
+        with patch(
+            "pybot.runtime.workers.sit_on_low_sp_worker.time.monotonic",
+            side_effect=lambda: clock[0],
+        ):
+            self.ctx.stop_event.wait = fake_wait  # type: ignore[method-assign]
+            outcome = worker._sit_until_done(82)
+
+        self.assertIsNone(outcome)
+        self.teleport.danger_teleport.assert_not_called()
+        regen_logs = [
+            call.args[0]
+            for call in self.ctx.logger.behavior.call_args_list
+            if call.args and "regen sp=" in call.args[0]
+        ]
+        self.assertTrue(regen_logs, "expected [SIT] regen progress logs")
+        self.assertIn("ratio=", regen_logs[0])
+        self.assertIn("elapsed=", regen_logs[0])
 
 
 if __name__ == "__main__":

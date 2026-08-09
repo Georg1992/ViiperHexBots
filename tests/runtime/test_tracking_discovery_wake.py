@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 from pybot.recognition.detector.detector import load_detector_config
 from pybot.runtime.hunt_tracks import HuntTracks
+from pybot.runtime.workers.attack_loop import AttackLoop
 from pybot.runtime.workers.coord_tracking_worker import CoordTrackingWorker
 
 
@@ -19,6 +20,7 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         self.ctx.tracks = self.tracks
         self.ctx.discovery_suspend = threading.Event()
         self.ctx.discovery_wake = threading.Event()
+        self.ctx.attack_wake = threading.Event()
         self.ctx.capture.is_valid.return_value = True
         self.ctx.capture.get_hunt_roi.return_value = MagicMock(
             x=0, y=0, w=200, h=200
@@ -105,6 +107,54 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
 
         self.assertEqual(self.tracks.get_track_count(), 0)
         self.assertTrue(self.tracks.has_pending_discovery_candidates())
+
+    def test_created_track_wakes_attack_after_template_commit(self) -> None:
+        """Tracking signals attack only after the live track is fully committed."""
+        from pybot.recognition.rules import DiscoveryDetection
+
+        self.ctx.config.mob_name = "horn"
+        self.ctx.config.use_sprite_grf = True
+        self.tracks.process_discovery_scan(
+            [DiscoveryDetection(
+                x=100, y=100, confidence=0.8,
+                candidate_scale=0.9, living=True,
+            )],
+            mob_name="horn",
+            now_tick=1,
+        )
+        self.ctx.tracker.track_locals_frame.return_value = SimpleNamespace(
+            ok=True,
+            results=[SimpleNamespace(
+                track_id=-1, found=True, x=101, y=102,
+                confidence=0.9,
+            )],
+        )
+        self.ctx.tracker.transfer_track_template.return_value = True
+
+        self.worker._tick()
+
+        self.assertTrue(self.ctx.attack_wake.is_set())
+        created = self.tracks.snapshot_alive(2)
+        self.assertEqual(len(created), 1)
+        self.assertEqual((created[0].x, created[0].y), (101, 102))
+        self.ctx.tracker.transfer_track_template.assert_called_once()
+
+    def test_attack_wake_interrupts_idle_attack_poll(self) -> None:
+        """A producer wake interrupts the idle wait immediately."""
+        ctx = MagicMock()
+        ctx.stop_event = threading.Event()
+        ctx.attack_wake = threading.Event()
+        ctx.attack_wake.set()
+        ctx.should_run_combat.return_value = True
+        ctx.in_post_teleport_heal_window.return_value = False
+        ctx.tracks.tracks_for_policy.return_value = []
+        ctx.policy.select_target.return_value = 0
+        ctx.hunt_mode = MagicMock()
+        ctx.hunt_mode.on_no_attackable_targets.return_value = False
+        attack = AttackLoop(ctx, ctx.hunt_mode, MagicMock())
+
+        self.assertFalse(attack.process_pending())
+        self.assertFalse(ctx.attack_wake.is_set())
 
     def test_local_miss_wakes_discovery_and_keeps_track(self) -> None:
         track = self.tracks.create_track(

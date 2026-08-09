@@ -13,6 +13,8 @@ from pybot.paths import PROJECT_ROOT
 from pybot.recognition.ui.status_panel import (
     BINARIZE_THRESHOLD,
     DIGIT_MATCH_THRESHOLD,
+    HP_SCAN_ZONE,
+    MAX_ROW_GLYPHS,
     SP_SCAN_ZONE,
     StatusPanelValues,
     _classify_glyph,
@@ -126,6 +128,40 @@ class StatusPanelTests(unittest.TestCase):
             )
         self.assertEqual(result, (None, -1.0))
         matcher.assert_not_called()
+
+    def test_garbage_row_with_too_many_glyphs_bails_before_classifying(
+        self,
+    ) -> None:
+        """A text-dense band must fail fast, not churn template matching.
+
+        A post-teleport frame can put chat/text under the stale fixed-ROI
+        anchor. With hundreds of candidate fragments, classifying each one
+        is what previously burned the whole OCR read budget; the parser
+        must reject the row before any template matching runs.
+        """
+        glyphs = [
+            (x, np.full((7, 5), 255, dtype=np.uint8))
+            for x in range(0, 150, 5)
+        ]
+        self.assertGreater(len(glyphs), MAX_ROW_GLYPHS)
+        with patch(
+            "pybot.recognition.ui.status_panel._glyph_components",
+            return_value=glyphs,
+        ), patch(
+            "pybot.recognition.ui.status_panel._classify_glyph",
+        ) as classify:
+            started = time.monotonic()
+            result = _parse_anchored(
+                np.zeros((85, 138, 3), dtype=np.uint8),
+                (-42, -45),
+                HP_SCAN_ZONE,
+                min_width=2,
+                stop_at_slash=True,
+            )
+            elapsed = time.monotonic() - started
+        self.assertIsNone(result)
+        classify.assert_not_called()
+        self.assertLess(elapsed, 0.05)
 
     def test_parser_passes_deadline_into_glyph_classifier(self) -> None:
         """The parser budget must cover each delegated glyph classification."""

@@ -108,8 +108,9 @@ def track_local(
     """Follow one known track near its last known center.
 
     Negative IDs are provisional and perform one-shot local acquisition.
-    Positive IDs require a transferred cached template and perform only the
-    temporal follow. Zero is invalid and returns a miss.
+    Positive IDs require a transferred cached template and perform the fast
+    temporal follow first, with bounded palette recovery after a miss. Zero is
+    invalid and returns a miss.
 
     ``suppress_positions``: ROI-relative (x, y) of other tracks whose heat
     signature should be suppressed in the peak search. Prevents track A from
@@ -165,8 +166,9 @@ def track_local(
     search_cx = int(round(cx + prediction_dx))
     search_cy = int(round(cy + prediction_dy))
 
-    # Candidate resolution is an explicit one-shot phase. Real tracks never
-    # fall back from warm-template follow into a second reacquisition path.
+    # Candidate resolution is an explicit one-shot phase. Confirmed tracks use
+    # warm-template follow first, with a bounded palette recovery only after a
+    # miss so transient animation/occlusion does not break stickiness.
     if track_id < 0:
         peak = _find_local_peak(
             detector,
@@ -211,14 +213,58 @@ def track_local(
         offset_x=offset_x,
         offset_y=offset_y,
     )
-    if template_hit is None:
-        return _miss_result(
-            track_id=track_id,
-            x=screen_cx,
-            y=screen_cy,
-            reason="template_miss",
-        )
-    return template_hit
+    if template_hit is not None:
+        return template_hit
+
+    # A temporal match can fail for one animated/occluded frame even though the
+    # mob is still nearby. Do not make that one miss permanently destroy the
+    # warm template. Pay the more expensive palette follow only on a miss and
+    # widen the recovery disk as the store's lost count grows; a later hit
+    # re-seeds the same template and makes the normal path fast again.
+    # Keep recovery bounded to one extra local disk. Expanding on every miss
+    # makes a long-lived miss both expensive and identity-unsafe; discovery is
+    # the authority for a genuinely new/relocated object.
+    recovery_radius = min(
+        radius * 2,
+        max(radius, int(getattr(detector, "local_track_max_search_radius_px", radius))),
+    )
+    peak = _find_local_peak(
+        detector,
+        frame_bgr,
+        descriptor,
+        search_cx,
+        search_cy,
+        scale,
+        search_radius_px=recovery_radius,
+        suppress_positions=suppress_positions,
+    )
+    if peak is not None:
+        _peak_x, _peak_y, _heat_score, peak_sim, peak_bbox = peak
+        template = _template_store(detector).get(track_id)
+        # Palette recovery may see a neighboring identical mob. Require the
+        # preserved temporal patch to agree before moving the authoritative
+        # track; otherwise report a miss and let discovery confirm identity.
+        if (
+            template is None
+            or _template_candidate_agrees(frame_bgr, template, peak_bbox)
+        ):
+            return _finalize_track_hit(
+                detector=detector,
+                frame_bgr=frame_bgr,
+                descriptor=descriptor,
+                track_id=track_id,
+                bbox=peak_bbox,
+                similarity=peak_sim,
+                scale=scale,
+                offset_x=offset_x,
+                offset_y=offset_y,
+            )
+    return _miss_result(
+        track_id=track_id,
+        x=screen_cx,
+        y=screen_cy,
+        reason="template_miss",
+    )
 
 
 def _effective_search_radius(
@@ -393,7 +439,7 @@ def _follow_cached_template(
     offset_x: int,
     offset_y: int,
 ) -> LocalTrackResult | None:
-    """Follow a previously confirmed patch; return None when reacquisition is needed."""
+    """Follow a confirmed patch; return None when bounded recovery is needed."""
     template = _template_store(detector).get(track_id)
     if template is None:
         return None
@@ -448,7 +494,10 @@ def _follow_cached_template(
         native_h,
     )
     if not _template_identity_ok(detector, frame_bgr, descriptor, bbox):
-        _template_store(detector).pop(track_id, None)
+        # Keep the last verified patch for a transient occlusion/animation.
+        # The caller performs a one-shot palette recovery on this miss; a
+        # single bad frame must not turn a sticky track into a permanently
+        # template-less track.
         return None
 
     # Re-center the follow point on the mob's sprite (palette-CC bbox center)
@@ -476,7 +525,9 @@ def _follow_cached_template(
             frame_bgr, descriptor, hit_x, hit_y, scale,
         )
         if not accepted:
-            _template_store(detector).pop(track_id, None)
+            # Periodic native verification is a safety check, not proof that
+            # the mob died. Preserve the warm patch and let the miss recovery
+            # path reacquire on the next frame.
             return None
 
     _remember_track_template(
@@ -513,6 +564,35 @@ def _follow_cached_template(
         miss_reason="",
         opacity_score=opacity_score,
     )
+
+
+def _template_candidate_agrees(
+    frame_bgr: np.ndarray,
+    template: _TrackTemplate,
+    bbox: tuple[int, int, int, int],
+) -> bool:
+    """Check a palette-recovery candidate against the preserved warm patch."""
+    x, y, width, height = (int(value) for value in bbox)
+    frame_h, frame_w = frame_bgr.shape[:2]
+    x0 = max(0, x)
+    y0 = max(0, y)
+    x1 = min(frame_w, x + max(0, width))
+    y1 = min(frame_h, y + max(0, height))
+    if x1 <= x0 or y1 <= y0:
+        return False
+    gray = cv2.cvtColor(frame_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    target_h, target_w = template.image_gray.shape[:2]
+    if gray.size == 0 or target_h <= 0 or target_w <= 0:
+        return False
+    reduced = cv2.resize(
+        gray, (target_w, target_h), interpolation=cv2.INTER_AREA,
+    )
+    if float(reduced.std()) < _TEMPLATE_MIN_STD:
+        return False
+    score = float(
+        cv2.matchTemplate(reduced, template.image_gray, cv2.TM_CCOEFF_NORMED)[0, 0]
+    )
+    return bool(np.isfinite(score) and score >= _TEMPLATE_MIN_SCORE)
 
 
 def _template_identity_ok(

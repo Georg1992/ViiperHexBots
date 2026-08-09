@@ -97,14 +97,22 @@ class GateController:
     """Event gate logic: which workers may run, sit/storage/heal lifecycle, waits.
 
     Owns: stop_event, pause_event, resume_gate, sitting_event, storage_event,
-    healing_event, discovery_wake, discovery_suspend, _sit_storage_lock.
+    healing_event, discovery_wake, attack_wake, discovery_suspend,
+    _sit_storage_lock.
     """
 
     def __init__(self, startup: HuntStartupSequence | None = None) -> None:
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
         self.resume_gate = threading.Event()
+        # HP observation wakes the single gameplay danger owner immediately.
+        # It is not a request or ownership flag; the owner re-reads facts.
+        self.danger_wake = threading.Event()
         self.discovery_wake = threading.Event()
+        # Set when tracking commits a new live track. Gameplay consumes this
+        # wake so a newly confirmed mob is attacked immediately instead of
+        # waiting for the idle polling slice.
+        self.attack_wake = threading.Event()
         # Set for the whole claim → teleport key → settle delay window so the
         # 1s discovery cadence cannot scan mid-teleport and falsely confirm clear.
         self.discovery_suspend = threading.Event()
@@ -133,24 +141,10 @@ class GateController:
         # Startup milestones and hunt generations belong to the dedicated
         # sequence object, not to this general lifecycle gate.
         self.startup = HuntStartupSequence() if startup is None else startup
-        # Set by DangerDetector for any HP drop; the sit worker owns seated
-        # damage and filters ordinary hunting hits.
-        self.danger_sit_requested = threading.Event()
-        # Urgent critical-danger signal so hunting can escape even when
-        # low-SP sitting is disabled or no sit key is configured.
-        self.critical_danger_requested = threading.Event()
         # True from any danger-escape ownership claim through teleport settle.
         # This is intentionally separate from sitting_event: the escape holds
         # the input gate but is not necessarily SP recovery.
         self.danger_escape_active = threading.Event()
-        # Unlike danger_escape_active, this marker is exclusively owned by the
-        # critical hunting escape. Active storage must abort only for this
-        # emergency, not for the seated recovery escape's generic marker.
-        self.critical_danger_escape_active = threading.Event()
-        # Sessions (sit/storage/heal) that a critical escape overrode. Used
-        # only to bound the pre-teleport wait for the preempted owners to
-        # release; teardown always releases the gate the escape itself set.
-        self._preempted_sessions = (False, False, False)
         # A seated toggle could not be undone during worker cleanup. Runtime
         # shutdown must retry this before releasing input ownership.
         self.sit_cleanup_unresolved = threading.Event()
@@ -179,8 +173,6 @@ class GateController:
             and not self.storage_event.is_set()
             and not self.healing_event.is_set()
             and not self.discovery_suspend.is_set()
-            and not self.danger_sit_requested.is_set()
-            and not self.critical_danger_requested.is_set()
             and not self.danger_escape_active.is_set()
             and self.startup.is_combat_ready()
         )
@@ -195,8 +187,6 @@ class GateController:
         return (
             self.should_run_workers()
             and not self.discovery_suspend.is_set()
-            and not self.danger_sit_requested.is_set()
-            and not self.critical_danger_requested.is_set()
             and not self.danger_escape_active.is_set()
         )
 
@@ -294,138 +284,39 @@ class GateController:
             result = action()
             return "cast" if result is not False else "failed"
 
-    def request_danger_sit(self) -> None:
-        """Ask the sit worker to move safe, sit, recover, and restart hunt."""
-        with self._sit_storage_lock:
-            self.danger_sit_requested.set()
-            self.resume_gate.set()
+    def begin_danger_transition(self, *, allow_sitting: bool = False) -> bool:
+        """Claim the one danger transition boundary.
 
-    def pop_danger_sit_request(self) -> bool:
-        """Consume one pending danger-driven sit request atomically."""
-        with self._sit_storage_lock:
-            if not self.danger_sit_requested.is_set():
-                return False
-            self.danger_sit_requested.clear()
-            return True
-
-    def request_critical_danger(self) -> None:
-        """Queue a critical hunting escape independent of sit configuration."""
-        with self._sit_storage_lock:
-            self.critical_danger_requested.set()
-            self.resume_gate.set()
-
-    def pop_critical_danger(self) -> bool:
-        """Consume one pending critical hunting escape atomically."""
-        with self._sit_storage_lock:
-            if not self.critical_danger_requested.is_set():
-                return False
-            self.critical_danger_requested.clear()
-            return True
-
-    def begin_danger_escape(self) -> bool:
-        """Claim an urgent escape from an already-owned session."""
-        with self._sit_storage_lock:
-            if self.danger_escape_active.is_set():
-                return False
-            self.danger_escape_active.set()
-            return True
-
-    def try_begin_critical_escape_ops(self, *, override: bool = False) -> bool:
-        """Atomically claim the critical escape and its input gate.
-
-        Critical danger is not an SP-recovery session. Claim both markers
-        under one lock so HP polling cannot see ``sitting_event`` alone and
-        enqueue a sit request in the pre-teleport window.
-
-        With ``override=True`` the escape preempts any active session (sit
-        recovery, storage UI, heal). Critical danger has the highest priority:
-        the preempted owners see ``danger_escape_active`` on their next loop
-        and abandon without touching input or gates, and the critical worker
-        waits (bounded) for storage/heal to release before pressing the
-        teleport key.
+        A normal hunting escape must never steal an active SP session. The
+        seated recovery owner passes ``allow_sitting=True`` and keeps the sit
+        gate intact while it performs its own safe-key escape.
         """
         with self._sit_storage_lock:
             if self.danger_escape_active.is_set():
                 return False
-            # SP-sit recovery owns seated danger. Never steal its sitting_event:
-            # clearing it mid-regen abandons recovery while SP is often already
-            # above the low-SP start threshold, so the hunt resumes stale.
-            if (
-                self.sitting_event.is_set()
-                and not self.critical_danger_escape_active.is_set()
-            ):
+            if self.sitting_event.is_set() and not allow_sitting:
                 return False
-            if not override and self._session_held():
-                return False
-            self._preempted_sessions = (
-                False,
-                self.storage_event.is_set(),
-                self.healing_event.is_set(),
-            )
             self.danger_escape_active.set()
-            self.critical_danger_escape_active.set()
-            self.sitting_event.set()
             self.resume_gate.clear()
             return True
 
-    def preempted_sessions(self) -> tuple[bool, bool, bool]:
-        """Sessions (sit, storage, heal) the current escape overrode."""
-        return self._preempted_sessions
-
-    def wait_for_preempted_session_release(self, timeout_s: float) -> bool:
-        """Block until sessions preempted by the escape release their gates.
-
-        The escape itself holds ``sitting_event`` (set by its own claim), so
-        only preempted storage/heal owners are waited on: storage must close
-        its UI panels before the teleport key is pressed, otherwise the wing
-        is wasted against an open panel. A preempted sit session needs no
-        release — the character can teleport while seated and its worker
-        stops touching input once it sees the escape.
-
-        The preempted snapshot is overwritten by the next claim, so it only
-        ever describes the escape currently in flight.
-
-        Returns True when nothing remains to release. Exits early on stop or
-        user pause (the caller re-checks both after this wait).
-        """
-        preempted = self._preempted_sessions
-        if not (preempted[1] or preempted[2]):
-            return True
-        deadline = time.monotonic() + max(0.0, timeout_s)
-        while not self.stop_event.is_set():
-            if self.pause_event.is_set():
-                return False
-            with self._sit_storage_lock:
-                still_held = (
-                    (preempted[1] and self.storage_event.is_set())
-                    or (preempted[2] and self.healing_event.is_set())
-                )
-                if not still_held:
-                    return True
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            self.stop_event.wait(min(WORKER_POLL_INTERVAL_S, remaining))
-        return False
-
-    def end_danger_escape(self) -> None:
-        """Release the explicit danger-escape phase after teleport handling."""
+    def end_danger_transition(self) -> None:
+        """Release the danger transaction marker after teleport handling."""
         with self._sit_storage_lock:
             self.danger_escape_active.clear()
-
-    def end_critical_escape_ops(self) -> None:
-        """Release a critical escape without starting a sit/hunt generation.
-
-        Critical danger temporarily borrows the input exclusion gate, but it is
-        not SP recovery. Calling ``end_sit_ops`` here would re-arm startup
-        milestones and make the attack loop appear stale after a successful
-        danger teleport.
-        """
-        with self._sit_storage_lock:
-            self.danger_escape_active.clear()
-            self.critical_danger_escape_active.clear()
-            self.sitting_event.clear()
             self._restore_resume_gate()
+
+    def finish_danger_transition(self, *, seated: bool) -> None:
+        """Publish a clean post-escape hunt boundary for non-seated danger."""
+        if seated:
+            return
+        with self._sit_storage_lock:
+            self.startup.begin_new_hunt(trusted_clear=False)
+            # Do not clear sitting_event here. The normal hunting owner cannot
+            # claim a seated session; if this is ever set by another path it is
+            # owned by that session and must be released by its owner.
+            self._restore_resume_gate()
+        self.discovery_wake.set()
 
     # ── Sit lifecycle ────────────────────────────────────────────
 
@@ -475,7 +366,6 @@ class GateController:
             # Damage sampled while sitting_event was still held (stand settle,
             # teardown retries) can leave this set with no owner left to
             # consume it. That permanently blocks combat/timers/startup.
-            self.danger_sit_requested.clear()
             # The sit-placement teleport's post-TP heal gate is not meaningful
             # after a completed SP recovery at a trusted spot. Leaving it set
             # forces AttackLoop to wait on HP (and OCR) before the new hunt.
@@ -505,8 +395,6 @@ class GateController:
             # storage wins just before danger/sit claims the character.
             if (
                 self._session_held()
-                or self.critical_danger_requested.is_set()
-                or self.danger_sit_requested.is_set()
                 or self.danger_escape_active.is_set()
             ):
                 return False
