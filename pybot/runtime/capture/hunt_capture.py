@@ -51,6 +51,12 @@ class HuntWindowCapture:
             maxsize=_GEOMETRY_QUEUE_MAX
         )
         self._geometry_worker_started = False
+        self._geometry_thread: threading.Thread | None = None
+        # A timed-out Win32 call cannot be cancelled. Keep its worker as the
+        # sole geometry owner until it returns; otherwise every timeout would
+        # start another daemon thread inside the same process.
+        self._retired_geometry_queue: "queue.Queue[_GeometryRequest | None] | None" = None
+        self._geometry_closed = False
         self._geometry_state_lock = threading.Lock()
         self._last_client_rect: tuple[int, int, int, int] | None = None
         self._last_client_rect_at = 0.0
@@ -97,46 +103,107 @@ class HuntWindowCapture:
     def _geometry_worker_loop(
         self, work_queue: "queue.Queue[_GeometryRequest | None]"
     ) -> None:
-        while True:
-            request = work_queue.get()
-            if request is None:
-                return
-            try:
-                request.client = self._read_client_rect_screen()
-            except BaseException:
-                # A failed native geometry call is an unavailable sample, not
-                # a reason to kill the observer threads.
-                request.client = None
-            finally:
-                request.done.set()
+        try:
+            while True:
+                request = work_queue.get()
+                if request is None:
+                    return
+                try:
+                    request.client = self._read_client_rect_screen()
+                except BaseException:
+                    # A failed native geometry call is an unavailable sample,
+                    # not a reason to kill the observer threads.
+                    request.client = None
+                finally:
+                    request.done.set()
+        finally:
+            # Clear the retirement barrier only after this worker has actually
+            # consumed its sentinel and exited. A caller may then start one,
+            # and only one, replacement worker.
+            with self._geometry_state_lock:
+                if self._retired_geometry_queue is work_queue:
+                    self._retired_geometry_queue = None
+                if self._geometry_thread is threading.current_thread():
+                    self._geometry_thread = None
 
     def _ensure_geometry_worker(
         self, work_queue: "queue.Queue[_GeometryRequest | None]"
     ) -> None:
         with self._geometry_state_lock:
-            if self._geometry_worker_started or work_queue is not self._geometry_queue:
+            if (
+                self._geometry_closed
+                or self._retired_geometry_queue is not None
+                or self._geometry_worker_started
+                or work_queue is not self._geometry_queue
+            ):
                 return
             self._geometry_worker_started = True
-        threading.Thread(
-            target=self._geometry_worker_loop,
-            args=(work_queue,),
-            name="hunt-window-geometry",
-            daemon=True,
-        ).start()
+            thread = threading.Thread(
+                target=self._geometry_worker_loop,
+                args=(work_queue,),
+                name="hunt-window-geometry",
+                daemon=True,
+            )
+            self._geometry_thread = thread
+            thread.start()
 
     def _retire_geometry_worker(
         self, work_queue: "queue.Queue[_GeometryRequest | None]"
     ) -> None:
-        """Rotate a geometry worker whose native Win32 call did not return."""
+        """Retire a wedged worker without starting a replacement beside it."""
         with self._geometry_state_lock:
-            if work_queue is not self._geometry_queue:
+            if (
+                self._geometry_closed
+                or work_queue is not self._geometry_queue
+                or self._retired_geometry_queue is not None
+            ):
                 return
+            self._retired_geometry_queue = work_queue
             self._geometry_queue = queue.Queue(maxsize=_GEOMETRY_QUEUE_MAX)
             self._geometry_worker_started = False
-            try:
-                work_queue.put_nowait(None)
-            except queue.Full:
-                pass
+            # A second caller may have queued work behind the blocked native
+            # request. Fail that stale request and reserve the sentinel slot so
+            # the old worker definitely exits after the native call returns.
+            while True:
+                try:
+                    queued = work_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if queued is not None:
+                    queued.client = None
+                    queued.done.set()
+            work_queue.put_nowait(None)
+
+    def close(self) -> bool:
+        """Stop the geometry worker and report whether it exited.
+
+        Native Win32 calls are not cancellable. Normal shutdown joins the
+        worker briefly; a still-blocked call remains daemonized and the caller
+        receives ``False`` so the owning runtime keeps its cleanup state and
+        can retry later rather than pretending the resource was released.
+        """
+        with self._geometry_state_lock:
+            if self._geometry_closed:
+                thread = self._geometry_thread
+            else:
+                self._geometry_closed = True
+                work_queue = self._geometry_queue
+                thread = self._geometry_thread
+                while True:
+                    try:
+                        queued = work_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if queued is not None:
+                        queued.client = None
+                        queued.done.set()
+                try:
+                    work_queue.put_nowait(None)
+                except queue.Full:
+                    pass
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=_GEOMETRY_WAIT_S)
+        return thread is None or not thread.is_alive()
 
     def get_client_rect_screen(self) -> tuple[int, int, int, int] | None:
         """Return fresh geometry without blocking the observation workers.
@@ -146,7 +213,21 @@ class HuntWindowCapture:
         the last valid rectangle; if there is no cache yet it returns ``None``.
         """
         with self._geometry_state_lock:
-            work_queue = self._geometry_queue
+            if self._geometry_closed:
+                work_queue = None
+            elif self._retired_geometry_queue is not None:
+                work_queue = None
+            else:
+                work_queue = self._geometry_queue
+        if work_queue is None:
+            with self._last_client_rect_lock:
+                if (
+                    self._last_client_rect is not None
+                    and time.monotonic() - self._last_client_rect_at
+                    <= _GEOMETRY_MAX_STALE_S
+                ):
+                    return self._last_client_rect
+            return None
         self._ensure_geometry_worker(work_queue)
         request = _GeometryRequest()
         queued = True

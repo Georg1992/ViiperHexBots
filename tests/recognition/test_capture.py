@@ -11,6 +11,7 @@ import numpy as np
 from mss.exception import ScreenShotError
 
 from pybot.recognition import capture as capture_mod
+from pybot.runtime.capture.hunt_capture import HuntWindowCapture
 
 
 class CaptureRegionTests(unittest.TestCase):
@@ -445,6 +446,56 @@ class UiCaptureChannelTests(unittest.TestCase):
 
         old_sct.grab.assert_called_once()
         new_sct.grab.assert_called_once()
+
+
+class HuntWindowGeometryTests(unittest.TestCase):
+    def test_timeout_does_not_start_second_geometry_worker(self) -> None:
+        """A blocked Win32 probe is isolated without accumulating workers."""
+        release = threading.Event()
+        entered = threading.Event()
+        config = type("Config", (), {
+            "hwnd": 123,
+            "search_range_cells": 3,
+            "cell_size_px": 64,
+        })()
+        capture = HuntWindowCapture(config)
+
+        def blocked_rect():
+            entered.set()
+            release.wait(timeout=2.0)
+            return (10, 20, 300, 200)
+
+        capture._read_client_rect_screen = blocked_rect  # type: ignore[method-assign]
+        try:
+            with patch(
+                "pybot.runtime.capture.hunt_capture._GEOMETRY_WAIT_S",
+                0.05,
+            ):
+                self.assertIsNone(capture.get_client_rect_screen())
+                self.assertTrue(entered.wait(timeout=1.0))
+                # The retired worker is still inside the native call. A retry
+                # must fail closed instead of starting another geometry thread.
+                self.assertIsNone(capture.get_client_rect_screen())
+                geometry_threads = [
+                    thread
+                    for thread in threading.enumerate()
+                    if thread.name == "hunt-window-geometry"
+                ]
+                self.assertLessEqual(len(geometry_threads), 1)
+        finally:
+            release.set()
+
+        for _ in range(100):
+            if capture._retired_geometry_queue is None:
+                break
+            time.sleep(0.01)
+        self.assertIsNone(capture._retired_geometry_queue)
+        with patch(
+            "pybot.runtime.capture.hunt_capture._GEOMETRY_WAIT_S",
+            0.05,
+        ):
+            self.assertEqual(capture.get_client_rect_screen(), (10, 20, 300, 200))
+        self.assertTrue(capture.close())
 
 
 if __name__ == "__main__":

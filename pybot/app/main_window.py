@@ -756,13 +756,13 @@ class MainWindow:
         main.columnconfigure(2, weight=1)
         self._sync_memory_reading_from_profile()
         self._update_search_label()
-        self._memory_feed.set_active(False)
-        self._status_feed.set_active(False)
+        # Observation feeds are independent producers. They stay alive for the
+        # whole application session and publish the latest valid vitals whether
+        # the bot is hunting, sitting, teleporting, paused, or stopped. Each
+        # feed still declines work when its window/profile is unavailable.
         self._memory_feed.start()
         self._status_feed.start()
-        # Observation feeds are intentionally idle until the bot owns a live
-        # session. The labels remain visible, but stopped/paused states must
-        # not read process memory or OCR the game window.
+        
         self.root.after(50, self._drain_ui_callbacks)
         self._settings_apply_enabled = True
 
@@ -1265,20 +1265,8 @@ class MainWindow:
         self.log_pipe.log("All set — select or launch the game window")
         self.refresh_windows()
 
-    def _set_observation_feeds_active(self, active: bool) -> None:
-        """Allow UI observation only while the bot is starting/running.
-
-        ``set_active`` invalidates in-flight generations, preventing a native
-        memory/OCR completion from updating vitals after pause or stop.
-        """
-        self._memory_feed.set_active(active)
-        self._status_feed.set_active(active)
-
     def _on_bot_state_changed(self, state: BotState) -> None:
         """Update UI widgets to reflect the current bot state."""
-        self._set_observation_feeds_active(
-            state in (BotState.STARTING, BotState.RUNNING)
-        )
         if state == BotState.RUNNING:
             self.bot_button.configure(text="Stop Bot")
             self.continue_button.configure(state=tk.DISABLED)

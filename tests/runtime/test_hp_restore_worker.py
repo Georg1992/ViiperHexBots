@@ -15,6 +15,7 @@ from pybot.runtime.danger_detector import (
 )
 from pybot.runtime.teleport import TeleportController
 from pybot.runtime.runtime_context import HuntRuntimeContext
+from pybot.runtime.workers.attack_loop import GameplayLoop
 from pybot.runtime.workers.hp_restore_worker import HpRestoreWorker
 
 
@@ -299,8 +300,6 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         # critical worker holds sitting_event inside the first teleport. The
         # second escape consumes the mirrored requests, after which combat is
         # allowed to resume.
-        from pybot.runtime.workers.critical_danger_worker import CriticalDangerWorker
-
         self.ctx.config.teleport_scan_code = 16
         self.ctx.config.teleport_button = "q"
         self.ctx.config.teleport_duration_ms = 10
@@ -327,14 +326,19 @@ class DangerTeleportPriorityTests(unittest.TestCase):
             return True
 
         self.teleport.danger_teleport.side_effect = escape
-        worker = CriticalDangerWorker(self.ctx, self.teleport)
+        gameplay = GameplayLoop(
+            self.ctx,
+            attack=MagicMock(),
+            teleport=self.teleport,
+            input_backend=self.input,
+        )
 
-        self.assertTrue(worker.process_pending())
+        self.assertTrue(gameplay._process_critical_danger())
         self.assertTrue(self.ctx.critical_danger_requested.is_set())
         self.assertFalse(self.ctx.danger_sit_requested.is_set())
         self.assertFalse(self.ctx.should_run_combat())
 
-        self.assertTrue(worker.process_pending())
+        self.assertTrue(gameplay._process_critical_danger())
         self.assertFalse(self.ctx.critical_danger_requested.is_set())
         self.assertFalse(self.ctx.danger_sit_requested.is_set())
         self.assertTrue(self.ctx.should_run_combat())
@@ -637,8 +641,6 @@ class StaleCriticalRequestTests(unittest.TestCase):
         self.ctx.danger_detector = self.danger
 
     def test_stale_critical_request_is_consumed_without_teleport(self) -> None:
-        from pybot.runtime.workers.critical_danger_worker import CriticalDangerWorker
-
         self.vitals.publish_hp(80, 100)
         self.danger._poll_hp()
         self.vitals.publish_hp(40, 100)
@@ -652,17 +654,20 @@ class StaleCriticalRequestTests(unittest.TestCase):
         self.assertEqual(self.danger.danger_level(), DangerLevel.SAFE)
 
         teleport = MagicMock()
-        worker = CriticalDangerWorker(self.ctx, teleport)
+        gameplay = GameplayLoop(
+            self.ctx,
+            attack=MagicMock(),
+            teleport=teleport,
+            input_backend=MagicMock(),
+        )
 
-        self.assertTrue(worker.process_pending())
+        self.assertTrue(gameplay._process_critical_danger())
 
         teleport.danger_teleport.assert_not_called()
         self.assertFalse(self.ctx.critical_danger_requested.is_set())
         self.assertFalse(self.ctx.danger_sit_requested.is_set())
 
     def test_fresh_critical_request_still_teleports(self) -> None:
-        from pybot.runtime.workers.critical_danger_worker import CriticalDangerWorker
-
         self.ctx.config.teleport_scan_code = 16
         self.ctx.config.teleport_button = "q"
         self.ctx.config.teleport_duration_ms = 10
@@ -674,9 +679,14 @@ class StaleCriticalRequestTests(unittest.TestCase):
 
         teleport = MagicMock()
         teleport.danger_teleport.return_value = True
-        worker = CriticalDangerWorker(self.ctx, teleport)
+        gameplay = GameplayLoop(
+            self.ctx,
+            attack=MagicMock(),
+            teleport=teleport,
+            input_backend=MagicMock(),
+        )
 
-        self.assertTrue(worker.process_pending())
+        self.assertTrue(gameplay._process_critical_danger())
 
         teleport.danger_teleport.assert_called_once_with(reason="critical_hunt")
         self.assertFalse(self.ctx.critical_danger_requested.is_set())

@@ -322,8 +322,8 @@ class SitOnLowSpWorker:
                 return
             ctx.pop_danger_sit_request()
             # The sit worker owns this danger escape, so consume the mirrored
-            # critical request as well. Otherwise the independent escape
-            # worker can issue a duplicate teleport after this session ends.
+            # critical request as well. Otherwise a separate danger controller
+            # could issue a duplicate teleport after this session ends.
             ctx.pop_critical_danger()
         elif not ctx.begin_sit_ops():
             return
@@ -339,11 +339,11 @@ class SitOnLowSpWorker:
                 # A critical request can only be latched before this session
                 # claimed the sit gate: DangerDetector never queues critical
                 # while a true SP sit owns ``sitting_event``, and the critical
-                # worker deliberately yields to this session. That leftover
+                # gameplay owner deliberately yields to this session. That leftover
                 # belongs to the seated owner, not to an in-flight escape.
                 # Consume it and, if the damage is still live, escape with
                 # the safe key. Never wait for a "critical handoff" — the
-                # critical worker cannot preempt this session, so waiting
+                # gameplay owner cannot preempt this session, so waiting
                 # would park the gameplay thread forever.
                 if ctx.critical_danger_requested.is_set():
                     ctx.pop_critical_danger()
@@ -530,7 +530,7 @@ class SitOnLowSpWorker:
         """Release the sit session after recovery and start a fresh hunt.
 
         A critical request can only be latched before this session claimed
-        the sit gate (the critical worker deliberately yields to a true SP
+        the sit gate (the gameplay owner deliberately yields to a true SP
         sit). It belongs to the seated owner, so consume it here — leaving it
         set would block ``should_run_combat``/``should_run_timers`` forever
         because no escape is in flight to clear it. Standing then releases
@@ -602,7 +602,7 @@ class SitOnLowSpWorker:
             # This seated recovery owns the damage event. Clear a mirrored
             # critical hunting request that may have been raised in the small
             # race immediately before the sit gate was acquired, otherwise the
-            # independent critical worker could duplicate the escape later.
+            # separate danger controller could duplicate the escape later.
             ctx.pop_critical_danger()
             ctx.logger.behavior(
                 "[SIT] danger observed before sitting — urgent escape "
@@ -622,7 +622,7 @@ class SitOnLowSpWorker:
         while not ctx.is_stopped():
             # The sit worker owns damage observed during its seated recovery.
             # Escape here on the gameplay thread; do not wait for the
-            # independent critical worker (which no longer queues while a
+            # separate danger controller (which no longer queues while a
             # true SP sit owns sitting_event).
             if self._sit_danger_detected():
                 ctx.pop_critical_danger()

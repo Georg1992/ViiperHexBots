@@ -104,6 +104,8 @@ class SkillTimerWorker:
         timers = [t for t in ctx.config.skill_timers if t.scan_code and t.interval_ms > 0]
         if not timers or ctx.is_stopped() or not ctx.should_run_timers():
             return False
+        if self._critical_pending():
+            return False
         # Startup buffs are a prerequisite, not merely a convention. The
         # gameplay owner may call this step immediately after a blocked buff
         # attempt, so fail closed until the milestone is actually published.
@@ -117,6 +119,8 @@ class SkillTimerWorker:
         if startup_only:
             # Startup execution is deliberately one key at a time. Periodic
             # expiry is owned exclusively by DeferredActionScheduler.
+            if self._critical_pending():
+                return False
             missing = [timer for timer in timers if timer.scan_code not in self._startup_pressed]
             if not missing:
                 return True
@@ -199,6 +203,11 @@ class SkillTimerWorker:
         for timer in timers:
             self._last_press_ms[timer.scan_code] = -timer.interval_ms
 
+    def _critical_pending(self) -> bool:
+        """Return whether urgent danger should abort this owned action step."""
+        event = getattr(self._ctx, "critical_danger_requested", None)
+        return bool(event is not None and event.is_set())
+
     def _wait_stagger_gap(self) -> bool:
         """Ensure the shared buff/timer keypress slot is open before a press.
 
@@ -210,6 +219,8 @@ class SkillTimerWorker:
         ctx = self._ctx
         gate = ctx.character_action_gate
         while not ctx.is_stopped():
+            if self._critical_pending():
+                return False
             if not ctx.should_run_timers():
                 return False
             now = monotonic_ms()

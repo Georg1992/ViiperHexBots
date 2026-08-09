@@ -1,7 +1,8 @@
-"""DangerDetector — isolated HP damage observer.
+"""Independent HP damage observation and urgent-signal publication.
 
-Runs in its own worker thread. Any observed HP drop records damage and queues
-one danger-sit request. Danger decisions rely only on received HP damage.
+This thread never performs gameplay input. It stores damage state, publishes
+simple requests, and signals cancellation of an in-flight input macro when
+critical damage is observed. GameplayLoop owns the resulting teleport.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ class DangerLevel(IntEnum):
 
 
 class DangerDetector:
-    """Observes HP damage; the sit worker owns danger escape."""
+    """Observes HP damage and publishes state/signals; it never performs input."""
 
     def __init__(self, ctx, vitals: PlayerVitals) -> None:
         self._ctx = ctx
@@ -66,15 +67,21 @@ class DangerDetector:
                 damage_seen = True
             self._prev_hp = hp
         if damage_seen:
-            # Queue damage for an active seated recovery session only.
-            # Critical damage also gets its own independent hunting escape
-            # signal, so critical protection does not depend on sit being
-            # enabled or configured.
+            # Wake/cancel the current gameplay input immediately. The gameplay
+            # thread remains the sole owner of the eventual teleport; this
+            # signal only makes a long input macro unwind promptly.
             level = self.danger_level()
+            if level is DangerLevel.CRITICAL:
+                cancel = getattr(self._ctx, "cancel_gameplay_input", None)
+                if callable(cancel):
+                    cancel()
+            # Queue damage for an active seated recovery session only. Critical
+            # damage gets a separate urgent signal; the gameplay loop owns the
+            # resulting escape, so this observer never competes for input.
             # A danger-sit request belongs only to an already-owned seated
             # recovery session. While hunting, ordinary damage must not enter
-            # the sit worker at all: the independent critical event is the
-            # sole owner of a hunting escape. The previous unconditional
+            # the sit worker at all: the urgent event is consumed by
+            # GameplayLoop. The previous unconditional
             # request made every small HP loss block combat and caused the sit
             # worker to run immediately after a critical teleport.
             sitting = getattr(self._ctx, "sitting_event", None)
@@ -107,11 +114,11 @@ class DangerDetector:
             critical_queued = False
             # SP-sit recovery (including its own urgent escape) owns seated
             # danger on the gameplay thread. Queuing critical while sit_owned
-            # lets CriticalDangerWorker clear sitting_event mid-regen: sit
+            # would let another path clear sitting_event mid-regen: sit
             # abandons, SP is often already >5% so process_pending will not
             # restart recovery, and the hunt resumes incomplete / stale.
-            # Hunting critical escapes remain independent; settle damage
-            # during a critical hunting escape may re-queue critical.
+            # Hunting critical escapes are consumed by GameplayLoop; settle
+            # damage during an escape may re-queue the signal.
             if level is DangerLevel.CRITICAL and not sit_owned:
                 request_critical = getattr(self._ctx, "request_critical_danger", None)
                 if callable(request_critical):

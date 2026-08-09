@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import (
     ATTACK_IDLE_SPIN_S,
+    CRITICAL_PREEMPT_RELEASE_TIMEOUT_S,
     IDLE_DEAD_ATTACK_COUNT,
     IDLE_UNREACHABLE_ATTACK_COUNT,
     HEAL_VERIFY_DELAY_MS,
@@ -25,6 +26,7 @@ from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.hunt_mode import HuntModeController
 from pybot.runtime.input.input_backend import InputBackend, perform_if_allowed
 from pybot.runtime.mob_behaviors import MobBehavior
+from pybot.runtime.danger_detector import DangerLevel
 from pybot.runtime.workers.worker_contexts import AttackLoopContext
 
 
@@ -639,7 +641,8 @@ class GameplayLoop:
     """Single owner for gameplay decisions and character input."""
 
     def __init__(self, ctx, *, attack, sit=None, storage=None,
-                 hp_restore=None, buffs=None, timers=None) -> None:
+                 hp_restore=None, buffs=None, timers=None, teleport=None,
+                 input_backend=None) -> None:
         self._ctx = ctx
         self._attack = attack
         self._sit = sit
@@ -647,6 +650,8 @@ class GameplayLoop:
         self._hp_restore = hp_restore
         self._buffs = buffs
         self._timers = timers
+        self._teleport = teleport
+        self._input_backend = input_backend
         self._scheduler = DeferredActionScheduler()
         self._scheduler_generation: int | None = None
         self._startup_seed_generation: int | None = None
@@ -746,17 +751,15 @@ class GameplayLoop:
 
     def run(self) -> None:
         self._ctx.logger.behavior("[GAMEPLAY] loop started")
-        # Critical danger is intentionally not processed here. It has its own
-        # emergency worker so a startup buff/timer callback that is waiting on
-        # a lifecycle gate cannot deadlock the only thread that could consume
-        # ``critical_danger_requested``. The critical worker still uses the
-        # shared input/session admission boundary, so this is preemption of
-        # scheduling—not unsynchronized input.
+        # All character input, including urgent danger escape, is sequenced
+        # here. HP observation only publishes the request; it never owns input.
         while not self._ctx.is_stopped():
             try:
+                if self._process_critical_danger():
+                    continue
                 if self._ctx.danger_escape_active.is_set():
-                    # An independent escape owns character input. Park without
-                    # busy-spinning so OCR/danger/tracking keep CPU time.
+                    # An urgent transition is already in progress. Park without
+                    # busy-spinning so observation workers keep CPU time.
                     self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
                     continue
                 if self._sit is not None and self._sit.process_pending():
@@ -769,8 +772,26 @@ class GameplayLoop:
                 # retryable and never resets a timer merely because it expired.
                 if self._buffs is not None:
                     self._buffs.process_pending(startup_only=True)
+                if self._ctx.critical_danger_requested.is_set():
+                    continue
                 if self._timers is not None:
                     self._timers.process_pending(startup_only=True)
+                if self._ctx.critical_danger_requested.is_set():
+                    continue
+                # Do not let the periodic scheduler observe generation-due
+                # actions until startup has completed. Startup callbacks already
+                # performed the first buff/timer presses; running the scheduler
+                # before both milestones are published would replay a completed
+                # buff while later startup timers are still being pressed.
+                startup_buffs_done = event_is_set(
+                    getattr(self._ctx, "startup_buffs_done", None)
+                )
+                startup_timers_done = event_is_set(
+                    getattr(self._ctx, "startup_timers_done", None)
+                )
+                if startup_buffs_done is False or startup_timers_done is False:
+                    self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
+                    continue
                 # Startup callbacks may have succeeded on this same generation;
                 # seed their real success timestamps before observing deadlines.
                 self._prepare_deferred_actions(now_ms)
@@ -818,3 +839,82 @@ class GameplayLoop:
                     f"[GAMEPLAY] step error:\n{traceback.format_exc()}"
                 )
                 self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
+
+    def _process_critical_danger(self) -> bool:
+        """Consume one urgent HP-danger signal on this gameplay owner.
+
+        The HP observer only sets the request and cancels an in-flight input
+        operation. This method is the sole path that turns the request into a
+        teleport, so no second gameplay controller can compete for input.
+        """
+        ctx = self._ctx
+        teleport = self._teleport
+        if teleport is None or ctx.is_stopped() or ctx.pause_event.is_set():
+            return False
+        if not ctx.critical_danger_requested.is_set():
+            return False
+
+        # SP recovery owns seated danger; its synchronous recovery path handles
+        # the escape without allowing this hunting path to tear down the sit
+        # lifecycle mid-regen.
+        if (
+            ctx.sitting_event.is_set()
+            and not ctx.critical_danger_escape_active.is_set()
+        ):
+            return False
+
+        # Damage can age out before this loop consumes the request. Never
+        # teleport for a stale critical signal.
+        if ctx.danger_detector.danger_level() is not DangerLevel.CRITICAL:
+            ctx.pop_critical_danger()
+            ctx.pop_danger_sit_request()
+            return True
+
+        if not ctx.try_begin_critical_escape_ops(override=True):
+            return False
+        try:
+            if not ctx.wait_for_preempted_session_release(
+                CRITICAL_PREEMPT_RELEASE_TIMEOUT_S
+            ):
+                # Never press the teleport key through a storage/heal owner
+                # that did not release in time. Keep the urgent request
+                # pending; the next gameplay tick retries after the owner has
+                # unwound. The finally below releases the temporary escape
+                # claim so this failure cannot stall the runtime forever.
+                ctx.request_critical_danger()
+                return False
+            prefer_safe_key = bool(ctx.preempted_sessions()[0])
+            if ctx.pause_event.is_set():
+                return False
+            if not ctx.pop_critical_danger():
+                return False
+            ctx.pop_danger_sit_request()
+            if ctx.pause_event.is_set():
+                ctx.request_critical_danger()
+                return False
+
+            # The observer may have canceled the previous input operation. It
+            # has unwound before this tick, so re-arm the backend before the
+            # emergency teleport key is emitted.
+            begin = getattr(self._input_backend, "begin_session", None)
+            if callable(begin) and begin() is False:
+                ctx.request_critical_danger()
+                return False
+
+            try:
+                escape_kwargs = {"reason": "critical_hunt"}
+                if prefer_safe_key:
+                    escape_kwargs["prefer_safe_key"] = True
+                escaped = bool(teleport.danger_teleport(**escape_kwargs))
+            except Exception as exc:
+                ctx.logger.behavior(
+                    f"[DANGER] critical hunting teleport failed: {exc}"
+                )
+                escaped = False
+            if escaped:
+                ctx.logger.behavior("[DANGER] critical hunting escape succeeded")
+                return True
+            ctx.request_critical_danger()
+            return False
+        finally:
+            ctx.end_critical_escape_ops()

@@ -170,9 +170,13 @@ class SelfBuffWorker:
         """
         for index, buff in enumerate(buffs):
             while not self._ctx.is_stopped():
+                if self._critical_pending():
+                    return False
                 if self._current_generation() != expected_generation:
                     return False
                 if not self._startup_action_allowed():
+                    if self._critical_pending():
+                        return False
                     resumed = self._ctx.wait_while_combat_blocked(0.25)
                     # Lightweight/test contexts may return immediately while
                     # still blocked; poll stop_event only on interruption so
@@ -202,6 +206,11 @@ class SelfBuffWorker:
                 return False
         return self._current_generation() == expected_generation
 
+    def _critical_pending(self) -> bool:
+        """Return whether urgent danger should abort this owned action step."""
+        event = getattr(self._ctx, "critical_danger_requested", None)
+        return bool(event is not None and event.is_set())
+
     def _startup_action_allowed(self) -> bool:
         checker = getattr(self._ctx, "should_run_startup_actions", None)
         if checker is not None:
@@ -218,11 +227,16 @@ class SelfBuffWorker:
         """Wait one full second while remaining in the active hunt."""
         deadline: int | None = None
         while not self._ctx.is_stopped():
+            if self._critical_pending():
+                return False
             if self._current_generation() != expected_generation:
                 return False
             if not self._startup_action_allowed():
-                # Danger/fight postpones the next buff; the one-second delay
-                # starts again only once the character is safe.
+                # Ordinary combat blocking postpones the next buff. An urgent
+                # critical request is different: abort this startup step so
+                # GameplayLoop can consume the request immediately.
+                if self._critical_pending():
+                    return False
                 deadline = None
                 resumed = self._ctx.wait_while_combat_blocked(0.25)
                 if not resumed and self._ctx.stop_event.wait(0.05):
@@ -251,7 +265,11 @@ class SelfBuffWorker:
         gate = self._ctx.character_action_gate
         allowed = self._startup_action_allowed if startup else self._character_action_allowed
         while not self._ctx.is_stopped():
+            if self._critical_pending():
+                return False
             if not allowed():
+                if self._critical_pending():
+                    return False
                 self._ctx.wait_while_combat_blocked(0.25)
                 continue
             now = monotonic_ms()

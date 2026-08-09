@@ -1,33 +1,16 @@
-"""Critical danger must preempt a blocked gameplay action."""
+"""Critical danger is signalled by observation and consumed by GameplayLoop."""
 
 from __future__ import annotations
 
-import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from pybot.runtime.danger_detector import DangerLevel
+from pybot.game_state import PlayerVitals
+from pybot.runtime.danger_detector import DangerDetector, DangerLevel
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.workers.attack_loop import GameplayLoop
-from pybot.runtime.workers.critical_danger_worker import CriticalDangerWorker
-
-
-class _BlockingStartup:
-    def __init__(self) -> None:
-        self.entered = threading.Event()
-        self.release = threading.Event()
-
-    def process_pending(self, *, startup_only: bool = False) -> bool:
-        self.assert_startup_only(startup_only)
-        self.entered.set()
-        self.release.wait(timeout=2.0)
-        return False
-
-    @staticmethod
-    def assert_startup_only(startup_only: bool) -> None:
-        if not startup_only:
-            raise AssertionError("test callback was used as a periodic action")
+from pybot.runtime.workers.self_buff_worker import SelfBuffWorker
 
 
 class CriticalPreemptionTests(unittest.TestCase):
@@ -35,6 +18,7 @@ class CriticalPreemptionTests(unittest.TestCase):
         config = SimpleNamespace(
             custom_behavior=SimpleNamespace(buffs=()),
             skill_timers=(),
+            sit_on_low_sp_scan_code=0,
         )
         ctx = HuntRuntimeContext(
             config=config,
@@ -53,48 +37,96 @@ class CriticalPreemptionTests(unittest.TestCase):
         )
         return ctx
 
-    def test_critical_escape_does_not_wait_for_gameplay_owner(self) -> None:
-        """A blocked startup callback cannot strand critical danger forever."""
+    def test_gameplay_owner_consumes_critical_escape(self) -> None:
+        """The registered gameplay owner performs the urgent teleport itself."""
         ctx = self._context()
-        startup = _BlockingStartup()
-        gameplay = GameplayLoop(
-            ctx,
-            attack=MagicMock(),
-            buffs=startup,
-        )
-        gameplay_thread = threading.Thread(target=gameplay.run, daemon=True)
-        gameplay_thread.start()
-        self.assertTrue(startup.entered.wait(timeout=1.0))
-
-        # The normal runtime wiring adds the emergency worker separately from
-        # GameplayLoop; this regression exercises the same independent ownership
-        # boundary directly so the blocked callback remains untouched.
         ctx.request_critical_danger()
         teleport = MagicMock()
         teleport.danger_teleport.return_value = True
-        critical = CriticalDangerWorker(ctx, teleport)
+        input_backend = MagicMock()
+        input_backend.begin_session.return_value = True
 
-        completed = threading.Event()
+        gameplay = GameplayLoop(
+            ctx,
+            attack=MagicMock(),
+            teleport=teleport,
+            input_backend=input_backend,
+        )
 
-        def run_escape() -> None:
-            critical.process_pending()
-            completed.set()
-
-        escape_thread = threading.Thread(target=run_escape, daemon=True)
-        escape_thread.start()
-        self.assertTrue(completed.wait(timeout=1.0))
+        self.assertTrue(gameplay._process_critical_danger())
         self.assertFalse(ctx.critical_danger_requested.is_set())
         teleport.danger_teleport.assert_called_once_with(reason="critical_hunt")
-        # The gameplay callback is still blocked; critical handling did not
-        # depend on it returning to the top of its loop.
-        self.assertTrue(gameplay_thread.is_alive())
+        input_backend.begin_session.assert_called_once_with()
 
-        ctx.stop_event.set()
-        startup.release.set()
-        gameplay_thread.join(timeout=1.0)
-        escape_thread.join(timeout=1.0)
-        self.assertFalse(gameplay_thread.is_alive())
-        self.assertFalse(escape_thread.is_alive())
+    def test_hp_observer_cancels_input_but_does_not_teleport(self) -> None:
+        """The metric producer only publishes urgency and requests cancellation."""
+        ctx = self._context()
+        vitals = PlayerVitals()
+        cancel = MagicMock()
+        ctx.cancel_gameplay_input = cancel
+        detector = DangerDetector(ctx, vitals=vitals)
+
+        vitals.publish_hp(100, 100)
+        detector._poll_hp()
+        vitals.publish_hp(40, 100)
+        detector._poll_hp()
+
+        cancel.assert_called_once_with()
+        self.assertTrue(ctx.critical_danger_requested.is_set())
+
+    def test_preempted_session_timeout_releases_temporary_gates(self) -> None:
+        """A failed storage/heal handoff cannot leave gameplay permanently gated."""
+        ctx = self._context()
+        ctx.request_critical_danger()
+        ctx.storage_event.set()
+        # The real GateController wait path times out while storage remains
+        # held; no mock should hide the ownership cleanup being tested.
+        gameplay = GameplayLoop(
+            ctx,
+            attack=MagicMock(),
+            teleport=MagicMock(),
+            input_backend=MagicMock(),
+        )
+
+        self.assertFalse(gameplay._process_critical_danger())
+        self.assertTrue(ctx.critical_danger_requested.is_set())
+        self.assertFalse(ctx.danger_escape_active.is_set())
+        self.assertFalse(ctx.critical_danger_escape_active.is_set())
+        self.assertFalse(ctx.sitting_event.is_set())
+
+    def test_startup_wait_aborts_when_critical_request_arrives(self) -> None:
+        """Startup postponement must yield to the gameplay owner's urgent step."""
+        ctx = self._context()
+        ctx.config.custom_behavior.buffs = (
+            SimpleNamespace(scan_code=59, delay_ms=10_000, button="f1"),
+        )
+        ctx.wait_while_combat_blocked = MagicMock(
+            side_effect=lambda _timeout: (
+                ctx.request_critical_danger(), False
+            )[1]
+        )
+        worker = SelfBuffWorker(ctx, MagicMock())
+
+        self.assertFalse(
+            worker._run_startup_sequence(
+                tuple(ctx.config.custom_behavior.buffs),
+                expected_generation=ctx.hunt_generation,
+            )
+        )
+        self.assertTrue(ctx.critical_danger_requested.is_set())
+
+        # The same owner that aborted startup must consume the request and
+        # perform the escape; no second controller is involved.
+        teleport = MagicMock()
+        teleport.danger_teleport.return_value = True
+        gameplay = GameplayLoop(
+            ctx,
+            attack=MagicMock(),
+            teleport=teleport,
+            input_backend=MagicMock(),
+        )
+        self.assertTrue(gameplay._process_critical_danger())
+        teleport.danger_teleport.assert_called_once_with(reason="critical_hunt")
 
 
 if __name__ == "__main__":

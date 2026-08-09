@@ -144,15 +144,9 @@ class TeleportController:
                 "[HEAL] retry teleport skipped — no teleport key configured"
             )
             return False
-        ctx.discovery_suspend.set()
-        ctx.discovery_wake.clear()
-        try:
-            with ctx.area_transition_lock:
-                # Track reset happens inside ``teleport_once`` after settle.
-                return bool(self.teleport_once(scan_code=tp))
-        finally:
-            ctx.discovery_suspend.clear()
-            ctx.discovery_wake.set()
+        return self._run_area_transition(
+            lambda: self.teleport_once(scan_code=tp),
+        )
 
     def _wait_for_settle(self, timeout_s: float) -> bool:
         """Wait for a teleport already in flight to finish landing.
@@ -264,18 +258,13 @@ class TeleportController:
         ctx.logger.behavior(
             f"[DANGER] {prefix}key={key_name!r} scan={tp} — teleporting"
         )
-        ctx.discovery_suspend.set()
-        ctx.discovery_wake.clear()
-        try:
-            # Hold the lifecycle boundary through input, settle, and reset.
-            # No-target decisions cannot observe the old strategy state while
-            # the critical worker is already in the danger transition.
-            # ``teleport_once`` clears tracks under the same re-entrant lock.
-            with ctx.area_transition_lock:
-                return bool(self.teleport_once(scan_code=tp))
-        finally:
-            ctx.discovery_suspend.clear()
-            ctx.discovery_wake.set()
+        # Hold the lifecycle boundary through input, settle, and reset.
+        # No-target decisions cannot observe the old strategy state while
+        # the gameplay owner is already in the danger transition.
+        # ``teleport_once`` clears tracks under the same re-entrant lock.
+        return self._run_area_transition(
+            lambda: self.teleport_once(scan_code=tp),
+        )
 
     # ── Area clear loops ─────────────────────────────────────────
 
@@ -416,34 +405,48 @@ class TeleportController:
             return False
 
         # Suspend discovery so the 1s cadence cannot scan during teleport
-        # settle and confirm clear on a loading / empty frame.
+        # settle and confirm clear on a loading / empty frame. The clear claim
+        # remains inside the same transition lock before the key is pressed.
+        def transition() -> bool:
+            # Claim under the tracks lock so a concurrent discovery reconcile
+            # cannot spawn tracks into the area we are leaving. The strategy
+            # reset stays in this same transaction.
+            if not ctx.tracks.try_claim_clear_for_teleport():
+                return False
+
+            ctx.policy.reset()
+            ctx.validation.log_area_reset("pre_teleport")
+            self._notify_area_reset()
+
+            tp_button = self.active_button()
+            ctx.logger.behavior(
+                f"[MODE] teleport key={tp_button!r} "
+                f"wingsExhausted={ctx.fly_wings_exhausted}"
+            )
+            return self.teleport_once()
+
+        return self._run_area_transition(transition)
+
+    # ── Internal helpers ─────────────────────────────────────────
+
+    def _run_area_transition(self, action) -> bool:
+        """Run one teleport transition with one shared suspend/lock boundary.
+
+        All teleport entry points must use the same boundary: discovery stays
+        out of loading frames, and track/policy publication cannot interleave
+        with the input, settle, and reset sequence. Keeping this ownership in
+        one helper removes three subtly divergent wrappers without changing
+        detector work or transition ordering.
+        """
+        ctx = self._ctx
         ctx.discovery_suspend.set()
         ctx.discovery_wake.clear()
-
         try:
             with ctx.area_transition_lock:
-                # Claim under the tracks lock before input so a concurrent
-                # discovery reconcile cannot spawn tracks into the area we are
-                # leaving. The strategy reset stays in this same transaction.
-                if not ctx.tracks.try_claim_clear_for_teleport():
-                    return False
-
-                ctx.policy.reset()
-                ctx.validation.log_area_reset("pre_teleport")
-                self._notify_area_reset()
-
-                tp_button = self.active_button()
-                ctx.logger.behavior(
-                    f"[MODE] teleport key={tp_button!r} "
-                    f"wingsExhausted={ctx.fly_wings_exhausted}"
-                )
-                ok = self.teleport_once()
-                return ok
+                return bool(action())
         finally:
             ctx.discovery_suspend.clear()
             ctx.discovery_wake.set()
-
-    # ── Internal helpers ─────────────────────────────────────────
 
     def no_visible_mobs_now(self) -> bool:
         """Return true only when an immediate discovery scan sees zero mobs.

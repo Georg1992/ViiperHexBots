@@ -54,7 +54,6 @@ from pybot.runtime.constants import (
 from pybot.runtime.workers.items_to_storage_worker import ItemsToStorageWorker
 from pybot.runtime.workers.sit_on_low_sp_worker import SitOnLowSpWorker
 from pybot.runtime.workers.hp_restore_worker import HpRestoreWorker
-from pybot.runtime.workers.critical_danger_worker import CriticalDangerWorker
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="ViiperHexBots Python hunt runtime")
     sub = parser.add_subparsers(dest="command")
@@ -236,7 +235,7 @@ def _build_core_workers(
     player_vitals: PlayerVitals,
     mob_behavior,
     danger: DangerDetector,
-) -> tuple[list[tuple[str, Callable[[], None]]], AttackLoop, CriticalDangerWorker]:
+) -> tuple[list[tuple[str, Callable[[], None]]], AttackLoop]:
     """Build observation workers and action objects for the single gameplay owner.
 
     ``danger`` is the shared detector assembled by ``_build_context`` — there
@@ -254,17 +253,15 @@ def _build_core_workers(
         teleport_controller=tport,
         char_x=char_x, char_y=char_y,
     )
-    critical_escape = CriticalDangerWorker(ctx, tport)
-    # Observation and emergency danger handling run independently from the
-    # serialized gameplay owner. Critical escape must not wait behind a startup
-    # buff/timer callback that is itself blocked by the critical request.
+    # HP observation remains independent, but it publishes only the urgent
+    # signal. GameplayLoop is the sole owner that turns that signal into a
+    # teleport/input action.
     workers = [
         ("danger", danger.run),
-        ("critical-danger", critical_escape.run),
         ("coord", tracking.run),
         ("discovery", discovery.run),
     ]
-    return workers, attack, critical_escape
+    return workers, attack
 
 
 def _build_conditional_workers(
@@ -365,6 +362,10 @@ def create_runtime_deps(
         # The process-wide VIIPER stream store (shared with ViiperManager)
         # keeps device streams alive across hunt stop/start.
         input_backend: InputBackend = ViiperBackend(stream_store=stream_store)
+        # The observer may cancel an in-flight macro, but never performs input.
+        # GameplayLoop remains the only caller that executes the escape action.
+        ctx.input_backend = input_backend
+        ctx.cancel_gameplay_input = input_backend.cancel_pending
 
         # Create TeleportController early — every teleport concern lives here.
         tport = TeleportController(ctx, input_backend)
@@ -392,7 +393,7 @@ def create_runtime_deps(
         else:
             mob_behavior = legacy_behavior
 
-        core_workers, attack, critical = _build_core_workers(
+        core_workers, attack = _build_core_workers(
             ctx, hunt_mode, input_backend, tport, player_vitals, mob_behavior,
             danger=danger,
         )
@@ -410,6 +411,8 @@ def create_runtime_deps(
             hp_restore=actions.get("hp_restore"),
             buffs=actions.get("buffs"),
             timers=actions.get("timers"),
+            teleport=tport,
+            input_backend=input_backend,
         )
         return RuntimeDependencies(
             ctx=ctx,
@@ -535,6 +538,9 @@ class HuntRuntime:
                 logger_closed = False
         if clean_shutdown and logger_closed:
             try:
+                close_capture = getattr(ctx.capture, "close", None)
+                if callable(close_capture) and close_capture() is False:
+                    return False
                 reset_capture_session()
             except BaseException:
                 return False
@@ -614,6 +620,13 @@ class HuntRuntime:
                     "[PYBOT] shutdown incomplete; seated state unresolved"
                 )
                 return False
+
+        close_capture = getattr(self._ctx.capture, "close", None)
+        if callable(close_capture) and close_capture() is False:
+            self._ctx.logger.behavior(
+                "[PYBOT] capture shutdown did not finish; geometry worker is still active"
+            )
+            return False
 
         self._worker_threads.clear()
         if not self._shutdown_input():

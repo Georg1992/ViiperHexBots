@@ -18,7 +18,7 @@ from pybot.runtime.constants import (
 from pybot.runtime.danger_detector import DangerDetector, DangerLevel
 from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.runtime_context import HuntRuntimeContext
-from pybot.runtime.workers.critical_danger_worker import CriticalDangerWorker
+from pybot.runtime.workers.attack_loop import GameplayLoop
 from pybot.runtime.workers.sit_on_low_sp_worker import SitOnLowSpWorker
 
 
@@ -509,11 +509,16 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.teleport.danger_teleport = MagicMock(  # type: ignore[method-assign]
             side_effect=[False, True]
         )
-        escape = CriticalDangerWorker(self.ctx, self.teleport)
+        gameplay = GameplayLoop(
+            self.ctx,
+            attack=MagicMock(),
+            teleport=self.teleport,
+            input_backend=self.input,
+        )
 
-        self.assertFalse(escape.process_pending())
+        self.assertFalse(gameplay._process_critical_danger())
         self.assertTrue(self.ctx.critical_danger_requested.is_set())
-        self.assertTrue(escape.process_pending())
+        self.assertTrue(gameplay._process_critical_danger())
 
         self.assertEqual(self.teleport.danger_teleport.call_count, 2)
         self.assertFalse(self.ctx.critical_danger_requested.is_set())
@@ -524,9 +529,14 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.request_critical_danger()
         self.ctx.sitting_event.set()
         self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
-        escape = CriticalDangerWorker(self.ctx, self.teleport)
+        gameplay = GameplayLoop(
+            self.ctx,
+            attack=MagicMock(),
+            teleport=self.teleport,
+            input_backend=self.input,
+        )
 
-        self.assertFalse(escape.process_pending())
+        self.assertFalse(gameplay._process_critical_danger())
         self.teleport.danger_teleport.assert_not_called()
         self.assertTrue(self.ctx.critical_danger_requested.is_set())
         self.assertTrue(self.ctx.sitting_event.is_set())
@@ -672,15 +682,20 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.request_critical_danger()
         self.ctx.mark_paused()
         self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
-        escape = CriticalDangerWorker(self.ctx, self.teleport)
+        gameplay = GameplayLoop(
+            self.ctx,
+            attack=MagicMock(),
+            teleport=self.teleport,
+            input_backend=self.input,
+        )
 
-        self.assertFalse(escape.process_pending())
-        self.assertFalse(escape.process_pending())
+        self.assertFalse(gameplay._process_critical_danger())
+        self.assertFalse(gameplay._process_critical_danger())
         self.teleport.danger_teleport.assert_not_called()
         self.assertTrue(self.ctx.critical_danger_requested.is_set())
 
         self.ctx.mark_running()
-        self.assertTrue(escape.process_pending())
+        self.assertTrue(gameplay._process_critical_danger())
         self.teleport.danger_teleport.assert_called_once_with(reason="critical_hunt")
         self.assertFalse(self.ctx.critical_danger_requested.is_set())
 
@@ -688,9 +703,14 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.request_critical_danger()
         self.ctx.stop_event.set()
         self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
-        escape = CriticalDangerWorker(self.ctx, self.teleport)
+        gameplay = GameplayLoop(
+            self.ctx,
+            attack=MagicMock(),
+            teleport=self.teleport,
+            input_backend=self.input,
+        )
 
-        self.assertFalse(escape.process_pending())
+        self.assertFalse(gameplay._process_critical_danger())
         self.teleport.danger_teleport.assert_not_called()
         self.assertTrue(self.ctx.critical_danger_requested.is_set())
 

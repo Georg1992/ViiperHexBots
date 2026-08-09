@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import unittest
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -17,6 +18,7 @@ from pybot.recognition.ui.status_panel import (
     _classify_glyph,
     _load_digit_templates,
     _match_template_zncc,
+    _parse_anchored,
     clear_template_cache,
     find_status_panel,
     read_status_panel,
@@ -109,6 +111,56 @@ class StatusPanelTests(unittest.TestCase):
         character, score = _classify_glyph(glyph)
         self.assertEqual(character, "8")
         self.assertGreaterEqual(score, DIGIT_MATCH_THRESHOLD)
+
+    def test_expired_glyph_budget_skips_template_matching(self) -> None:
+        """A stale OCR frame cannot spend the whole budget on one glyph."""
+        templates = _load_digit_templates()
+        glyph = templates["8"][0]
+        with patch(
+            "pybot.recognition.ui.status_panel._match_template_zncc",
+        ) as matcher:
+            result = _classify_glyph(
+                glyph,
+                deadline=time.monotonic() - 1.0,
+            )
+        self.assertEqual(result, (None, -1.0))
+        matcher.assert_not_called()
+
+    def test_parser_passes_deadline_into_glyph_classifier(self) -> None:
+        """The parser budget must cover each delegated glyph classification."""
+        glyph = np.zeros((7, 3), dtype=np.uint8)
+        deadline = time.monotonic() + 1.0
+        with patch(
+            "pybot.recognition.ui.status_panel._glyph_components",
+            return_value=[(0, glyph)],
+        ), patch(
+            "pybot.recognition.ui.status_panel._classify_glyph",
+            return_value=("1", 1.0),
+        ) as classify:
+            _parse_anchored(
+                np.zeros((20, 20, 3), dtype=np.uint8),
+                (0, 0),
+                (0, 0, 10, 10),
+                min_width=2,
+                stop_at_slash=False,
+                deadline=deadline,
+            )
+        classify.assert_called_once_with(glyph, deadline=deadline)
+
+    def test_glyph_classifier_rejects_match_that_crosses_deadline(self) -> None:
+        """A slow final template match cannot return a stale glyph result."""
+        templates = _load_digit_templates()
+        glyph = templates["8"][0]
+        clock = iter((0.0, 0.0, 2.0, 2.0))
+        with patch(
+            "pybot.recognition.ui.status_panel.time.monotonic",
+            side_effect=lambda: next(clock),
+        ), patch(
+            "pybot.recognition.ui.status_panel._match_template_zncc",
+            return_value=1.0,
+        ):
+            result = _classify_glyph(glyph, deadline=1.0)
+        self.assertEqual(result, (None, -1.0))
 
     def test_verify_status_panel_at_locked_origin(self) -> None:
         frame = self._load("FalseWeight2.png")

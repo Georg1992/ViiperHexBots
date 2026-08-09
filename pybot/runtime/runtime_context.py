@@ -71,6 +71,11 @@ class HuntRuntimeContext:
     # Assembled by the context factory so the gates and the detector always
     # observe the same session state.
     danger_detector: DangerDetector | None = field(default=None, repr=False)
+    # Set by the composition root. Observation may cancel an in-flight input
+    # operation, but this callback never performs gameplay input itself.
+    cancel_gameplay_input: Callable[[], None] | None = field(
+        default=None, repr=False,
+    )
     # Registered by the sit worker so runtime shutdown can retry an unresolved
     # seated toggle after the worker thread has exited.
     sit_cleanup_callback: Callable[[], bool] | None = field(

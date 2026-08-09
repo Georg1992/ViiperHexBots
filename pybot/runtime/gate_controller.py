@@ -136,7 +136,7 @@ class GateController:
         # Set by DangerDetector for any HP drop; the sit worker owns seated
         # damage and filters ordinary hunting hits.
         self.danger_sit_requested = threading.Event()
-        # Independent critical-danger signal so hunting can escape even when
+        # Urgent critical-danger signal so hunting can escape even when
         # low-SP sitting is disabled or no sit key is configured.
         self.critical_danger_requested = threading.Event()
         # True from any danger-escape ownership claim through teleport settle.
@@ -333,7 +333,7 @@ class GateController:
     def try_begin_critical_escape_ops(self, *, override: bool = False) -> bool:
         """Atomically claim the critical escape and its input gate.
 
-        The critical worker is not an SP-recovery session. Claim both markers
+        Critical danger is not an SP-recovery session. Claim both markers
         under one lock so HP polling cannot see ``sitting_event`` alone and
         enqueue a sit request in the pre-teleport window.
 

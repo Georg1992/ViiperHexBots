@@ -529,7 +529,10 @@ def _parse_anchored(
             telemetry(
                 f"glyph_start x={x} w={glyph.shape[1]} h={glyph.shape[0]}"
             )
-        classified.append((x, *_classify_glyph(glyph), glyph))
+        classified_glyph = _classify_glyph(glyph, deadline=deadline)
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
+        classified.append((x, *classified_glyph, glyph))
 
     slash_x: int | None = None
     for x, ch, score, glyph in classified:
@@ -781,13 +784,29 @@ def _match_template_zncc(
     return float(scores.max()) if scores.size else -1.0
 
 
-def _classify_glyph(glyph: np.ndarray) -> tuple[str | None, float]:
+def _classify_glyph(
+    glyph: np.ndarray,
+    *,
+    deadline: float | None = None,
+) -> tuple[str | None, float]:
+    """Classify one glyph without overrunning the current OCR budget.
+
+    Glyph matching is deliberately pure NumPy, but a noisy frame can still
+    make the bounded set of template comparisons expensive. The caller's
+    deadline must therefore apply inside this loop too; otherwise one glyph
+    can keep the native-read helper alive after the outer parser budget has
+    expired and hold the single-flight OCR guard indefinitely.
+    """
     templates = _load_digit_templates()
     best_ch: str | None = None
     best_score = -1.0
     gh, gw = glyph.shape[:2]
     for ch, variants in templates.items():
+        if deadline is not None and time.monotonic() >= deadline:
+            return None, -1.0
         for tpl in variants:
+            if deadline is not None and time.monotonic() >= deadline:
+                return None, -1.0
             th, tw = tpl.shape[:2]
             # Belarus statusui: skip wildly different scales (dot vs digit).
             if gw * 2 < tw or tw * 2 < gw or gh * 2 < th or th * 2 < gh:
@@ -797,10 +816,18 @@ def _classify_glyph(glyph: np.ndarray) -> tuple[str | None, float]:
             pad = np.zeros((pad_h, pad_w), dtype=np.uint8)
             pad[2 : 2 + gh, 2 : 2 + gw] = glyph
             score = _match_template_zncc(pad, tpl)
+            if deadline is not None and time.monotonic() >= deadline:
+                return None, -1.0
             if score > best_score:
                 best_score = score
                 best_ch = ch
-                if best_score >= DIGIT_EARLY_EXIT_SCORE:
+                if (
+                    best_score >= DIGIT_EARLY_EXIT_SCORE
+                    and (
+                        deadline is None
+                        or time.monotonic() < deadline
+                    )
+                ):
                     return best_ch, best_score
     return best_ch, best_score
 
