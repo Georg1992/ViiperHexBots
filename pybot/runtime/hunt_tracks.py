@@ -250,7 +250,7 @@ class HuntTracks:
 
     def discovery_frame_snapshot(
         self, now_tick: int | None = None
-    ) -> tuple[int, list[tuple[int, int]], list[tuple[int, int, int, float, float]]]:
+    ) -> tuple[int, list[tuple[int, int]], list[tuple[int, int, int, float, float, int]]]:
         """Atomic sample for one discovery capture: epoch + dedup + positions.
 
         Dedup positions are alive tracks only. Death sites are absorbed later
@@ -263,7 +263,14 @@ class HuntTracks:
                 self._area_epoch,
                 self._dedup_positions_locked(tick, alive=alive),
                 [
-                    (t.id, t.x, t.y, float(t.vel_x), float(t.vel_y))
+                    (
+                        t.id,
+                        t.x,
+                        t.y,
+                        float(t.vel_x),
+                        float(t.vel_y),
+                        int(t.lost_count),
+                    )
                     for t in alive
                 ],
             )
@@ -279,6 +286,24 @@ class HuntTracks:
         with self._lock:
             alive = [replace(t) for t in self._tracks if is_alive(t)]
             return self._area_epoch, alive
+
+    def consume_reanchor(self, track_id: int, *, expected_epoch: int | None = None) -> tuple[int, int] | None:
+        """Consume one Discovery reanchor hint for the current area.
+
+        Discovery publishes only a search proposal. Tracking consumes it before
+        its next fresh-frame follow and remains the sole writer of authoritative
+        coordinates. Epoch validation prevents an old hint from crossing a
+        teleport boundary.
+        """
+        with self._lock:
+            if expected_epoch is not None and expected_epoch != self._area_epoch:
+                return None
+            track = self._get_track_by_id_locked(track_id)
+            if track is None or not is_alive(track):
+                return None
+            anchor = track.pending_reanchor
+            track.pending_reanchor = None
+            return anchor
 
     # ── Discovery candidates pipeline ────────────────────────────────────
 
@@ -368,7 +393,18 @@ class HuntTracks:
             track_positions = (
                 existing_track_positions
                 if existing_track_positions is not None
-                else [(t.id, t.x, t.y) for t in self._tracks if is_alive(t)]
+                else [
+                    (
+                        t.id,
+                        t.x,
+                        t.y,
+                        float(t.vel_x),
+                        float(t.vel_y),
+                        int(t.lost_count),
+                    )
+                    for t in self._tracks
+                    if is_alive(t)
+                ]
             )
             result: DiscoveryReconcileResult = TrackReconciler.match_and_absent(
                 detections,
@@ -387,6 +423,10 @@ class HuntTracks:
                         now_tick=tick,
                         detection=detection,
                         config=config,
+                        tracking_lost=self._capture_tracking_lost(
+                            tid,
+                            track_positions,
+                        ),
                     )
 
             # Absorb corpse heat into death sites (larger radius than track
@@ -837,6 +877,14 @@ class HuntTracks:
             if entry[0] == track_id:
                 return int(entry[1]), int(entry[2])
         return None, None
+
+    @staticmethod
+    def _capture_tracking_lost(track_id: int, track_positions: list[tuple]) -> bool:
+        """Return the capture-time local-tracking loss state for a track."""
+        for entry in track_positions:
+            if entry[0] == track_id:
+                return len(entry) > 5 and int(entry[5]) > 0
+        return False
 
     def _detector_config(self) -> dict:
         return self._detector_config_ref if self._detector_config_ref is not None else load_detector_config()

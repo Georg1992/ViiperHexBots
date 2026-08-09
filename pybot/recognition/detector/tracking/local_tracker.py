@@ -15,6 +15,7 @@ Opacity is measured on hits for in-place death fade.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import threading
 from typing import TYPE_CHECKING
 
 import cv2
@@ -126,6 +127,13 @@ def track_local(
         )
     cx = int(track["x"])
     cy = int(track["y"])
+    # A Discovery reanchor is a one-shot search proposal, not an authoritative
+    # coordinate update. Tracking searches around it on this fresh frame and
+    # publishes x/y only if the tracker confirms the mob there.
+    reanchor_x = track.get("reanchor_x")
+    reanchor_y = track.get("reanchor_y")
+    search_origin_x = int(reanchor_x) if reanchor_x is not None else cx
+    search_origin_y = int(reanchor_y) if reanchor_y is not None else cy
     scale = float(track.get("scale", 0.0))
     if scale <= 0.0:
         return _miss_result(
@@ -163,13 +171,43 @@ def track_local(
         factor = float(radius) / prediction_len
         prediction_dx *= factor
         prediction_dy *= factor
-    search_cx = int(round(cx + prediction_dx))
-    search_cy = int(round(cy + prediction_dy))
+    if reanchor_x is not None and reanchor_y is not None:
+        # Discovery's hint is already a current detection center; do not add
+        # stale tracking velocity to it.
+        search_cx = search_origin_x
+        search_cy = search_origin_y
+    else:
+        search_cx = int(round(cx + prediction_dx))
+        search_cy = int(round(cy + prediction_dy))
 
-    # Candidate resolution is an explicit one-shot phase. Confirmed tracks use
-    # warm-template follow first, with a bounded palette recovery only after a
-    # miss so transient animation/occlusion does not break stickiness.
+    # Candidate resolution is an explicit one-shot phase. Discovery already
+    # passed this position through the full silhouette detector, so try that
+    # authoritative candidate first. The heatmap peak is an optimization, not
+    # an identity decision: in a dense scene a neighboring mob can dominate the
+    # local heatmap and make a valid discovery candidate report ``no_peak``.
+    # Seeding from the validated discovery point prevents duplicate templates
+    # and gives every newly discovered mob an independent warm identity.
     if track_id < 0:
+        accepted, bbox, similarity = detector.score_at(
+            frame_bgr,
+            descriptor,
+            search_origin_x,
+            search_origin_y,
+            scale,
+        )
+        if accepted and bbox is not None:
+            return _finalize_track_hit(
+                detector=detector,
+                frame_bgr=frame_bgr,
+                descriptor=descriptor,
+                track_id=track_id,
+                bbox=bbox,
+                similarity=similarity,
+                scale=scale,
+                offset_x=offset_x,
+                offset_y=offset_y,
+            )
+
         peak = _find_local_peak(
             detector,
             frame_bgr,
@@ -240,7 +278,7 @@ def track_local(
     )
     if peak is not None:
         _peak_x, _peak_y, _heat_score, peak_sim, peak_bbox = peak
-        template = _template_store(detector).get(track_id)
+        template = _template_for_track(detector, track_id)
         # Palette recovery may see a neighboring identical mob. Require the
         # preserved temporal patch to agree before moving the authoritative
         # track; otherwise report a miss and let discovery confirm identity.
@@ -313,8 +351,21 @@ def _finalize_track_hit(
     offset_x: int, offset_y: int,
 ) -> LocalTrackResult:
     bx, by, bw, bh = bbox
-    x = bx + bw // 2 + offset_x
-    y = by + bh // 2 + offset_y
+    # Every accepted palette/silhouette path must publish the same stable
+    # coordinate: the center of the sprite component, not the heatmap peak or
+    # an arbitrary gate/window midpoint. Warm-template and static-GRF paths
+    # already refine before arriving here; applying the same final invariant
+    # here restores it for the ordinary silhouette-gated path as well.
+    x, y = _refine_hit_to_sprite_center(
+        detector,
+        frame_bgr,
+        descriptor,
+        bx + bw // 2,
+        by + bh // 2,
+        scale,
+    )
+    x += offset_x
+    y += offset_y
 
     opacity_score = measure_opacity_score(
         frame_bgr,
@@ -348,32 +399,53 @@ def _template_store(detector: MobDetector) -> dict[int, _TrackTemplate]:
     return store
 
 
+def _template_lock(detector: MobDetector) -> threading.RLock:
+    """Return the narrow lock protecting temporal-cache mutations."""
+    lock = getattr(detector, "_local_track_templates_lock", None)
+    if lock is None:
+        lock = threading.RLock()
+        setattr(detector, "_local_track_templates_lock", lock)
+    return lock
+
+
+def _template_for_track(
+    detector: MobDetector,
+    track_id: int,
+) -> _TrackTemplate | None:
+    """Read one immutable template under the cache lock."""
+    with _template_lock(detector):
+        return _template_store(detector).get(track_id)
+
+
 def transfer_track_template(
     detector: MobDetector,
     source_track_id: int,
     target_track_id: int,
 ) -> bool:
     """Move a provisional template to the real track ID exactly once."""
-    if source_track_id == target_track_id:
-        return source_track_id in _template_store(detector)
-    store = _template_store(detector)
-    template = store.pop(source_track_id, None)
-    if template is None:
-        return False
-    store[target_track_id] = template
-    return True
+    with _template_lock(detector):
+        store = _template_store(detector)
+        if source_track_id == target_track_id:
+            return source_track_id in store
+        template = store.pop(source_track_id, None)
+        if template is None:
+            return False
+        store[target_track_id] = template
+        return True
 
 
 def discard_track_template(detector: MobDetector, track_id: int) -> None:
     """Discard a provisional template that was not committed to a track."""
-    _template_store(detector).pop(track_id, None)
+    with _template_lock(detector):
+        _template_store(detector).pop(track_id, None)
 
 
 def clear_track_templates(detector: MobDetector) -> None:
     """Drop all temporal patches when the detector enters a new screen area."""
-    store = getattr(detector, "_local_track_templates", None)
-    if store is not None:
-        store.clear()
+    with _template_lock(detector):
+        store = getattr(detector, "_local_track_templates", None)
+        if store is not None:
+            store.clear()
 
 
 def _remember_track_template(
@@ -403,26 +475,27 @@ def _remember_track_template(
          max(1, gray.shape[0] // _TEMPLATE_DOWNSCALE)),
         interpolation=cv2.INTER_AREA,
     )
-    store = _template_store(detector)
-    previous = store.get(track_id)
-    verified_hits = (
-        int(getattr(previous, "verified_hits", 0)) if previous is not None else 0
-    )
-    store[track_id] = _TrackTemplate(
-        image_gray=reduced,
-        width=x1 - x0,
-        height=y1 - y0,
-        center_x=(x0 + x1) // 2,
-        center_y=(y0 + y1) // 2,
-        scale=scale,
-        verified_hits=verified_hits,
-    )
-    # Track IDs are monotonic in production, but keep a test/restart session
-    # from retaining unbounded image memory if a caller reuses one detector.
-    total_bytes = sum(int(item.image_gray.nbytes) for item in store.values())
-    while total_bytes > _TEMPLATE_MAX_BYTES and store:
-        oldest_id = next(iter(store))
-        total_bytes -= int(store.pop(oldest_id).image_gray.nbytes)
+    with _template_lock(detector):
+        store = _template_store(detector)
+        previous = store.get(track_id)
+        verified_hits = (
+            int(getattr(previous, "verified_hits", 0)) if previous is not None else 0
+        )
+        store[track_id] = _TrackTemplate(
+            image_gray=reduced,
+            width=x1 - x0,
+            height=y1 - y0,
+            center_x=(x0 + x1) // 2,
+            center_y=(y0 + y1) // 2,
+            scale=scale,
+            verified_hits=verified_hits,
+        )
+        # Track IDs are monotonic in production, but keep a test/restart session
+        # from retaining unbounded image memory if a caller reuses one detector.
+        total_bytes = sum(int(item.image_gray.nbytes) for item in store.values())
+        while total_bytes > _TEMPLATE_MAX_BYTES and store:
+            oldest_id = next(iter(store))
+            total_bytes -= int(store.pop(oldest_id).image_gray.nbytes)
 
 
 def _follow_cached_template(
@@ -440,7 +513,7 @@ def _follow_cached_template(
     offset_y: int,
 ) -> LocalTrackResult | None:
     """Follow a confirmed patch; return None when bounded recovery is needed."""
-    template = _template_store(detector).get(track_id)
+    template = _template_for_track(detector, track_id)
     if template is None:
         return None
     template_gray = template.image_gray
@@ -537,17 +610,18 @@ def _follow_cached_template(
         bbox=bbox,
         scale=scale,
     )
-    current = _template_store(detector).get(track_id)
-    if current is not None:
-        _template_store(detector)[track_id] = _TrackTemplate(
-            image_gray=current.image_gray,
-            width=current.width,
-            height=current.height,
-            center_x=current.center_x,
-            center_y=current.center_y,
-            scale=current.scale,
-            verified_hits=previous_hits,
-        )
+    with _template_lock(detector):
+        current = _template_store(detector).get(track_id)
+        if current is not None:
+            _template_store(detector)[track_id] = _TrackTemplate(
+                image_gray=current.image_gray,
+                width=current.width,
+                height=current.height,
+                center_x=current.center_x,
+                center_y=current.center_y,
+                scale=current.scale,
+                verified_hits=previous_hits,
+            )
     opacity_score = measure_opacity_score(
         frame_bgr,
         descriptor,
@@ -718,13 +792,10 @@ def _find_local_peak(
                 and peak_val >= _LOCAL_FAST_MIN_HEAT_MULT * min_heat
                 and _template_identity_ok(detector, frame_bgr, descriptor, bbox)
             ):
-                # Re-center on the sprite body: the heat peak can sit on the
-                # densest color region instead of the sprite center, which made
-                # the bot aim off the mob. Heat (palette match strength) doubles
-                # as confidence — the fast path has no silhouette similarity.
-                peak_x, peak_y = _refine_hit_to_sprite_center(
-                    detector, frame_bgr, descriptor, peak_x, peak_y, scale,
-                )
+                # The accepted result is centered once in
+                # ``_finalize_track_hit``. Keep this fast path focused on
+                # finding/verifying the peak and return its descriptor-sized
+                # bbox as the input to that shared final center adjustment.
                 bbox = _descriptor_sized_bbox(descriptor, peak_x, peak_y, scale)
                 return peak_x, peak_y, peak_val, float(peak_val), bbox
     else:

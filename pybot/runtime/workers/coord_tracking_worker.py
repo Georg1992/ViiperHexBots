@@ -17,6 +17,7 @@ to accept a hit; heatmap peaks only propose candidates.
 
 from __future__ import annotations
 
+import threading
 import traceback
 from contextlib import nullcontext
 
@@ -41,6 +42,11 @@ class CoordTrackingWorker:
         # Track IDs whose first-tick data has been logged (one shot per track).
         self._logged_first_tick: set[tuple[int, int]] = set()
         self._logged_first_tick_epoch: int | None = None
+        # Coordinator-owned lifecycle state: Track objects remain passive, and
+        # at most one local-follow job is active for any Track at a time.
+        self._inflight_track_ids: set[int] = set()
+        self._tracking_round_robin = 0
+        self._inflight_lock = threading.Lock()
 
     def run(self) -> None:
         ctx = self._ctx
@@ -81,6 +87,9 @@ class CoordTrackingWorker:
 
         now_ms = monotonic_ms()
         area_epoch, alive_tracks = ctx.tracks.tracking_frame_snapshot(now_ms)
+        if self._logged_first_tick_epoch != area_epoch:
+            with self._inflight_lock:
+                self._inflight_track_ids.clear()
         # Track IDs are intentionally monotonic across areas. Keep the
         # one-shot diagnostic set scoped to the current area so long teleport
         # sessions do not retain one tuple per historical track forever.
@@ -134,6 +143,21 @@ class CoordTrackingWorker:
             self._update_overlay(now_ms)
             return
 
+        # Only tracks with a valid scale enter local tracking. Consume a
+        # reanchor only for those submitted tracks; otherwise a malformed
+        # track could lose its hint without ever giving Tracking a chance to
+        # use it.
+        trackable_tracks = [
+            track for track in alive_tracks if track.discovery_scale > 0
+        ]
+        for track in trackable_tracks:
+            anchor = ctx.tracks.consume_reanchor(
+                track.id,
+                expected_epoch=area_epoch,
+            )
+            if anchor is not None:
+                track.pending_reanchor = anchor
+
         snapshots = [
             StateTrackSnapshot(
                 track_id=track.id,
@@ -159,15 +183,120 @@ class CoordTrackingWorker:
                     now_ms - track.updated_tick
                     <= max(250, 3 * int(TRACKING_LOOP_INTERVAL_S * 1000))
                 ),
+                reanchor_x=(
+                    track.pending_reanchor[0]
+                    if track.pending_reanchor is not None
+                    else None
+                ),
+                reanchor_y=(
+                    track.pending_reanchor[1]
+                    if track.pending_reanchor is not None
+                    else None
+                ),
             )
-            for track in alive_tracks
-            if track.discovery_scale > 0
+            for track in trackable_tracks
         ]
         if not snapshots:
             self._update_overlay(now_ms)
             return
 
-        batch = ctx.tracker.track_locals_frame(frame, roi, snapshots)
+        # Publish each completed track immediately. The executor may finish a
+        # fast mob while another local search is still running; waiting for the
+        # whole batch before applying results would preserve the old head-of-
+        # line blocking even though computation is parallel.
+        published_missed_ids: list[int] = []
+        published_opacity_deaths = []
+        callback_seen_ids: set[int] = set()
+        publish_lock = threading.Lock()
+
+        def publish_result(result) -> None:
+            # Fake/legacy tracker sessions used by lightweight callers may not
+            # support the completion callback. Mark callback delivery before
+            # lifecycle checks so a stale completion is never re-applied by the
+            # compatibility fallback below.
+            with publish_lock:
+                callback_seen_ids.add(result.track_id)
+            if not ctx.should_run_tracking() or ctx.tracks.area_epoch != area_epoch:
+                return
+            # Completion can happen several scheduler ticks after the frame
+            # was captured. Store the publication time, not the old tick-start
+            # time, so Gameplay sees the real age of each coordinate.
+            completed_ms = monotonic_ms()
+            commit_guard = (
+                nullcontext()
+                if publication_lock is None
+                else publication_lock
+            )
+            with commit_guard:
+                if (
+                    not ctx.should_run_tracking()
+                    or ctx.tracks.area_epoch != area_epoch
+                ):
+                    return
+                missed, deaths = ctx.tracks.apply_tracking(
+                    [result],
+                    now_tick=completed_ms,
+                    area_epoch=area_epoch,
+                )
+            with publish_lock:
+                published_missed_ids.extend(missed)
+                published_opacity_deaths.extend(deaths)
+            self._log_opacity_deaths(deaths)
+
+        submit_async = getattr(ctx.tracker, "submit_track_locals_frame", None)
+        if callable(submit_async) and getattr(
+            ctx.tracker, "supports_async_tracking", False
+        ) is True:
+            # Rotate the submission order so a dense scene does not permanently
+            # privilege the first four track IDs when the executor is saturated.
+            offset = self._tracking_round_robin % len(snapshots)
+            ordered = snapshots[offset:] + snapshots[:offset]
+            self._tracking_round_robin += 1
+            with self._inflight_lock:
+                selected = [
+                    snapshot for snapshot in ordered
+                    if snapshot.track_id not in self._inflight_track_ids
+                ]
+                selected_ids = {snapshot.track_id for snapshot in selected}
+                self._inflight_track_ids.update(selected_ids)
+
+            def async_publish(result) -> None:
+                try:
+                    publish_result(result)
+                    if (
+                        not result.found
+                        and not ctx.discovery_suspend.is_set()
+                        and ctx.tracks.area_epoch == area_epoch
+                    ):
+                        ctx.discovery_wake.set()
+                finally:
+                    with self._inflight_lock:
+                        self._inflight_track_ids.discard(result.track_id)
+
+            try:
+                accepted = set(
+                    submit_async(
+                        frame,
+                        roi,
+                        selected,
+                        on_result=async_publish,
+                    )
+                )
+            except BaseException:
+                with self._inflight_lock:
+                    self._inflight_track_ids.difference_update(selected_ids)
+                raise
+            with self._inflight_lock:
+                self._inflight_track_ids.difference_update(selected_ids - accepted)
+            self._update_overlay(now_ms)
+            return
+
+        batch = ctx.tracker.track_locals_frame(
+            frame,
+            roi,
+            snapshots,
+            on_result=publish_result,
+        )
         self._warn_if_slow_tracking(batch, snapshots)
         results = batch.results
 
@@ -199,46 +328,36 @@ class CoordTrackingWorker:
         # A teleport/area reset may win while local matching is computing.
         # Never publish a frame from the old screen into the new area, and do
         # not let an in-flight transition turn a stale hit into liveness.
-        if (
-            not ctx.should_run_tracking()
-            or ctx.tracks.area_epoch != area_epoch
-        ):
-            return
-
-        if publication_lock is None:
-            missed_ids, opacity_deaths = ctx.tracks.apply_tracking(
-                results,
-                now_tick=now_ms,
-                area_epoch=area_epoch,
+        # Results were committed individually as each executor job completed.
+        # A transition may have invalidated some or all callbacks; the store's
+        # epoch check already discarded those stale publications.
+        #
+        # Compatibility path: simple test/fake sessions return a batch but do
+        # not implement ``on_result`` delivery. Apply that complete batch once
+        # here; real DetectorSession callbacks have already marked every result
+        # and therefore cannot be double-published.
+        if not callback_seen_ids:
+            commit_guard = (
+                nullcontext()
+                if publication_lock is None
+                else publication_lock
             )
-        else:
-            with publication_lock:
+            with commit_guard:
                 if (
-                    not ctx.should_run_tracking()
-                    or ctx.tracks.area_epoch != area_epoch
+                    ctx.should_run_tracking()
+                    and ctx.tracks.area_epoch == area_epoch
                 ):
-                    return
-                missed_ids, opacity_deaths = ctx.tracks.apply_tracking(
-                    results,
-                    now_tick=now_ms,
-                    area_epoch=area_epoch,
-                )
+                    missed, deaths = ctx.tracks.apply_tracking(
+                        results,
+                        now_tick=now_ms,
+                        area_epoch=area_epoch,
+                    )
+                    published_missed_ids.extend(missed)
+                    published_opacity_deaths.extend(deaths)
+        missed_ids = list(published_missed_ids)
+        opacity_deaths = list(published_opacity_deaths)
 
-        # sprite.grf removes death animations — opacity death is meaningless.
-        if not ctx.config.use_sprite_grf:
-            for event in opacity_deaths:
-                ratio = (
-                    event.opacity_score / event.baseline
-                    if event.baseline > 0
-                    else 0.0
-                )
-                ctx.logger.behavior(
-                    f"[DEATH] path=opacity id={event.track_id} "
-                    f"@{event.x},{event.y} "
-                    f"score={event.opacity_score:.3f} baseline={event.baseline:.3f} "
-                    f"ratio={ratio:.2f} streak={event.streak} "
-                    f"— track removed, death-site recorded"
-                )
+        self._log_opacity_deaths(opacity_deaths)
 
         # Local miss → wake discovery so it can confirm removal.
         if missed_ids and not ctx.discovery_suspend.is_set():
@@ -391,6 +510,25 @@ class CoordTrackingWorker:
             )
         self._wake_attack_if_created(created)
         return created
+
+    def _log_opacity_deaths(self, events) -> None:
+        """Log opacity removals consistently for sync and async completions."""
+        ctx = self._ctx
+        if ctx.config.use_sprite_grf:
+            return
+        for event in events:
+            ratio = (
+                event.opacity_score / event.baseline
+                if event.baseline > 0
+                else 0.0
+            )
+            ctx.logger.behavior(
+                f"[DEATH] path=opacity id={event.track_id} "
+                f"@{event.x},{event.y} "
+                f"score={event.opacity_score:.3f} baseline={event.baseline:.3f} "
+                f"ratio={ratio:.2f} streak={event.streak} "
+                f"— track removed, death-site recorded"
+            )
 
     def _wake_attack_if_created(self, created: int) -> None:
         """Publish the attack wake after any partial candidate commit."""

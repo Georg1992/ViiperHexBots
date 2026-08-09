@@ -83,12 +83,11 @@ class StatusPanelFeed:
             int | None,
             StatusPanelReadResult,
         ] | None = None
-        # PlayerVitals epochs are advanced by teleport transitions. When the
-        # epoch changes, the old anchored OCR snapshot is no longer allowed to
-        # drive the next read: retaining it lets a transition frame under the
-        # previous ROI publish the previous SP (for example 574) into the new
-        # sit session. The next read must rediscover the static panel and start
-        # with no cached values/maxima.
+        # PlayerVitals epochs are advanced by teleport transitions to reject
+        # stale in-flight publications. The Basic Info panel itself is static
+        # for the whole session, so its confirmed anchor and client geometry
+        # must survive a danger teleport; changing gameplay state must never
+        # force OCR back into an expensive full-panel search.
         self._last_observation_epoch: int | None = getattr(
             vitals, "observation_epoch", None
         )
@@ -150,14 +149,7 @@ class StatusPanelFeed:
             with self._feed_state_lock:
                 epoch = self._lifecycle_epoch
             observation_epoch = getattr(self._vitals, "observation_epoch", None)
-            with self._feed_state_lock:
-                if observation_epoch != self._last_observation_epoch:
-                    self._last_observation_epoch = observation_epoch
-                    self._status_panel_confirmed = None
-                    self._status_panel_max_read_at = 0.0
-                    # Geometry is cheap compared with accepting a stale value
-                    # band. Force one full-client search after each teleport.
-                    self._status_panel_client_hint = None
+            self._sync_observation_epoch(observation_epoch)
             try:
                 result = self._read_snapshot()
             except Exception as exc:
@@ -197,6 +189,19 @@ class StatusPanelFeed:
                 confirmed = self._status_panel_confirmed
             delay_ms = STATUS_PANEL_VALUE_MS if confirmed else STATUS_PANEL_SEARCH_MS
             self._ocr_stop.wait(max(0.05, delay_ms / 1000.0))
+
+    def _sync_observation_epoch(self, observation_epoch: int | None) -> None:
+        """Notice a teleport epoch without reconfiguring the static OCR ROI."""
+        with self._feed_state_lock:
+            if observation_epoch == self._last_observation_epoch:
+                return
+            self._last_observation_epoch = observation_epoch
+            # The panel layout is session-static. Reset only the max refresh
+            # clock so the next fixed-ROI read refreshes the maxima; retain the
+            # confirmed anchor and client hint. Epoch publication guards reject
+            # stale transition frames without making OCR rediscover an unchanged
+            # panel.
+            self._status_panel_max_read_at = 0.0
 
     def _read_snapshot(self) -> StatusPanelReadResult:
         with self._feed_state_lock:

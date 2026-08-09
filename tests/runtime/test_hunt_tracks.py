@@ -112,6 +112,81 @@ class HuntTracksRulesTests(unittest.TestCase):
         # Discovery miss count reset by match
         self.assertEqual(track.discovery_miss_count, 0)
 
+    def test_discovery_match_does_not_reanchor_live_tracking(self) -> None:
+        """A normal discovery confirmation never changes tracking state."""
+        track_id = self._create(500, 500)
+        summary = self.tracks.process_discovery_scan(
+            [det(650, 500)],
+            mob_name="horn",
+            now_tick=self.now + 100,
+            existing_positions=[(500, 500)],
+            existing_track_positions=[(track_id, 500, 500, 100.0, 0.0, 0)],
+        )
+        self.assertEqual(summary.matched_count, 1)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertEqual((track.x, track.y), (500, 500))
+        self.assertIsNone(track.pending_reanchor)
+
+    def test_discovery_match_reanchors_only_after_tracking_miss(self) -> None:
+        """A discovery hit can recover a track after local follow lost it."""
+        track_id = self._create(500, 500)
+        summary = self.tracks.process_discovery_scan(
+            [det(580, 500)],
+            mob_name="horn",
+            now_tick=self.now + 100,
+            existing_positions=[(500, 500)],
+            existing_track_positions=[(track_id, 500, 500, 0.0, 0.0, 1)],
+        )
+        self.assertEqual(summary.matched_count, 1)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertEqual((track.x, track.y), (500, 500))
+        self.assertEqual(track.pending_reanchor, (580, 500))
+
+    def test_lost_track_uses_bounded_recovery_matching_radius(self) -> None:
+        """A lost track can be rediscovered beyond the normal dedup radius."""
+        track_id = self._create(500, 500)
+        summary = self.tracks.process_discovery_scan(
+            [det(700, 500)],
+            mob_name="horn",
+            now_tick=self.now + 100,
+            existing_positions=[(500, 500)],
+            existing_track_positions=[(track_id, 500, 500, 0.0, 0.0, 1)],
+        )
+        self.assertEqual(summary.matched_count, 1)
+        self.assertEqual(summary.added_count, 0)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertEqual(track.pending_reanchor, (700, 500))
+
+    def test_reanchor_is_consumed_once_and_epoch_bound(self) -> None:
+        track_id = self._create(500, 500)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.pending_reanchor = (650, 500)
+        epoch = self.tracks.area_epoch
+        self.assertEqual(
+            self.tracks.consume_reanchor(track_id, expected_epoch=epoch),
+            (650, 500),
+        )
+        self.assertIsNone(self.tracks.consume_reanchor(track_id, expected_epoch=epoch))
+        track.pending_reanchor = (700, 500)
+        self.tracks.area_reset()
+        self.assertIsNone(self.tracks.consume_reanchor(track_id, expected_epoch=epoch))
+
+    def test_close_discovery_match_clears_unconsumed_reanchor(self) -> None:
+        track_id = self._create(500, 500)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.pending_reanchor = (650, 500)
+        self.tracks.process_discovery_scan(
+            [det(510, 500)],
+            mob_name="horn",
+            now_tick=self.now + 100,
+        )
+        self.assertIsNone(track.pending_reanchor)
+
     def test_tracking_miss_advances_lost_count_normally(self) -> None:
         """Miss advances lost count — no soft prior to snap to."""
         track_id = self._create(874, 578)
@@ -146,7 +221,7 @@ class HuntTracksRulesTests(unittest.TestCase):
             now_tick=self.now + 100,
             existing_positions=[(815, 421)],
             existing_track_positions=[
-                (track_id, 815, 421, track.vel_x, track.vel_y),
+                (track_id, 815, 421, track.vel_x, track.vel_y, 0),
             ],
         )
         self.assertEqual(summary.added_count, 0)
@@ -162,7 +237,7 @@ class HuntTracksRulesTests(unittest.TestCase):
             mob_name="anubis",
             now_tick=self.now + 100,
             existing_positions=[(815, 421)],
-            existing_track_positions=[(track_id, 815, 421, 0.0, 0.0)],
+            existing_track_positions=[(track_id, 815, 421, 0.0, 0.0, 0)],
         )
         self.assertEqual(summary.matched_count, 0)
         self.assertEqual(summary.added_count, 1)

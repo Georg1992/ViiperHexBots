@@ -322,36 +322,61 @@ class StatusPanelFeedTests(unittest.TestCase):
         )
         self.assertIsNone(vitals.sp)
 
-    def test_rejected_transition_frame_does_not_become_next_ocr_anchor(self) -> None:
-        """Quarantined OCR frames cannot seed the post-teleport anchor."""
+    def test_teleport_epoch_keeps_static_ocr_anchor(self) -> None:
+        """Danger state changes do not force the static panel to re-anchor."""
         vitals = PlayerVitals()
         feed = _status_feed()
         feed._vitals = vitals
-        epoch = vitals.begin_observation_epoch()
-        feed._last_observation_epoch = epoch
-        transition_values = SimpleNamespace(
+        anchor = SimpleNamespace(
             panel_origin=(4, 5),
             hp=90, hp_max=100, sp=574, sp_max=1454,
             weight=20, weight_max=100,
         )
-        result = SimpleNamespace(
-            hwnd=123, state="values", values=transition_values,
-            client_left=10, client_top=20,
-            client_width=300, client_height=200,
-            full_refresh=True,
+        feed._status_panel_confirmed = anchor
+        feed._status_panel_client_hint = (10, 20, 300, 200)
+        feed._status_panel_max_read_at = 123.0
+
+        epoch = vitals.begin_observation_epoch()
+        feed._sync_observation_epoch(epoch)
+
+        self.assertIs(feed._status_panel_confirmed, anchor)
+        self.assertEqual(feed._status_panel_client_hint, (10, 20, 300, 200))
+        self.assertEqual(feed._status_panel_max_read_at, 0.0)
+
+        # A stale transition frame is still rejected by the vitals epoch gate
+        # and cannot replace the retained static anchor.
+        transition_values = SimpleNamespace(
+            panel_origin=(99, 101),
+            hp=1, hp_max=100, sp=999, sp_max=1454,
+            weight=99, weight_max=100,
         )
         feed._record_reader_result(
-            result,
+            SimpleNamespace(
+                hwnd=123, state="values", values=transition_values,
+                client_left=99, client_top=101,
+                client_width=640, client_height=480,
+                full_refresh=True,
+            ),
             feed._lifecycle_epoch,
             observation_epoch=epoch,
         )
         self.assertIsNone(vitals.sp)
-        self.assertIsNone(feed._status_panel_confirmed)
-        self.assertIsNone(feed._status_panel_client_hint)
+        self.assertIs(feed._status_panel_confirmed, anchor)
+        self.assertEqual(feed._status_panel_client_hint, (10, 20, 300, 200))
+
+        # The next read still receives the retained fixed-ROI anchor rather
+        # than being forced into a full-client header search.
+        with patch(
+            "pybot.app.status_panel_feed.read_status_panel_snapshot",
+            return_value=SimpleNamespace(hwnd=123, state="roi_missing"),
+        ) as reader:
+            feed._read_snapshot()
+        self.assertIs(reader.call_args.args[1], anchor)
+        self.assertEqual(reader.call_args.kwargs["client_hint"], (10, 20, 300, 200))
 
         self.assertTrue(vitals.complete_observation_epoch(epoch))
         fresh_values = SimpleNamespace(
-            panel_origin=(8, 9),
+            panel_origin=(4, 5),
             hp=90, hp_max=100, sp=350, sp_max=1454,
             weight=20, weight_max=100,
         )
@@ -360,7 +385,7 @@ class StatusPanelFeedTests(unittest.TestCase):
                 hwnd=123, state="values", values=fresh_values,
                 client_left=10, client_top=20,
                 client_width=300, client_height=200,
-                full_refresh=True,
+                full_refresh=False,
             ),
             feed._lifecycle_epoch,
             observation_epoch=epoch,

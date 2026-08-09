@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import unittest
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -18,6 +19,7 @@ from pybot.recognition.fixtures import (
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
 from pybot.recognition.detector.tracking.local_tracker import (
     LocalTrackResult,
+    _finalize_track_hit,
     clear_track_templates,
     transfer_track_template,
     _effective_search_radius,
@@ -70,6 +72,44 @@ class LocalTrackerTests(unittest.TestCase):
         track.update(overrides)
         return track
 
+    def test_finalized_hit_publishes_refined_sprite_center(self) -> None:
+        """Every accepted local hit must expose the sprite-center aim point.
+
+        The ordinary silhouette-gated path enters ``_finalize_track_hit`` with
+        a verified bbox. Keep this test separate from detector matching so a
+        future optimization cannot accidentally restore the raw bbox midpoint
+        for that path while warm-template tracking remains centered.
+        """
+        detector = self._detector()
+        descriptor = detector.ensure_descriptor("horn")
+        frame = np.zeros((120, 160, 3), dtype=np.uint8)
+        with patch(
+            "pybot.recognition.detector.tracking.local_tracker._refine_hit_to_sprite_center",
+            return_value=(31, 47),
+        ) as refine, patch(
+            "pybot.recognition.detector.tracking.local_tracker.measure_opacity_score",
+            return_value=1.0,
+        ), patch(
+            "pybot.recognition.detector.tracking.local_tracker._remember_track_template",
+        ):
+            result = _finalize_track_hit(
+                detector=detector,
+                frame_bgr=frame,
+                descriptor=descriptor,
+                track_id=7,
+                bbox=(10, 20, 8, 10),
+                similarity=0.9,
+                scale=0.9,
+                offset_x=100,
+                offset_y=200,
+            )
+
+        self.assertTrue(result.found)
+        self.assertEqual((result.x, result.y), (131, 247))
+        refine.assert_called_once_with(
+            detector, frame, descriptor, 14, 25, 0.9,
+        )
+
     def test_finds_mob_at_discovery_coords(self) -> None:
         detector = self._detector()
         anchor = self._living_anchor(detector)
@@ -93,6 +133,23 @@ class LocalTrackerTests(unittest.TestCase):
         )
         self.assertFalse(result.found)
         self.assertEqual(result.miss_reason, "invalid_track_id")
+
+    def test_reanchor_hint_changes_search_origin_without_changing_input_position(self) -> None:
+        """A discovery reanchor is used as a fresh search center, not a write."""
+        detector = self._detector()
+        anchor = self._living_anchor(detector)
+        track = self._build_track_dict(
+            anchor,
+            trackId=-101,
+            x=anchor.center_x - 80,
+            y=anchor.center_y,
+            reanchor_x=anchor.center_x,
+            reanchor_y=anchor.center_y,
+        )
+        result = track_local(detector, self.roi, "horn", track)
+        self.assertTrue(result.found, result.miss_reason)
+        self.assertLess(abs(result.x - anchor.center_x), 40)
+        self.assertLess(abs(result.y - anchor.center_y), 40)
 
     def test_miss_returns_meaningful_reason(self) -> None:
         detector = self._detector()

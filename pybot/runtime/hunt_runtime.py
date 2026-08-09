@@ -450,6 +450,13 @@ def create_runtime_deps(
             logger.close()
         except BaseException:
             pass
+        for session in locals().get("detector", None), locals().get("tracker", None):
+            close_session = getattr(session, "close", None)
+            if callable(close_session):
+                try:
+                    close_session()
+                except BaseException:
+                    pass
         try:
             reset_capture_session()
         except BaseException:
@@ -556,6 +563,13 @@ class HuntRuntime:
             except BaseException:
                 logger_closed = False
         if clean_shutdown and logger_closed:
+            for session in (ctx.detector, ctx.tracker):
+                close_session = getattr(session, "close", None)
+                if callable(close_session):
+                    try:
+                        close_session()
+                    except BaseException:
+                        pass
             try:
                 close_capture = getattr(ctx.capture, "close", None)
                 if callable(close_capture) and close_capture() is False:
@@ -642,6 +656,15 @@ class HuntRuntime:
                     "[PYBOT] shutdown incomplete; seated state unresolved"
                 )
                 return False
+
+        # Detector sessions own bounded tracking executors. All worker threads
+        # are stopped above, so close both sessions before releasing capture;
+        # this keeps runtime stop deterministic and prevents pool threads from
+        # surviving a hunt restart.
+        for session in (self._ctx.detector, self._ctx.tracker):
+            close_session = getattr(session, "close", None)
+            if callable(close_session):
+                close_session()
 
         close_capture = getattr(self._ctx.capture, "close", None)
         if callable(close_capture) and close_capture() is False:

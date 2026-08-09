@@ -140,13 +140,22 @@ class TrackReconciler:
                 vel_x = float(entry[3]) if len(entry) > 3 else 0.0
                 vel_y = float(entry[4]) if len(entry) > 4 else 0.0
                 speed = (vel_x * vel_x + vel_y * vel_y) ** 0.5
-                # Motion earns only one bounded displacement's worth of grace.
-                # This is independent of the variable discovery interval.
-                motion_credit = min(
-                    max(0, int(moving_radius) - base_radius),
-                    max(0, int(round(speed))),
-                )
-                allowed_radius = base_radius + motion_credit
+                lost_count = int(entry[5]) if len(entry) > 5 else 0
+                if lost_count > 0:
+                    # Once local tracking has reported a miss, Discovery gets
+                    # one bounded recovery radius to find the same mob again.
+                    # This is deliberately unavailable to live tracks, so
+                    # ordinary discovery cannot pull identities across the
+                    # scene or fight high-frequency tracking.
+                    allowed_radius = int(moving_radius)
+                else:
+                    # Motion earns only one bounded displacement's worth of
+                    # grace. This is independent of discovery cadence.
+                    motion_credit = min(
+                        max(0, int(moving_radius) - base_radius),
+                        max(0, int(round(speed))),
+                    )
+                    allowed_radius = base_radius + motion_credit
                 allowed_sq = allowed_radius * allowed_radius
 
                 predicted_dx = detection.x - (px + vel_x)
@@ -159,8 +168,8 @@ class TrackReconciler:
                     continue
 
                 # Prefer a current-center match over a prediction-only match,
-                # while still allowing the latest displacement to bridge a
-                # large local-follow jump.
+                # while still allowing bounded recovery to bridge a lost
+                # local-follow anchor.
                 score = min(current_dist_sq, predicted_dist_sq)
                 edges.append((int(score), track_id))
             candidates.append(sorted(edges))
