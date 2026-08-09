@@ -132,70 +132,57 @@ class CoordTrackingWorker:
             )
             return
         if candidates:
-            new_count = self._process_discovery_candidates(
+            self._process_discovery_candidates(
                 candidates, frame, roi, now_ms, area_epoch,
             )
-            # Candidate resolution is complete; new tracks enter the normal
-            # warm-template path on the next frame.
+            # Candidate resolution publishes an exact current-frame position
+            # and transfers the warm template. Refresh the store snapshot now
+            # so a newly created track enters the sticky follow path in this
+            # same coordinator tick instead of waiting for another capture.
+            refreshed_epoch, refreshed_tracks = ctx.tracks.tracking_frame_snapshot(
+                monotonic_ms(),
+            )
+            if refreshed_epoch != area_epoch:
+                self._update_overlay(now_ms)
+                return
+            alive_tracks = refreshed_tracks
 
-        # ── Step 2: Follow existing tracks ───────────────────────────────
+        # ── Step 2: Follow active tracks ─────────────────────────────────
         if not alive_tracks:
             self._update_overlay(now_ms)
             return
 
-        # Only tracks with a valid scale enter local tracking. Consume a
-        # reanchor only for those submitted tracks; otherwise a malformed
-        # track could lose its hint without ever giving Tracking a chance to
-        # use it.
+        # Active tracks are intentionally tiny follow jobs. Their only hot-path
+        # state is the latest position and discovery scale; discovery/death/
+        # opacity bookkeeping must not make a healthy track stop being followed.
+        # A one-shot discovery reanchor is still allowed to change the search
+        # origin, but it never replaces the authoritative stored x/y itself.
         trackable_tracks = [
             track for track in alive_tracks if track.discovery_scale > 0
         ]
+        snapshots = []
         for track in trackable_tracks:
-            anchor = ctx.tracks.consume_reanchor(
+            reanchor = ctx.tracks.consume_reanchor(
                 track.id,
                 expected_epoch=area_epoch,
             )
-            if anchor is not None:
-                track.pending_reanchor = anchor
-
-        snapshots = [
-            StateTrackSnapshot(
-                track_id=track.id,
-                x=track.x,
-                y=track.y,
-                scale=track.discovery_scale,
-                opacity_baseline=track.opacity_baseline,
-                opacity_baseline_samples=track.opacity_baseline_samples,
-                opacity_decay_streak=track.opacity_decay_streak,
-                moving=track.moving,
-                vel_x=track.vel_x,
-                vel_y=track.vel_y,
-                lost_count=track.lost_count,
-                attack_count=track.attack_count,
-                created_tick=track.created_tick,
-                now_tick=now_ms,
-                # A track that has not been observed recently cannot safely
-                # extrapolate its last frame displacement across the whole
-                # stalled interval. Let local tracking reacquire around the
-                # last confirmed position instead of biasing the search with
-                # stale momentum.
-                prediction_valid=(
-                    now_ms - track.updated_tick
-                    <= max(250, 3 * int(TRACKING_LOOP_INTERVAL_S * 1000))
-                ),
-                reanchor_x=(
-                    track.pending_reanchor[0]
-                    if track.pending_reanchor is not None
-                    else None
-                ),
-                reanchor_y=(
-                    track.pending_reanchor[1]
-                    if track.pending_reanchor is not None
-                    else None
-                ),
+            snapshots.append(
+                StateTrackSnapshot(
+                    track_id=track.id,
+                    x=track.x,
+                    y=track.y,
+                    scale=track.discovery_scale,
+                    # Keep only the minimum local-follow hints. These values
+                    # are read-only inputs and never gate publication.
+                    moving=False,
+                    vel_x=0.0,
+                    vel_y=0.0,
+                    prediction_valid=False,
+                    reanchor_x=reanchor[0] if reanchor is not None else None,
+                    reanchor_y=reanchor[1] if reanchor is not None else None,
+                    now_tick=now_ms,
+                )
             )
-            for track in trackable_tracks
-        ]
         if not snapshots:
             self._update_overlay(now_ms)
             return

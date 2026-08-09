@@ -135,12 +135,28 @@ class HuntModeTests(unittest.TestCase):
         teleported = self.mode.on_no_attackable_targets()
         self.assertTrue(teleported)
         self.assertEqual(self.tracks.get_track_count(), 0)
-        # Claim clears before the key (epoch +1); successful land resets again
-        # inside teleport_once so post-settle state cannot keep prior tracks.
-        self.assertEqual(self.tracks.area_epoch, 2)
+        # The accepted teleport owns the single reset; no pre-key mutation is
+        # needed now that the key can be rejected.
+        self.assertEqual(self.tracks.area_epoch, 1)
         # Post-settle: discovery may scan again; suspend must be clear + wake set.
         self.assertFalse(self.ctx.discovery_suspend.is_set())
         self.assertTrue(self.ctx.discovery_wake.is_set())
+
+    def test_rejected_mode_teleport_preserves_current_area_and_wake(self) -> None:
+        """A rejected key must not reset or partially mutate the hunt area."""
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=self.tracks.area_epoch,
+        )
+        self.ctx.attack_wake.set()
+        teleport = self.mode._strategy._teleport
+        teleport.active_scan_code = MagicMock(return_value=0)
+
+        self.assertFalse(self.mode.on_no_attackable_targets())
+        self.assertEqual(self.tracks.area_epoch, 0)
+        self.assertTrue(self.ctx.attack_wake.is_set())
+        self.assertTrue(self.mode.discovery_since_reset)
 
     def test_suspends_discovery_during_teleport_delay(self) -> None:
         self.mode.note_discovery_scan_completed(

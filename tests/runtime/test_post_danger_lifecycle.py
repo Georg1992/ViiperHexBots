@@ -87,6 +87,65 @@ class PostDangerLifecycleTests(unittest.TestCase):
         # No-target handling cannot treat the new area as discovery-confirmed.
         self.assertFalse(self.mode.on_no_attackable_targets())
 
+    def test_teleport_clears_tracks_before_settle(self) -> None:
+        """Accepted teleport input removes old targets before landing wait."""
+        track = self.tracks.create_track(
+            "horn", 100, 100, 0.9, 0.8, now_tick=1,
+        )
+        self.assertIsNotNone(track)
+        settle_checked = threading.Event()
+
+        def wait_for_settle(_timeout_s: float) -> bool:
+            # The old area must already be empty while the client is still in
+            # its landing transition. This is the important danger/sit race
+            # boundary: gameplay cannot keep consuming the old track.
+            self.assertEqual(self.tracks.get_track_count(), 0)
+            settle_checked.set()
+            return True
+
+        self.ctx.wait_unless_stopped = wait_for_settle  # type: ignore[method-assign]
+        teleport = TeleportController(self.ctx, ShadowInputBackend(), self.mode)
+
+        self.assertTrue(teleport.teleport_once(scan_code=16))
+        self.assertTrue(settle_checked.is_set())
+        self.assertEqual(self.tracks.get_track_count(), 0)
+
+    def test_late_tracking_result_from_old_epoch_is_ignored(self) -> None:
+        """A callback completing after teleport cannot update the new area."""
+        track = self.tracks.create_track(
+            "horn", 100, 100, 0.9, 0.8, now_tick=1,
+        )
+        assert track is not None
+        old_epoch = self.tracks.area_epoch
+        teleport = TeleportController(self.ctx, ShadowInputBackend(), self.mode)
+        self.assertTrue(teleport.teleport_once(scan_code=16))
+
+        result = SimpleNamespace(
+            track_id=track.id,
+            found=True,
+            x=999,
+            y=999,
+            confidence=1.0,
+            opacity_score=0.0,
+        )
+        missed, deaths = self.tracks.apply_tracking(
+            [result],
+            now_tick=2,
+            area_epoch=old_epoch,
+        )
+        self.assertEqual(missed, [])
+        self.assertEqual(deaths, [])
+        self.assertEqual(self.tracks.get_track_count(), 0)
+
+    def test_interrupted_teleport_still_leaves_tracks_cleared(self) -> None:
+        """A stopped/interrupted settle cannot resurrect old-area targets."""
+        self.tracks.create_track("horn", 100, 100, 0.9, 0.8, now_tick=1)
+        self.ctx.wait_unless_stopped = MagicMock(return_value=False)
+        teleport = TeleportController(self.ctx, ShadowInputBackend(), self.mode)
+
+        self.assertFalse(teleport.teleport_once(scan_code=16))
+        self.assertEqual(self.tracks.get_track_count(), 0)
+
     def test_inflight_old_discovery_cannot_publish_after_area_reset(self) -> None:
         self.ctx.capture.is_valid.return_value = True
         self.ctx.capture.get_hunt_roi.return_value = SimpleNamespace(

@@ -103,7 +103,7 @@ class TeleportController:
     # ── Press + settle ───────────────────────────────────────────
 
     def teleport_once(self, scan_code: int | None = None) -> bool:
-        """Press a teleport key, wait for settle, track wings/overlay.
+        """Press a teleport key, clear tracks immediately, then wait to settle.
 
         Args:
             scan_code: Key to press. Defaults to :meth:`active_scan_code`.
@@ -125,10 +125,14 @@ class TeleportController:
                 f"[TP] key rejected scan={tp} — transition not started"
             )
             return False
-        # The key was accepted: invalidate every sample captured before this
-        # screen transition before the asynchronous OCR/memory producers can
-        # publish it. Producers remain alive; they only publish under the new
-        # epoch when their read began after this boundary.
+        # The key was accepted: remove every old-area track immediately. Do
+        # not spend any further transition work before this reset. Tracking and
+        # discovery may still finish work captured before the key, but the
+        # advanced area epoch rejects those late publications. This is
+        # deliberately fail-closed: even an interrupted settle cannot leave
+        # old targets actionable.
+        self._reset_tracking("teleport", log_tag="TP")
+        attack_wake = getattr(self._ctx, "attack_wake", None)
         transition_epoch = None
         if self._vitals is not None:
             begin_epoch = getattr(self._vitals, "begin_observation_epoch", None)
@@ -137,6 +141,9 @@ class TeleportController:
                 # transition. Readers captured before the key, during settle,
                 # and before this completion all fail the same token check.
                 transition_epoch = begin_epoch()
+        if attack_wake is not None:
+            attack_wake.clear()
+
         # Only decrement the fly-wing counter when the wing key was used.
         if tp == cfg.teleport_scan_code and cfg.teleport_scan_code > 0:
             self._ctx.note_teleport_for_wings()
@@ -159,9 +166,6 @@ class TeleportController:
             danger = self._ctx.danger_detector
             if danger is not None:
                 danger.reset_after_teleport(teleport_started)
-            # Drop pre-teleport tracks here so no caller can forget and leave
-            # the next hunt cycle acting on mobs from the previous area.
-            self._reset_tracking("teleport", log_tag="TP")
         return settled
 
     def retry_post_teleport_heal(self) -> bool:
@@ -263,7 +267,8 @@ class TeleportController:
 
         Suspends discovery for the claim → key → settle window so a concurrent
         scan cannot confirm clear on a loading frame. Track reset is owned by
-        :meth:`teleport_once` after a successful landing.
+        :meth:`teleport_once` immediately after the key is accepted, before
+        landing completes.
 
         ``prefer_safe_key`` selects the same key used for sit/storage placement
         (creamy / save point first) instead of the urgent random fly wing. A
@@ -423,21 +428,15 @@ class TeleportController:
         # settle and confirm clear on a loading / empty frame. The clear claim
         # remains inside the same transition lock before the key is pressed.
         def transition() -> bool:
-            # Claim under the tracks lock so a concurrent discovery reconcile
-            # cannot spawn tracks into the area we are leaving. The strategy
-            # reset stays in this same transaction.
-            if not ctx.tracks.try_claim_clear_for_teleport():
+            # Validate under the tracks lock without mutating the area. The
+            # actual reset belongs to teleport_once and occurs immediately
+            # after the key is accepted; a rejected key must not advance the
+            # area epoch or discard the current screen's state.
+            if not ctx.tracks.can_claim_clear_for_teleport():
                 return False
-            # The clear claim invalidates all old targets even if the key press
-            # or settle later fails. Do not leave an old-area wake pending.
-            attack_wake = getattr(ctx, "attack_wake", None)
-            if attack_wake is not None:
-                attack_wake.clear()
-
-            ctx.policy.reset()
-            ctx.validation.log_area_reset("pre_teleport")
-            self._notify_area_reset()
-
+            # ``teleport_once`` owns wake cleanup together with the accepted
+            # input reset. Do not clear it during this read-only admission
+            # check: a rejected key must leave the current area untouched.
             tp_button = self.active_button()
             ctx.logger.behavior(
                 f"[MODE] teleport key={tp_button!r} "

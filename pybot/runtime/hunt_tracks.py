@@ -114,18 +114,25 @@ class HuntTracks:
         with self._lock:
             self._area_reset_locked()
 
+    def can_claim_clear_for_teleport(self) -> bool:
+        """Return whether a clear-area teleport is currently admissible.
+
+        This is a read-only check. The teleport controller performs the actual
+        area reset only after the input key is accepted, so a rejected key
+        cannot discard the current area state.
+        """
+        with self._lock:
+            return not any(is_alive(track) for track in self._tracks) and not self._discovery_candidates
+
     def try_claim_clear_for_teleport(self) -> bool:
         """Atomically claim an empty area for teleport.
 
-        Returns False if any alive track or pending discovery candidate
-        exists. On True, advances the area epoch and clears tracks so a
-        concurrent discovery scan cannot create tracks into the area being
-        left.
+        Kept for callers/tests that need the old claim-and-reset operation.
+        Danger/mode teleport paths should use :meth:`can_claim_clear_for_teleport`
+        followed by the accepted-input reset owned by ``teleport_once``.
         """
         with self._lock:
-            if any(is_alive(track) for track in self._tracks):
-                return False
-            if self._discovery_candidates:
+            if not self.can_claim_clear_for_teleport():
                 return False
             self._area_reset_locked()
             return True

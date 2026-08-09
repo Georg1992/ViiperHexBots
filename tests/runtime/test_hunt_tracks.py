@@ -497,6 +497,11 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(self.tracks.area_epoch, 1)
         self.assertEqual(self.tracks.get_track_count(), 0)
 
+    def test_can_claim_clear_for_teleport_is_read_only(self) -> None:
+        self.assertTrue(self.tracks.can_claim_clear_for_teleport())
+        self.assertEqual(self.tracks.area_epoch, 0)
+        self.assertEqual(self.tracks.get_track_count(), 0)
+
     def test_tracking_refreshes_coords(self) -> None:
         track_id = self._create(874, 578)
         self.tracks.apply_tracking([_hit(track_id, 900, 610)], now_tick=self.now + 50)
