@@ -423,8 +423,9 @@ def read_status_panel_fixed_rois(
             panel_origin=origin,
         )
 
-    # Fast fixed-ROI poll: maxima are static, so parse only changing current
-    # values and reuse the confirmed maxima. This is the normal session path.
+    # Fast fixed-ROI poll: maxima are static, so parse current values while
+    # reusing the confirmed maxima. HP remains part of the fast poll because
+    # its fresh value feeds critical-danger detection.
     hp_current = _parse_anchored(
         frame_bgr,
         origin,

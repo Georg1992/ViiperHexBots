@@ -22,6 +22,7 @@ from pybot.recognition.ui.status_panel import (
     clear_template_cache,
     find_status_panel,
     read_status_panel,
+    read_status_panel_fixed_rois,
     verify_status_panel_at,
 )
 

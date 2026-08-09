@@ -291,6 +291,7 @@ def read_status_panel_snapshot(
         if panel_frame is not None and panel_frame.size > 0:
             _set_native_phase(
                 "parse.fixed_rois",
+                f"refresh_max={int(refresh_max)} "
                 f"shape={panel_frame.shape[1]}x{panel_frame.shape[0]}",
             )
             values = read_status_panel_fixed_rois(
@@ -300,7 +301,9 @@ def read_status_panel_snapshot(
                 refresh_max=refresh_max,
                 deadline=deadline,
                 telemetry=lambda detail: _set_native_phase(
-                    "parse.fixed_rois", detail, preserve_started=True
+                    "parse.fixed_rois",
+                    f"refresh_max={int(refresh_max)} {detail}",
+                    preserve_started=True,
                 ),
             )
             if values is not None:

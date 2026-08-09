@@ -4,10 +4,17 @@ Sit/stand is a **toggle key**. Pose OCR (falcon, animation, crop) is too
 unreliable to drive retries — each wrong read caused another tap and the
 character flapped sit↔stand.
 
+RO gameplay fact: **a seated character stands up automatically the moment
+it takes any damage.** That is why every damage-escape path resets
+``_seated = False`` — after a hit the character really is standing, so the
+next ``sit()`` correctly presses the toggle down instead of inverting a
+still-seated pose. There is no "teleport preserved the seated pose" state
+to reconcile after damage.
+
 Contract
 --------
-* After a teleport the character is standing. ``sit()`` presses the key
-  **once** and marks ``_seated``.
+* After any damage/teleport the character is standing. ``sit()`` presses
+  the key **once** and marks ``_seated``.
 * ``stand()`` presses **once** only while ``_seated``, then clears the flag.
 * The same relocation applies when the SP feed stays unreadable (OCR layout
   lost / panel gone) — a character parked on a dead feed can neither finish
@@ -193,11 +200,10 @@ class SitOnLowSpWorker:
         """Let the client finish the landing before the sit toggle is sent.
 
         The sit key pressed during the teleport landing transition can be
-        eaten (character stays standing while the bot believes it is seated)
-        or, on a client that preserves the seated pose through the teleport,
-        inverted. A short margin after the teleport settle makes the single
-        sit press land on a settled character so the logical seated state
-        matches the game.
+        eaten (character stays standing while the bot believes it is seated).
+        A short margin after the teleport settle makes the single sit press
+        land on a settled character so the logical seated state matches the
+        game.
         """
         if not self._ctx.wait_unless_stopped(SIT_POST_TELEPORT_SETTLE_S):
             self._ctx.logger.behavior(
@@ -362,6 +368,10 @@ class SitOnLowSpWorker:
                 # to critical danger for ordinary hunting sessions.
                 if self._seated and escape_first:
                     if self._urgent_escape(reason="sit_danger"):
+                        # RO stands a seated character up automatically when
+                        # it takes damage, so after this damage escape the
+                        # character is genuinely standing. Reset the flag or
+                        # the next sit() would invert the toggle.
                         self._seated = False
                         escape_first = False
                         teleported_for_session = True
@@ -630,10 +640,10 @@ class SitOnLowSpWorker:
                     "[SIT] danger — urgently escaping without stand toggle"
                 )
                 # Damage is an emergency escape, not normal SP recovery. Do
-                # not press the sit/stand toggle here: teleport immediately
-                # and preserve the logical seated state until the new area is
-                # settled. This avoids an unnecessary input delay and prevents
-                # a second toggle from accidentally seating the character.
+                # not press the sit/stand toggle here: teleport immediately.
+                # RO stands a seated character up automatically when it takes
+                # damage, so after this escape the character is standing —
+                # reset ``_seated`` accordingly.
                 if not self._urgent_escape(reason="sit_danger"):
                     return "danger_escape_failed"
                 self._seated = False
