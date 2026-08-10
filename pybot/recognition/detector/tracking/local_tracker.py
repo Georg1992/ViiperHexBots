@@ -50,6 +50,8 @@ _ANCHOR_MIN_SCORE = 0.18
 _IDENTITY_MIN_SPRITE_FRACTION = 0.08
 _IDENTITY_MIN_BODY_FRACTION = 0.02
 _MAX_RECOVERY_FAILURES = 3
+_PREDICTION_MIN_SPEED_PX = 2.0
+_FEATURE_SPRITE_MIN_HEAT = 0.18
 
 
 @dataclass(frozen=True)
@@ -172,14 +174,25 @@ def track_local(
     with _state_lock(detector):
         state = _state_store(detector).get(track_id)
 
+    # A healthy Track's velocity is one-cycle displacement, not pixels/second.
+    # Center this frame's crop at the bounded predicted position so LK only
+    # solves the residual error. The previous reference crop remains centered
+    # on the last accepted hit; translating the current crop by the prediction
+    # keeps a mob moving at the predicted speed in the same local coordinates.
+    # Do not predict after a miss: recovery must start from the last confirmed
+    # anchor plus its own bounded ladder.
+    predicted_x, predicted_y = _predicted_center(track, cx, cy, detector)
+
     if state is not None:
         # Track coordinates are authoritative and may move with the capture
         # ROI/window. Keep the visual state in the current frame coordinate
         # system before attempting LK.
-        state.center_x = cx
-        state.center_y = cy
+        state.center_x = predicted_x
+        state.center_y = predicted_y
         flow = _follow_flow(
             detector, frame_bgr, descriptor, state,
+            prediction_dx=predicted_x - cx,
+            prediction_dy=predicted_y - cy,
             search_radius_px=search_radius_px,
             suppress_positions=suppress_positions,
         )
@@ -192,11 +205,13 @@ def track_local(
 
         state.recovery_failures += 1
         recovery_radius = _recovery_radius(detector, descriptor, scale, state.recovery_failures)
-        origin_x = int(round(state.center_x + state.velocity_x))
-        origin_y = int(round(state.center_y + state.velocity_y))
+        # ``state.center_*`` is already the single predicted center for this
+        # frame. Do not add velocity again after flow fails; that double-predicts
+        # and makes recovery search ahead of the mob.
+        origin_x, origin_y = predicted_x, predicted_y
     else:
         recovery_radius = _recovery_radius(detector, descriptor, scale, 1)
-        origin_x, origin_y = cx, cy
+        origin_x, origin_y = predicted_x, predicted_y
 
     recovered = _recover(
         detector, frame_bgr, descriptor, track_id, origin_x, origin_y, scale,
@@ -223,6 +238,55 @@ def track_local(
         ),
         tracking_lost=exhausted,
     )
+
+
+def _predicted_center(
+    track: dict,
+    cx: int,
+    cy: int,
+    detector: MobDetector,
+) -> tuple[int, int]:
+    """Predict one healthy tracking step from the last confirmed hit.
+
+    ``velX``/``velY`` are smoothed displacement per tracking cycle. Applying
+    more than one step would turn a temporary estimate into runaway drift, so
+    prediction is bounded to the configured local moving radius and disabled
+    after a miss. The appearance tracker then corrects this prediction on the
+    same fresh frame.
+    """
+    if not bool(track.get("prediction_valid", True)):
+        return cx, cy
+    if int(track.get("lostCount", 0) or 0) > 0:
+        return cx, cy
+    try:
+        vel_x = float(track.get("velX", 0.0) or 0.0)
+        vel_y = float(track.get("velY", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return cx, cy
+    speed = (vel_x * vel_x + vel_y * vel_y) ** 0.5
+    if speed < _PREDICTION_MIN_SPEED_PX:
+        return cx, cy
+    try:
+        raw_now_tick = track.get("nowTick")
+        raw_updated_tick = track.get("updatedTick")
+        now_tick = int(raw_now_tick or 0)
+        updated_tick = int(raw_updated_tick or 0)
+    except (TypeError, ValueError):
+        raw_now_tick = raw_updated_tick = None
+        now_tick, updated_tick = 0, 0
+    elapsed_ms = now_tick - updated_tick
+    # Missing timestamps mean the caller supplied the legacy one-cycle velocity;
+    # preserve that nominal step. When both timestamps are valid, scale the
+    # displacement to the actual frame age so a slow multi-mob cycle does not
+    # trail while the extrapolation remains bounded.
+    if raw_now_tick is None or raw_updated_tick is None or now_tick <= 0 or updated_tick <= 0:
+        cadence_ratio = 1.0
+    else:
+        cadence_ratio = max(0.5, min(3.0, max(1, elapsed_ms) / 20.0))
+    limit = max(1, int(detector.local_track_moving_search_radius_px))
+    vel_x = max(-limit, min(limit, vel_x * cadence_ratio))
+    vel_y = max(-limit, min(limit, vel_y * cadence_ratio))
+    return int(round(cx + vel_x)), int(round(cy + vel_y))
 
 
 def _acquire(
@@ -267,6 +331,8 @@ def _follow_flow(
     descriptor: MobDescriptor,
     state: _TrackVisualState,
     *,
+    prediction_dx: int = 0,
+    prediction_dy: int = 0,
     search_radius_px: int | None,
     suppress_positions: list[tuple[int, int]] | None,
 ) -> tuple[int, int, float] | None:
@@ -276,22 +342,46 @@ def _follow_flow(
     half_w = max(_FAST_BBOX_MIN_PX, state.anchor_width // 2)
     half_h = max(_FAST_BBOX_MIN_PX, state.anchor_height // 2)
     current, x0, y0 = _crop_gray(frame, state.center_x, state.center_y, half_w, half_h)
-    if current is None or current.shape != previous.shape:
+    current_bgr, _bx0, _by0 = _crop_bgr(
+        frame, state.center_x, state.center_y, half_w, half_h,
+    )
+    if current is None or current_bgr is None or current.shape != previous.shape:
         return None
+    # ``previous_gray`` is centered on the last accepted hit, while ``current``
+    # is centered on the predicted hit. Translate the old feature coordinates
+    # into the current crop before LK; otherwise LK compares different screen
+    # locations and can manufacture a near-zero/background displacement, leaving
+    # the published Track behind a moving mob.
+    prediction = np.asarray(
+        (float(prediction_dx), float(prediction_dy)), dtype=np.float32,
+    )
+    previous_points = state.points.astype(np.float32)
+    initial_next_points = previous_points - prediction.reshape(1, 1, 2)
     next_points, status, errors = cv2.calcOpticalFlowPyrLK(
-        previous, current, state.points.astype(np.float32), None,
+        previous, current, previous_points, initial_next_points,
         winSize=(15, 15), maxLevel=2,
         criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 12, 0.03),
+        flags=cv2.OPTFLOW_USE_INITIAL_FLOW,
     )
     if next_points is None or status is None:
         return None
     valid = status.reshape(-1).astype(bool)
     if errors is not None:
         valid &= errors.reshape(-1) <= _FLOW_MAX_ERROR
+    # Features are selected from the sprite-colored region, not arbitrary
+    # background corners inside the crop. Recheck the current endpoints too:
+    # animated sprites can expose new colors, but stationary background must
+    # never dominate the displacement consensus and drag the Track behind.
+    valid &= _points_match_sprite(
+        current_bgr,
+        next_points.reshape(-1, 2),
+        descriptor,
+        float(detector.config["minSpritePaletteMatch"]),
+    )
     if int(valid.sum()) < _FLOW_MIN_POINTS:
         return None
     displacement = (
-        next_points.reshape(-1, 2) - state.points.reshape(-1, 2)
+        next_points.reshape(-1, 2) - initial_next_points.reshape(-1, 2)
     )[valid]
     median = np.median(displacement, axis=0)
     distances = np.linalg.norm(displacement - median, axis=1)
@@ -300,6 +390,12 @@ def _follow_flow(
     if int(inliers.sum()) < _FLOW_MIN_POINTS:
         return None
     delta = np.median(displacement[inliers], axis=0)
+    # Carry only the robust consensus points into the next reference frame.
+    # A point may pass LK's local error check yet belong to stationary scenery;
+    # retaining it would reintroduce that outlier on the following cycle.
+    inlier_valid = np.zeros_like(valid, dtype=bool)
+    valid_indices = np.flatnonzero(valid)
+    inlier_valid[valid_indices[inliers]] = True
     max_delta = float(search_radius_px or detector.local_track_moving_search_radius_px)
     if float(np.linalg.norm(delta)) > max_delta * _FLOW_MAX_DISPLACEMENT_MULTIPLIER:
         return None
@@ -314,9 +410,17 @@ def _follow_flow(
     ):
         return None
 
-    state.velocity_x = 0.65 * state.velocity_x + 0.35 * float(delta[0])
-    state.velocity_y = 0.65 * state.velocity_y + 0.35 * float(delta[1])
-    _advance_flow_reference(frame, state, delta, next_points.reshape(-1, 2), valid)
+    # The LK displacement is residual because the crop was centered at the
+    # predicted position. Feed the full observed displacement back into the
+    # predictor, otherwise a correctly predicted mob would appear stationary
+    # and the Track would fall behind on the next frame.
+    observed_dx = float(prediction_dx) + float(delta[0])
+    observed_dy = float(prediction_dy) + float(delta[1])
+    state.velocity_x = 0.65 * state.velocity_x + 0.35 * observed_dx
+    state.velocity_y = 0.65 * state.velocity_y + 0.35 * observed_dy
+    _advance_flow_reference(
+        frame, state, delta, next_points.reshape(-1, 2), inlier_valid,
+    )
     confidence = min(1.0, float(inliers.sum()) / float(max(1, len(displacement))))
     return candidate_x, candidate_y, confidence
 
@@ -428,10 +532,11 @@ def _make_state(
 ) -> _TrackVisualState:
     width = max(_FAST_BBOX_MIN_PX, int(round(descriptor.avg_width * scale * _REFINE_WINDOW_SCALE)))
     height = max(_FAST_BBOX_MIN_PX, int(round(descriptor.avg_height * scale * _REFINE_WINDOW_SCALE)))
-    patch, _x0, _y0 = _crop_gray(frame, cx, cy, width // 2, height // 2)
-    if patch is None:
-        patch = np.zeros((height, width), dtype=np.uint8)
-    points = _feature_points(patch, descriptor, frame_bgr=None)
+    patch_bgr, _x0, _y0 = _crop_bgr(frame, cx, cy, width // 2, height // 2)
+    if patch_bgr is None:
+        patch_bgr = np.zeros((height, width, 3), dtype=np.uint8)
+    patch = cv2.cvtColor(patch_bgr, cv2.COLOR_BGR2GRAY)
+    points = _feature_points(patch, descriptor, frame_bgr=patch_bgr)
     anchor = patch.copy()
     return _TrackVisualState(
         center_x=cx, center_y=cy, scale=scale,
@@ -447,13 +552,14 @@ def _reanchor_flow_points(
     cx: int,
     cy: int,
 ) -> None:
-    patch, _x0, _y0 = _crop_gray(
+    patch_bgr, _x0, _y0 = _crop_bgr(
         frame, cx, cy, state.anchor_width // 2, state.anchor_height // 2,
     )
-    if patch is None:
+    if patch_bgr is None:
         return
+    patch = cv2.cvtColor(patch_bgr, cv2.COLOR_BGR2GRAY)
     state.previous_gray = patch
-    state.points = _feature_points(patch, descriptor, frame_bgr=None)
+    state.points = _feature_points(patch, descriptor, frame_bgr=patch_bgr)
 
 
 def _advance_flow_reference(
@@ -512,7 +618,6 @@ def _feature_points(
     *,
     frame_bgr: np.ndarray | None,
 ) -> np.ndarray:
-    del frame_bgr
     if patch_gray.size == 0:
         return np.empty((0, 1, 2), dtype=np.float32)
     mask = np.zeros_like(patch_gray, dtype=np.uint8)
@@ -520,6 +625,22 @@ def _feature_points(
     margin_y = max(1, patch_gray.shape[0] // 6)
     mask[margin_y : patch_gray.shape[0] - margin_y,
          margin_x : patch_gray.shape[1] - margin_x] = 255
+    if descriptor is not None and frame_bgr is not None:
+        sprite_heat = sprite_palette_heatmap(
+            frame_bgr,
+            descriptor.match_palette_bgr,
+            float(descriptor.max_sprite_palette_distance),
+        )
+        sprite_mask = (
+            sprite_heat >= _FEATURE_SPRITE_MIN_HEAT
+        ).astype(np.uint8) * 255
+        sprite_mask = cv2.dilate(sprite_mask, np.ones((3, 3), np.uint8))
+        restricted = cv2.bitwise_and(mask, sprite_mask)
+        # Keep the center fallback for unusual animated frames where the
+        # palette gate has no pixels; losing all features is worse than using
+        # the bounded central crop for one cycle.
+        if int(np.count_nonzero(restricted)) >= _FLOW_MIN_POINTS:
+            mask = restricted
     points = cv2.goodFeaturesToTrack(
         patch_gray, maxCorners=32, qualityLevel=0.01,
         minDistance=3, blockSize=5, mask=mask,
@@ -529,7 +650,28 @@ def _feature_points(
     return points.astype(np.float32)
 
 
-def _crop_gray(
+def _points_match_sprite(
+    frame_bgr: np.ndarray,
+    points: np.ndarray,
+    descriptor: MobDescriptor,
+    threshold: float,
+) -> np.ndarray:
+    """Return an endpoint mask for points that remain on sprite-colored pixels."""
+    heat = sprite_palette_heatmap(
+        frame_bgr,
+        descriptor.match_palette_bgr,
+        float(descriptor.max_sprite_palette_distance),
+    )
+    result = np.zeros((points.shape[0],), dtype=bool)
+    height, width = heat.shape[:2]
+    for index, point in enumerate(points):
+        px, py = int(round(float(point[0]))), int(round(float(point[1])))
+        if 0 <= px < width and 0 <= py < height:
+            result[index] = bool(heat[py, px] >= threshold)
+    return result
+
+
+def _crop_bgr(
     frame: np.ndarray,
     cx: int,
     cy: int,
@@ -552,12 +694,24 @@ def _crop_gray(
     if clipped_x1 <= clipped_x0 or clipped_y1 <= clipped_y0:
         return None, x0, y0
     crop = frame[clipped_y0:clipped_y1, clipped_x0:clipped_x1]
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     if clipped_x0 == x0 and clipped_y0 == y0 and clipped_x1 == x1 and clipped_y1 == y1:
-        return gray, x0, y0
-    padded = np.zeros((y1 - y0, x1 - x0), dtype=gray.dtype)
-    padded[clipped_y0 - y0 : clipped_y1 - y0, clipped_x0 - x0 : clipped_x1 - x0] = gray
+        return crop, x0, y0
+    padded = np.zeros((y1 - y0, x1 - x0, 3), dtype=crop.dtype)
+    padded[clipped_y0 - y0 : clipped_y1 - y0, clipped_x0 - x0 : clipped_x1 - x0] = crop
     return padded, x0, y0
+
+
+def _crop_gray(
+    frame: np.ndarray,
+    cx: int,
+    cy: int,
+    half_w: int,
+    half_h: int,
+) -> tuple[np.ndarray | None, int, int]:
+    bgr, x0, y0 = _crop_bgr(frame, cx, cy, half_w, half_h)
+    if bgr is None:
+        return None, x0, y0
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY), x0, y0
 
 
 def _local_identity_ok(

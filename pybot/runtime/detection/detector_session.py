@@ -70,6 +70,7 @@ class StateTrackSnapshot:
     attack_count: int = 0
     created_tick: int = 0
     now_tick: int = 0
+    updated_tick: int = 0
     prediction_valid: bool = True
 
 
@@ -193,6 +194,8 @@ class DetectorSession:
             "velX": snapshot.vel_x,
             "velY": snapshot.vel_y,
             "lostCount": snapshot.lost_count,
+            "nowTick": snapshot.now_tick,
+            "updatedTick": snapshot.updated_tick,
             "prediction_valid": snapshot.prediction_valid,
         }
         try:

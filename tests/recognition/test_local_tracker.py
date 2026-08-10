@@ -23,6 +23,7 @@ from pybot.recognition.detector.tracking.local_tracker import (
     transfer_track_state,
     _effective_search_radius,
     _local_follow_scales,
+    _predicted_center,
     track_local,
 )
 
@@ -180,6 +181,36 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertGreater(grf_radius, base)
         self.assertLessEqual(grf_radius, grf_detector.local_track_max_search_radius_px)
 
+    def test_velocity_prediction_centers_healthy_follow_crop(self) -> None:
+        detector = self._detector()
+        center = _predicted_center(
+            {
+                "prediction_valid": True,
+                "lostCount": 0,
+                "velX": 42.0,
+                "velY": -18.0,
+            },
+            500,
+            400,
+            detector,
+        )
+        self.assertEqual(center, (542, 382))
+
+    def test_velocity_prediction_is_disabled_after_miss(self) -> None:
+        detector = self._detector()
+        center = _predicted_center(
+            {
+                "prediction_valid": True,
+                "lostCount": 1,
+                "velX": 42.0,
+                "velY": -18.0,
+            },
+            500,
+            400,
+            detector,
+        )
+        self.assertEqual(center, (500, 400))
+
     def test_velocity_prediction_is_clamped_and_reacquires(self) -> None:
         """A bad momentum hint cannot move the search outside its local disk."""
         detector = self._detector()
@@ -277,7 +308,17 @@ class LocalTrackerTests(unittest.TestCase):
         # The snapshot contains the last published coordinate. The fresh
         # frame—not the snapshot—is shifted, so tracking must measure the
         # +18/+7 drift itself.
-        moved = dict(track, trackId=88, x=first.x, y=first.y)
+        moved = dict(
+            track,
+            trackId=88,
+            x=first.x,
+            y=first.y,
+            moving=True,
+            velX=18.0,
+            velY=7.0,
+            prediction_valid=True,
+            lostCount=0,
+        )
         started = time.perf_counter()
         second = track_local(detector, shifted, "horn", moved)
         elapsed = time.perf_counter() - started

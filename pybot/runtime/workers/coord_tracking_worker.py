@@ -105,6 +105,7 @@ class CoordTrackingWorker:
                 lost_count=track.lost_count,
                 created_tick=track.created_tick,
                 now_tick=now_ms,
+                updated_tick=track.updated_tick,
                 prediction_valid=True,
             )
             for track in alive_tracks
@@ -169,6 +170,7 @@ class CoordTrackingWorker:
                 y=candidate.y,
                 scale=candidate.candidate_scale,
                 now_tick=now_ms,
+                updated_tick=now_ms,
             ))
         if not snapshots:
             return 0
