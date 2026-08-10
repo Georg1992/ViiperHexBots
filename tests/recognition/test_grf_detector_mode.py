@@ -140,6 +140,39 @@ class GrfDetectorModeTests(unittest.TestCase):
         self.assertTrue(all(shape[:2] != frame.shape[:2] for shape, _ in calls))
         self.assertTrue(all(colors == len(result.descriptor.match_palette_bgr) for _, colors in calls))
 
+    def test_grf_static_discovery_bypasses_weighted_full_frame_heatmap(self) -> None:
+        """Static GRF discovery must not pay the animated rarity/diversity pass."""
+        grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
+        frame = _anubis_modified_frame()
+        from pybot.recognition.detector.scoring import heatmap_detector
+
+        with patch.object(
+            heatmap_detector,
+            "weighted_sprite_palette_heatmap",
+            side_effect=AssertionError("static GRF must use the cheap palette heatmap"),
+        ):
+            result = grf.detect(frame, "anubis")
+
+        self.assertGreater(len(result.accepted), 0)
+
+    def test_discovery_accepts_legacy_heatmap_builder_signature(self) -> None:
+        """The optional static keyword must not break older detector doubles."""
+        grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
+        frame = _anubis_modified_frame()
+        real_build = grf.heatmap_detector.build_sprite_heatmap
+
+        def legacy_build(frame_bgr, descriptor, downscale=1):
+            return real_build(frame_bgr, descriptor, downscale=downscale)
+
+        with patch.object(
+            grf.heatmap_detector,
+            "build_sprite_heatmap",
+            new=legacy_build,
+        ):
+            result = grf.detect(frame, "anubis")
+
+        self.assertGreater(len(result.accepted), 0)
+
     def test_anubis_modified_fixture_detects_in_grf_mode(self) -> None:
         """Regression: the clipped Anubis extract was rejected by the tight aspect
         band even on a clean fixture, so the bot missed tracked mobs and

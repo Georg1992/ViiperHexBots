@@ -252,8 +252,14 @@ def track_local(
             suppress_positions=suppress_positions,
             offset_x=offset_x,
             offset_y=offset_y,
-            identity_cx=identity_cx,
-            identity_cy=identity_cy,
+            # Re-center the identity corridor on the bounded motion
+            # prediction, not on the stale pre-miss coordinate. The search may
+            # expand to recovery_radius, but the accepted template hit must
+            # remain near the predicted position; this retains fast mobs while
+            # preventing an identical neighbor at the far edge of the expanded
+            # crop from winning merely because its grayscale match is stronger.
+            identity_cx=search_cx,
+            identity_cy=search_cy,
             identity_radius_px=radius,
         )
         if recovered is not None:
@@ -527,7 +533,25 @@ def _follow_cached_template(
     if float(work.std()) < _TEMPLATE_MIN_STD:
         return None
     scores = cv2.matchTemplate(work, template_gray, cv2.TM_CCOEFF_NORMED)
-    _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(scores)
+    # Select the best *identity-valid* correlation, not the global best hit.
+    # With identical mobs nearby, the strongest grayscale match can belong to
+    # the neighbor; rejecting it after minMaxLoc would discard a weaker but
+    # correct hit for the original Track. The mask is built in native pixels
+    # from the predicted identity corridor before peak selection.
+    valid_scores = np.array(scores, copy=True)
+    score_h, score_w = valid_scores.shape[:2]
+    score_x = np.arange(score_w, dtype=np.float32)[None, :]
+    score_y = np.arange(score_h, dtype=np.float32)[:, None]
+    candidate_x = x0 + (score_x + tw / 2.0) * _TEMPLATE_DOWNSCALE
+    candidate_y = y0 + (score_y + th / 2.0) * _TEMPLATE_DOWNSCALE
+    identity_radius = max(1, int(identity_radius_px))
+    valid = (
+        (candidate_x - identity_cx) ** 2
+        + (candidate_y - identity_cy) ** 2
+        <= float(identity_radius * identity_radius)
+    )
+    valid_scores[~valid] = -np.inf
+    _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(valid_scores)
     if not np.isfinite(max_val) or max_val < _TEMPLATE_MIN_SCORE:
         return None
 
@@ -543,10 +567,8 @@ def _follow_cached_template(
         detector, frame_bgr, descriptor, hit_x, hit_y, scale,
     )
 
-    # MatchTemplate searches the crop including the descriptor margin. Enforce
-    # the actual motion radius as an identity bound so a farther identical mob
-    # cannot win simply because its grayscale correlation is higher.
-    identity_radius = max(1, int(identity_radius_px))
+    # Center refinement can move a valid template hit by a few pixels. Keep
+    # the final corrected coordinate inside the same corridor as well.
     if (hit_x - identity_cx) ** 2 + (hit_y - identity_cy) ** 2 > identity_radius ** 2:
         return None
     if suppress_positions:

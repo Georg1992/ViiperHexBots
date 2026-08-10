@@ -783,16 +783,36 @@ class HeatmapDetector:
         frame_bgr: np.ndarray,
         descriptor: MobDescriptor,
         downscale: int = 1,
+        *,
+        fast_static: bool = False,
     ) -> np.ndarray:
         """Build sprite palette heatmap with edge-density boost.
+
+        ``fast_static`` is used only for the modified, single-frame sprite
+        assets. Their palette is already distinctive and deterministic, so
+        rarity weighting and body-diversity maps add cost without adding an
+        identity signal. The downstream geometry and silhouette gates still
+        validate candidates.
 
         Returns sprite_heatmap at full frame resolution.
         """
         frame_shape = frame_bgr.shape[:2]
         work_bgr = self._work_bgr(frame_bgr, downscale)
 
-        # --- 1. Weighted sprite-palette-distance heatmap ---
-        if descriptor.use_body_cluster_diversity:
+        # --- 1. Sprite-palette-distance heatmap ---
+        if fast_static:
+            # Static GRF mode does not need scene-relative rarity or the
+            # full-frame body/group diversity maps. Avoiding those extra
+            # palette passes is important on the 1024x1024 hunt ROI.
+            sprite = sprite_palette_heatmap(
+                work_bgr,
+                descriptor.match_palette_bgr,
+                descriptor.max_sprite_palette_distance,
+            )
+            self._last_body_best = None
+            self._last_body_downscale = 0
+            self._last_body_descriptor_id = 0
+        elif descriptor.use_body_cluster_diversity:
             # Keep the weighted base heatmap, but do not retain a full-frame
             # per-palette similarity tensor. Diversity only needs one 2-D
             # presence map per color group; building those maps on demand keeps

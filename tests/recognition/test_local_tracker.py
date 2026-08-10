@@ -202,6 +202,121 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertEqual(follow.call_args.kwargs["cx"], anchor.center_x + 36)
         self.assertEqual(follow.call_args.kwargs["cy"], anchor.center_y - 8)
 
+    def test_template_recovery_prefers_valid_corridor_over_identical_neighbor(self) -> None:
+        """A stronger neighbor outside the corridor cannot steal the Track."""
+        detector = self._detector()
+        descriptor = detector.ensure_descriptor("horn")
+        from pybot.recognition.detector.tracking import local_tracker
+
+        rng = np.random.default_rng(7)
+        template = rng.integers(0, 255, size=(12, 12), dtype=np.uint8)
+        frame_gray = rng.integers(0, 35, size=(180, 260), dtype=np.uint8)
+        desired = cv2.resize(template, (24, 24), interpolation=cv2.INTER_NEAREST)
+        # The desired target is deliberately a little weaker than the exact
+        # identical neighbor, so an unmasked global minMaxLoc would choose the
+        # wrong mob. The corridor is centered on the desired target.
+        weakened = desired.copy()
+        weakened[::3, ::3] = weakened[::3, ::3] // 2
+        frame_gray[68:92, 103:127] = weakened
+        frame_gray[68:92, 183:207] = desired
+        frame = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
+        track_id = 901
+        local_tracker._template_store(detector)[track_id] = SimpleNamespace(
+            image_gray=template,
+            width=24,
+            height=24,
+            center_x=115,
+            center_y=80,
+            scale=0.9,
+            verified_hits=0,
+        )
+
+        with patch.object(
+            local_tracker,
+            "_refine_hit_to_sprite_center",
+            side_effect=lambda _detector, _frame, _descriptor, cx, cy, _scale: (cx, cy),
+        ), patch.object(
+            local_tracker,
+            "_template_identity_ok",
+            return_value=True,
+        ):
+            result = local_tracker._follow_cached_template(
+                detector,
+                frame,
+                descriptor,
+                track_id=track_id,
+                cx=115,
+                cy=80,
+                scale=0.9,
+                search_radius_px=110,
+                suppress_positions=None,
+                offset_x=0,
+                offset_y=0,
+                identity_cx=115,
+                identity_cy=80,
+                identity_radius_px=28,
+            )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertLessEqual(abs(result.x - 115), 4)
+        self.assertLessEqual(abs(result.y - 80), 4)
+
+    def test_expanded_recovery_keeps_same_template_identity_bound(self) -> None:
+        """A wider miss recovery also widens its bound without generic reacquire."""
+        detector = self._detector()
+        anchor = self._living_anchor(detector)
+        track_id = 93
+        from pybot.recognition.detector.tracking import local_tracker
+
+        local_tracker._template_store(detector)[track_id] = SimpleNamespace(
+            image_gray=np.ones((4, 4), dtype=np.uint8),
+        )
+        calls: list[dict] = []
+
+        def follow(_detector, _frame, _descriptor, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return None
+            return LocalTrackResult(
+                track_id=track_id,
+                found=True,
+                x=anchor.center_x + 120,
+                y=anchor.center_y,
+                confidence=0.9,
+                miss_reason="",
+            )
+
+        with patch.object(local_tracker, "_follow_cached_template", side_effect=follow):
+            result = track_local(
+                detector,
+                self.roi,
+                "horn",
+                self._build_track_dict(
+                    anchor,
+                    track_id=track_id,
+                    velX=60.0,
+                    velY=0.0,
+                    lost_count=1,
+                    prediction_valid=True,
+                    anchor_required=True,
+                ),
+            )
+
+        self.assertTrue(result.found)
+        self.assertEqual(len(calls), 2)
+        self.assertGreater(calls[1]["search_radius_px"], calls[0]["search_radius_px"])
+        # Recovery searches a wider crop, but identity stays in the normal
+        # motion corridor around the predicted center. This is the sticky
+        # boundary that prevents an identical neighbor at the far edge from
+        # winning the expanded template search.
+        self.assertEqual(
+            calls[1]["identity_radius_px"], calls[0]["search_radius_px"],
+        )
+        self.assertEqual(calls[1]["identity_cx"], anchor.center_x + 120)
+        self.assertEqual(calls[1]["identity_cy"], anchor.center_y)
+        self.assertEqual(calls[0]["identity_radius_px"], calls[0]["search_radius_px"])
+
     def test_wide_radius_finds_mob_lagged_behind_last_known(self) -> None:
         """No velocity needed — fixed wide disk around last-known catches runners."""
         detector = self._detector()

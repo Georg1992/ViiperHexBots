@@ -7,6 +7,7 @@ No RegionScorer, no structural pixels, and no heavyweight global center search.
 
 from __future__ import annotations
 
+import inspect
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -407,6 +408,12 @@ class MobDetector:
         # --- heatmap --------------------------------------------------
         heatmap_start = time.perf_counter()
         downscale = self._discovery_heatmap_downscale(frame_bgr)
+        # Static modified sprites use the cheap palette-only discovery path.
+        # Compute this before building the heatmap so the fast mode is also
+        # applied to the first post-teleport scan.
+        static_sprite_fast_path = self.use_sprite_grf and self.descriptor_is_static(
+            descriptor,
+        )
         if (
             not self.use_sprite_grf
             and downscale > 1
@@ -415,11 +422,37 @@ class MobDetector:
         ):
             downscale = 1
 
-        sprite_heatmap = self.heatmap_detector.build_sprite_heatmap(
-            frame_bgr,
-            descriptor,
-            downscale=downscale,
-        )
+        build_heatmap = self.heatmap_detector.build_sprite_heatmap
+        # Keep older detector doubles/extensions usable without catching an
+        # internal TypeError from the actual heatmap implementation. Signature
+        # dispatch is resolved before the call, so production failures remain
+        # visible and static GRF mode cannot silently fall back to the slow path.
+        try:
+            heatmap_parameters = inspect.signature(build_heatmap).parameters
+            supports_fast_static = (
+                "fast_static" in heatmap_parameters
+                or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in heatmap_parameters.values()
+                )
+            )
+        except (TypeError, ValueError):
+            # Some extension callables do not expose a signature; the current
+            # built-in implementation supports the keyword, so use it there.
+            supports_fast_static = True
+        if supports_fast_static:
+            sprite_heatmap = build_heatmap(
+                frame_bgr,
+                descriptor,
+                downscale=downscale,
+                fast_static=static_sprite_fast_path,
+            )
+        else:
+            sprite_heatmap = build_heatmap(
+                frame_bgr,
+                descriptor,
+                downscale=downscale,
+            )
         heatmap_end = time.perf_counter()
 
         # --- blobs ----------------------------------------------------
@@ -429,14 +462,6 @@ class MobDetector:
         heatmap_peak = float(sprite_heatmap.max()) if sprite_heatmap.size else 0.0
         peak_rel = float(self.config["peakRelativeThreshold"])
         small_rel_heat = _SMALL_HEAT_RELATIVE_PEAK_MULT * peak_rel
-        # Modified GRF sprites are one deterministic frame. Their local
-        # silhouette gate already performs the exact palette extraction and the
-        # one-reference silhouette comparison, so the animated-sprite color
-        # structure pre-gate and shared full-frame palette map are redundant.
-        static_sprite_fast_path = self.use_sprite_grf and self.descriptor_is_static(
-            descriptor,
-        )
-
         # The silhouette gate needs the unweighted palette mask, not the
         # weighted discovery heatmap. Build that mask once per frame and slice
         # it for every candidate. Recomputing the same palette-distance matrix
