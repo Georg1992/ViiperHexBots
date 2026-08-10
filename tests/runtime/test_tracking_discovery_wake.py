@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 from pybot.recognition.detector.detector import load_detector_config
 from pybot.runtime.hunt_tracks import HuntTracks
@@ -139,6 +139,57 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         self.assertEqual((created[0].x, created[0].y), (101, 102))
         self.ctx.tracker.transfer_track_template.assert_called_once()
 
+    def test_created_track_is_followed_in_same_tick(self) -> None:
+        """The first committed track is followed without a second tick."""
+        from pybot.recognition.rules import DiscoveryDetection
+
+        self.ctx.config.mob_name = "horn"
+        self.ctx.config.use_sprite_grf = True
+        self.tracks.process_discovery_scan(
+            [DiscoveryDetection(
+                x=100, y=100, confidence=0.8,
+                candidate_scale=0.9, living=True,
+            )],
+            mob_name="horn",
+            now_tick=1,
+        )
+        self.ctx.tracker.transfer_track_template.return_value = True
+        calls: list[int] = []
+
+        def follow(_frame, _roi, snapshots, *, on_result=None):
+            for snapshot in snapshots:
+                calls.append(snapshot.track_id)
+                result = SimpleNamespace(
+                    track_id=snapshot.track_id,
+                    found=True,
+                    x=101 if snapshot.track_id < 0 else 106,
+                    y=102 if snapshot.track_id < 0 else 107,
+                    confidence=0.9,
+                    opacity_score=0.0,
+                )
+                if on_result is not None:
+                    on_result(result)
+            return SimpleNamespace(ok=True, results=[
+                SimpleNamespace(
+                    track_id=snapshot.track_id,
+                    found=True,
+                    x=101 if snapshot.track_id < 0 else 106,
+                    y=102 if snapshot.track_id < 0 else 107,
+                    confidence=0.9,
+                    opacity_score=0.0,
+                )
+                for snapshot in snapshots
+            ])
+
+        self.ctx.tracker.track_locals_frame.side_effect = follow
+        self.worker._tick()
+
+        self.assertEqual(calls, [-1, 1])
+        created = self.tracks.snapshot_alive(2)
+        self.assertEqual(len(created), 1)
+        self.assertEqual((created[0].x, created[0].y), (106, 107))
+        self.assertTrue(self.ctx.attack_wake.is_set())
+
     def test_attack_wake_interrupts_idle_attack_poll(self) -> None:
         """A producer wake interrupts the idle wait immediately."""
         ctx = MagicMock()
@@ -155,6 +206,30 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
 
         self.assertFalse(attack.process_pending())
         self.assertFalse(ctx.attack_wake.is_set())
+
+    def test_attack_wake_rechecks_store_before_area_clear(self) -> None:
+        """A track committed during the empty read is attacked immediately."""
+        ctx = MagicMock()
+        ctx.stop_event = threading.Event()
+        ctx.attack_wake = threading.Event()
+        ctx.attack_wake.set()
+        ctx.should_run_combat.return_value = True
+        ctx.in_post_teleport_heal_window.return_value = False
+        ctx.tracks.tracks_for_policy.side_effect = [
+            [],
+            [SimpleNamespace(id=7, area_epoch=0)],
+        ]
+        ctx.policy.select_target.side_effect = [0, 7]
+        ctx.hunt_mode = MagicMock()
+        ctx.hunt_mode.on_no_attackable_targets.return_value = False
+        attack = AttackLoop(ctx, ctx.hunt_mode, MagicMock())
+        attack._attack_one = MagicMock()  # type: ignore[method-assign]
+
+        self.assertTrue(attack.process_pending())
+        attack._attack_one.assert_called_once_with(
+            7, ANY, expected_epoch=0,
+        )
+        ctx.hunt_mode.on_no_attackable_targets.assert_not_called()
 
     def test_local_miss_wakes_discovery_and_keeps_track(self) -> None:
         track = self.tracks.create_track(

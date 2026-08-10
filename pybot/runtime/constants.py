@@ -73,10 +73,9 @@ CRITICAL_DANGER_POLL_INTERVAL_S = WORKER_POLL_INTERVAL_S
 CRITICAL_PREEMPT_RELEASE_TIMEOUT_S = 3.0
 # After teleport settle, custom self-heal may cast during this grace window.
 HP_POST_TELEPORT_HEAL_S = 2.0
-# After a custom heal cast, wait this long before deciding the cast was blocked
-# and retrying with a teleport. Must outlast the heal's effect window plus the
-# HP publisher/OCR lag so a working heal is never cut off mid-cast; the retry
-# teleport key is only clicked after this full window has elapsed.
+# Earliest point at which a custom heal cast may be checked for a fresh HP
+# observation. The stricter HP_RESTORE_COOLDOWN_S still controls when a stale
+# cast may be classified as blocked and trigger the retry teleport.
 HEAL_VERIFY_DELAY_MS = 1000
 
 # Minimum gap between distinct skill-timer key presses when several are due.

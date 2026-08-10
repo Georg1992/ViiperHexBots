@@ -97,6 +97,49 @@ class GrfDetectorModeTests(unittest.TestCase):
         self.assertLess(g_min, n_min)
         self.assertGreater(g_max, n_max)
 
+    def test_grf_static_discovery_uses_only_local_palette_gate(self) -> None:
+        """Static GRF discovery skips generic color pre-gates and full-frame maps.
+
+        The local silhouette gate still performs palette extraction and compares
+        against the one cached static reference; only redundant full-frame and
+        animated-sprite color-structure work is removed.
+        """
+        grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
+        frame = _anubis_modified_frame()
+        calls: list[tuple[tuple[int, ...], int]] = []
+
+        from pybot.recognition.detector import detector as detector_module
+        original_palette_heatmap = detector_module.sprite_palette_heatmap
+
+        def record_palette_heatmap(frame_bgr, palette_bgr, max_distance):
+            calls.append((tuple(frame_bgr.shape), len(palette_bgr)))
+            return original_palette_heatmap(frame_bgr, palette_bgr, max_distance)
+
+        with patch.object(
+            grf,
+            "_passes_color_structure_gate",
+            side_effect=AssertionError("static GRF should skip color pre-gate"),
+        ), patch.object(
+            grf,
+            "_passes_extract_body_gate",
+            side_effect=AssertionError("static GRF should skip duplicate body gate"),
+        ), patch.object(
+            detector_module,
+            "sprite_palette_heatmap",
+            side_effect=record_palette_heatmap,
+        ):
+            result = grf.detect(frame, "anubis")
+
+        self.assertGreater(len(result.accepted), 0)
+        self.assertEqual(len(grf._descriptor_silhouette_references(
+            result.descriptor.silhouette_masks,
+        )), 1)
+        self.assertTrue(calls)
+        # Every palette calculation belongs to a local silhouette search or
+        # descriptor-scale deformation, never the full captured frame.
+        self.assertTrue(all(shape[:2] != frame.shape[:2] for shape, _ in calls))
+        self.assertTrue(all(colors == len(result.descriptor.match_palette_bgr) for _, colors in calls))
+
     def test_anubis_modified_fixture_detects_in_grf_mode(self) -> None:
         """Regression: the clipped Anubis extract was rejected by the tight aspect
         band even on a clean fixture, so the bot missed tracked mobs and

@@ -39,6 +39,13 @@ _OPTIONAL_GROUP_BOOST = np.float32(0.35)
 _BODY_MASS_MIN_FRACTION = 0.15
 # Near-duplicate blob suppress radius as a fraction of min(sprite w, h).
 _BLOB_DEDUP_SIZE_FRAC = 0.85
+# A close pair can form one connected heat component after blur/upscale even
+# though the sprites are separate. Only components clearly larger than one
+# descriptor-sized sprite are eligible for the narrow two-peak recovery below.
+_OVERSIZED_SPLIT_DIM_RATIO = 1.65
+_OVERSIZED_SPLIT_PEAK_RATIO = 0.78
+_OVERSIZED_SPLIT_NMS_RADIUS_FRAC = 0.55
+_OVERSIZED_SPLIT_MIN_SEPARATION_FRAC = 0.70
 # Ignore heat CCs smaller than this many pixels (noise speckles).
 _MIN_BLOB_COMPONENT_AREA = 6
 # Gaussian blur kernel ≈ this fraction of sprite size at work resolution.
@@ -832,6 +839,9 @@ class HeatmapDetector:
         """Find distinct hot regions via connected components.
 
         Near-duplicate peaks within ~0.85× min(sprite dims) are suppressed.
+        A single oversized component is split only when it contains two strong,
+        well-separated heat peaks; ordinary components keep their original
+        connected-component bbox and behavior.
         """
         if heatmap.size == 0:
             return []
@@ -854,15 +864,132 @@ class HeatmapDetector:
             return []
 
         raw: list[tuple[int, int, float, tuple[int, int, int, int]]] = []
+        split_groups: list[
+            list[tuple[int, int, float, tuple[int, int, int, int]]]
+        ] = []
         for label in range(1, num_labels):
             if stats[label, cv2.CC_STAT_AREA] < _MIN_BLOB_COMPONENT_AREA:
                 continue
-            blob = self._blob_from_mask(heatmap, labels == label)
+            mask = labels == label
+            bbox = (
+                int(stats[label, cv2.CC_STAT_LEFT]),
+                int(stats[label, cv2.CC_STAT_TOP]),
+                int(stats[label, cv2.CC_STAT_WIDTH]),
+                int(stats[label, cv2.CC_STAT_HEIGHT]),
+            )
+            split = self._split_oversized_component(
+                heatmap,
+                mask,
+                bbox,
+                avg_width,
+                avg_height,
+            )
+            if split is not None:
+                # These two peaks came from one intentionally split component.
+                # They have already passed the stricter split separation check;
+                # do not run them through the normal 0.85-sprite dedup radius,
+                # which would merge a valid close pair again.
+                split_groups.append(split)
+                continue
+            blob = self._blob_from_mask(heatmap, mask)
             if blob is not None:
                 raw.append(blob)
 
         kept = _dedup_blobs_by_sprite_size(raw, avg_width, avg_height)
+        split_kept: list[tuple[int, int, float, tuple[int, int, int, int]]] = []
+        split_dedup_sq = (
+            min(avg_width, avg_height) * _BLOB_DEDUP_SIZE_FRAC
+        ) ** 2
+        # Connected-component label order is spatial, not confidence order.
+        # Resolve cross-component duplicates strongest-first so the retained
+        # candidate is deterministic and has the best evidence.
+        for split_group in sorted(
+            split_groups,
+            key=lambda group: max(blob[2] for blob in group),
+            reverse=True,
+        ):
+            prior_kept = (*kept, *split_kept)
+            for split_blob in split_group:
+                sx, sy, _score, _bbox = split_blob
+                # Preserve the two peaks from one explicitly validated
+                # component, but suppress a split peak that duplicates an
+                # ordinary component or a split peak from another component.
+                # This keeps separate close pairs intact without allowing
+                # unusual heatmaps to create duplicate candidates.
+                if all(
+                    (sx - kx) * (sx - kx) + (sy - ky) * (sy - ky)
+                    >= split_dedup_sq
+                    for kx, ky, _ks, _kb in prior_kept
+                ):
+                    split_kept.append(split_blob)
+        kept.extend(split_kept)
+        kept.sort(key=lambda item: item[2], reverse=True)
         return kept[: self.max_centers]
+
+    def _split_oversized_component(
+        self,
+        heatmap: np.ndarray,
+        mask: np.ndarray,
+        bbox: tuple[int, int, int, int],
+        avg_width: int,
+        avg_height: int,
+    ) -> list[tuple[int, int, float, tuple[int, int, int, int]]] | None:
+        """Recover two nearby sprites from one clearly oversized heat blob.
+
+        This is deliberately not a general segmentation algorithm. It only
+        activates when a component is at least 1.65 descriptor dimensions on one
+        axis, then keeps at most two strong peaks separated by most of one
+        sprite width/height. Each recovered peak gets a descriptor-sized search
+        box, which gives the downstream geometry/color/silhouette gates an
+        individual sprite-sized crop instead of the merged component.
+        """
+        _x, _y, width, height = bbox
+        width_ratio = width / max(avg_width, 1)
+        height_ratio = height / max(avg_height, 1)
+        if max(width_ratio, height_ratio) < _OVERSIZED_SPLIT_DIM_RATIO:
+            return None
+
+        component_heat = np.where(mask, heatmap, 0.0).astype(np.float32)
+        component_peak = float(component_heat.max())
+        if component_peak <= 0.0:
+            return None
+
+        work = component_heat.copy()
+        nms_radius = max(
+            3,
+            int(round(min(avg_width, avg_height) * _OVERSIZED_SPLIT_NMS_RADIUS_FRAC)),
+        )
+        peaks: list[tuple[int, int, float]] = []
+        for _ in range(2):
+            peak_y, peak_x = np.unravel_index(int(np.argmax(work)), work.shape)
+            peak_score = float(work[peak_y, peak_x])
+            if peak_score < component_peak * _OVERSIZED_SPLIT_PEAK_RATIO:
+                break
+            peaks.append((int(peak_x), int(peak_y), peak_score))
+            cv2.circle(work, (int(peak_x), int(peak_y)), nms_radius, 0.0, -1)
+
+        if len(peaks) != 2:
+            return None
+
+        dominant_axis = 1 if height_ratio >= width_ratio else 0
+        separation = abs(
+            peaks[0][dominant_axis] - peaks[1][dominant_axis]
+        )
+        if separation < min(avg_width, avg_height) * _OVERSIZED_SPLIT_MIN_SEPARATION_FRAC:
+            return None
+
+        frame_height, frame_width = heatmap.shape[:2]
+        split: list[tuple[int, int, float, tuple[int, int, int, int]]] = []
+        for peak_x, peak_y, peak_score in peaks:
+            left = max(0, min(frame_width - avg_width, peak_x - avg_width // 2))
+            top = max(0, min(frame_height - avg_height, peak_y - avg_height // 2))
+            split.append((
+                peak_x,
+                peak_y,
+                peak_score,
+                (int(left), int(top), avg_width, avg_height),
+            ))
+        return split
 
     def _blob_from_mask(
         self,

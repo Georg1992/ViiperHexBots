@@ -17,6 +17,7 @@ to accept a hit; heatmap peaks only propose candidates.
 
 from __future__ import annotations
 
+import inspect
 import threading
 import traceback
 from contextlib import nullcontext
@@ -410,63 +411,46 @@ class CoordTrackingWorker:
         if not snaps:
             return 0
 
-        batch = ctx.tracker.track_locals_frame(frame, roi, snaps)
-        self._warn_if_slow_tracking(batch, snaps)
-
-        if not getattr(batch, "ok", True) or len(batch.results) != len(pending):
-            self._discard_provisional_templates(batch.results)
-            ctx.tracks.requeue_discovery_candidates(
-                pending, expected_epoch=area_epoch,
-            )
-            return 0
-
         created = 0
+        committed_provisional_ids: set[int] = set()
+        pending_by_id = {
+            -(index + 1): candidate
+            for index, candidate in enumerate(pending)
+        }
         commit_guard = (
             nullcontext()
             if publication_lock is None
             else publication_lock
         )
-        with commit_guard:
-            if (
-                not ctx.should_run_tracking()
-                or ctx.tracks.area_epoch != area_epoch
-            ):
-                self._discard_provisional_templates(batch.results)
-                ctx.tracks.requeue_discovery_candidates(
-                    pending, expected_epoch=area_epoch,
-                )
-                return 0
-            for index, (candidate, result) in enumerate(
-                zip(pending, batch.results, strict=True)
-            ):
+
+        def commit_candidate_result(result) -> None:
+            """Commit one acquisition as soon as its local search completes."""
+            nonlocal created
+            candidate = pending_by_id.get(result.track_id)
+            if candidate is None or result.track_id in committed_provisional_ids:
+                return
+            with commit_guard:
                 if (
                     not ctx.should_run_tracking()
                     or ctx.tracks.area_epoch != area_epoch
                 ):
-                    # A transition won while local-follow was running. Do not
-                    # create old-area tracks; the next discovery frame owns the
-                    # fresh area.
-                    self._discard_provisional_templates(batch.results[index:])
-                    ctx.tracks.requeue_discovery_candidates(
-                        pending[index:], expected_epoch=area_epoch,
-                    )
-                    self._wake_attack_if_created(created)
-                    return created
+                    return
                 if not result.found:
                     ctx.tracker.discard_track_template(result.track_id)
-                    continue
-                cx, cy = result.x, result.y
-                create_x, create_y = cx, cy
+                    committed_provisional_ids.add(result.track_id)
+                    return
+                create_x, create_y = result.x, result.y
 
-                # Re-check dedup after earlier creates in this batch.
-                duplicate = False
-                for px, py in existing_positions:
-                    if (create_x - px) ** 2 + (create_y - py) ** 2 <= dedup_sq:
-                        duplicate = True
-                        break
-                if duplicate:
+                # Re-check dedup after earlier candidates commit. Discovery's
+                # center is only a proposal; the local result is the centered,
+                # current-frame coordinate used for the live track.
+                if any(
+                    (create_x - px) ** 2 + (create_y - py) ** 2 <= dedup_sq
+                    for px, py in existing_positions
+                ):
                     ctx.tracker.discard_track_template(result.track_id)
-                    continue
+                    committed_provisional_ids.add(result.track_id)
+                    return
 
                 track = ctx.tracks.create_track(
                     mob_name,
@@ -478,24 +462,84 @@ class CoordTrackingWorker:
                     area_epoch=area_epoch,
                 )
                 if track is None:
-                    # Area epoch advanced — do not requeue into the new screen.
-                    self._discard_provisional_templates(batch.results[index:])
-                    self._wake_attack_if_created(created)
-                    return created
-
-                if not ctx.tracker.transfer_track_template(result.track_id, track.id):
+                    committed_provisional_ids.add(result.track_id)
+                    return
+                if not ctx.tracker.transfer_track_template(
+                    result.track_id, track.id,
+                ):
                     # Never publish a real track without its warm template.
                     ctx.tracks.remove_track(track.id)
-                    self._wake_attack_if_created(created)
-                    return created
+                    committed_provisional_ids.add(result.track_id)
+                    return
                 existing_positions.append((create_x, create_y))
                 created += 1
+                committed_provisional_ids.add(result.track_id)
+                # Wake gameplay at the first complete track commit, while the
+                # remaining candidate searches may still be running.
+                self._wake_attack_if_created(1)
+
+        # DetectorSession invokes this callback as each bounded local job
+        # completes, so the first valid mob becomes attackable immediately.
+        # Compatibility doubles without the keyword are selected explicitly;
+        # do not catch arbitrary TypeError from inside the tracker and run the
+        # expensive acquisition a second time.
+        supports_callback = True
+        try:
+            parameters = inspect.signature(
+                ctx.tracker.track_locals_frame,
+            ).parameters.values()
+            supports_callback = any(
+                parameter.name == "on_result"
+                or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            # Some extension/mocked callables expose no inspectable signature;
+            # production DetectorSession supports the callback, so fail open.
+            supports_callback = True
+
+        if supports_callback:
+            batch = ctx.tracker.track_locals_frame(
+                frame,
+                roi,
+                snaps,
+                on_result=commit_candidate_result,
+            )
+        else:
+            batch = ctx.tracker.track_locals_frame(frame, roi, snaps)
+        self._warn_if_slow_tracking(batch, snaps)
+        results = list(getattr(batch, "results", ()))
+
+        # Synchronous/legacy sessions may return results without delivering the
+        # callback. Commit those results here, skipping IDs already published by
+        # the incremental callback path.
+        for result in results:
+            commit_candidate_result(result)
+
+        # Always reconcile the full provisional set. A callback can finish while
+        # tracking is temporarily suspended or an area reset is winning; that
+        # result is intentionally not committed, but it must remain discoverable
+        # (or be rejected by the old epoch) rather than silently disappearing.
+        uncommitted_candidates = [
+            candidate
+            for index, candidate in enumerate(pending)
+            if -(index + 1) not in committed_provisional_ids
+        ]
+        uncommitted_results = [
+            result
+            for result in results
+            if result.track_id not in committed_provisional_ids
+        ]
+        self._discard_provisional_templates(uncommitted_results)
+        ctx.tracks.requeue_discovery_candidates(
+            uncommitted_candidates,
+            expected_epoch=area_epoch,
+        )
 
         if created > 0:
             ctx.logger.behavior(
                 f"[COORD] created {created} track(s) from discovery candidates"
             )
-        self._wake_attack_if_created(created)
         return created
 
     def _log_opacity_deaths(self, events) -> None:

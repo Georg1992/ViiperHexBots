@@ -181,32 +181,31 @@ def track_local(
         search_cy = int(round(cy + prediction_dy))
 
     # Candidate resolution is an explicit one-shot phase. Discovery already
-    # passed this position through the full silhouette detector, so try that
-    # authoritative candidate first. The heatmap peak is an optimization, not
-    # an identity decision: in a dense scene a neighboring mob can dominate the
-    # local heatmap and make a valid discovery candidate report ``no_peak``.
-    # Seeding from the validated discovery point prevents duplicate templates
-    # and gives every newly discovered mob an independent warm identity.
+    # passed this position through the full detector, so ordinary animated
+    # descriptors try that authoritative candidate first. Static GRF tracking
+    # deliberately stays on the cheap palette/heat path even for provisional
+    # IDs; it must not re-enter the native silhouette gate.
     if track_id < 0:
-        accepted, bbox, similarity = detector.score_at(
-            frame_bgr,
-            descriptor,
-            search_origin_x,
-            search_origin_y,
-            scale,
-        )
-        if accepted and bbox is not None:
-            return _finalize_track_hit(
-                detector=detector,
-                frame_bgr=frame_bgr,
-                descriptor=descriptor,
-                track_id=track_id,
-                bbox=bbox,
-                similarity=similarity,
-                scale=scale,
-                offset_x=offset_x,
-                offset_y=offset_y,
+        if not _fast_track_accept(detector, descriptor):
+            accepted, bbox, similarity = detector.score_at(
+                frame_bgr,
+                descriptor,
+                search_origin_x,
+                search_origin_y,
+                scale,
             )
+            if accepted and bbox is not None:
+                return _finalize_track_hit(
+                    detector=detector,
+                    frame_bgr=frame_bgr,
+                    descriptor=descriptor,
+                    track_id=track_id,
+                    bbox=bbox,
+                    similarity=similarity,
+                    scale=scale,
+                    offset_x=offset_x,
+                    offset_y=offset_y,
+                )
 
         peak = _find_local_peak(
             detector,

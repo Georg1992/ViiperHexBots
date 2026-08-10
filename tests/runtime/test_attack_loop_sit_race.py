@@ -294,23 +294,24 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         )
 
         self.assertFalse(loop.process_pending())
-        # Simulate the verification window expiring without any HP change.
+        # Simulate the heal remaining stale. The retry teleport must wait for
+        # the complete custom skill-heal cooldown, not only the shorter OCR
+        # verification window.
         last_changed_ms = vitals.hp_sample()[3]
         loop._last_skill_heal_ms = last_changed_ms
-        # The cast must get the full verification window before it is
-        # classified as blocked and allowed to trigger a retry teleport.
-        from pybot.runtime.constants import HEAL_VERIFY_DELAY_MS
+        from pybot.runtime.constants import HP_RESTORE_COOLDOWN_S
 
+        cooldown_ms = int(HP_RESTORE_COOLDOWN_S * 1000)
         with patch(
             "pybot.runtime.workers.attack_loop.monotonic_ms",
-            return_value=last_changed_ms + HEAL_VERIFY_DELAY_MS - 1,
+            return_value=last_changed_ms + cooldown_ms - 1,
         ):
             self.assertFalse(loop.process_pending())
         teleport.retry_post_teleport_heal.assert_not_called()
 
         with patch(
             "pybot.runtime.workers.attack_loop.monotonic_ms",
-            return_value=last_changed_ms + HEAL_VERIFY_DELAY_MS,
+            return_value=last_changed_ms + cooldown_ms,
         ):
             self.assertFalse(loop.process_pending())
 

@@ -101,39 +101,80 @@ class AttackLoop:
             # tick even when the cast is blocked or unavailable. Normal hunting
             # HP thresholds do not apply outside this post-teleport window.
             tick = monotonic_ms()
-            policy_tracks = self._ctx.tracks.tracks_for_policy(tick)
-            target_id = self._ctx.policy.select_target(policy_tracks, tick)
-            if target_id:
-                selected_epoch = next(
+            attack_wake = getattr(self._ctx, "attack_wake", None)
+            # A wake can race with the first empty policy snapshot: tracking may
+            # have committed a track just after this step read the store. Re-read
+            # once immediately before considering an area-clear transition so a
+            # fresh track is attacked in this same gameplay step instead of
+            # waiting for another polling cycle (or risking a no-target teleport).
+            for _ in range(2):
+                policy_tracks = self._ctx.tracks.tracks_for_policy(tick)
+                target_id = self._ctx.policy.select_target(policy_tracks, tick)
+                if target_id:
+                    selected_epoch = next(
+                        (
+                            int(track.area_epoch)
+                            for track in policy_tracks
+                            if track.id == target_id
+                            and type(getattr(track, "area_epoch", None)) is int
+                        ),
+                        None,
+                    )
+                    # Capture the selected track's area identity before any heal
+                    # or other action can yield to a teleport/reset. Track IDs
+                    # are intentionally reusable after an area reset, so the ID
+                    # alone is not a safe target identity.
+                    if selected_epoch is None:
+                        self._attack_one(target_id, tick)
+                    else:
+                        self._attack_one(
+                            target_id,
+                            tick,
+                            expected_epoch=selected_epoch,
+                        )
+                    self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
+                    return True
+                if (
+                    attack_wake is None
+                    or not callable(getattr(attack_wake, "is_set", None))
+                    or not attack_wake.is_set()
+                ):
+                    break
+                attack_wake.clear()
+
+            # One final authoritative read immediately before the clear-area
+            # transition closes the normal wake race. The transition itself
+            # owns its area/publication locks; do not hold them across attack or
+            # teleport input.
+            final_tracks = self._ctx.tracks.tracks_for_policy(monotonic_ms())
+            final_target = self._ctx.policy.select_target(
+                final_tracks,
+                monotonic_ms(),
+            )
+            if final_target:
+                final_epoch = next(
                     (
                         int(track.area_epoch)
-                        for track in policy_tracks
-                        if track.id == target_id
+                        for track in final_tracks
+                        if track.id == final_target
                         and type(getattr(track, "area_epoch", None)) is int
                     ),
                     None,
                 )
-                # Capture the selected track's area identity before any heal or
-                # other action can yield to a teleport/reset. Track IDs are
-                # intentionally reusable after an area reset, so the ID alone
-                # is not a safe target identity.
-                if selected_epoch is None:
-                    # Preserve the compatibility path for lightweight callers
-                    # that do not expose area epochs; real MobTrack snapshots
-                    # always carry one.
-                    self._attack_one(target_id, tick)
-                else:
-                    self._attack_one(
-                        target_id,
-                        tick,
-                        expected_epoch=selected_epoch,
-                    )
+                self._attack_one(
+                    final_target,
+                    monotonic_ms(),
+                    expected_epoch=final_epoch,
+                )
                 self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
                 return True
 
             # A clear-area transition owns the next teleport. Do it before
             # attempting a skill heal so the required order is:
-            # clear -> teleport -> inspect/heal -> hunt.
+            # clear -> teleport -> inspect/heal -> hunt. The strategy performs
+            # its own authoritative alive-track/discovery checks under the
+            # transition boundary, so this call must remain the final decision
+            # after the last track-store read above.
             transitioned = self._hunt_mode.on_no_attackable_targets()
             if transitioned is True:
                 self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
@@ -281,10 +322,14 @@ class AttackLoop:
             # reported any change by then, the skill did not take effect at
             # this location (blocked input/session), so recovery must teleport
             # instead of waiting indefinitely and standing still.
-            if hp_changed_ms <= self._last_skill_heal_ms:
-                return "blocked"
+            # Keep the complete skill-heal cooldown before deciding that the
+            # cast was stale and starting a retry teleport. The teleport is a
+            # recovery action for the failed cast, so it must not happen during
+            # the same 1.5-second heal window.
             if elapsed_ms < int(HP_RESTORE_COOLDOWN_S * 1000):
                 return "waiting"
+            if hp_changed_ms <= self._last_skill_heal_ms:
+                return "blocked"
 
         def cast() -> bool:
             hx, hy = self._character_pos()
@@ -301,7 +346,9 @@ class AttackLoop:
             )
             return "failed"
         if result == "cast":
-            self._last_skill_heal_ms = now_ms
+            # Start the cooldown from the completed skill input so the real
+            # heal-to-heal interval cannot be shorter than the policy.
+            self._last_skill_heal_ms = monotonic_ms()
             return "cast"
         if result in {"blocked", "cooldown", "failed"}:
             return result

@@ -434,6 +434,13 @@ class MobDetector:
         heatmap_peak = float(sprite_heatmap.max()) if sprite_heatmap.size else 0.0
         peak_rel = float(self.config["peakRelativeThreshold"])
         small_rel_heat = _SMALL_HEAT_RELATIVE_PEAK_MULT * peak_rel
+        # Modified GRF sprites are one deterministic frame. Their local
+        # silhouette gate already performs the exact palette extraction and the
+        # one-reference silhouette comparison, so the animated-sprite color
+        # structure pre-gate and shared full-frame palette map are redundant.
+        static_sprite_fast_path = self.use_sprite_grf and self.descriptor_is_static(
+            descriptor,
+        )
 
         # The silhouette gate needs the unweighted palette mask, not the
         # weighted discovery heatmap. Build that mask once per frame and slice
@@ -445,8 +452,11 @@ class MobDetector:
         # A full-frame palette map pays off only when several candidates will
         # reuse it. Keep the one-candidate/common path local; this avoids adding
         # a large frame-wide allocation to normal scans while bounding the
-        # repeated per-candidate work on a noisy post-transition frame.
-        reuse_palette_heatmap = len(blobs) >= 2
+        # repeated per-candidate work on a noisy post-transition frame. Static
+        # GRF mode deliberately keeps this None: each local silhouette window
+        # is much smaller than the 1024x1024 frame and uses the one exact sprite
+        # palette directly.
+        reuse_palette_heatmap = len(blobs) >= 2 and not static_sprite_fast_path
         palette_heatmap_started = time.perf_counter()
         palette_heatmap_full = (
             sprite_palette_heatmap(
@@ -496,8 +506,11 @@ class MobDetector:
                     ))
                     continue
 
-            if not self._passes_color_structure_gate(
-                frame_bgr, descriptor, comp_bbox,
+            if (
+                not static_sprite_fast_path
+                and not self._passes_color_structure_gate(
+                    frame_bgr, descriptor, comp_bbox,
+                )
             ):
                 silhouette_checks.append(SilhouetteCheck(
                     center_x=cx,
@@ -532,8 +545,11 @@ class MobDetector:
             if gate_elapsed > max_gate_elapsed_s:
                 max_gate_elapsed_s = gate_elapsed
                 max_gate_bbox = comp_bbox
-            # All passed blobs must confirm body mass on the final extract crop.
-            if passed:
+            # The generic extract body confirmation is useful for animated
+            # sprites and gray-world impostors. In static GRF mode the local
+            # palette-backed one-reference silhouette gate is the confirmation;
+            # repeating a second full palette-group analysis only adds latency.
+            if passed and not static_sprite_fast_path:
                 if not self._passes_extract_body_gate(
                     frame_bgr, descriptor, extract_bbox,
                 ):
@@ -1015,9 +1031,16 @@ class MobDetector:
         if not masks:
             descriptor._static_descriptor = False
             return False
-        first = tuple(round(float(v), 3) for v in masks[0].avg_mask)
+        first = masks[0]
+        first_shape = (first.width, first.height)
+        first_avg = tuple(round(float(v), 3) for v in first.avg_mask)
+        first_stable = tuple(bool(v) for v in first.stable_mask)
         for mask in masks[1:]:
-            if tuple(round(float(v), 3) for v in mask.avg_mask) != first:
+            if (
+                (mask.width, mask.height) != first_shape
+                or tuple(round(float(v), 3) for v in mask.avg_mask) != first_avg
+                or tuple(bool(v) for v in mask.stable_mask) != first_stable
+            ):
                 descriptor._static_descriptor = False
                 return False
         descriptor._static_descriptor = True
