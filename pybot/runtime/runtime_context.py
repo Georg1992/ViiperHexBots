@@ -343,6 +343,14 @@ class HuntRuntimeContext:
         the bot heal at critically low HP. Session gates (sit/storage/heal/
         pause/stop) and an in-flight teleport still block the cast.
         """
+        try:
+            heal_settings = getattr(self.config, "custom_behavior", None)
+            heal_scan = int(getattr(heal_settings, "heal_scan_code", 0) or 0)
+            heal_button = str(getattr(heal_settings, "heal_button", "") or "").strip()
+        except (AttributeError, TypeError, ValueError):
+            heal_scan = 0
+        if heal_scan <= 0 or not heal_button:
+            return False
         if self.in_post_teleport_heal_window():
             return not (
                 self.is_stopped()
@@ -507,15 +515,10 @@ class HuntRuntimeContext:
             # producer signal before discovery confirms the new screen.
             self.attack_wake.clear()
             self.tracking_wake.clear()
-            # Local tracker patches are screen-local. Retaining them after a
-            # teleport makes every new track ID live beside old image patches
-            # and gradually increases work/memory across long sessions.
-            clear_templates = getattr(self.tracker, "clear_track_templates", None)
-            # ``MagicMock`` fabricates every missing attribute, so a partial
-            # test double would appear to support this hook and record a
-            # meaningless call. Only invoke a concrete implementation; the
-            # production tracker is a DetectorSession.
-            if callable(clear_templates) and isinstance(self.tracker, DetectorSession):
-                clear_templates()
+            # Local visual anchors and LK points are screen-local. Clear them
+            # at the same epoch boundary as the Track store.
+            clear_states = getattr(self.tracker, "clear_track_states", None)
+            if callable(clear_states) and isinstance(self.tracker, DetectorSession):
+                clear_states()
             self.policy.reset()
             self.validation.log_area_reset(reason)

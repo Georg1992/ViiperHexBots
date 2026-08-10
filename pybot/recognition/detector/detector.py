@@ -7,7 +7,6 @@ No RegionScorer, no structural pixels, no center refinement, no scales.
 
 from __future__ import annotations
 
-import threading
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -62,7 +61,6 @@ REQUIRED_CONFIG_KEYS = {
     "localTrackMaxSearchRadiusPx",
     "discoveryClusterRadiusPx",
     "trackDedupRadiusPx",
-    "localTrackingWorkerCount",
     "debugOutputDir",
     # track-removal keys (movement + discovery blob stationary + opacity death)
     "movementMoveThresholdPx",
@@ -283,11 +281,8 @@ class MobDetector:
         # recognition tools and tests outside the hunt runtime.
         self.heatmap_detector = HeatmapDetector(self.config)
         self._descriptor_cache: dict[str, MobDescriptor] = {}
-        # Local tracking jobs may run concurrently in one session. The cache
-        # lock protects only template dictionary mutation/eviction; it is never
-        # held while OpenCV performs a search.
-        self._local_track_templates: dict = {}
-        self._local_track_templates_lock = threading.RLock()
+        # Local tracking state is kept by the single tracking session and
+        # contains one stable anchor plus LK points per active Track.
         self._silhouette_ref_cache: dict[
             tuple[int, ...], list[tuple[np.ndarray, np.ndarray]]
         ] = {}

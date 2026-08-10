@@ -155,7 +155,7 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         self.assertTrue(self.tracks.has_pending_discovery_candidates())
         hunt_mode.note_discovery_scan_completed.assert_called_once()
 
-    def test_created_track_wakes_attack_after_template_commit(self) -> None:
+    def test_created_track_wakes_attack_after_state_commit(self) -> None:
         """Tracking signals attack only after the live track is fully committed."""
         from pybot.recognition.rules import DiscoveryDetection
 
@@ -176,7 +176,7 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
                 confidence=0.9,
             )],
         )
-        self.ctx.tracker.transfer_track_template.return_value = True
+        self.ctx.tracker.transfer_track_state.return_value = True
 
         self.worker._tick()
 
@@ -184,7 +184,7 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         created = self.tracks.snapshot_alive(2)
         self.assertEqual(len(created), 1)
         self.assertEqual((created[0].x, created[0].y), (101, 102))
-        self.ctx.tracker.transfer_track_template.assert_called_once()
+        self.ctx.tracker.transfer_track_state.assert_called_once()
 
     def test_nearby_distinct_candidates_each_create_a_track(self) -> None:
         """Candidate dedup keeps the discovery cluster boundary.
@@ -211,7 +211,7 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
             mob_name="horn",
             now_tick=1,
         )
-        self.ctx.tracker.transfer_track_template.return_value = True
+        self.ctx.tracker.transfer_track_state.return_value = True
 
         def acquire(_frame, _roi, snapshots, *, on_result=None):
             results = []
@@ -253,7 +253,7 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
             mob_name="horn",
             now_tick=1,
         )
-        self.ctx.tracker.transfer_track_template.return_value = True
+        self.ctx.tracker.transfer_track_state.return_value = True
         calls: list[int] = []
 
         def follow(_frame, _roi, snapshots, *, on_result=None):

@@ -222,6 +222,7 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
 
     def test_casts_debuff_once_per_target_and_retries_failed_cast(self) -> None:
         settings = SimpleNamespace(
+            debuff_button="r",
             debuff_scan_code=19,
             heal_scan_code=0,
             kiting_tick_ms=0,
@@ -256,7 +257,7 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
         marked.assert_called_once()
 
     def test_skips_debuff_for_already_prepared_target(self) -> None:
-        settings = SimpleNamespace(debuff_scan_code=19)
+        settings = SimpleNamespace(debuff_button="r", debuff_scan_code=19)
         behavior = ConfiguredMobBehavior(settings)
         backend = MagicMock()
         marker = MagicMock()

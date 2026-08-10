@@ -43,6 +43,10 @@ class TeleportKeySelectionTests(unittest.TestCase):
         self.assertEqual(self.tport.danger_scan_code(), 17)
         self.assertEqual(self.tport.danger_button(), "w")
 
+    def test_active_button_ignores_whitespace_only_creamy_binding(self) -> None:
+        self.ctx.config.creamy_tp_button = "   "
+        self.assertEqual(self.tport.active_button(), "q")
+
     def test_danger_teleport_resets_hunt_mode_discovery_state(self) -> None:
         self.ctx.config.teleport_scan_code = 16
         self.ctx.config.teleport_button = "q"
@@ -94,6 +98,12 @@ class TeleportKeySelectionTests(unittest.TestCase):
         self.assertTrue(self.tport.teleport_once())
         self.input.teleport_key.assert_called_once_with(17)
         self.ctx.note_teleport_for_wings.assert_not_called()
+
+    def test_explicit_teleport_code_is_rejected_when_binding_was_cleared(self) -> None:
+        self.ctx.config.creamy_tp_button = ""
+        self.ctx.config.creamy_tp_scan_code = 17
+        self.assertFalse(self.tport.teleport_once(scan_code=17))
+        self.input.teleport_key.assert_not_called()
 
     def test_successful_teleport_invalidates_stale_vitals_and_reopens_reader(self) -> None:
         vitals = PlayerVitals()

@@ -50,6 +50,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.config = MagicMock()
         self.config.hwnd = 1
         self.config.sit_on_low_sp_button = "insert"
+        self.config.sit_on_low_sp = True
         self.config.sit_on_low_sp_scan_code = 82
         self.config.teleport_button = "q"
         self.config.teleport_scan_code = 16
@@ -84,6 +85,42 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             self.ctx, self.input, self.teleport,
             danger=self.danger, vitals=vitals or _ScriptedVitals([]),
         )
+
+    def test_disabled_sit_does_not_read_sp_or_claim_gate(self) -> None:
+        self.config.sit_on_low_sp = False
+        vitals = MagicMock()
+        vitals.sp_pair.return_value = (1, 100)
+        worker = self._worker(vitals)
+
+        self.assertFalse(worker.process_pending())
+        vitals.sp_pair.assert_not_called()
+        self.assertFalse(self.ctx.sitting_event.is_set())
+        self.input.toggle_key.assert_not_called()
+
+    def test_unassigned_sit_does_not_read_sp_or_claim_gate(self) -> None:
+        self.config.sit_on_low_sp = True
+        self.config.sit_on_low_sp_scan_code = 0
+        vitals = MagicMock()
+        vitals.sp_pair.return_value = (1, 100)
+        worker = self._worker(vitals)
+
+        self.assertFalse(worker.process_pending())
+        vitals.sp_pair.assert_not_called()
+        self.assertFalse(self.ctx.sitting_event.is_set())
+        self.input.toggle_key.assert_not_called()
+
+    def test_cleared_sit_button_does_not_read_sp_or_claim_gate(self) -> None:
+        self.config.sit_on_low_sp = True
+        self.config.sit_on_low_sp_button = ""
+        self.config.sit_on_low_sp_scan_code = 82
+        vitals = MagicMock()
+        vitals.sp_pair.return_value = (1, 100)
+        worker = self._worker(vitals)
+
+        self.assertFalse(worker.process_pending())
+        vitals.sp_pair.assert_not_called()
+        self.assertFalse(self.ctx.sitting_event.is_set())
+        self.input.toggle_key.assert_not_called()
 
     def test_thresholds(self) -> None:
         self.assertAlmostEqual(SIT_LOW_SP_RATIO, 0.05)

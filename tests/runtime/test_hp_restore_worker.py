@@ -48,6 +48,14 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self._worker().run()
         self.input.key_tap.assert_not_called()
 
+    def test_skips_when_hp_button_is_cleared_but_scan_code_is_stale(self) -> None:
+        self.config.hp_button = ""
+        self.config.hp_scan_code = 59
+        self.vitals.publish_hp(1, 100)
+
+        self.assertFalse(self._worker().process_pending())
+        self.input.key_tap.assert_not_called()
+
     def test_presses_hp_item_key_when_below_fifty_percent_after_teleport(self) -> None:
         self.vitals.publish_hp(49, 100)
         self.ctx.mark_post_teleport_heal(10.0)

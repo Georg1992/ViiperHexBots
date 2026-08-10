@@ -198,9 +198,12 @@ def _validate_teleport_mode(config, tport: TeleportController) -> None:
 
 def _validate_sp_memory(config) -> None:
     """Fail early if sit-on-low-sp is on but SP memory addresses are missing."""
-    if not config.sit_on_low_sp:
+    if not bool(config.sit_on_low_sp):
         return
-    if config.sit_on_low_sp_scan_code <= 0:
+    sit_button = str(config.sit_on_low_sp_button or "").strip()
+    if not sit_button:
+        return
+    if int(config.sit_on_low_sp_scan_code) <= 0:
         raise ValueError(
             "Sit On Low Sp is On but the sit key is invalid "
             f"(button={config.sit_on_low_sp_button!r})."
@@ -279,14 +282,14 @@ def _build_conditional_workers(
     """Build gameplay actions; they are advanced by ``GameplayLoop``."""
     actions: dict[str, object] = {}
 
-    if any(t.scan_code and t.interval_ms > 0 for t in ctx.config.skill_timers):
+    if any(t.scan_code and t.button.strip() and t.interval_ms > 0 for t in ctx.config.skill_timers):
         actions["timers"] = SkillTimerWorker(ctx, input_backend)
     has_buffs = any(
-        buff.scan_code > 0 and buff.delay_ms > 0
+        buff.scan_code > 0 and buff.button.strip() and buff.delay_ms > 0
         for buff in ctx.config.custom_behavior.buffs
     )
     has_timers = any(
-        t.scan_code and t.interval_ms > 0
+        t.scan_code and t.button.strip() and t.interval_ms > 0
         for t in ctx.config.skill_timers
     )
     if has_buffs:
@@ -299,10 +302,17 @@ def _build_conditional_workers(
         # SelfBuffWorker also marks this after its final buff when present.
         if not has_buffs:
             ctx.mark_startup_timers_done()
-    if ctx.config.hp_scan_code > 0:
+    if (
+        ctx.config.hp_scan_code > 0
+        and str(ctx.config.hp_button or "").strip()
+    ):
         actions["hp_restore"] = HpRestoreWorker(ctx, input_backend, player_vitals)
 
-    if ctx.config.sit_on_low_sp:
+    if (
+        bool(ctx.config.sit_on_low_sp)
+        and bool(str(ctx.config.sit_on_low_sp_button or "").strip())
+        and int(ctx.config.sit_on_low_sp_scan_code) > 0
+    ):
         if danger is None:
             raise RuntimeError("Sit-on-low-SP requires a shared DangerDetector")
         sit_worker = SitOnLowSpWorker(
@@ -351,11 +361,11 @@ def create_runtime_deps(
             config, logger, detector, tracker, overlay, player_vitals,
         )
         has_buffs = any(
-            buff.scan_code > 0 and buff.delay_ms > 0
+            buff.scan_code > 0 and buff.button.strip() and buff.delay_ms > 0
             for buff in config.custom_behavior.buffs
         )
         has_timers = any(
-            timer.scan_code and timer.interval_ms > 0
+            timer.scan_code and timer.button.strip() and timer.interval_ms > 0
             for timer in config.skill_timers
         )
         # Every runtime start is a fresh hunt cycle. Only configured workers need

@@ -15,9 +15,10 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx = MagicMock()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
+            skill_button="e",
             skill_delay_ms=1,
             use_sprite_grf=False,
-            custom_behavior=SimpleNamespace(heal_scan_code=16),
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
         )
         events: list[str] = []
         ctx.stop_event = MagicMock()
@@ -70,13 +71,46 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         self.assertEqual(events, ["debuff", "marked", "before", "attack", "kite"])
         ctx.tracks.mark_debuff_applied.assert_called_once_with(1)
 
+    def test_unassigned_attack_key_does_not_prepare_or_attack(self) -> None:
+        ctx = MagicMock()
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_button="",
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
+        )
+        ctx.tracks.snapshot_for_track.return_value = SimpleNamespace(x=10, y=20)
+        input_backend = MagicMock()
+        loop = AttackLoop(ctx, MagicMock(), input_backend)
+
+        loop._attack_one(1, 1)
+
+        ctx.tracks.snapshot_for_track.assert_not_called()
+        input_backend.skill_click_at.assert_not_called()
+
+    def test_unassigned_custom_heal_does_not_hold_post_teleport_combat_gate(self) -> None:
+        ctx = MagicMock()
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_button="e",
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button=""),
+        )
+        ctx.in_post_teleport_heal_window.return_value = True
+        vitals = PlayerVitals()
+        vitals.publish_hp(40, 100)
+        loop = AttackLoop(ctx, MagicMock(), MagicMock(), vitals=vitals)
+
+        self.assertFalse(loop._post_teleport_hp_requires_heal())
+        self.assertFalse(loop._post_teleport_recovery_step())
+        ctx.try_heal_if_allowed.assert_not_called()
+
     def test_post_teleport_non_full_hp_has_heal_priority_over_combat(self) -> None:
         """Any missing HP after teleport gets the tick before combat."""
         ctx = MagicMock()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
+            skill_button="e",
             skill_delay_ms=1,
-            custom_behavior=SimpleNamespace(heal_scan_code=16),
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
         )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
@@ -117,8 +151,9 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx = MagicMock()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
+            skill_button="e",
             skill_delay_ms=1,
-            custom_behavior=SimpleNamespace(heal_scan_code=16),
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
         )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
@@ -148,8 +183,9 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx = MagicMock()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
+            skill_button="e",
             skill_delay_ms=1,
-            custom_behavior=SimpleNamespace(heal_scan_code=16),
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
         )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
@@ -180,8 +216,9 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx = MagicMock()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
+            skill_button="e",
             skill_delay_ms=1,
-            custom_behavior=SimpleNamespace(heal_scan_code=16),
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
         )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
@@ -225,8 +262,9 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx = MagicMock()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
+            skill_button="e",
             skill_delay_ms=1,
-            custom_behavior=SimpleNamespace(heal_scan_code=16),
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
         )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
@@ -268,8 +306,9 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx = MagicMock()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
+            skill_button="e",
             skill_delay_ms=1,
-            custom_behavior=SimpleNamespace(heal_scan_code=16),
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
         )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
@@ -328,8 +367,9 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx = MagicMock()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
+            skill_button="e",
             skill_delay_ms=1,
-            custom_behavior=SimpleNamespace(heal_scan_code=16),
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
         )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
@@ -368,8 +408,9 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx = MagicMock()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
+            skill_button="e",
             skill_delay_ms=1,
-            custom_behavior=SimpleNamespace(heal_scan_code=16),
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
         )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
@@ -405,8 +446,9 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx = MagicMock()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
+            skill_button="e",
             skill_delay_ms=1,
-            custom_behavior=SimpleNamespace(heal_scan_code=16),
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
         )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
@@ -437,10 +479,11 @@ class AttackLoopSitRaceTests(unittest.TestCase):
             self.assertFalse(loop.process_pending())
         teleport.retry_post_teleport_heal.assert_not_called()
 
-    def test_post_teleport_without_skill_keeps_recovery_gate(self) -> None:
+    def test_post_teleport_without_skill_does_not_block_combat(self) -> None:
         ctx = MagicMock()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
+            skill_button="e",
             skill_delay_ms=1,
             custom_behavior=SimpleNamespace(heal_scan_code=0),
         )
@@ -455,17 +498,20 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         vitals.publish_hp(40, 100)
         loop = AttackLoop(ctx, MagicMock(), MagicMock(), vitals=vitals)
 
-        self.assertFalse(loop.process_pending())
+        self.assertFalse(loop._post_teleport_hp_requires_heal())
         ctx.clear_post_teleport_heal.assert_not_called()
-        ctx.policy.select_target.assert_not_called()
+        # With no configured heal there is no recovery gate to hold combat;
+        # this focused assertion verifies the disabled path itself.
+        ctx.try_heal_if_allowed.assert_not_called()
 
     def test_post_teleport_non_full_hp_without_heal_vetoes_combat(self) -> None:
         """Post-teleport HP must be full before combat, even if heal is blocked."""
         ctx = MagicMock()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
+            skill_button="e",
             skill_delay_ms=1,
-            custom_behavior=SimpleNamespace(heal_scan_code=16),
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
         )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
@@ -499,8 +545,9 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx = MagicMock()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
+            skill_button="e",
             skill_delay_ms=1,
-            custom_behavior=SimpleNamespace(heal_scan_code=16),
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
         )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
@@ -534,8 +581,9 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx = MagicMock()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
+            skill_button="e",
             skill_delay_ms=1,
-            custom_behavior=SimpleNamespace(heal_scan_code=16),
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
         )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
@@ -567,8 +615,9 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx = MagicMock()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
+            skill_button="e",
             skill_delay_ms=1,
-            custom_behavior=SimpleNamespace(heal_scan_code=16),
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
         )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
@@ -606,9 +655,10 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx = MagicMock()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
+            skill_button="e",
             skill_delay_ms=1,
             use_sprite_grf=True,
-            custom_behavior=SimpleNamespace(heal_scan_code=16),
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
         )
         ctx.logger = MagicMock()
         ctx.should_run_combat.return_value = True
@@ -646,8 +696,9 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx = MagicMock()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
+            skill_button="e",
             skill_delay_ms=50,
-            custom_behavior=SimpleNamespace(heal_scan_code=16),
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
         )
         events: list[str] = []
         ctx.stop_event = MagicMock()

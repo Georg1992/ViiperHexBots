@@ -47,7 +47,7 @@ class SkillTimerWorker:
         ctx = self._ctx
         timers = [
             timer for timer in ctx.config.skill_timers
-            if timer.scan_code == scan_code and timer.interval_ms > 0
+            if timer.scan_code == scan_code and timer.button.strip() and timer.interval_ms > 0
         ]
         if not timers or ctx.is_stopped() or not ctx.should_run_timers():
             return False
@@ -62,7 +62,7 @@ class SkillTimerWorker:
         if not self._armed:
             self._arm_timers([
                 timer for timer in ctx.config.skill_timers
-                if timer.scan_code and timer.interval_ms > 0
+                if timer.scan_code and timer.button.strip() and timer.interval_ms > 0
             ])
             self._armed = True
         timer = timers[0]
@@ -85,7 +85,7 @@ class SkillTimerWorker:
         )
         startup_scans = {
             item.scan_code for item in ctx.config.skill_timers
-            if item.scan_code and item.interval_ms > 0
+            if item.scan_code and item.button.strip() and item.interval_ms > 0
         }
         if startup_scans.issubset(self._startup_pressed):
             mark = getattr(ctx, "mark_startup_timers_done", None)
@@ -101,7 +101,7 @@ class SkillTimerWorker:
         the deferred scheduler instead of being silently consumed here.
         """
         ctx = self._ctx
-        timers = [t for t in ctx.config.skill_timers if t.scan_code and t.interval_ms > 0]
+        timers = [t for t in ctx.config.skill_timers if t.scan_code and t.button.strip() and t.interval_ms > 0]
         if not timers or ctx.is_stopped() or not ctx.should_run_timers():
             return False
         if self._critical_pending():
@@ -170,7 +170,7 @@ class SkillTimerWorker:
         timers = [
             t
             for t in ctx.config.skill_timers
-            if t.scan_code and t.interval_ms > 0
+            if t.scan_code and t.button.strip() and t.interval_ms > 0
         ]
         if not timers:
             return

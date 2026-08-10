@@ -280,6 +280,15 @@ class SitOnLowSpWorker:
         control thread. Observation workers only publish vitals/danger state.
         """
         ctx = self._ctx
+        # The worker can be called directly by lightweight integrations even
+        # when runtime composition would normally omit it. A disabled feature
+        # must not inspect SP, claim the sit gate, or enter recovery.
+        if (
+            not bool(getattr(ctx.config, "sit_on_low_sp", False))
+            or not str(getattr(ctx.config, "sit_on_low_sp_button", "") or "").strip()
+            or int(getattr(ctx.config, "sit_on_low_sp_scan_code", 0) or 0) <= 0
+        ):
+            return False
         if ctx.is_stopped() or not ctx.should_run_workers():
             return False
         if ctx.danger_escape_active.is_set():
@@ -301,6 +310,12 @@ class SitOnLowSpWorker:
         parks on the lifecycle gates and paces the poll.
         """
         ctx = self._ctx
+        if (
+            not bool(getattr(ctx.config, "sit_on_low_sp", False))
+            or not str(getattr(ctx.config, "sit_on_low_sp_button", "") or "").strip()
+            or int(getattr(ctx.config, "sit_on_low_sp_scan_code", 0) or 0) <= 0
+        ):
+            return
         ctx.logger.behavior(
             f"[SIT] worker started key={ctx.config.sit_on_low_sp_button} "
             f"scanCode={ctx.config.sit_on_low_sp_scan_code} "
@@ -331,6 +346,12 @@ class SitOnLowSpWorker:
     ) -> None:
         """Break hunt, move safe, sit/recover, then start a fresh hunt."""
         ctx = self._ctx
+        if (
+            not bool(getattr(ctx.config, "sit_on_low_sp", False))
+            or not str(getattr(ctx.config, "sit_on_low_sp_button", "") or "").strip()
+            or int(getattr(ctx.config, "sit_on_low_sp_scan_code", 0) or 0) <= 0
+        ):
+            return
         sit_scan = ctx.config.sit_on_low_sp_scan_code
         if reason == "danger":
             # Do not consume the request until the session is ours. If another

@@ -86,7 +86,7 @@ def create_tracks_from_candidates(tracks, detector, frame, roi, candidates, now_
             now_tick=now_tick,
         )
         if track is not None:
-            detector.transfer_track_template(result.track_id, track.id)
+            detector.transfer_track_state(result.track_id, track.id)
 
 
 class TrackingIntegrationTests(unittest.TestCase):

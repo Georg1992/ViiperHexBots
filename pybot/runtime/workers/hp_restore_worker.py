@@ -24,7 +24,7 @@ class HpRestoreWorker:
     def run(self) -> None:
         ctx = self._ctx
         scan = int(ctx.config.hp_scan_code)
-        if scan <= 0:
+        if scan <= 0 or not str(getattr(ctx.config, "hp_button", "") or "").strip():
             return
         ctx.logger.behavior(
             f"[HP] item worker started key={ctx.config.hp_button!r} scanCode={scan} "
@@ -47,7 +47,12 @@ class HpRestoreWorker:
         ctx = self._ctx
         scan = int(ctx.config.hp_scan_code)
         ratio = self._hp_ratio()
-        if scan <= 0 or ratio is None or ratio >= HP_RESTORE_RATIO:
+        if (
+            scan <= 0
+            or not str(getattr(ctx.config, "hp_button", "") or "").strip()
+            or ratio is None
+            or ratio >= HP_RESTORE_RATIO
+        ):
             return False
         ctx.logger.behavior(
             f"[HP] item key={ctx.config.hp_button!r} ratio={ratio:.1%}"

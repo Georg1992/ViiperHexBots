@@ -92,6 +92,14 @@ class AttackLoop:
                     self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
                     return False
 
+            try:
+                attack_scan = int(self._ctx.config.skill_scan_code)
+            except (AttributeError, TypeError, ValueError):
+                attack_scan = 0
+            raw_attack_button = getattr(self._ctx.config, "skill_button", None)
+            if attack_scan <= 0 or not str(raw_attack_button or "").strip():
+                return False
+
             if not self._ctx.should_run_combat():
                 self._ctx.wait_while_combat_blocked(WORKER_POLL_INTERVAL_S)
                 return False
@@ -198,6 +206,18 @@ class AttackLoop:
 
     def _post_teleport_hp_requires_heal(self) -> bool:
         """Return whether post-teleport combat must wait for a full HP bar."""
+        try:
+            heal_scan = int(self._ctx.config.custom_behavior.heal_scan_code)
+        except (AttributeError, TypeError, ValueError):
+            heal_scan = 0
+        raw_heal_button = getattr(
+            self._ctx.config.custom_behavior, "heal_button", None
+        )
+        heal_button = str(raw_heal_button or "").strip()
+        # No configured custom heal means this recovery path is disabled. Do
+        # not hold combat behind a full-HP gate that cannot perform an action.
+        if heal_scan <= 0 or not heal_button:
+            return False
         in_window = getattr(self._ctx, "in_post_teleport_heal_window", None)
         if not callable(in_window) or not bool(in_window()):
             return False
@@ -307,7 +327,11 @@ class AttackLoop:
             scan_code = int(self._ctx.config.custom_behavior.heal_scan_code)
         except (AttributeError, TypeError, ValueError):
             scan_code = 0
-        if scan_code <= 0:
+        raw_heal_button = getattr(
+            self._ctx.config.custom_behavior, "heal_button", None
+        )
+        heal_button = str(raw_heal_button or "").strip()
+        if scan_code <= 0 or not heal_button:
             return "unavailable"
 
         hp, hp_max, _observed_ms, hp_changed_ms = self._vitals.hp_sample()
@@ -467,6 +491,16 @@ class AttackLoop:
         expected_epoch: int | None = None,
     ) -> None:
         ctx = self._ctx
+        try:
+            attack_scan = int(ctx.config.skill_scan_code)
+        except (AttributeError, TypeError, ValueError):
+            attack_scan = 0
+        raw_attack_button = getattr(ctx.config, "skill_button", None)
+        attack_button = str(raw_attack_button or "").strip()
+        # An empty attack binding disables combat input. Do not even snapshot
+        # or prepare a target when the configured attack action cannot run.
+        if attack_scan <= 0 or not attack_button:
+            return
 
         # Snapshot coords under the store lock.
         snap = ctx.tracks.snapshot_for_track(target_id, now_tick)
@@ -553,7 +587,7 @@ class AttackLoop:
                 if fresh is None:
                     return False
                 return self._input.skill_click_at(
-                    ctx.config.skill_scan_code,
+                    attack_scan,
                     fresh.x,
                     fresh.y,
                 )
@@ -731,7 +765,7 @@ class GameplayLoop:
             )
         if self._buffs is not None:
             for buff in getattr(self._ctx.config.custom_behavior, "buffs", ()):
-                if buff.scan_code > 0 and buff.delay_ms > 0:
+                if buff.scan_code > 0 and buff.button.strip() and buff.delay_ms > 0:
                     self._scheduler.register(
                         f"buff:{buff.scan_code}",
                         interval_ms=buff.delay_ms,
@@ -741,7 +775,7 @@ class GameplayLoop:
                     )
         if self._timers is not None:
             for timer in getattr(self._ctx.config, "skill_timers", ()):
-                if timer.scan_code and timer.interval_ms > 0:
+                if timer.scan_code and timer.button.strip() and timer.interval_ms > 0:
                     self._scheduler.register(
                         f"timer:{timer.scan_code}",
                         interval_ms=timer.interval_ms,
@@ -785,7 +819,7 @@ class GameplayLoop:
         found = False
         if self._buffs is not None:
             for buff in getattr(self._ctx.config.custom_behavior, "buffs", ()):
-                if buff.scan_code > 0 and buff.delay_ms > 0:
+                if buff.scan_code > 0 and buff.button.strip() and buff.delay_ms > 0:
                     at = self._buffs.last_success_ms(buff.scan_code)
                     if at is not None:
                         action = self._scheduler.get(f"buff:{buff.scan_code}")
@@ -794,7 +828,7 @@ class GameplayLoop:
                         found = True
         if self._timers is not None:
             for timer in getattr(self._ctx.config, "skill_timers", ()):
-                if timer.scan_code and timer.interval_ms > 0:
+                if timer.scan_code and timer.button.strip() and timer.interval_ms > 0:
                     at = self._timers.last_success_ms(timer.scan_code)
                     if at is not None:
                         self._scheduler.seed_executed(f"timer:{timer.scan_code}", at_ms=at)

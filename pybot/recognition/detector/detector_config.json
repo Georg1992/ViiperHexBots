@@ -29,7 +29,6 @@
   "centerScales": [0.35, 0.45, 0.65, 0.85, 0.95, 1.1],
   "discoveryClusterRadiusPx": 48,
   "trackDedupRadiusPx": 90,
-  "localTrackingWorkerCount": 4,
   "trackDedupMovingRadiusPx": 260,
   "debugOutputDir": "pybot/recognition/debug/detector",
   "movementMoveThresholdPx": 12,

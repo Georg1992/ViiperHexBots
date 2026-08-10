@@ -4,15 +4,42 @@ from __future__ import annotations
 
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 
 _REAL_THREAD = threading.Thread
 
-from pybot.runtime.hunt_runtime import HuntRuntime, RuntimeDependencies
+from pybot.runtime.hunt_runtime import (
+    HuntRuntime,
+    RuntimeDependencies,
+    _validate_sp_memory,
+)
 
 
 class HuntRuntimeStartupCleanupTests(unittest.TestCase):
+    def test_unassigned_sit_skips_sp_memory_validation(self) -> None:
+        config = SimpleNamespace(
+            sit_on_low_sp=True,
+            sit_on_low_sp_button="",
+            sit_on_low_sp_scan_code=82,
+        )
+
+        with patch("pybot.runtime.hunt_runtime.load_client_profile") as load_profile:
+            _validate_sp_memory(config)
+
+        load_profile.assert_not_called()
+
+    def test_nonblank_invalid_sit_binding_still_fails_fast(self) -> None:
+        config = SimpleNamespace(
+            sit_on_low_sp=True,
+            sit_on_low_sp_button="unsupported-key",
+            sit_on_low_sp_scan_code=0,
+        )
+
+        with self.assertRaisesRegex(ValueError, "sit key is invalid"):
+            _validate_sp_memory(config)
+
     def test_partial_worker_start_cleans_started_workers_and_resources(self) -> None:
         stop_event = threading.Event()
         discovery_wake = threading.Event()

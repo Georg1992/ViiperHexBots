@@ -16,8 +16,7 @@ Ownership:
   Sustained opacity drop while stationary removes the track (in-place
   death fade).  Discovery matches also update ``discovery_stationary``
   from consecutive discovery blob centers (coordinates unchanged within
-  the stop threshold).  On miss it keeps the last known position and
-  wakes discovery for confirmation.
+  the stop threshold).  On miss it keeps the last known position while Tracking enters local recovery.
 - **Attack** supplies skill clicks and idle SP samples (``was_idle``).
   Confirmed idle-dead / unreachable decisions live in
   ``HuntTracks.evaluate_idle_attack`` (death uses discovery blob stationary,
@@ -106,10 +105,6 @@ class MobTrack:
     # tracking hit resets the counter, so removal effectively requires that
     # BOTH discovery misses the mob AND local tracking failed to confirm it.
     discovery_miss_count: int = 0
-    # Discovery may propose a one-shot recovery search anchor only after local
-    # tracking has reported a miss. Tracking consumes the hint; Discovery never
-    # writes authoritative x/y directly.
-    pending_reanchor: tuple[int, int] | None = None
     # True after the configured per-mob debuff was successfully cast once.
     debuff_applied: bool = False
 
@@ -229,29 +224,17 @@ def apply_discovery_match(
     now_tick: int,
     detection: DiscoveryDetection,
     config: dict,
-    tracking_lost: bool = False,
 ) -> None:
     """Record that discovery saw this track in its latest scan.
 
     Resets the discovery-miss streak so the track is not removed by the
     miss-count absence rule. Does NOT write track position — tracking owns that.
 
-    If local tracking was lost at the capture-time snapshot, publish a
-    one-shot recovery search hint at Discovery's confirmed position. Normal
-    matches never reanchor, regardless of distance. The hint is consumed by
-    Tracking on its next fresh frame and is not an x/y write.
-
     Sets ``discovery_stationary`` when the discovery blob center did not
     move (within ``movementStopThresholdPx``) vs the previous match.
     """
     track.last_discovery_tick = now_tick
     track.discovery_miss_count = 0
-    if tracking_lost:
-        track.pending_reanchor = (int(detection.x), int(detection.y))
-    else:
-        # A successful/normal confirmation supersedes an unconsumed recovery
-        # hint; the next tracking pass should not search an old anchor.
-        track.pending_reanchor = None
     if detection.candidate_scale > 0:
         # Keep local-follow scale current as the mob's apparent size changes.
         track.discovery_scale = detection.candidate_scale
@@ -319,9 +302,6 @@ def apply_track_observation(
         # finding the mob. Once tracking also loses it (found=False), misses
         # count normally so gone/dead mobs are still removed.
         track.discovery_miss_count = 0
-        # A fresh hit is authoritative for tracking recovery. Do not leave a
-        # Discovery recovery request armed after the tracker has reacquired.
-        track.pending_reanchor = None
         if confidence > 0:
             track.confidence = confidence
         return

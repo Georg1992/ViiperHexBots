@@ -111,7 +111,7 @@ STORAGE_MENU_TIMEOUT_S = 2.0
 STORAGE_MENU_POLL_S = 0.1
 # After inventory/storage open, close, or tab switch — UI needs time to draw.
 STORAGE_UI_SETTLE_S = 0.1
-# After moving the cursor off UI before a template capture.
+# After moving the cursor off UI before a screen capture.
 STORAGE_CURSOR_CLEAR_S = 0.05
 __all__ = [
     "HUNT_DISCOVERY_INTERVAL_MS",

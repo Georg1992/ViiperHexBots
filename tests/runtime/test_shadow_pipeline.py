@@ -104,7 +104,7 @@ class ShadowPipelineTests(unittest.TestCase):
                     now_tick=now,
                 )
                 if track is not None:
-                    detector.transfer_track_template(r.track_id, track.id)
+                    detector.transfer_track_state(r.track_id, track.id)
 
         self.assertGreater(tracks.get_track_count(), 0)
         track = tracks.get_track_by_id(1)

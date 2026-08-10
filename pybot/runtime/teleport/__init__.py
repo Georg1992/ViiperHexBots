@@ -68,14 +68,37 @@ class TeleportController:
     def active_scan_code(self) -> int:
         """Creamy TP first, wing key next (mode / area-clear teleports)."""
         cfg = self._ctx.config
-        return cfg.creamy_tp_scan_code or cfg.teleport_scan_code
+        if cfg.creamy_tp_scan_code > 0 and (cfg.creamy_tp_button or "").strip():
+            return int(cfg.creamy_tp_scan_code)
+        if self._wing_key_assigned(cfg):
+            return int(cfg.teleport_scan_code)
+        return 0
 
     def active_button(self) -> str:
         """Creamy TP first, wing key next (mode / area-clear teleports)."""
         cfg = self._ctx.config
-        if cfg.creamy_tp_scan_code > 0 and cfg.creamy_tp_button:
+        if cfg.creamy_tp_scan_code > 0 and (cfg.creamy_tp_button or "").strip():
             return cfg.creamy_tp_button
         return cfg.teleport_button
+
+    def _scan_code_is_configured(self, scan_code: int) -> bool:
+        """Return whether a teleport scan code still has an assigned key.
+
+        Callers may pass an explicit code for a selected teleport path, but
+        that must not bypass the same assignment checks used by key selection.
+        This protects against stale runtime objects after a binding is cleared.
+        """
+        cfg = self._ctx.config
+        return (
+            (
+                int(cfg.teleport_scan_code) == scan_code
+                and bool((cfg.teleport_button or "").strip())
+            )
+            or (
+                int(cfg.creamy_tp_scan_code) == scan_code
+                and bool((cfg.creamy_tp_button or "").strip())
+            )
+        )
 
     @staticmethod
     def _wing_key_assigned(cfg) -> bool:
@@ -91,7 +114,9 @@ class TeleportController:
         cfg = self._ctx.config
         if self._wing_key_assigned(cfg):
             return int(cfg.teleport_scan_code)
-        return int(cfg.creamy_tp_scan_code)
+        if cfg.creamy_tp_scan_code > 0 and (cfg.creamy_tp_button or "").strip():
+            return int(cfg.creamy_tp_scan_code)
+        return 0
 
     def danger_button(self) -> str:
         """Wing (Teleport) key when assigned; otherwise Creamy TP."""
@@ -112,7 +137,7 @@ class TeleportController:
         """
         cfg = self._ctx.config
         tp = int(scan_code) if scan_code is not None else self.active_scan_code()
-        if tp <= 0:
+        if tp <= 0 or not self._scan_code_is_configured(tp):
             return False
         teleport_started = time.monotonic()
         try:

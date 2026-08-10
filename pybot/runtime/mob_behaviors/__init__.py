@@ -196,7 +196,11 @@ class ConfiguredMobBehavior(MobBehavior):
         mark_debuffed: Callable[[], bool],
     ) -> bool:
         del target_id
-        if getattr(self._settings, "debuff_scan_code", 0) <= 0 or target_debuffed:
+        if (
+            getattr(self._settings, "debuff_scan_code", 0) <= 0
+            or not str(getattr(self._settings, "debuff_button", "") or "").strip()
+            or target_debuffed
+        ):
             return True
         if not input_backend.skill_click_at(
             self._settings.debuff_scan_code,

@@ -40,7 +40,7 @@ class SelfBuffWorker:
         ctx = self._ctx
         buffs = tuple(
             buff for buff in ctx.config.custom_behavior.buffs
-            if buff.scan_code == buff_key and buff.delay_ms > 0
+            if buff.scan_code == buff_key and buff.button.strip() and buff.delay_ms > 0
         )
         if not buffs or ctx.is_stopped() or not ctx.should_run_character_actions():
             return False
@@ -62,7 +62,7 @@ class SelfBuffWorker:
         ctx = self._ctx
         buffs = tuple(
             buff for buff in ctx.config.custom_behavior.buffs
-            if buff.scan_code > 0 and buff.delay_ms > 0
+            if buff.scan_code > 0 and buff.button.strip() and buff.delay_ms > 0
         )
         if not buffs or ctx.is_stopped():
             return False
@@ -117,7 +117,7 @@ class SelfBuffWorker:
         buffs = tuple(
             buff
             for buff in ctx.config.custom_behavior.buffs
-            if buff.scan_code > 0 and buff.delay_ms > 0
+            if buff.scan_code > 0 and buff.button.strip() and buff.delay_ms > 0
         )
         if not buffs:
             return
@@ -151,7 +151,7 @@ class SelfBuffWorker:
 
     def _has_normal_timers(self) -> bool:
         return any(
-            timer.scan_code and timer.interval_ms > 0
+            timer.scan_code and timer.button.strip() and timer.interval_ms > 0
             for timer in getattr(self._ctx.config, "skill_timers", ())
         )
 
