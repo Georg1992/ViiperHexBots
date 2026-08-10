@@ -18,9 +18,24 @@ class CaptureRegionTests(unittest.TestCase):
     def tearDown(self) -> None:
         capture_mod.reset_capture_session()
 
+    def test_new_capture_session_disables_hardware_cursor(self) -> None:
+        """Cursor exclusion is set via the constructor, not attribute write.
+
+        mss 10.x exposes ``with_cursor`` as a read-only property; assigning it
+        after construction raises AttributeError. The runtime must request
+        cursor-off at session creation.
+        """
+        with patch(
+            "pybot.recognition.capture.mss.MSS",
+            return_value=MagicMock(),
+        ) as factory:
+            capture_mod._new_capture_session()
+        factory.assert_called_once_with(with_cursor=False)
+
     def test_returns_none_after_repeated_grab_failure(self) -> None:
         fake_sct = MagicMock()
         fake_sct.grab.side_effect = ScreenShotError("BitBlt", details={})
+        fake_sct.with_cursor = False
 
         with patch("pybot.recognition.capture.mss.MSS", return_value=fake_sct):
             capture_mod.reset_capture_session()
@@ -235,6 +250,7 @@ class UiCaptureChannelTests(unittest.TestCase):
         shot = np.zeros((4, 4, 4), dtype=np.uint8)
         fake_sct = MagicMock()
         fake_sct.grab.return_value = shot
+        fake_sct.with_cursor = False
         channel = self.channel
 
         with patch("pybot.recognition.capture.mss.MSS", return_value=fake_sct):
@@ -352,7 +368,7 @@ class UiCaptureChannelTests(unittest.TestCase):
         shot = np.zeros((4, 4, 4), dtype=np.uint8)
         mss_calls = {"count": 0}
 
-        def wedged_factory():
+        def wedged_factory(**_kwargs):
             mss_calls["count"] += 1
             if mss_calls["count"] == 1:
                 release.wait(timeout=5.0)

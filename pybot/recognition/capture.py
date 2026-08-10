@@ -33,13 +33,13 @@ _grab_state_lock = threading.Lock()
 def _new_capture_session() -> mss.mss:
     """Create a capture session with the hardware cursor excluded.
 
-    Tracking and discovery must see game pixels only.  ``mss`` defaults to
-    cursor-off on Windows, but set it explicitly so a future library/default
-    change cannot paint the OS cursor into a mob sprite and disturb matching.
+    Tracking and discovery must see game pixels only.  ``with_cursor`` is a
+    read-only property on mss 10.x, so it must be passed to the constructor;
+    the library already defaults to cursor-off on Windows, but passing it
+    explicitly keeps a future library/default change from painting the OS
+    cursor into a mob sprite and disturbing matching.
     """
-    sct = mss.MSS()
-    sct.with_cursor = False
-    return sct
+    return mss.MSS(with_cursor=False)
 
 
 class _GrabRequest:
