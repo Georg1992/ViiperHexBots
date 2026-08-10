@@ -280,9 +280,10 @@ def apply_track_observation(
 ) -> None:
     """Tracking owns position + liveness. Fresh coords on hit; hold on miss.
 
-    Misses do **not** coast along velocity — local follow searches a fixed
-    wide disk around the last known hit. Coasting drifted that anchor when
-    velocity was wrong.
+    Misses do **not** coast along velocity — local follow searches around a
+    bounded one-frame prediction but the published coordinate remains the last
+    confirmed hit. Coordinate freshness therefore remains tied to the last
+    successful observation, not to a miss attempt.
     """
     if found:
         dx = float(x - track.x)
@@ -309,7 +310,9 @@ def apply_track_observation(
     track.vel_x *= VEL_COAST_DECAY_STATIONARY
     track.vel_y *= VEL_COAST_DECAY_STATIONARY
     track.lost_count += 1
-    track.updated_tick = now_tick
+    # x/y were not refreshed on a miss. Keep updated_tick as the timestamp of
+    # the last confirmed coordinate so consumers cannot mistake a held stale
+    # position for a fresh attack coordinate.
 
 
 def evaluate_track_moving(

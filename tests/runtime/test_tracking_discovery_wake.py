@@ -331,8 +331,8 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         )
         ctx.hunt_mode.on_no_attackable_targets.assert_not_called()
 
-    def test_tracking_snapshot_contains_only_center_follow_inputs(self) -> None:
-        """The hot path receives the current center and scale, not momentum state."""
+    def test_tracking_snapshot_contains_prediction_inputs(self) -> None:
+        """The hot path receives center, scale, and bounded motion prediction."""
         track = self.tracks.create_track(
             "horn", 100, 100, 0.8, 0.9, now_tick=1
         )
@@ -354,8 +354,9 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         snapshot = snapshots[0]
         self.assertEqual((snapshot.x, snapshot.y), (100, 100))
         self.assertEqual(snapshot.scale, 0.9)
-        self.assertFalse(hasattr(snapshot, "vel_x"))
-        self.assertFalse(hasattr(snapshot, "prediction_valid"))
+        self.assertEqual(snapshot.vel_x, 0.0)
+        self.assertEqual(snapshot.vel_y, 0.0)
+        self.assertTrue(snapshot.prediction_valid)
 
     def test_local_miss_wakes_discovery_and_keeps_track(self) -> None:
         track = self.tracks.create_track(

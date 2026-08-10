@@ -69,6 +69,7 @@ class MobTrackSnapshot:
     state: str
     mob_name: str
     updated_tick: int
+    last_found_tick: int
     discovery_scale: float
     candidate_scale: float
     idle_attack_count: int = 0
@@ -907,6 +908,7 @@ class HuntTracks:
             state=track.state,
             mob_name=track.mob_name,
             updated_tick=track.updated_tick,
+            last_found_tick=track.last_found_tick,
             discovery_scale=track.discovery_scale,
             candidate_scale=track.candidate_scale,
             idle_attack_count=track.idle_attack_count,

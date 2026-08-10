@@ -60,10 +60,20 @@ class StateTrackSnapshot:
     x: int
     y: int
     scale: float = 0.0
+    # One-frame displacement prediction from the last confirmed hit. The local
+    # follower uses this only to center its bounded search window; it never
+    # publishes a coasted coordinate.
+    vel_x: float = 0.0
+    vel_y: float = 0.0
+    prediction_valid: bool = True
+    # Production positive Tracks must retain their acquired anchor. Tests and
+    # standalone callers may leave this false for one-shot acquisition.
+    anchor_required: bool = False
     opacity_baseline: float = 0.0
     opacity_baseline_samples: int = 0
     opacity_decay_streak: int = 0
     attack_count: int = 0
+
 
 
 @dataclass(frozen=True)
@@ -182,6 +192,10 @@ class DetectorSession:
             "x": snapshot.x - roi.x,
             "y": snapshot.y - roi.y,
             "scale": snapshot.scale,
+            "velX": snapshot.vel_x,
+            "velY": snapshot.vel_y,
+            "prediction_valid": snapshot.prediction_valid,
+            "anchor_required": snapshot.anchor_required,
         }
         try:
             result = self._detector.track_local(

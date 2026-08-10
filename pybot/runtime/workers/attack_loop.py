@@ -16,6 +16,7 @@ from pybot.runtime.constants import (
     HEAL_VERIFY_DELAY_MS,
     HP_RESTORE_COOLDOWN_S,
     LOG_REPEAT_INTERVAL_MS,
+    MAX_ATTACK_COORD_AGE_MS,
     WORKER_POLL_INTERVAL_S,
 )
 from pybot.runtime.combat_observer import CombatObserver
@@ -507,6 +508,17 @@ class AttackLoop:
         if snap is None:
             return
 
+        # A held coordinate is not a fresh attack coordinate. Production
+        # snapshots expose last_found_tick; lightweight compatibility fixtures
+        # may not, so they retain their existing behavior.
+        last_found_tick = getattr(snap, "last_found_tick", None)
+        if type(last_found_tick) is int and now_tick - last_found_tick > MAX_ATTACK_COORD_AGE_MS:
+            ctx.logger.behavior(
+                f"[ATTACK] stale coordinate dropped id={target_id} "
+                f"age_ms={now_tick - last_found_tick}"
+            )
+            return
+
         click_x, click_y = snap.x, snap.y
         snap_epoch = expected_epoch
         if snap_epoch is None:
@@ -583,8 +595,19 @@ class AttackLoop:
             # and this click, and a re-read under the store lock lands the
             # cursor on the sprite instead of where the mob was a moment ago.
             def _click_freshest_target() -> bool:
-                fresh = ctx.tracks.snapshot_for_track(target_id, monotonic_ms())
+                click_now = monotonic_ms()
+                fresh = ctx.tracks.snapshot_for_track(target_id, click_now)
                 if fresh is None:
+                    return False
+                fresh_last_found = getattr(fresh, "last_found_tick", None)
+                if (
+                    type(fresh_last_found) is int
+                    and click_now - fresh_last_found > MAX_ATTACK_COORD_AGE_MS
+                ):
+                    ctx.logger.behavior(
+                        f"[ATTACK] stale coordinate dropped id={target_id} "
+                        f"age_ms={click_now - fresh_last_found} before click"
+                    )
                     return False
                 return self._input.skill_click_at(
                     attack_scan,

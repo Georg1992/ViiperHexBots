@@ -99,6 +99,10 @@ class CoordTrackingWorker:
                 x=track.x,
                 y=track.y,
                 scale=track.discovery_scale,
+                vel_x=track.vel_x,
+                vel_y=track.vel_y,
+                prediction_valid=track.lost_count == 0,
+                anchor_required=True,
             )
             for track in alive_tracks
             if track.discovery_scale > 0
@@ -161,6 +165,8 @@ class CoordTrackingWorker:
                 x=candidate.x,
                 y=candidate.y,
                 scale=candidate.candidate_scale,
+                prediction_valid=False,
+                anchor_required=False,
             ))
         if not snapshots:
             return 0
@@ -186,13 +192,16 @@ class CoordTrackingWorker:
             if not ctx.should_run_tracking() or ctx.tracks.area_epoch != area_epoch:
                 ctx.tracker.discard_track_state(result.track_id)
                 continue
+            # The coordinate came from the fresh acquisition frame, so stamp
+            # the Track at commit time rather than with the pre-capture tick.
+            created_ms = monotonic_ms()
             track = ctx.tracks.create_track(
                 ctx.config.mob_name,
                 x,
                 y,
                 candidate.confidence,
                 candidate.candidate_scale,
-                now_tick=now_ms,
+                now_tick=created_ms,
                 area_epoch=area_epoch,
                 discovery_bbox=candidate.bbox,
             )

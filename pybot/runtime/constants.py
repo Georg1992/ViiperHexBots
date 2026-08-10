@@ -12,6 +12,10 @@ WORKER_POLL_INTERVAL_S = 0.05
 # Tracking needs to follow moving mobs, but must yield the shared capture
 # session so discovery and character-state sampling are not starved.
 TRACKING_LOOP_INTERVAL_S = 0.02
+# Attack must not click a coordinate that tracking has only held through misses.
+# Normal hits are ~20-50ms old; this allows a short capture hiccup without
+# turning a prolonged tracking failure into stale combat input.
+MAX_ATTACK_COORD_AGE_MS = 250
 LOG_REPEAT_INTERVAL_MS = 5000
 # A discovery or tracking pass taking longer than this gets a stage-timing
 # warning (capture / lock-wait / compute split) so stalls are diagnosable.
@@ -121,6 +125,7 @@ __all__ = [
     "DEFAULT_SEARCH_RANGE_CELLS",
     "WORKER_POLL_INTERVAL_S",
     "TRACKING_LOOP_INTERVAL_S",
+    "MAX_ATTACK_COORD_AGE_MS",
     "LOG_REPEAT_INTERVAL_MS",
     "SLOW_SCAN_WARN_MS",
     "ATTACK_IDLE_SPIN_S",
