@@ -230,7 +230,7 @@ class ViiperBackend(ShadowInputBackend):
 
     # ── Input methods ─────────────────────────────────────────────────
 
-    def begin_session(self) -> bool:
+    def begin_session(self, timeout_s: float | None = None) -> bool:
         """Re-arm input after the previous operation has fully unwound.
 
         Pause sets the process-wide cancellation event. Acquire the same
@@ -238,7 +238,8 @@ class ViiperBackend(ShadowInputBackend):
         cannot race with resume and send fresh input after the pause boundary.
         The bounded acquisition keeps a Tk/UI resume callback responsive.
         """
-        if not self._operation_lock.acquire(timeout=0.25):
+        acquire_timeout = 0.25 if timeout_s is None else max(0.0, float(timeout_s))
+        if not self._operation_lock.acquire(timeout=acquire_timeout):
             return False
         try:
             self._cancel_event.clear()

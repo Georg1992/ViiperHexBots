@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import HP_RESTORE_RATIO
@@ -182,7 +182,31 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.danger._poll_hp()
         self.assertEqual(self.danger.danger_level(), DangerLevel.CRITICAL)
 
+    def test_low_hp_damage_stays_critical_after_recent_window(self) -> None:
+        """A real hit below 50% remains urgent after the quiet window expires."""
+        with patch("pybot.runtime.danger_detector.time.monotonic", side_effect=[10.0, 12.0, 12.0, 12.0]):
+            self.vitals.publish_hp(60, 100)
+            self.danger._poll_hp()
+            self.vitals.publish_hp(40, 100)
+            self.danger._poll_hp()
+            self.assertEqual(self.danger.danger_level(), DangerLevel.CRITICAL)
 
+    def test_low_hp_damage_stays_critical_when_hp_sample_is_unreadable(self) -> None:
+        """Unknown OCR after a critical hit is not treated as recovery."""
+        self.vitals.publish_hp(60, 100)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(40, 100)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(None, None)
+
+        self.assertEqual(self.danger.danger_level(), DangerLevel.CRITICAL)
+        self.vitals.publish_hp(60, 100)
+        self.danger._poll_hp()
+        with patch(
+            "pybot.runtime.danger_detector.time.monotonic",
+            return_value=10_000_000_000.0,
+        ):
+            self.assertEqual(self.danger.danger_level(), DangerLevel.SAFE)
 
 
 
@@ -215,7 +239,24 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         # A low-HP snapshot establishes the baseline; it is not an attack.
         self.vitals.publish_hp(40, 100)
         self.danger._poll_hp()
+        self.assertEqual(self.danger.danger_level(), DangerLevel.SAFE)
         self.teleport.danger_teleport.assert_not_called()
+
+    def test_escape_retries_input_admission_after_cancel(self) -> None:
+        """A busy input macro cannot silently swallow critical escape."""
+        self.vitals.publish_hp(60, 100)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(40, 100)
+        self.danger._poll_hp()
+        self.input.begin_session.side_effect = [False, True]
+        self.teleport.danger_teleport.return_value = True
+
+        self.assertTrue(self.ctx.danger_controller.process())
+        self.assertEqual(self.input.begin_session.call_count, 2)
+        self.teleport.danger_teleport.assert_called_once_with(
+            reason="critical_hunt",
+            prefer_safe_key=False,
+        )
 
 
 
@@ -252,13 +293,13 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.vitals.publish_hp(90, 100)
         self.danger._poll_hp()
         teleport_started = time.monotonic()
-        self.vitals.publish_hp(80, 100)
+        self.vitals.publish_hp(40, 100)
         self.danger._poll_hp()
 
         self.danger.reset_after_teleport(teleport_started)
 
         self.assertTrue(self.danger.has_recent_damage(1.0))
-        self.assertEqual(self.danger.danger_level(), DangerLevel.DANGER)
+        self.assertEqual(self.danger.danger_level(), DangerLevel.CRITICAL)
 
 
 

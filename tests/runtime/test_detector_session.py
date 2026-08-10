@@ -52,6 +52,33 @@ class DetectorSessionTests(unittest.TestCase):
         self.assertGreater(scan.detect_ms, 0)
         self.assertLess(scan.lock_wait_ms, 50)
 
+    def test_discovery_heat_support_accepts_predicted_position(self) -> None:
+        """A moving Track remains supported when heat is only at its prediction."""
+        session = DetectorSession("horn", project_root=ROOT)
+        try:
+            heatmap = __import__("numpy").zeros((120, 120), dtype=float)
+            heatmap[70, 80] = 1.0
+            fake_result = type(
+                "FakeDetectionResult",
+                (),
+                {
+                    "sprite_heatmap": heatmap,
+                    "candidates": [],
+                    "accepted": [],
+                    "elapsed_s": 0.001,
+                    "timing": {},
+                },
+            )()
+            with patch.object(session._detector, "detect", return_value=fake_result):
+                scan = session.discover_frame(
+                    heatmap,
+                    HuntRoi(x=0, y=0, w=120, h=120),
+                    heat_track_positions=[(7, 20, 20, 1.0, 80, 70)],
+                )
+            self.assertEqual(scan.heat_supported_track_ids, frozenset({7}))
+        finally:
+            session.close()
+
     def test_tracking_uses_one_shared_frame_in_snapshot_order(self) -> None:
         """All Tracks are updated sequentially from one immutable frame."""
         session = DetectorSession("horn", project_root=ROOT)

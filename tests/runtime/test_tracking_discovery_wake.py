@@ -155,6 +155,43 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         self.assertTrue(self.tracks.has_pending_discovery_candidates())
         hunt_mode.note_discovery_scan_completed.assert_called_once()
 
+    def test_discovery_accepts_legacy_detector_signature(self) -> None:
+        """Old two-argument detector doubles still complete a discovery pass."""
+        from pybot.runtime.workers.discovery_worker import DiscoveryWorker
+
+        self.ctx.stop_event = threading.Event()
+        self.ctx.config.discovery_interval_ms = 250
+        self.ctx.config.mob_name = "horn"
+        self.ctx.config.use_sprite_grf = False
+        self.ctx.should_run_discovery.return_value = True
+        self.ctx.discovery_wake = threading.Event()
+        self.ctx.area_transition_lock = threading.RLock()
+        self.ctx.observation_publication_lock = threading.Lock()
+        self.ctx.hunt_generation = 0
+        self.ctx.capture.get_hunt_roi.return_value = SimpleNamespace(
+            x=0, y=0, w=200, h=200, center_x=100, center_y=100,
+        )
+        self.ctx.capture.capture_roi.return_value = MagicMock(size=1)
+        self.ctx.detector.detector_config.return_value = {}
+        self.ctx.detector.discover_frame.side_effect = (
+            lambda _frame, _roi: SimpleNamespace(
+                ok=True,
+                fail_reason="",
+                raw_count=0,
+                accepted_count=0,
+                duration_ms=1,
+                timing={},
+                detections=[],
+            )
+        )
+        self.ctx.overlay = MagicMock()
+        self.ctx.validation = MagicMock()
+        self.ctx.mark_startup_area_clear = MagicMock()
+        worker = DiscoveryWorker(self.ctx, MagicMock())
+        worker._scan()
+        self.assertEqual(self.tracks.get_track_count(), 0)
+        self.assertTrue(self.ctx.detector.discover_frame.called)
+
     def test_created_track_wakes_attack_after_state_commit(self) -> None:
         """Tracking signals attack only after the live track is fully committed."""
         from pybot.recognition.rules import DiscoveryDetection
@@ -306,6 +343,70 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
 
         self.assertFalse(attack.process_pending())
         self.assertFalse(ctx.attack_wake.is_set())
+
+    def test_all_stale_tracks_are_excluded_but_remain_alive(self) -> None:
+        """Stale combat input never deletes Tracks needed for local recovery."""
+        ctx = MagicMock()
+        ctx.stop_event = threading.Event()
+        ctx.attack_wake = threading.Event()
+        ctx.should_run_combat.return_value = True
+        ctx.in_post_teleport_heal_window.return_value = False
+        now = 10_000
+        stale = SimpleNamespace(id=1, last_found_tick=now - 1_000, area_epoch=0)
+        ctx.tracks.tracks_for_policy.return_value = [stale]
+        ctx.policy.select_target.return_value = 0
+        ctx.hunt_mode = MagicMock()
+        attack = AttackLoop(ctx, ctx.hunt_mode, MagicMock())
+
+        with unittest.mock.patch(
+            "pybot.runtime.workers.attack_loop.monotonic_ms", return_value=now,
+        ):
+            self.assertFalse(attack.process_pending())
+
+        ctx.policy.select_target.assert_called_with([], now)
+        ctx.hunt_mode.on_no_attackable_targets.assert_called_once_with()
+
+    def test_stale_track_is_not_selected_for_attack(self) -> None:
+        """Held coordinates do not monopolize attack selection."""
+        ctx = MagicMock()
+        ctx.stop_event = threading.Event()
+        ctx.attack_wake = threading.Event()
+        ctx.should_run_combat.return_value = True
+        ctx.in_post_teleport_heal_window.return_value = False
+        now = 10_000
+        stale = SimpleNamespace(id=1, last_found_tick=now - 1_000, area_epoch=0)
+        fresh = SimpleNamespace(id=2, last_found_tick=now, area_epoch=0)
+        ctx.tracks.tracks_for_policy.return_value = [stale, fresh]
+        ctx.policy.select_target.return_value = 2
+        ctx.hunt_mode = MagicMock()
+        attack = AttackLoop(ctx, ctx.hunt_mode, MagicMock())
+
+        with unittest.mock.patch(
+            "pybot.runtime.workers.attack_loop.monotonic_ms", return_value=now,
+        ):
+            attack._attack_one = MagicMock()  # type: ignore[method-assign]
+            self.assertTrue(attack.process_pending())
+
+        ctx.policy.select_target.assert_called_once_with([fresh], now)
+        attack._attack_one.assert_called_once_with(2, now, expected_epoch=0)
+        ctx.hunt_mode.on_no_attackable_targets.assert_not_called()
+
+    def test_danger_wake_interrupts_gameplay_idle_wait(self) -> None:
+        """A newly observed critical hit interrupts the idle wait immediately."""
+        ctx = MagicMock()
+        ctx.stop_event = threading.Event()
+        ctx.danger_wake = threading.Event()
+        ctx.attack_wake = threading.Event()
+        attack = AttackLoop(ctx, MagicMock(), MagicMock())
+        wake = threading.Timer(0.01, ctx.danger_wake.set)
+        wake.start()
+        try:
+            attack._wait_for_gameplay_delay(1.0)
+        finally:
+            wake.join(timeout=1.0)
+
+        self.assertFalse(ctx.danger_wake.is_set())
+        self.assertFalse(ctx.stop_event.is_set())
 
     def test_attack_wake_rechecks_store_before_area_clear(self) -> None:
         """A track committed during the empty read is attacked immediately."""

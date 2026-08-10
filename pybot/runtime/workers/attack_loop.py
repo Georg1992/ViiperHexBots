@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 import traceback
 from typing import TYPE_CHECKING
 
@@ -81,7 +83,7 @@ class AttackLoop:
                 # and the next tick performs the one post-settle skill attempt.
                 if self._retry_post_teleport_heal():
                     self._skill_heal_retry_pending = False
-                self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
+                self._wait_for_gameplay_delay(ATTACK_IDLE_SPIN_S)
                 return False
 
             # Post-teleport skill recovery owns the first decision. It must run
@@ -90,7 +92,7 @@ class AttackLoop:
             # teleport immediately instead of waiting at the same spot.
             if self._post_teleport_hp_requires_heal():
                 if not self._post_teleport_recovery_step():
-                    self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
+                    self._wait_for_gameplay_delay(ATTACK_IDLE_SPIN_S)
                     return False
 
             try:
@@ -117,7 +119,10 @@ class AttackLoop:
             # fresh track is attacked in this same gameplay step instead of
             # waiting for another polling cycle (or risking a no-target teleport).
             for _ in range(2):
-                policy_tracks = self._ctx.tracks.tracks_for_policy(tick)
+                policy_tracks = self._attackable_policy_tracks(
+                    self._ctx.tracks.tracks_for_policy(tick),
+                    tick,
+                )
                 target_id = self._ctx.policy.select_target(policy_tracks, tick)
                 if target_id:
                     selected_epoch = next(
@@ -141,7 +146,7 @@ class AttackLoop:
                             tick,
                             expected_epoch=selected_epoch,
                         )
-                    self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
+                    self._wait_for_gameplay_delay(ATTACK_IDLE_SPIN_S)
                     return True
                 if (
                     attack_wake is None
@@ -155,10 +160,14 @@ class AttackLoop:
             # transition closes the normal wake race. The transition itself
             # owns its area/publication locks; do not hold them across attack or
             # teleport input.
-            final_tracks = self._ctx.tracks.tracks_for_policy(monotonic_ms())
+            final_tick = monotonic_ms()
+            final_tracks = self._attackable_policy_tracks(
+                self._ctx.tracks.tracks_for_policy(final_tick),
+                final_tick,
+            )
             final_target = self._ctx.policy.select_target(
                 final_tracks,
-                monotonic_ms(),
+                final_tick,
             )
             if final_target:
                 final_epoch = next(
@@ -175,7 +184,7 @@ class AttackLoop:
                     monotonic_ms(),
                     expected_epoch=final_epoch,
                 )
-                self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
+                self._wait_for_gameplay_delay(ATTACK_IDLE_SPIN_S)
                 return True
 
             # A clear-area transition owns the next teleport. Do it before
@@ -186,17 +195,12 @@ class AttackLoop:
             # after the last track-store read above.
             transitioned = self._hunt_mode.on_no_attackable_targets()
             if transitioned is True:
-                self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
+                self._wait_for_gameplay_delay(ATTACK_IDLE_SPIN_S)
                 return False
             # A newly committed track publishes attack_wake. Wait on that
             # producer signal instead of making attack discovery-bound or
             # burning a fixed polling delay before the first target is seen.
-            attack_wake = getattr(self._ctx, "attack_wake", None)
-            if attack_wake is not None and callable(getattr(attack_wake, "wait", None)):
-                attack_wake.wait(ATTACK_IDLE_SPIN_S)
-                attack_wake.clear()
-            else:
-                self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
+            self._wait_for_gameplay_delay(ATTACK_IDLE_SPIN_S)
             return False
         except Exception:
             self._ctx.logger.behavior(
@@ -437,6 +441,23 @@ class AttackLoop:
             or getattr(current, "area_epoch", None) == expected_epoch
         )
 
+    def _attackable_policy_tracks(self, tracks, now_tick: int):
+        """Exclude held coordinates without deleting the live Track.
+
+        A local tracking miss should not make an old coordinate actionable, but
+        it also must not let one stale Track monopolize round-robin selection.
+        Discovery/tracking still own liveness and recovery; this is only the
+        attack-input freshness gate.
+        """
+        return [
+            track
+            for track in tracks
+            if not (
+                type(getattr(track, "last_found_tick", None)) is int
+                and now_tick - track.last_found_tick > MAX_ATTACK_COORD_AGE_MS
+            )
+        ]
+
     def _character_pos(self) -> tuple[int, int]:
         """Screen position used for the melee-range idle guard."""
         pos = self._ctx.character_screen_pos()
@@ -445,19 +466,25 @@ class AttackLoop:
         return int(pos[0]), int(pos[1])
 
     def _wait_for_gameplay_delay(self, timeout_s: float) -> None:
-        """Wait without hiding the new danger observer wake."""
+        """Wait without hiding danger or fresh-track producer wakes."""
         danger_wake = getattr(self._ctx, "danger_wake", None)
-        deadline = monotonic_ms() + int(timeout_s * 1000)
-        while not self._ctx.is_stopped():
-            remaining_ms = deadline - monotonic_ms()
-            if remaining_ms <= 0:
-                return
-            if danger_wake is not None and danger_wake.wait(
-                min(0.05, remaining_ms / 1000.0)
-            ):
+        attack_wake = getattr(self._ctx, "attack_wake", None)
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while event_is_set(self._ctx.stop_event) is not True:
+            if event_is_set(danger_wake) is True:
                 danger_wake.clear()
                 return
-            if self._ctx.stop_event.is_set():
+            if event_is_set(attack_wake) is True:
+                attack_wake.clear()
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return
+            stop_event = self._ctx.stop_event
+            stop_event.wait(min(0.05, remaining))
+            if not isinstance(stop_event, threading.Event):
+                return
+            if event_is_set(stop_event) is True:
                 return
 
     def _log_unknown_observation(
@@ -875,7 +902,7 @@ class GameplayLoop:
                 if self._ctx.danger_escape_active.is_set():
                     # An urgent transition is already in progress. Park without
                     # busy-spinning so observation workers keep CPU time.
-                    self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
+                    self._wait_for_gameplay_delay(WORKER_POLL_INTERVAL_S)
                     continue
                 if self._sit is not None and self._sit.process_pending():
                     continue
@@ -905,7 +932,7 @@ class GameplayLoop:
                     getattr(self._ctx, "startup_timers_done", None)
                 )
                 if startup_buffs_done is False or startup_timers_done is False:
-                    self._ctx.stop_event.wait(ATTACK_IDLE_SPIN_S)
+                    self._wait_for_gameplay_delay(ATTACK_IDLE_SPIN_S)
                     continue
                 # Startup callbacks may have succeeded on this same generation;
                 # seed their real success timestamps before observing deadlines.
@@ -943,7 +970,7 @@ class GameplayLoop:
                     # teleport settle. Keep its deadline pending and give the
                     # independent UI/danger workers time to run; do not spin
                     # the gameplay owner at 100% CPU while waiting for landing.
-                    self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
+                    self._wait_for_gameplay_delay(WORKER_POLL_INTERVAL_S)
                     continue
                 self._attack.process_pending()
                 danger_wake = getattr(self._ctx, "danger_wake", None)
@@ -956,7 +983,27 @@ class GameplayLoop:
                 self._ctx.logger.behavior(
                     f"[GAMEPLAY] step error:\n{traceback.format_exc()}"
                 )
-                self._ctx.stop_event.wait(WORKER_POLL_INTERVAL_S)
+                self._wait_for_gameplay_delay(WORKER_POLL_INTERVAL_S)
+
+    def _wait_for_gameplay_delay(self, timeout_s: float) -> None:
+        """Keep gameplay waits interruptible by danger and fresh tracks."""
+        danger_wake = getattr(self._ctx, "danger_wake", None)
+        attack_wake = getattr(self._ctx, "attack_wake", None)
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while event_is_set(self._ctx.stop_event) is not True:
+            if event_is_set(danger_wake) is True:
+                danger_wake.clear()
+                return
+            if event_is_set(attack_wake) is True:
+                attack_wake.clear()
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return
+            stop_event = self._ctx.stop_event
+            stop_event.wait(min(0.05, remaining))
+            if not isinstance(stop_event, threading.Event):
+                return
 
     def _danger_is_active(self) -> bool:
         """Read the pure observer fact; no request event is consulted."""

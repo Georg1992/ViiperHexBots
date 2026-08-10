@@ -533,6 +533,16 @@ def _follow_cached_template(
 
     hit_x = int(round(x0 + (max_loc[0] + tw / 2.0) * _TEMPLATE_DOWNSCALE))
     hit_y = int(round(y0 + (max_loc[1] + th / 2.0) * _TEMPLATE_DOWNSCALE))
+    # Correct the center before the strict identity/suppression checks. A
+    # template hit can be a few pixels outside the sprite edge; rejecting it
+    # first made the tracker go stale instead of using palette heat to pull it
+    # back onto the mob. The stable patch remains unchanged until verification.
+    native_w = max(1, int(round(tw * _TEMPLATE_DOWNSCALE)))
+    native_h = max(1, int(round(th * _TEMPLATE_DOWNSCALE)))
+    hit_x, hit_y = _refine_hit_to_sprite_center(
+        detector, frame_bgr, descriptor, hit_x, hit_y, scale,
+    )
+
     # MatchTemplate searches the crop including the descriptor margin. Enforce
     # the actual motion radius as an identity bound so a farther identical mob
     # cannot win simply because its grayscale correlation is higher.
@@ -545,10 +555,6 @@ def _follow_cached_template(
                for sx, sy in suppress_positions):
             return None
 
-    # Keep the cache aligned to the newly observed location. The patch size is
-    # fixed, so animation/movement updates do not introduce geometric drift.
-    native_w = max(1, int(round(tw * _TEMPLATE_DOWNSCALE)))
-    native_h = max(1, int(round(th * _TEMPLATE_DOWNSCALE)))
     bbox = (
         hit_x - native_w // 2,
         hit_y - native_h // 2,
@@ -559,19 +565,6 @@ def _follow_cached_template(
     # for the expanded same-template recovery pass on the next attempt.
     if not _template_identity_ok(detector, frame_bgr, descriptor, bbox):
         return None
-
-    # Re-center the follow point on the mob's sprite (palette-CC bbox center)
-    # instead of the template patch center, then re-anchor the cached patch so
-    # the next match is centered too. The patch keeps its size (no drift).
-    hit_x, hit_y = _refine_hit_to_sprite_center(
-        detector, frame_bgr, descriptor, hit_x, hit_y, scale,
-    )
-    bbox = (
-        hit_x - native_w // 2,
-        hit_y - native_h // 2,
-        native_w,
-        native_h,
-    )
 
     previous_hits = int(getattr(template, "verified_hits", 0)) + 1
     # Static GRF descriptors skip the periodic native verify entirely — the
@@ -746,20 +739,17 @@ def _find_local_peak(
             # cost for large sprites (Anubis) and a common miss source when the
             # gate flickers on a deformed extract. The peak must clear a strong
             # heat multiple (not just the floor) since no silhouette verify runs.
+            # Refine before identity validation so a slightly off-edge heat
+            # peak is corrected onto the sprite instead of becoming a miss.
+            peak_x, peak_y = _refine_hit_to_sprite_center(
+                detector, frame_bgr, descriptor, peak_x, peak_y, scale,
+            )
             bbox = _descriptor_sized_bbox(descriptor, peak_x, peak_y, scale)
             if (
                 bbox is not None
                 and peak_val >= _LOCAL_FAST_MIN_HEAT_MULT * min_heat
                 and _template_identity_ok(detector, frame_bgr, descriptor, bbox)
             ):
-                # Re-center on the sprite body: the heat peak can sit on the
-                # densest color region instead of the sprite center, which made
-                # the bot aim off the mob. Heat (palette match strength) doubles
-                # as confidence — the fast path has no silhouette similarity.
-                peak_x, peak_y = _refine_hit_to_sprite_center(
-                    detector, frame_bgr, descriptor, peak_x, peak_y, scale,
-                )
-                bbox = _descriptor_sized_bbox(descriptor, peak_x, peak_y, scale)
                 return peak_x, peak_y, peak_val, float(peak_val), bbox
     else:
         accepted, bbox, sim = detector.score_at(
@@ -852,7 +842,7 @@ def _refine_hit_to_sprite_center(
 
     local_cx = int(cx) - x0
     local_cy = int(cy) - y0
-    nlab, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+    nlab, labels, _stats, _centroids = cv2.connectedComponentsWithStats(
         mask.astype(np.uint8), connectivity=8,
     )
     chosen = 0
@@ -863,12 +853,28 @@ def _refine_hit_to_sprite_center(
     ):
         chosen = int(labels[local_cy, local_cx])
     if chosen <= 0 and nlab > 1:
-        # Hit fell between components (e.g. on a gap) — use the largest one.
-        areas = {
-            label: int(stats[label, cv2.CC_STAT_AREA])
-            for label in range(1, nlab)
-        }
-        chosen = max(areas, key=areas.get)  # type: ignore[arg-type]
+        # Hit fell just outside a component (e.g. a template edge). Choose the
+        # nearest component to the hit, not the largest component, so center
+        # correction remains local when another mob is nearby.
+        candidates: list[tuple[float, int]] = []
+        for label in range(1, nlab):
+            component_y, component_x = np.where(labels == label)
+            if component_x.size == 0:
+                continue
+            centroid_x = float(component_x.mean())
+            centroid_y = float(component_y.mean())
+            distance_sq = (
+                (centroid_x - local_cx) ** 2
+                + (centroid_y - local_cy) ** 2
+            )
+            candidates.append((distance_sq, label))
+        if candidates:
+            distance_sq, label = min(candidates)
+            # A hit just outside the component may be corrected, but never
+            # across most of the refinement window where another mob could be.
+            max_distance_sq = (max(w, h) * 0.4) ** 2
+            if distance_sq <= max_distance_sq:
+                chosen = label
     if chosen <= 0:
         return int(cx), int(cy)
 

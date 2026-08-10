@@ -10,13 +10,18 @@ there are no critical-vs-sit request handoffs.
 
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
 from pybot.game_state import PlayerVitals
-from pybot.runtime.constants import HP_HEAL_DAMAGE_QUIET_S, WORKER_POLL_INTERVAL_S
+from pybot.runtime.constants import (
+    CRITICAL_PREEMPT_RELEASE_TIMEOUT_S,
+    HP_HEAL_DAMAGE_QUIET_S,
+    WORKER_POLL_INTERVAL_S,
+)
 
 if TYPE_CHECKING:
     from pybot.runtime.teleport import TeleportController
@@ -57,6 +62,12 @@ class DangerDetector:
         self._damage_lock = threading.Lock()
         self._last_damage_mono: float | None = None
         self._last_damage_ratio: float | None = None
+        # A real HP drop observed while already below the critical threshold
+        # remains an urgent fact until HP recovers or the area is reset. The
+        # short recent-damage window is still used for ordinary DANGER/heal
+        # gating, but it must not make a low-HP damage event disappear before
+        # gameplay gets a chance to press the escape key.
+        self._critical_damage_seen = False
         self._damage_sequence = 0
 
     @property
@@ -109,6 +120,11 @@ class DangerDetector:
                 return
             if hp >= self._prev_hp:
                 self._prev_hp = hp
+                # A known sample back above the critical threshold is explicit
+                # recovery evidence. Unknown samples never reach this branch,
+                # so they cannot accidentally clear an urgent latch.
+                if not self._is_critical_hp(hp, _hp_max):
+                    self._critical_damage_seen = False
                 return
             previous_hp = self._prev_hp
             now = time.monotonic()
@@ -117,8 +133,8 @@ class DangerDetector:
             self._last_damage_ratio = (
                 (previous_hp - hp) / previous_hp if previous_hp > 0 else None
             )
+            self._critical_damage_seen = self._is_critical_hp(hp, _hp_max)
             self._damage_sequence += 1
-            ratio = self._last_damage_ratio
 
         # The observer publishes facts and wakes the gameplay owner only. It
         # never requests a sit, sets a danger gate, cancels input, or presses a
@@ -135,17 +151,37 @@ class DangerDetector:
                 self._last_damage_ratio is not None
                 and self._last_damage_ratio > CRITICAL_DAMAGE_RATIO
             )
-        critical_hp = (
-            hp is not None
-            and hp_max is not None
-            and hp_max > 0
-            and hp / hp_max < CRITICAL_HP_RATIO
-        )
+            critical_damage_seen = self._critical_damage_seen
+        critical_hp = self._is_critical_hp(hp, hp_max)
+        # A large hit is immediately critical while recent. A smaller hit that
+        # leaves the player below 50% latches the same urgent state, so a slow
+        # OCR/status update or a busy gameplay step cannot downgrade it to SAFE.
+        # An unreadable sample is not recovery evidence; preserve the urgent
+        # fact until a known HP value proves the player is back above the line.
+        if critical_damage_seen:
+            if hp is None or hp_max is None or hp_max <= 0:
+                return DangerLevel.CRITICAL
+            if critical_hp:
+                return DangerLevel.CRITICAL
+            with self._damage_lock:
+                self._critical_damage_seen = False
         if damaged and (critical_damage or critical_hp):
             return DangerLevel.CRITICAL
         if damaged:
             return DangerLevel.DANGER
         return DangerLevel.SAFE
+
+    @staticmethod
+    def _is_critical_hp(
+        hp: int | None,
+        hp_max: int | None,
+    ) -> bool:
+        return (
+            hp is not None
+            and hp_max is not None
+            and hp_max > 0
+            and hp / hp_max < CRITICAL_HP_RATIO
+        )
 
     def reset_after_teleport(self, tp_start_mono: float | None = None) -> None:
         """Start a new HP baseline after the teleport transaction.
@@ -174,6 +210,14 @@ class DangerDetector:
             # the vitals observation clock was coarse or was published by a
             # lightweight adapter without the same timestamp precision.
             self._prev_hp = _hp if (fresh or damage_after_start) else None
+            # Preserve a genuine landing hit. It belongs to the new area and
+            # must remain urgent even after the ordinary recent-damage window.
+            if damage_after_start:
+                # Preserve the existing latch even when the landing sample is
+                # unreadable; None/None is not proof that the danger ended.
+                pass
+            else:
+                self._critical_damage_seen = False
             if not damage_after_start:
                 self._last_damage_mono = None
                 self._last_damage_ratio = None
@@ -234,6 +278,61 @@ class DangerController:
             reason="sit_danger" if seated else "critical_hunt",
         )
 
+    def _begin_input_for_escape(self) -> bool:
+        """Wait briefly for a canceled input macro to release its lock.
+
+        Critical danger must not disappear because storage/heal was still
+        unwinding during the first 250 ms admission attempt. The cancellation
+        above is asynchronous, so retry the bounded input-session admission
+        until the emergency timeout expires, then leave the danger fact active
+        for the next gameplay tick.
+        """
+        begin = getattr(self._input_backend, "begin_session", None)
+        if not callable(begin):
+            return True
+        deadline = time.monotonic() + CRITICAL_PREEMPT_RELEASE_TIMEOUT_S
+        logged_busy = False
+        while not self._ctx.is_stopped() and not self._ctx.pause_event.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                self._ctx.logger.behavior(
+                    "[DANGER] input admission timeout — escape remains pending"
+                )
+                return False
+            try:
+                parameters = inspect.signature(begin).parameters.values()
+                accepts_timeout = (
+                    "timeout_s" in inspect.signature(begin).parameters
+                    or any(
+                        parameter.kind is inspect.Parameter.VAR_KEYWORD
+                        for parameter in parameters
+                    )
+                )
+            except (TypeError, ValueError):
+                accepts_timeout = True
+            admitted = (
+                begin(timeout_s=remaining)
+                if accepts_timeout
+                else begin()
+            )
+            if admitted is not False:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                self._ctx.logger.behavior(
+                    "[DANGER] input admission timeout — escape remains pending"
+                )
+                return False
+            if not logged_busy:
+                self._ctx.logger.behavior(
+                    "[DANGER] input busy after cancellation — waiting for escape admission"
+                )
+                logged_busy = True
+            self._ctx.stop_event.wait(
+                min(WORKER_POLL_INTERVAL_S, remaining)
+            )
+        return False
+
     def escape(self, *, seated: bool, reason: str) -> bool:
         """Run one complete escape or leave the fact active for a retry.
 
@@ -252,8 +351,7 @@ class DangerController:
                 cancel = getattr(self._ctx, "cancel_gameplay_input", None)
                 if callable(cancel):
                     cancel()
-                begin = getattr(self._input_backend, "begin_session", None)
-                if callable(begin) and begin() is False:
+                if not self._begin_input_for_escape():
                     return False
                 escaped = bool(
                     self._teleport.danger_teleport(

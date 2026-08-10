@@ -235,6 +235,36 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(kept_track.discovery_miss_count, 0)
         self.assertEqual(absent_track.discovery_miss_count, 1)
 
+    def test_heat_supported_silhouette_miss_does_not_remove_track(self) -> None:
+        """Raw mob heat preserves a track when the silhouette gate fails."""
+        track_id = self._create(874, 578)
+        for offset in (50, 100, 150):
+            summary = self.tracks.process_discovery_scan(
+                [],
+                mob_name="horn",
+                now_tick=self.now + offset,
+                heat_supported_track_ids={track_id},
+            )
+            self.assertEqual(summary.removed_count, 0)
+        track = self.tracks.get_track_by_id(track_id)
+        self.assertIsNotNone(track)
+        assert track is not None
+        self.assertEqual(track.discovery_miss_count, 0)
+
+    def test_no_heat_still_removes_track_after_misses(self) -> None:
+        """A true local heat absence remains eligible for removal."""
+        track_id = self._create(874, 578)
+        for offset in (50, 100):
+            summary = self.tracks.process_discovery_scan(
+                [], mob_name="horn", now_tick=self.now + offset,
+            )
+            self.assertEqual(summary.removed_count, 0)
+        summary = self.tracks.process_discovery_scan(
+            [], mob_name="horn", now_tick=self.now + 150,
+        )
+        self.assertEqual(summary.removed_ids, [track_id])
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
+
     def test_three_discovery_misses_removes_track(self) -> None:
         track_id = self._create(874, 578)
         # Misses 1–2 → track survives

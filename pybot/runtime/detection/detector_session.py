@@ -50,6 +50,9 @@ class DiscoveryScanResult:
     lock_wait_ms: int = 0
     detect_ms: int = 0
     timing: dict[str, float] = field(default_factory=dict)
+    # Track IDs whose capture-time positions had supporting sprite heat even
+    # when the expensive discovery silhouette gate produced no detection.
+    heat_supported_track_ids: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -127,7 +130,13 @@ class DetectorSession:
             return DiscoveryScanResult(False, "capture_failed", 0, 0, [], 0, 0.0)
         return self.discover_frame(frame, roi)
 
-    def discover_frame(self, frame: np.ndarray | None, roi: HuntRoi) -> DiscoveryScanResult:
+    def discover_frame(
+        self,
+        frame: np.ndarray | None,
+        roi: HuntRoi,
+        *,
+        heat_track_positions: list[tuple[int, ...]] | None = None,
+    ) -> DiscoveryScanResult:
         if frame is None or frame.size == 0:
             return DiscoveryScanResult(False, "capture_failed", 0, 0, [], 0, 0.0)
         start = time.perf_counter()
@@ -135,6 +144,28 @@ class DetectorSession:
             locked_at = time.perf_counter()
             result = self._detector.detect(frame, self._mob_name)
         elapsed = time.perf_counter() - start
+        heat_supported_track_ids = frozenset(
+            int(entry[0])
+            for entry in (heat_track_positions or [])
+            if len(entry) >= 4
+            and (
+                self._heat_supports_position(
+                    result.sprite_heatmap,
+                    int(entry[1]) - roi.x,
+                    int(entry[2]) - roi.y,
+                    float(entry[3]),
+                )
+                or (
+                    len(entry) >= 6
+                    and self._heat_supports_position(
+                        result.sprite_heatmap,
+                        int(entry[4]) - roi.x,
+                        int(entry[5]) - roi.y,
+                        float(entry[3]),
+                    )
+                )
+            )
+        )
         accepted = [
             RawDetection(
                 x=c.center_x + roi.x,
@@ -156,10 +187,45 @@ class DetectorSession:
             detections=accepted,
             duration_ms=duration_ms,
             elapsed_s=elapsed,
+            heat_supported_track_ids=heat_supported_track_ids,
             lock_wait_ms=lock_wait_ms,
             detect_ms=max(0, duration_ms - lock_wait_ms),
             timing=dict(result.timing),
         )
+
+    def _heat_supports_position(
+        self,
+        heatmap: np.ndarray,
+        x: int,
+        y: int,
+        scale: float,
+    ) -> bool:
+        """Return whether discovery heat supports a known Track position.
+
+        This is deliberately weaker than silhouette acceptance: it answers only
+        whether mob-colored heat remains near the tracked center. A moving or
+        overlapping sprite may fail the silhouette gate while still providing
+        enough local heat to keep its Track alive.
+        """
+        if heatmap is None or heatmap.size == 0:
+            return False
+        height, width = heatmap.shape[:2]
+        if not (0 <= int(x) < width and 0 <= int(y) < height):
+            return False
+        radius = max(4, int(round(24.0 * max(float(scale), 0.5))))
+        x0 = max(0, int(x) - radius)
+        y0 = max(0, int(y) - radius)
+        x1 = min(width, int(x) + radius + 1)
+        y1 = min(height, int(y) + radius + 1)
+        local = heatmap[y0:y1, x0:x1]
+        if local.size == 0:
+            return False
+        # Use the configured center floor rather than requiring a full blob;
+        # this tolerates partial overlap and animation while rejecting ordinary
+        # background at the tracked place. Do not lower this to a generic
+        # nonzero test: blurred background should not keep a gone Track alive.
+        threshold = float(self._detector.heatmap_detector.min_center_heat)
+        return float(local.max()) >= threshold
 
     def transfer_track_state(self, source_track_id: int, target_track_id: int) -> bool:
         return transfer_track_state(self._detector, source_track_id, target_track_id)

@@ -145,10 +145,61 @@ class DiscoveryWorker:
                 )
             return
 
-        scan = ctx.detector.discover_frame(
-            frame,
-            roi,
+        heat_track_positions: list[tuple[int, ...]] = []
+        # Tracking tuning belongs to the detector session, not the runtime
+        # behavior config. Keep the fallback for lightweight test doubles and
+        # older detector implementations that do not expose detector_config().
+        detector_config_getter = getattr(ctx.detector, "detector_config", None)
+        detector_config = (
+            detector_config_getter() if callable(detector_config_getter) else {}
         )
+        if not isinstance(detector_config, dict):
+            detector_config = {}
+        max_prediction = max(
+            1,
+            int(detector_config.get("localTrackMaxSearchRadiusPx", 360)),
+        )
+        for entry in existing_track_positions:
+            track_id = int(entry[0])
+            current_x = int(entry[1])
+            current_y = int(entry[2])
+            velocity_x = float(entry[3]) if len(entry) > 3 else 0.0
+            velocity_y = float(entry[4]) if len(entry) > 4 else 0.0
+            lost_count = max(0, int(entry[5])) if len(entry) > 5 else 0
+            scale = float(entry[7]) if len(entry) > 7 else 1.0
+            horizon = min(3, lost_count + 1)
+            prediction_x = velocity_x * horizon
+            prediction_y = velocity_y * horizon
+            prediction_length = (prediction_x * prediction_x + prediction_y * prediction_y) ** 0.5
+            if prediction_length > max_prediction and prediction_length > 0.0:
+                factor = max_prediction / prediction_length
+                prediction_x *= factor
+                prediction_y *= factor
+            heat_track_positions.append(
+                (
+                    track_id,
+                    current_x,
+                    current_y,
+                    scale,
+                    int(round(current_x + prediction_x)),
+                    int(round(current_y + prediction_y)),
+                )
+            )
+
+        # Keep older detector doubles/mocks usable while the production
+        # DetectorSession receives optional heat-presence metadata. A TypeError
+        # here means only that the alternate implementation has the old method
+        # signature; the normal two-argument call remains the safe fallback.
+        try:
+            scan = ctx.detector.discover_frame(
+                frame,
+                roi,
+                heat_track_positions=heat_track_positions,
+            )
+        except TypeError as exc:
+            if "heat_track_positions" not in str(exc):
+                raise
+            scan = ctx.detector.discover_frame(frame, roi)
         if not scan.ok:
             # A failed observation (capture or detection error) must not
             # poison the hunt clear/startup state. Discovery and tracking use
@@ -228,6 +279,9 @@ class DiscoveryWorker:
                     existing_track_positions=existing_track_positions,
                     area_epoch=area_epoch,
                     hunt_roi=roi,
+                    heat_supported_track_ids=getattr(
+                        scan, "heat_supported_track_ids", frozenset()
+                    ),
                 )
                 if summary.added_count > 0:
                     # Discovery has published candidates; wake the coordinator

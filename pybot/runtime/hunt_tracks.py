@@ -258,8 +258,13 @@ class HuntTracks:
 
     def discovery_frame_snapshot(
         self, now_tick: int | None = None
-    ) -> tuple[int, list[tuple[int, int]], list[tuple[int, int, int, float, float, int]]]:
+    ) -> tuple[int, list[tuple[int, int]], list[tuple]]:
         """Atomic sample for one discovery capture: epoch + dedup + positions.
+
+        Track-position entries are ``(id, x, y, vel_x, vel_y, lost_count,
+        discovery_bbox, discovery_scale)``. The tuple is intentionally an
+        observation snapshot: discovery may use it for heat-presence probes,
+        but it never writes Track coordinates.
 
         Dedup positions are alive tracks only. Death sites are absorbed later
         with ``deathSiteRadiusPx`` (not mixed into track dedup).
@@ -279,6 +284,7 @@ class HuntTracks:
                         float(t.vel_y),
                         int(t.lost_count),
                         t.last_discovery_bbox,
+                        float(t.discovery_scale),
                     )
                     for t in alive
                 ],
@@ -336,6 +342,7 @@ class HuntTracks:
         existing_track_positions: list[tuple] | None = None,
         area_epoch: int | None = None,
         hunt_roi: HuntRoi | None = None,
+        heat_supported_track_ids: frozenset[int] | set[int] | None = None,
     ) -> ReconcileSummary:
         """Discovery step: match detections, mark absence, evaluate removal factors.
 
@@ -393,6 +400,7 @@ class HuntTracks:
                         float(t.vel_y),
                         int(t.lost_count),
                         t.last_discovery_bbox,
+                        float(t.discovery_scale),
                     )
                     for t in self._tracks
                     if is_alive(t)
@@ -453,6 +461,7 @@ class HuntTracks:
             miss_remove, _first_miss = self._evaluate_discovery_miss_removal(
                 remaining_ids,
                 hunt_roi=hunt_roi,
+                heat_supported_track_ids=heat_supported_track_ids,
             )
             remove_ids.update(miss_remove)
 
@@ -517,6 +526,7 @@ class HuntTracks:
         unmatched_ids: set[int],
         *,
         hunt_roi: HuntRoi | None = None,
+        heat_supported_track_ids: frozenset[int] | set[int] | None = None,
     ) -> tuple[set[int], list[int]]:
         """Factor 2: Remove tracks missed by 3+ consecutive discovery scans.
 
@@ -546,11 +556,18 @@ class HuntTracks:
         first_miss_ids: list[int] = []
         char_x = hunt_roi.center_x if hunt_roi is not None else None
         char_y = hunt_roi.center_y if hunt_roi is not None else None
+        supported_by_heat = heat_supported_track_ids or frozenset()
         for track_id in unmatched_ids:
             track = self._get_track_by_id_locked(track_id)
             if track is None:
                 continue
             clear_discovery_blob_observation(track)
+            # Discovery silhouette failure is not absence when the raw
+            # heatmap still supports this Track's capture-time position.
+            # Overlapping/moving sprites commonly fail the shape gate while
+            # remaining visually present in the local heat signal.
+            if track_id in supported_by_heat:
+                continue
             if (
                 char_x is not None
                 and char_y is not None

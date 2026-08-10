@@ -88,7 +88,7 @@ class InputBackend(Protocol):
         self, steps: tuple[tuple[str, int, int], ...]
     ) -> bool: ...
 
-    def begin_session(self) -> bool: ...
+    def begin_session(self, timeout_s: float | None = None) -> bool: ...
 
     def cancel_pending(self) -> None: ...
 
@@ -203,7 +203,8 @@ class ShadowInputBackend:
                 time.sleep(delay_ms / 1000.0)
         return True
 
-    def begin_session(self) -> bool:
+    def begin_session(self, timeout_s: float | None = None) -> bool:
+        del timeout_s
         return True
 
     def cancel_pending(self) -> None:

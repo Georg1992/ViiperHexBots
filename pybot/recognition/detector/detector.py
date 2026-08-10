@@ -2,7 +2,7 @@
 
 Pipeline: sprite heatmap → blobs → geometry pre-gate → color-structure
 pre-gate → silhouette gate → accept by heat score.
-No RegionScorer, no structural pixels, no center refinement, no scales.
+No RegionScorer, no structural pixels, and no heavyweight global center search.
 """
 
 from __future__ import annotations
@@ -282,7 +282,7 @@ class MobDetector:
         self.heatmap_detector = HeatmapDetector(self.config)
         self._descriptor_cache: dict[str, MobDescriptor] = {}
         # Local tracking state is kept by the single tracking session and
-        # contains one stable anchor plus LK points per active Track.
+        # contains one stable visual anchor per active Track.
         self._silhouette_ref_cache: dict[
             tuple[int, ...], list[tuple[np.ndarray, np.ndarray]]
         ] = {}

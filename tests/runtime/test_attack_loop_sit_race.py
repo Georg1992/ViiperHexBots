@@ -68,7 +68,10 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         # target preparation/input ordering only. The delay is interruptible
         # and is not reached when the lightweight mock context reports the
         # combat gate closed after input.
-        self.assertEqual(events, ["debuff", "marked", "before", "attack", "kite"])
+        self.assertEqual(
+            events,
+            ["debuff", "marked", "before", "attack", "kite", "delay"],
+        )
         ctx.tracks.mark_debuff_applied.assert_called_once_with(1)
 
     def test_unassigned_attack_key_does_not_prepare_or_attack(self) -> None:
