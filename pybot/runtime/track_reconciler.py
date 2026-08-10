@@ -69,7 +69,7 @@ class TrackReconciler:
             moving_radius=moving_radius,
         )
 
-        known_positions: list[tuple[int, int]] = list(existing_positions)
+        candidate_positions: list[tuple[int, int]] = []
         matched: list[tuple[int, DiscoveryDetection]] = []
         matched_count = 0
         new_candidates: list[DiscoveryDetection] = []
@@ -79,20 +79,34 @@ class TrackReconciler:
                 unmatched_ids.discard(matched_tid)
                 matched.append((matched_tid, detection))
                 matched_count += 1
-                known_positions.append((detection.x, detection.y))
+                # Keep dedup anchored to the capture-time positions of live
+                # tracks. A matched detection is not a new known object, and
+                # using its (possibly moved) center here would make the wider
+                # track radius swallow a nearby distinct candidate.
                 continue
 
-            if detection_matches_existing(
+            if TrackReconciler._matches_existing_track(
+                detection,
+                existing_positions,
+                existing_track_positions,
+                dedup_radius=dedup_radius,
+            ) or detection_matches_existing(
                 detection.x,
                 detection.y,
-                known_positions,
-                dedup_radius=dedup_radius,
+                candidate_positions,
+                dedup_radius=cluster_radius,
             ):
+                # The first check is against already-known live tracks. When
+                # discovery has a valid bbox for both objects, proximity alone
+                # is not enough: non-overlapping close sprites are distinct.
+                # The second check is only against other *new* detections from
+                # this discovery frame, preserving the narrower cluster
+                # boundary rather than the wider existing-track radius.
                 matched_count += 1
                 continue
 
             new_candidates.append(detection)
-            known_positions.append((detection.x, detection.y))
+            candidate_positions.append((detection.x, detection.y))
 
         return DiscoveryReconcileResult(
             new_candidates=new_candidates,
@@ -260,6 +274,57 @@ class TrackReconciler:
                     assignments[det_index] = track_id
                     break
         return assignments
+
+    @staticmethod
+    def _matches_existing_track(
+        detection: DiscoveryDetection,
+        existing_positions: list[tuple[int, int]],
+        existing_track_positions: list[tuple],
+        *,
+        dedup_radius: int,
+    ) -> bool:
+        """Return whether an unmatched detection is an existing object.
+
+        A center-radius check is the fallback for older callers that do not
+        carry discovery boxes. Runtime tracks do carry the last discovery bbox;
+        when both boxes are valid, require overlap as well as proximity. This
+        keeps a distinct sprite beside a tracked sprite from being swallowed
+        by the wider same-object radius.
+        """
+        radius_sq = dedup_radius * dedup_radius
+        entries = list(existing_track_positions)
+        if not entries:
+            entries = [(index, x, y) for index, (x, y) in enumerate(existing_positions)]
+        for entry in entries:
+            if len(entry) < 3:
+                continue
+            px, py = int(entry[1]), int(entry[2])
+            dx = detection.x - px
+            dy = detection.y - py
+            if dx * dx + dy * dy > radius_sq:
+                continue
+            track_bbox = entry[6] if len(entry) > 6 else (0, 0, 0, 0)
+            det_bbox = detection.bbox
+            if (
+                len(track_bbox) == 4
+                and track_bbox[2] > 0
+                and track_bbox[3] > 0
+                and len(det_bbox) == 4
+                and det_bbox[2] > 0
+                and det_bbox[3] > 0
+            ):
+                tx, ty, tw, th = (int(value) for value in track_bbox)
+                dx0, dy0, dw, dh = (int(value) for value in det_bbox)
+                overlaps = (
+                    tx < dx0 + dw
+                    and dx0 < tx + tw
+                    and ty < dy0 + dh
+                    and dy0 < ty + th
+                )
+                if not overlaps:
+                    continue
+            return True
+        return False
 
     @staticmethod
     def _match_track_id(

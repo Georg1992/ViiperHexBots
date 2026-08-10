@@ -229,6 +229,24 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(summary.removed_count, 0)
         self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 0)
 
+    def test_new_close_detection_is_not_swallowed_by_matched_track(self) -> None:
+        """A new nearby sprite remains a candidate beside a matched track."""
+        track_id = self.tracks.create_track(
+            "horn", 100, 100, 0.71, 0.9,
+            now_tick=self.now,
+            discovery_bbox=(80, 80, 30, 30),
+        ).id
+        summary = self.tracks.process_discovery_scan(
+            [det(100, 100, bbox=(80, 80, 30, 30)), det(160, 100, 0.70, 0.9, bbox=(145, 85, 30, 30))],
+            mob_name="horn",
+            now_tick=self.now + 100,
+        )
+        self.assertEqual(summary.matched_count, 1)
+        self.assertEqual(summary.added_count, 1)
+        candidate = self.tracks.get_and_clear_new_candidates()
+        self.assertEqual([(item.x, item.y) for item in candidate], [(160, 100)])
+        self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
+
     def test_stationary_track_does_not_match_far_detection(self) -> None:
         """The moving grace must not turn an unrelated far blob into a match."""
         track_id = self._create(815, 421)

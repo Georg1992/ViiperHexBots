@@ -277,6 +277,7 @@ class HuntTracks:
                         float(t.vel_x),
                         float(t.vel_y),
                         int(t.lost_count),
+                        t.last_discovery_bbox,
                     )
                     for t in alive
                 ],
@@ -294,13 +295,40 @@ class HuntTracks:
             alive = [replace(t) for t in self._tracks if is_alive(t)]
             return self._area_epoch, alive
 
-    def consume_reanchor(self, track_id: int, *, expected_epoch: int | None = None) -> tuple[int, int] | None:
+    def peek_reanchor(
+        self,
+        track_id: int,
+        *,
+        expected_epoch: int | None = None,
+    ) -> tuple[int, int] | None:
+        """Read a Discovery search hint without consuming it.
+
+        The coordinator must be able to prepare a snapshot before it knows
+        whether the bounded async executor accepted that track. A rejected or
+        already-inflight track keeps its hint for the next submission.
+        """
+        with self._lock:
+            if expected_epoch is not None and expected_epoch != self._area_epoch:
+                return None
+            track = self._get_track_by_id_locked(track_id)
+            if track is None or not is_alive(track):
+                return None
+            return track.pending_reanchor
+
+    def consume_reanchor(
+        self,
+        track_id: int,
+        *,
+        expected_epoch: int | None = None,
+        expected_anchor: tuple[int, int] | None = None,
+    ) -> tuple[int, int] | None:
         """Consume one Discovery reanchor hint for the current area.
 
         Discovery publishes only a search proposal. Tracking consumes it before
         its next fresh-frame follow and remains the sole writer of authoritative
-        coordinates. Epoch validation prevents an old hint from crossing a
-        teleport boundary.
+        coordinates. Epoch and optional anchor validation prevent an old hint
+        from crossing a teleport boundary or replacing a newer hint that arrived
+        while a job was being submitted.
         """
         with self._lock:
             if expected_epoch is not None and expected_epoch != self._area_epoch:
@@ -309,6 +337,8 @@ class HuntTracks:
             if track is None or not is_alive(track):
                 return None
             anchor = track.pending_reanchor
+            if expected_anchor is not None and anchor != expected_anchor:
+                return None
             track.pending_reanchor = None
             return anchor
 
@@ -408,6 +438,7 @@ class HuntTracks:
                         float(t.vel_x),
                         float(t.vel_y),
                         int(t.lost_count),
+                        t.last_discovery_bbox,
                     )
                     for t in self._tracks
                     if is_alive(t)
@@ -775,13 +806,20 @@ class HuntTracks:
         *,
         now_tick: int | None = None,
         area_epoch: int | None = None,
+        discovery_bbox: tuple[int, int, int, int] = (0, 0, 0, 0),
     ) -> MobTrack | None:
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
             if area_epoch is not None and area_epoch != self._area_epoch:
                 return None
             return self._create_track_locked(
-                mob_name, x, y, confidence, candidate_scale, tick
+                mob_name,
+                x,
+                y,
+                confidence,
+                candidate_scale,
+                tick,
+                discovery_bbox=discovery_bbox,
             )
 
     def _track_opacity_fading_locked(self, track_id: int) -> bool:
@@ -795,8 +833,12 @@ class HuntTracks:
         if not new_candidates and not self._discovery_candidates:
             return
         config = self._detector_config()
-        dedup_radius = int(config["trackDedupRadiusPx"])
-        radius_sq = dedup_radius * dedup_radius
+        # Pending candidates are already separated from existing tracks by
+        # TrackReconciler. Their mutual dedup boundary must stay at the
+        # discovery cluster radius, otherwise two distinct close blobs are
+        # collapsed before Tracking gets a chance to acquire both.
+        candidate_radius = int(config["discoveryClusterRadiusPx"])
+        radius_sq = candidate_radius * candidate_radius
         merged: list[DiscoveryDetection] = list(new_candidates)
         known = [(c.x, c.y) for c in merged]
         for prior in self._discovery_candidates:
@@ -820,6 +862,8 @@ class HuntTracks:
         confidence: float,
         candidate_scale: float,
         now_tick: int,
+        *,
+        discovery_bbox: tuple[int, int, int, int] = (0, 0, 0, 0),
     ) -> MobTrack:
         track = MobTrack.from_discovery(
             self._next_id,
@@ -834,6 +878,12 @@ class HuntTracks:
         track.attack_count = 0
         track.idle_attack_count = 0
         track.was_accessible = False
+        track.last_discovery_x = int(x)
+        track.last_discovery_y = int(y)
+        track.last_discovery_bbox = tuple(int(value) for value in discovery_bbox)
+        track.discovery_blob_seen = bool(
+            track.last_discovery_bbox[2] > 0 and track.last_discovery_bbox[3] > 0
+        )
         self._next_id += 1
         self._tracks.append(track)
         return track

@@ -186,6 +186,59 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         self.assertEqual((created[0].x, created[0].y), (101, 102))
         self.ctx.tracker.transfer_track_template.assert_called_once()
 
+    def test_nearby_distinct_candidates_each_create_a_track(self) -> None:
+        """Candidate dedup keeps the discovery cluster boundary.
+
+        The wider existing-track dedup radius is for matching a new scan to a
+        known mob; it must not merge two distinct blobs that Discovery already
+        separated in the same scan.
+        """
+        from pybot.recognition.rules import DiscoveryDetection
+
+        self.ctx.config.mob_name = "horn"
+        self.ctx.config.use_sprite_grf = True
+        self.tracks.process_discovery_scan(
+            [
+                DiscoveryDetection(
+                    x=100, y=100, confidence=0.8,
+                    candidate_scale=0.9, living=True,
+                ),
+                DiscoveryDetection(
+                    x=160, y=100, confidence=0.79,
+                    candidate_scale=0.9, living=True,
+                ),
+            ],
+            mob_name="horn",
+            now_tick=1,
+        )
+        self.ctx.tracker.transfer_track_template.return_value = True
+
+        def acquire(_frame, _roi, snapshots, *, on_result=None):
+            results = []
+            for snapshot in snapshots:
+                result = SimpleNamespace(
+                    track_id=snapshot.track_id,
+                    found=True,
+                    x=snapshot.x,
+                    y=snapshot.y,
+                    confidence=0.9,
+                    opacity_score=0.0,
+                )
+                results.append(result)
+                if on_result is not None:
+                    on_result(result)
+            return SimpleNamespace(ok=True, results=results)
+
+        self.ctx.tracker.track_locals_frame.side_effect = acquire
+        self.worker._tick()
+
+        created = self.tracks.snapshot_alive(2)
+        self.assertEqual(len(created), 2)
+        self.assertEqual(
+            {(track.x, track.y) for track in created},
+            {(100, 100), (160, 100)},
+        )
+
     def test_created_track_is_followed_in_same_tick(self) -> None:
         """The first committed track is followed without a second tick."""
         from pybot.recognition.rules import DiscoveryDetection
@@ -277,6 +330,47 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
             7, ANY, expected_epoch=0,
         )
         ctx.hunt_mode.on_no_attackable_targets.assert_not_called()
+
+    def test_tracking_snapshot_preserves_motion_prediction(self) -> None:
+        """The coordinator passes fresh motion state to local tracking.
+
+        LocalTracker uses the smoothed displacement to search one frame ahead;
+        zeroing it would make fast/kiting mobs harder to follow.
+        """
+        track = self.tracks.create_track(
+            "horn", 100, 100, 0.8, 0.9, now_tick=1
+        )
+        assert track is not None
+        self.tracks.apply_tracking(
+            [SimpleNamespace(
+                track_id=track.id,
+                found=True,
+                x=125,
+                y=110,
+                confidence=0.9,
+                opacity_score=0.0,
+            )],
+            now_tick=20,
+        )
+        self.ctx.tracker.track_locals_frame.return_value = SimpleNamespace(
+            results=[SimpleNamespace(
+                track_id=track.id,
+                found=True,
+                x=125,
+                y=110,
+                confidence=0.9,
+                opacity_score=0.0,
+            )]
+        )
+
+        self.worker._tick()
+
+        snapshots = self.ctx.tracker.track_locals_frame.call_args.args[2]
+        self.assertEqual(len(snapshots), 1)
+        snapshot = snapshots[0]
+        self.assertEqual(snapshot.vel_x, 12.5)
+        self.assertEqual(snapshot.vel_y, 5.0)
+        self.assertTrue(snapshot.prediction_valid)
 
     def test_local_miss_wakes_discovery_and_keeps_track(self) -> None:
         track = self.tracks.create_track(

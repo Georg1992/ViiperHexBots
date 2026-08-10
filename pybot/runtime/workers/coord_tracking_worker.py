@@ -177,23 +177,33 @@ class CoordTrackingWorker:
             track for track in alive_tracks if track.discovery_scale > 0
         ]
         snapshots = []
+        reanchor_hints: dict[int, tuple[int, int] | None] = {}
         for track in trackable_tracks:
-            reanchor = ctx.tracks.consume_reanchor(
+            # Peek first. The hint is consumed only after the async scheduler
+            # accepts this particular track; a saturated executor must not
+            # silently discard Discovery's recovery proposal.
+            reanchor = ctx.tracks.peek_reanchor(
                 track.id,
                 expected_epoch=area_epoch,
             )
+            reanchor_hints[track.id] = reanchor
             snapshots.append(
                 StateTrackSnapshot(
                     track_id=track.id,
                     x=track.x,
                     y=track.y,
                     scale=track.discovery_scale,
-                    # Keep only the minimum local-follow hints. These values
-                    # are read-only inputs and never gate publication.
-                    moving=False,
-                    vel_x=0.0,
-                    vel_y=0.0,
-                    prediction_valid=False,
+                    # Preserve the tracker-owned motion estimate. Local
+                    # tracking uses this one-frame displacement to search ahead
+                    # of the last hit; replacing it with zero silently makes
+                    # kiting mobs harder to follow. A velocity is valid only
+                    # while the current track is continuously found. After a
+                    # miss, Discovery may provide the explicit reanchor hint,
+                    # but stale velocity must not pull the search away from it.
+                    moving=track.moving,
+                    vel_x=track.vel_x,
+                    vel_y=track.vel_y,
+                    prediction_valid=(track.lost_count == 0),
                     reanchor_x=reanchor[0] if reanchor is not None else None,
                     reanchor_y=reanchor[1] if reanchor is not None else None,
                     now_tick=now_ms,
@@ -285,6 +295,12 @@ class CoordTrackingWorker:
                         on_result=async_publish,
                     )
                 )
+                for track_id in accepted:
+                    ctx.tracks.consume_reanchor(
+                        track_id,
+                        expected_epoch=area_epoch,
+                        expected_anchor=reanchor_hints.get(track_id),
+                    )
             except BaseException:
                 with self._inflight_lock:
                     self._inflight_track_ids.difference_update(selected_ids)
@@ -300,6 +316,12 @@ class CoordTrackingWorker:
             snapshots,
             on_result=publish_result,
         )
+        for snapshot in snapshots:
+            ctx.tracks.consume_reanchor(
+                snapshot.track_id,
+                expected_epoch=area_epoch,
+                expected_anchor=reanchor_hints.get(snapshot.track_id),
+            )
         self._warn_if_slow_tracking(batch, snapshots)
         results = batch.results
 
@@ -390,6 +412,11 @@ class CoordTrackingWorker:
         config = ctx.tracker.detector_config()
         dedup_radius = int(config["trackDedupRadiusPx"])
         dedup_sq = dedup_radius * dedup_radius
+        # Discovery already clustered distinct blobs with this smaller radius.
+        # Do not apply the wider existing-track radius between two *new*
+        # candidates: nearby but non-overlapping mobs must each get a track.
+        candidate_radius = int(config["discoveryClusterRadiusPx"])
+        candidate_sq = candidate_radius * candidate_radius
 
         pending: list = []
         snaps: list[StateTrackSnapshot] = []
@@ -428,6 +455,7 @@ class CoordTrackingWorker:
 
         created = 0
         committed_provisional_ids: set[int] = set()
+        committed_candidate_positions: list[tuple[int, int]] = []
         pending_by_id = {
             -(index + 1): candidate
             for index, candidate in enumerate(pending)
@@ -462,6 +490,9 @@ class CoordTrackingWorker:
                 if any(
                     (create_x - px) ** 2 + (create_y - py) ** 2 <= dedup_sq
                     for px, py in existing_positions
+                ) or any(
+                    (create_x - px) ** 2 + (create_y - py) ** 2 <= candidate_sq
+                    for px, py in committed_candidate_positions
                 ):
                     ctx.tracker.discard_track_template(result.track_id)
                     committed_provisional_ids.add(result.track_id)
@@ -475,6 +506,7 @@ class CoordTrackingWorker:
                     candidate.candidate_scale,
                     now_tick=now_ms,
                     area_epoch=area_epoch,
+                    discovery_bbox=candidate.bbox,
                 )
                 if track is None:
                     committed_provisional_ids.add(result.track_id)
@@ -486,7 +518,7 @@ class CoordTrackingWorker:
                     ctx.tracks.remove_track(track.id)
                     committed_provisional_ids.add(result.track_id)
                     return
-                existing_positions.append((create_x, create_y))
+                committed_candidate_positions.append((create_x, create_y))
                 created += 1
                 committed_provisional_ids.add(result.track_id)
                 # Wake gameplay at the first complete track commit, while the
