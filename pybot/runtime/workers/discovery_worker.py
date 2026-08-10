@@ -47,6 +47,13 @@ from pybot.runtime.constants import (
 )
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.detection.discovery_filter import filter_scan_candidates
+from pybot.runtime.diagnostics import (
+    format_thread_cpu_deltas,
+    format_thread_dump,
+    frame_stats,
+    game_process_cpu_snapshot,
+    sample_threads_while,
+)
 from pybot.runtime.workers.worker_contexts import DiscoveryWorkerContext
 
 
@@ -190,16 +197,38 @@ class DiscoveryWorker:
         # DetectorSession receives optional heat-presence metadata. A TypeError
         # here means only that the alternate implementation has the old method
         # signature; the normal two-argument call remains the safe fallback.
+        # While the scan runs, sample all thread stacks + per-thread CPU so a
+        # multi-second detect can be attributed with numbers: one bot thread
+        # hogging, or every bot thread starved while the game process burns CPU.
+        slow_samples = []
+        # The game client's process is identified through the captured window.
+        window_id = getattr(ctx.capture, "hwnd", None)
+        game_cpu_before = game_process_cpu_snapshot(window_id)
         try:
-            scan = ctx.detector.discover_frame(
-                frame,
-                roi,
-                heat_track_positions=heat_track_positions,
+            scan, slow_samples = sample_threads_while(
+                lambda: ctx.detector.discover_frame(
+                    frame,
+                    roi,
+                    heat_track_positions=heat_track_positions,
+                )
             )
         except TypeError as exc:
             if "heat_track_positions" not in str(exc):
                 raise
-            scan = ctx.detector.discover_frame(frame, roi)
+            scan, slow_samples = sample_threads_while(
+                lambda: ctx.detector.discover_frame(frame, roi)
+            )
+        game_cpu_after = game_process_cpu_snapshot(window_id)
+        if game_cpu_before is not None and game_cpu_after is not None:
+            game_cpu_ms = int((game_cpu_after[1] - game_cpu_before[1]) * 1000)
+            game_wall_ms = max(1.0, scan.duration_ms)
+            game_cpu_diag = (
+                f"gameCpu={game_cpu_ms}ms "
+                f"gameCpuWall={game_cpu_ms / game_wall_ms:.2f} "
+                f"gamePid={game_cpu_after[0]} "
+            )
+        else:
+            game_cpu_diag = ""
         if not scan.ok:
             # A failed observation (capture or detection error) must not
             # poison the hunt clear/startup state. Discovery and tracking use
@@ -217,11 +246,22 @@ class DiscoveryWorker:
                 f"[DISCOVERY] SLOW scan total={total_ms}ms "
                 f"capture={capture_ms}ms lock_wait={scan.lock_wait_ms}ms "
                 f"detect={scan.detect_ms}ms "
+                f"cpu={int(timing.get('cpuMs', 0.0))}ms "
+                f"cpuWall={timing.get('cpuWallRatio', 1.0):.2f} "
+                f"threadCpu={int(timing.get('threadCpuMs', 0.0))}ms "
+                f"threadCpuWall={timing.get('threadCpuWall', 1.0):.2f} "
+                f"{game_cpu_diag}"
+                f"frame={int(timing.get('frameW', 0.0))}x"
+                f"{int(timing.get('frameH', 0.0))} "
+                f"downscale={int(timing.get('downscale', 0.0))} "
                 f"raw={scan.raw_count} "
                 f"accepted={scan.accepted_count} "
                 f"blobCount={int(timing.get('blobCount', 0.0))} "
                 f"checks={int(timing.get('silhouetteCheckCount', 0.0))} "
                 f"heatmap={int(timing.get('spriteHeatmap', 0.0) * 1000)}ms "
+                f"hmResize={int(timing.get('heatmapWorkResize', 0.0) * 1000)}ms "
+                f"hmPalette={int(timing.get('heatmapPalettePass', 0.0) * 1000)}ms "
+                f"hmFinish={int(timing.get('heatmapFinish', 0.0) * 1000)}ms "
                 f"blobs={int(timing.get('blobCenters', 0.0) * 1000)}ms "
                 f"palette={int(timing.get('silhouettePaletteHeatmap', 0.0) * 1000)}ms "
                 f"gate={int(timing.get('silhouetteGate', 0.0) * 1000)}ms "
@@ -229,6 +269,21 @@ class DiscoveryWorker:
                 f"gateBBox={int(timing.get('maxGateWidth', 0.0))}x"
                 f"{int(timing.get('maxGateHeight', 0.0))}"
             )
+            ctx.logger.behavior(f"[DISCOVERY] SLOW frame_stats {frame_stats(frame)}")
+            if slow_samples:
+                lines = [
+                    f"  t={elapsed:.2f}s {name}: {info}"
+                    for elapsed, thread_snapshot in slow_samples
+                    for name, info, _cpu in thread_snapshot
+                ]
+                cpu_lines = format_thread_cpu_deltas(slow_samples)
+                if cpu_lines:
+                    lines.append("[DISCOVERY] SLOW per-thread CPU:")
+                    lines.extend(cpu_lines)
+                ctx.logger.behavior(
+                    "[DISCOVERY] SLOW during-scan samples:\n" + "\n".join(lines)
+                )
+            ctx.logger.behavior(f"[DISCOVERY] SLOW threads:\n{format_thread_dump()}")
 
         self._scan_count += 1
 

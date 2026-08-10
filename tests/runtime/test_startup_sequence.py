@@ -200,6 +200,49 @@ class HuntStartupSequenceTests(unittest.TestCase):
         sequence.mark_timers_done()
         self.assertTrue(gates.should_run_combat())
 
+    def test_danger_escape_keeps_hunt_intact_like_normal_teleport(self) -> None:
+        """A hunting danger escape is a normal teleport: it must not break the hunt.
+
+        Only sit/stand recovery and kafra (storage) sessions start a new hunt
+        cycle. After an escape the active buffs/timers stay done and the
+        generation is unchanged, so combat resumes immediately in the landing
+        area instead of re-running the startup sequence.
+        """
+        sequence = HuntStartupSequence()
+        sequence.begin()
+        sequence.mark_area_clear()
+        sequence.mark_buffs_done()
+        sequence.mark_timers_done()
+        gates = GateController(startup=sequence)
+        old_generation = sequence.generation
+
+        gates.finish_danger_transition(seated=False)
+
+        self.assertEqual(sequence.generation, old_generation)
+        self.assertTrue(sequence.area_clear.is_set())
+        self.assertTrue(sequence.buffs_done.is_set())
+        self.assertTrue(sequence.timers_done.is_set())
+        self.assertTrue(gates.should_run_combat())
+        # The landing area is scanned promptly so tracks can be re-created.
+        self.assertTrue(gates.discovery_wake.is_set())
+
+    def test_seated_danger_escape_never_touches_hunt_state(self) -> None:
+        """Seated escapes stay inside the SP session and touch nothing."""
+        sequence = HuntStartupSequence()
+        sequence.begin()
+        sequence.mark_area_clear()
+        sequence.mark_buffs_done()
+        sequence.mark_timers_done()
+        gates = GateController(startup=sequence)
+        old_generation = sequence.generation
+
+        gates.finish_danger_transition(seated=True)
+
+        self.assertEqual(sequence.generation, old_generation)
+        self.assertTrue(sequence.buffs_done.is_set())
+        self.assertTrue(sequence.timers_done.is_set())
+        self.assertFalse(gates.discovery_wake.is_set())
+
     def test_new_hunt_with_trusted_clear_runs_startup_immediately(self) -> None:
         sequence = HuntStartupSequence()
         sequence.begin()

@@ -932,6 +932,16 @@ class GameplayLoop:
                     getattr(self._ctx, "startup_timers_done", None)
                 )
                 if startup_buffs_done is False or startup_timers_done is False:
+                    # Startup actions have not completed. The periodic
+                    # scheduler must stay parked (buffs/timers would replay),
+                    # but a recovered hunt (danger escape, sit landing) keeps
+                    # combat live before the first clear scan: the landing
+                    # area may be populated, and attack must run to clear it
+                    # instead of standing still until an empty scan releases
+                    # the startup milestones. ``should_run_combat`` already
+                    # admits the pre-clear window via the startup sequence.
+                    if self._ctx.should_run_combat():
+                        self._attack.process_pending()
                     self._wait_for_gameplay_delay(ATTACK_IDLE_SPIN_S)
                     continue
                 # Startup callbacks may have succeeded on this same generation;

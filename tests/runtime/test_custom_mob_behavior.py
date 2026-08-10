@@ -433,6 +433,60 @@ class SelfBuffWorkerTests(unittest.TestCase):
         self.assertEqual(casts, [(59, 300, 350)])
         self.assertEqual(clock["ms"], 0)
 
+    def test_pre_clear_window_paces_poll_instead_of_spinning(self) -> None:
+        """A recovered-hunt pre-clear window must poll, not spin on the GIL.
+
+        After a danger escape (``trusted_clear=False``) combat is admitted
+        (``wait_while_combat_blocked`` returns immediately) while startup
+        actions stay blocked until the first discovery scan confirms the
+        landing area. The old loop continued without sleeping in that state,
+        spinning hot and starving the very scan that would release it — the
+        observed 8-13 s post-teleport freeze.
+        """
+        stop = threading.Event()
+        waits: list[float] = []
+
+        class StopEvent:
+            def is_set(self) -> bool:
+                return stop.is_set()
+
+            def wait(self, timeout: float) -> bool:
+                waits.append(timeout)
+                if len(waits) >= 3:
+                    stop.set()
+                return stop.is_set()
+
+        ctx = SimpleNamespace(
+            config=SimpleNamespace(
+                skill_timers=(),
+                custom_behavior=CustomBehaviorRuntime(
+                    buffs=(SelfBuffRuntime("f1", 59, 1000),)
+                )
+            ),
+            logger=SimpleNamespace(behavior=MagicMock()),
+            stop_event=StopEvent(),
+            is_stopped=stop.is_set,
+            hunt_generation=1,
+            # Recovered hunt: area not yet confirmed clear by a scan.
+            should_run_startup_actions=lambda: False,
+            # Combat is admitted in the pre-clear window: returns instantly.
+            wait_while_combat_blocked=lambda _timeout: True,
+            character_screen_pos=lambda: (300, 350),
+            character_action_gate=CharacterActionGate(),
+        )
+
+        worker = SelfBuffWorker(
+            ctx, SimpleNamespace(skill_click_at=MagicMock(return_value=True))
+        )
+        result = worker.process_pending()
+
+        # The sequence bails on stop; every blocked iteration must have
+        # slept a real poll so the loop cannot hold the GIL while waiting
+        # for the scan to clear the area.
+        self.assertFalse(result)
+        self.assertGreaterEqual(len(waits), 3)
+        self.assertTrue(all(timeout > 0 for timeout in waits))
+
     def test_periodic_buff_casts_under_shared_burst_flag(self) -> None:
         """A periodic buff cast claims buff priority on the shared gate."""
         stop = threading.Event()

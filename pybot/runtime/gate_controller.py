@@ -310,11 +310,18 @@ class GateController:
             self._restore_resume_gate()
 
     def finish_danger_transition(self, *, seated: bool) -> None:
-        """Publish a clean post-escape hunt boundary for non-seated danger."""
+        """Release the hunt boundary after a danger escape.
+
+        A hunting danger escape is a normal teleport: the active hunt (area
+        milestone, buffs, timers) continues unchanged, exactly like a
+        clear-area fly-wing. Only sit/stand recovery and kafra (storage)
+        sessions break the hunt loop. The teleport transaction already reset
+        track state (``area_epoch``), so stale pre-escape results are rejected
+        at the publication boundary without a new startup generation.
+        """
         if seated:
             return
         with self._sit_storage_lock:
-            self.startup.begin_new_hunt(trusted_clear=False)
             # Do not clear sitting_event here. The normal hunting owner cannot
             # claim a seated session; if this is ever set by another path it is
             # owned by that session and must be released by its owner.

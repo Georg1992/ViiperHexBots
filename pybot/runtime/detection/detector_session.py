@@ -92,6 +92,14 @@ class LocalTrackBatchResult:
     coord_updates: int
     lock_wait_ms: int = 0
     compute_ms: int = 0
+    # Process-CPU time consumed during the batch, for the same OS-starvation
+    # diagnosis used by discovery: a multi-second wall batch with a tiny CPU
+    # delta means the process was starved, not that tracking worked hard.
+    cpu_ms: int = 0
+    # Per-thread CPU (this tracking thread only). The decisive attribution:
+    # process-wide CPU can be consumed by the OCR/UI threads while this thread
+    # was starved of the GIL.
+    thread_cpu_ms: int = 0
     track_durations_ms: dict[int, float] = field(default_factory=dict)
 
 
@@ -301,6 +309,8 @@ class DetectorSession:
         if not track_snapshots:
             return LocalTrackBatchResult(True, "", [], 0, 0, 0)
         started = time.perf_counter()
+        cpu_started = time.process_time()
+        thread_cpu_started = time.thread_time()
         with self._tracking_lock:
             if self._closed:
                 return LocalTrackBatchResult(False, "session_closed", [], 0, 0, 0)
@@ -317,6 +327,8 @@ class DetectorSession:
                 if on_result is not None:
                     on_result(result)
         duration_ms = int((time.perf_counter() - started) * 1000)
+        cpu_ms = int((time.process_time() - cpu_started) * 1000)
+        thread_cpu_ms = int((time.thread_time() - thread_cpu_started) * 1000)
         found_count = sum(1 for result in results if result.found)
         coord_updates = sum(
             1 for result, snapshot in zip(results, track_snapshots)
@@ -324,7 +336,9 @@ class DetectorSession:
         )
         return LocalTrackBatchResult(
             True, "", results, duration_ms, found_count, coord_updates,
-            lock_wait_ms=0, compute_ms=duration_ms, track_durations_ms=durations,
+            lock_wait_ms=0, compute_ms=duration_ms, cpu_ms=cpu_ms,
+            thread_cpu_ms=thread_cpu_ms,
+            track_durations_ms=durations,
         )
 
 

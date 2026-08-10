@@ -7,6 +7,8 @@ Pipeline: weighted sprite palette heatmap → body-cluster diversity
 
 from __future__ import annotations
 
+import time
+
 import cv2
 import numpy as np
 
@@ -733,6 +735,10 @@ class HeatmapDetector:
         self._last_body_best: np.ndarray | None = None
         self._last_body_downscale: int = 0
         self._last_body_descriptor_id: int = 0
+        # Sub-stage wall timings from the last build_sprite_heatmap call, for
+        # the SLOW diagnostic: work-resize / palette pass / finish (edge,
+        # blur, upscale).
+        self.last_stage_times: dict[str, float] = {}
 
     def _center_scales(self, frame_width: int) -> list[float]:
         return [
@@ -797,9 +803,12 @@ class HeatmapDetector:
         Returns sprite_heatmap at full frame resolution.
         """
         frame_shape = frame_bgr.shape[:2]
+        work_started = time.perf_counter()
         work_bgr = self._work_bgr(frame_bgr, downscale)
+        work_elapsed = time.perf_counter() - work_started
 
         # --- 1. Sprite-palette-distance heatmap ---
+        palette_started = time.perf_counter()
         if fast_static:
             # Static GRF mode does not need scene-relative rarity or the
             # full-frame body/group diversity maps. Avoiding those extra
@@ -845,11 +854,20 @@ class HeatmapDetector:
             self._last_body_best = None
             self._last_body_downscale = 0
             self._last_body_descriptor_id = 0
+        palette_elapsed = time.perf_counter() - palette_started
 
         # --- 2. Edge-density boost ---
         # --- 3. GaussianBlur ---
         # --- 4. Upscale ---
-        return self._finish_heatmap(sprite, work_bgr, descriptor, downscale, frame_shape)
+        finish_started = time.perf_counter()
+        final = self._finish_heatmap(sprite, work_bgr, descriptor, downscale, frame_shape)
+        finish_elapsed = time.perf_counter() - finish_started
+        self.last_stage_times = {
+            "workResize": work_elapsed,
+            "palettePass": palette_elapsed,
+            "finishEdgeBlurUpscale": finish_elapsed,
+        }
+        return final
 
     def top_centers(
         self,

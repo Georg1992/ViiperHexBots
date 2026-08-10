@@ -177,12 +177,15 @@ class SelfBuffWorker:
                 if not self._startup_action_allowed():
                     if self._critical_pending():
                         return False
-                    resumed = self._ctx.wait_while_combat_blocked(0.25)
-                    # Lightweight/test contexts may return immediately while
-                    # still blocked; poll stop_event only on interruption so
-                    # a blocked startup cannot spin forever without adding
-                    # delay after a successful wake.
-                    if not resumed and self._ctx.stop_event.wait(0.05):
+                    self._ctx.wait_while_combat_blocked(0.25)
+                    # In a recovered hunt's pre-clear window (danger escape /
+                    # random fly-wing landing) combat is admitted, so
+                    # wait_while_combat_blocked returns immediately, while
+                    # startup actions stay blocked until the first discovery
+                    # scan confirms the landing area. Re-check and pace the
+                    # poll so the loop sleeps instead of spinning hot on the
+                    # GIL and starving the very scan that would release it.
+                    if not self._startup_action_allowed() and self._ctx.stop_event.wait(0.05):
                         return False
                     continue
                 if not self._wait_stagger_gap(startup=True):
@@ -241,8 +244,10 @@ class SelfBuffWorker:
                 if self._critical_pending():
                     return False
                 deadline = None
-                resumed = self._ctx.wait_while_combat_blocked(0.25)
-                if not resumed and self._ctx.stop_event.wait(0.05):
+                self._ctx.wait_while_combat_blocked(0.25)
+                # Same re-check as _run_startup_sequence: combat may be
+                # admitted before the area is confirmed clear; never spin.
+                if not self._startup_action_allowed() and self._ctx.stop_event.wait(0.05):
                     return False
                 continue
             if deadline is None:
@@ -274,6 +279,10 @@ class SelfBuffWorker:
                 if self._critical_pending():
                     return False
                 self._ctx.wait_while_combat_blocked(0.25)
+                # Same re-check as the startup sequence: in the pre-clear
+                # window combat is admitted while the action stays blocked.
+                if not allowed() and self._ctx.stop_event.wait(0.05):
+                    return False
                 continue
             now = monotonic_ms()
             if gate.try_claim(is_buff=True, now_ms=now):

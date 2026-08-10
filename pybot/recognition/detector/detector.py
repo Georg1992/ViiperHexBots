@@ -403,6 +403,8 @@ class MobDetector:
         applied.
         """
         start = time.perf_counter()
+        cpu_start = time.process_time()
+        thread_cpu_start = time.thread_time()
         descriptor = self.ensure_descriptor(mob_name)
 
         # --- heatmap --------------------------------------------------
@@ -634,9 +636,26 @@ class MobDetector:
         accepted = self._finalize_accepted(candidates)[:max_candidates]
 
         elapsed = time.perf_counter() - start
+        cpu_elapsed = time.process_time() - cpu_start
+        # Per-thread CPU is the decisive attribution: ``process_time`` sums
+        # every bot thread, so a busy OCR thread can hide how starved the
+        # discovery thread itself was. A large wall span with tiny thread CPU
+        # means this thread was not scheduled (GIL held elsewhere / OS
+        # starvation); thread CPU ≈ wall means this thread genuinely worked.
+        thread_cpu_elapsed = time.thread_time() - thread_cpu_start
+        # Heatmap sub-stages (wall time) from the last build call, for the
+        # SLOW diagnostic — attribute the 9 s to palette pass vs finish steps.
+        heatmap_stages = getattr(
+            self.heatmap_detector, "last_stage_times", None
+        ) or {}
         timing = {
             "descriptor": heatmap_start - start,
             "spriteHeatmap": heatmap_end - heatmap_start,
+            "heatmapWorkResize": float(heatmap_stages.get("workResize", 0.0)),
+            "heatmapPalettePass": float(heatmap_stages.get("palettePass", 0.0)),
+            "heatmapFinish": float(
+                heatmap_stages.get("finishEdgeBlurUpscale", 0.0)
+            ),
             "blobCenters": blobs_end - heatmap_end,
             "silhouettePaletteHeatmap": palette_heatmap_elapsed,
             # Candidate gate time excludes the optional shared palette-map
@@ -646,6 +665,25 @@ class MobDetector:
                 palette_heatmap_started + palette_heatmap_elapsed
             ),
             "total": elapsed,
+            # Process-CPU time consumed while this detect call was on the wall
+            # clock, and the ratio of CPU to wall time. A ratio well below 1.0
+            # over a multi-second wall span means the *process* received almost
+            # no CPU from the OS (another process saturating the machine, e.g.
+            # the game client loading a map) rather than this detector doing
+            # that much work. Note the process-wide metric counts all threads,
+            # and in-process concurrency can push the ratio above 1.0; the
+            # starvation signal is still unambiguous when wall time is large
+            # and the ratio is tiny. That distinction is the whole diagnosis
+            # for multi-second post-teleport scans.
+            "cpuMs": cpu_elapsed * 1000.0,
+            "cpuWallRatio": (cpu_elapsed / elapsed) if elapsed > 0.0 else 1.0,
+            "threadCpuMs": thread_cpu_elapsed * 1000.0,
+            "threadCpuWall": (
+                (thread_cpu_elapsed / elapsed) if elapsed > 0.0 else 1.0
+            ),
+            "frameW": float(frame_bgr.shape[1]),
+            "frameH": float(frame_bgr.shape[0]),
+            "downscale": float(downscale),
             "blobCount": float(len(blobs)),
             "silhouetteCheckCount": float(len(silhouette_checks)),
             "gateTotal": gate_elapsed_s,

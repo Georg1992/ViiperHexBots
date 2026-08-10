@@ -18,6 +18,7 @@ from pybot.runtime.constants import (
 )
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.detection.detector_session import StateTrackSnapshot
+from pybot.runtime.diagnostics import format_thread_dump, game_process_cpu_snapshot
 from pybot.runtime.workers.worker_contexts import CoordTrackingWorkerContext
 
 
@@ -112,7 +113,21 @@ class CoordTrackingWorker:
             if track.discovery_scale > 0
         ]
         if snapshots:
+            # The game client's process is identified through the captured window.
+            window_id = getattr(ctx.capture, "hwnd", None)
+            game_cpu_before = game_process_cpu_snapshot(window_id)
             batch = ctx.tracker.track_locals_frame(frame, roi, snapshots)
+            game_cpu_diag = ""
+            game_cpu_after = game_process_cpu_snapshot(window_id)
+            if game_cpu_before is not None and game_cpu_after is not None:
+                game_cpu_ms = int(
+                    (game_cpu_after[1] - game_cpu_before[1]) * 1000
+                )
+                game_cpu_diag = (
+                    f"gameCpu={game_cpu_ms}ms "
+                    f"gameCpuWall={game_cpu_ms / max(1.0, getattr(batch, 'duration_ms', 0)):.2f} "
+                    f"gamePid={game_cpu_after[0]} "
+                )
             if ctx.should_run_tracking() and ctx.tracks.area_epoch == area_epoch:
                 completed_ms = monotonic_ms()
                 missed, deaths = ctx.tracks.apply_tracking(
@@ -126,7 +141,7 @@ class CoordTrackingWorker:
                 self._log_first_ticks(alive_tracks, batch.results, area_epoch, now_ms)
             else:
                 missed, deaths = [], []
-            self._warn_if_slow_tracking(batch, snapshots)
+            self._warn_if_slow_tracking(batch, snapshots, game_cpu_diag=game_cpu_diag)
             # A miss is retained locally and will enter the Track's internal
             # recovery ladder on the next fresh frame. Discovery is independent
             # validation, not the recovery mechanism. It may still be notified
@@ -257,7 +272,7 @@ class CoordTrackingWorker:
             if wake is not None:
                 wake.set()
 
-    def _warn_if_slow_tracking(self, batch, snapshots) -> None:
+    def _warn_if_slow_tracking(self, batch, snapshots, *, game_cpu_diag: str = "") -> None:
         duration_ms = getattr(batch, "duration_ms", 0)
         if duration_ms < SLOW_SCAN_WARN_MS:
             return
@@ -265,10 +280,18 @@ class CoordTrackingWorker:
         if now_ms - self._last_slow_track_log_ms < LOG_REPEAT_INTERVAL_MS:
             return
         self._last_slow_track_log_ms = now_ms
+        cpu_ms = getattr(batch, "cpu_ms", 0)
+        wall_ms = max(1, duration_ms)
+        thread_cpu_ms = getattr(batch, "thread_cpu_ms", 0)
         self._ctx.logger.behavior(
             f"[COORD] SLOW tracking total={duration_ms}ms tracks={len(snapshots)} "
+            f"cpu={int(cpu_ms)}ms cpuWall={float(cpu_ms) / wall_ms:.2f} "
+            f"threadCpu={int(thread_cpu_ms)}ms "
+            f"threadCpuWall={float(thread_cpu_ms) / wall_ms:.2f} "
+            f"{game_cpu_diag}"
             f"found={getattr(batch, 'found_count', 0)} coord_updates={getattr(batch, 'coord_updates', 0)}"
         )
+        self._ctx.logger.behavior(f"[COORD] SLOW threads:\n{format_thread_dump()}")
 
     def _update_overlay(self, now_ms: int) -> None:
         del now_ms

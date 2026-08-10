@@ -364,12 +364,15 @@ class DangerController:
                         f"[DANGER] {reason} teleport failed — retrying"
                     )
                     return False
-                # Hunting danger starts a fresh, discovery-confirmed generation.
-                # Sit danger remains inside the existing SP session; its owner
-                # will call end_sit_ops after the re-sit/recovery sequence.
+                # Hunting danger is a normal teleport: the active hunt keeps
+                # its area milestone, buffs, and timers (no new generation).
+                # Only sit/stand recovery and kafra (storage) sessions break
+                # the hunt loop. Sit danger remains inside the existing SP
+                # session; its owner will call end_sit_ops after the
+                # re-sit/recovery sequence.
                 self._ctx.finish_danger_transition(seated=seated)
                 self._ctx.logger.behavior(
-                    f"[DANGER] {reason} escape complete — fresh transition"
+                    f"[DANGER] {reason} escape complete"
                 )
                 return True
             except Exception as exc:
