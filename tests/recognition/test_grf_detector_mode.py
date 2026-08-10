@@ -27,10 +27,7 @@ from pybot.recognition.fixtures import (
     fixture_search_frame,
 )
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
-from pybot.recognition.detector.tracking.local_tracker import (
-    _refine_hit_to_sprite_center,
-    track_local,
-)
+from pybot.recognition.detector.tracking.local_tracker import track_local
 
 ROOT = PROJECT_ROOT
 MOB_REC = RECOGNITION_DIR
@@ -227,21 +224,6 @@ class GrfDetectorModeTests(unittest.TestCase):
             result = track_local(detector, roi, "horn", track)
         self.assertTrue(result.found, result.miss_reason)
         spy.assert_called()
-
-    def test_refine_hit_to_sprite_center_returns_sprite_bbox_center(self) -> None:
-        """The aim point snaps to the palette-CC bbox center, not the raw input."""
-        grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
-        descriptor = grf.ensure_descriptor("anubis")
-        frame = np.zeros((800, 800, 3), dtype=np.uint8)
-        # A solid red body at a known location, comfortably inside the
-        # descriptor-sized window (BGR red matches the palette).
-        frame[320:440, 320:440] = (0, 0, 220)
-        # Input deliberately off-center — like a heat peak on the dense region.
-        cx, cy = _refine_hit_to_sprite_center(
-            grf, frame, descriptor, 395, 370, 1.0,
-        )
-        self.assertLess(abs(cx - 380), 4)  # bbox center x = (320+440)/2
-        self.assertLess(abs(cy - 380), 4)  # bbox center y = (320+440)/2
 
     def test_fast_tracking_sticks_to_sprite_center(self) -> None:
         """A deliberately off-sprite seed still resolves onto the mob's center."""

@@ -9,7 +9,7 @@ The expensive gate is deliberately not run at the old center first: that center
 is stale for moving mobs and doing so duplicated the largest part of every
 tracking tick.    Tracking is pure follow for position and reports terminal local loss;
     Discovery remains an independent validation/removal observer.
-Opacity is measured on hits for in-place death fade.
+Warm tracking only publishes fresh coordinates; discovery owns absence/death validation.
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ from pybot.recognition.detector.scoring.heatmap_detector import (
     palette_heatmap,
     sprite_palette_heatmap,
 )
-from pybot.recognition.detector.tracking.opacity_probe import measure_opacity_score
 
 if TYPE_CHECKING:
     from pybot.recognition.detector.detector import MobDetector
@@ -40,21 +39,18 @@ _FAST_BBOX_MIN_PX = 8
 # palette peak; this rejects weak marginal blobs that a red-tinted terrain
 # fragment could produce.
 _LOCAL_FAST_MIN_HEAT_MULT = 2.0
-# The sprite-recenter window is 1.5x the descriptor size so a hit that sits
-# off the sprite edge still contains the full body (a descriptor-sized window
-# would clip the palette bbox and bias the center toward the window center).
-_REFINE_WINDOW_SCALE = 1.5
+# Keep re-anchoring to one small descriptor-sized local window. The center
+# calculation deliberately avoids connected components and extra identity gates.
+_REFINE_WINDOW_SCALE = 1.25
 _LOCAL_CROSS_TRACK_SUPPRESS_DIV = 2
 _LOCAL_FOLLOW_MIN_HEAT_FRAC = 0.5
 _LOCAL_FOLLOW_BODY_W = 0.55
 _LOCAL_FOLLOW_ACCENT_W = 0.45
 _LOCAL_FOLLOW_SPRITE_W = 0.75
 _LOCAL_FOLLOW_COLOR_W = 0.55
-# Tracking has one deterministic peak decision; failed validation is a miss.
-# Large sprites (especially Anubis) make a full-resolution local heatmap
-# unnecessarily expensive. A 2x image pyramid keeps the search geometry wide
-# while reducing the per-pixel palette/morphology work by roughly 4x. The final
-# candidate is still verified at native resolution by score_at().
+# Tracking has one deterministic peak decision. Large sprites (especially
+# Anubis) use a 2x image pyramid to keep local palette work bounded; normal
+# animated sprites use the native gate only during initial acquisition.
 _LOCAL_HEATMAP_DOWNSCALE = 2
 # Temporal-follow correlation runs on a half-resolution grayscale patch. It is
 # deliberately independent of the full detector so a confirmed track does not
@@ -62,12 +58,8 @@ _LOCAL_HEATMAP_DOWNSCALE = 2
 _TEMPLATE_DOWNSCALE = 2
 _TEMPLATE_MIN_SCORE = 0.42
 _TEMPLATE_MIN_STD = 3.0
-# Warm correlation must still contain enough mob-colored/body-colored pixels;
-# this rejects a grayscale match on terrain or the player before the cache is
-# refreshed from it.
-_TEMPLATE_MIN_SPRITE_FRACTION = 0.12
-_TEMPLATE_MIN_BODY_FRACTION = 0.035
-_TEMPLATE_VERIFY_EVERY = 12
+# The grayscale anchor is kept stable; local palette heat is used only for
+# the current-frame center correction, never to rebuild the anchor.
 _LOCAL_RECOVERY_RADIUS_MULTIPLIER = 2
 _LOCAL_TRACK_LOST_MISSES = 8
 
@@ -81,7 +73,6 @@ class _TrackTemplate:
     center_x: int
     center_y: int
     scale: float
-    verified_hits: int = 0
 
 
 @dataclass(frozen=True)
@@ -176,11 +167,10 @@ def track_local(
     identity_cx = cx
     identity_cy = cy
 
-    # Candidate resolution is an explicit one-shot phase. Provisional IDs use
-    # the local heatmap; the resulting hit becomes the stable positive-track
-    # anchor after commit. A positive Track that has already lost its anchor
-    # must not silently reacquire a nearby identical mob through the generic
-    # detector path.
+    # Provisional IDs use the local heatmap once; the resulting hit becomes
+    # the stable positive-track anchor after commit. A positive Track that has
+    # lost its anchor must not silently reacquire a nearby identical mob through
+    # the generic detector path.
     template_store = _template_store(detector)
     if track_id < 0 or (track_id not in template_store and not anchor_required):
         peak = _find_local_peak(
@@ -213,6 +203,14 @@ def track_local(
             offset_x=offset_x,
             offset_y=offset_y,
         )
+        if result is None:
+            return _miss_result(
+                track_id=track_id,
+                x=screen_cx,
+                y=screen_cy,
+                reason="center_projection_failed",
+                tracking_lost=False,
+            )
         _track_miss_store(detector).pop(track_id, None)
         return result
 
@@ -335,22 +333,26 @@ def _finalize_track_hit(
     similarity: float,
     scale: float,
     offset_x: int, offset_y: int,
-) -> LocalTrackResult:
+) -> LocalTrackResult | None:
     bx, by, bw, bh = bbox
-    x = bx + bw // 2 + offset_x
-    y = by + bh // 2 + offset_y
-
-    opacity_score = measure_opacity_score(
-        frame_bgr,
-        descriptor,
-        bbox,
-        float(descriptor.max_sprite_palette_distance),
-        float(detector.config["minSpritePaletteMatch"]),
+    if bw <= 0 or bh <= 0:
+        return None
+    # ``score_at`` already paid for the native silhouette gate. Re-anchor its
+    # current-frame extract center once more through the same cheap local mask
+    # used by warm tracking; no unverified acquisition coordinate is publishable.
+    raw_x = bx + bw // 2
+    raw_y = by + bh // 2
+    projected = _refine_hit_to_sprite_center(
+        detector, frame_bgr, descriptor, raw_x, raw_y, scale,
     )
+    if projected is None:
+        return None
+    x = projected[0] + offset_x
+    y = projected[1] + offset_y
 
-    # Provisional acquisition creates the first anchor. A positive Track keeps
-    # that anchor stable; the warm follower may only re-anchor after its
-    # periodic native verification has accepted a hit.
+    # Provisional acquisition creates the first stable identity anchor. Warm
+    # tracking re-anchors the published coordinate on every fresh frame without
+    # replacing this template. Death/absence validation is discovery-owned.
     if track_id not in _template_store(detector):
         _remember_track_template(
             detector,
@@ -363,7 +365,7 @@ def _finalize_track_hit(
     return LocalTrackResult(
         track_id=track_id, found=True, x=x, y=y,
         confidence=similarity, miss_reason="",
-        opacity_score=opacity_score,
+        opacity_score=0.0,
     )
 
 
@@ -466,10 +468,6 @@ def _remember_track_template(
         interpolation=cv2.INTER_AREA,
     )
     store = _template_store(detector)
-    previous = store.get(track_id)
-    verified_hits = (
-        int(getattr(previous, "verified_hits", 0)) if previous is not None else 0
-    )
     store[track_id] = _TrackTemplate(
         image_gray=reduced,
         width=x1 - x0,
@@ -477,7 +475,6 @@ def _remember_track_template(
         center_x=(x0 + x1) // 2,
         center_y=(y0 + y1) // 2,
         scale=scale,
-        verified_hits=verified_hits,
     )
     # There is exactly one small anchor per active Track. Runtime lifecycle
     # pruning removes anchors when Tracks disappear; never evict an arbitrary
@@ -557,20 +554,21 @@ def _follow_cached_template(
 
     hit_x = int(round(x0 + (max_loc[0] + tw / 2.0) * _TEMPLATE_DOWNSCALE))
     hit_y = int(round(y0 + (max_loc[1] + th / 2.0) * _TEMPLATE_DOWNSCALE))
-    # Correct the center before the strict identity/suppression checks. A
-    # template hit can be a few pixels outside the sprite edge; rejecting it
-    # first made the tracker go stale instead of using palette heat to pull it
-    # back onto the mob. The stable patch remains unchanged until verification.
-    native_w = max(1, int(round(tw * _TEMPLATE_DOWNSCALE)))
-    native_h = max(1, int(round(th * _TEMPLATE_DOWNSCALE)))
-    hit_x, hit_y = _refine_hit_to_sprite_center(
+    # Every successful warm frame must be anchored by the current sprite mask.
+    # No raw template coordinate is publishable.
+    projected = _refine_hit_to_sprite_center(
         detector, frame_bgr, descriptor, hit_x, hit_y, scale,
     )
-
-    # Center refinement can move a valid template hit by a few pixels. Keep
-    # the final corrected coordinate inside the same corridor as well.
-    if (hit_x - identity_cx) ** 2 + (hit_y - identity_cy) ** 2 > identity_radius ** 2:
+    if projected is None:
         return None
+    hit_x, hit_y = projected
+    if (
+        (hit_x - identity_cx) ** 2 + (hit_y - identity_cy) ** 2
+        > float(identity_radius * identity_radius)
+    ):
+        return None
+    native_w = max(1, int(round(tw * _TEMPLATE_DOWNSCALE)))
+    native_h = max(1, int(round(th * _TEMPLATE_DOWNSCALE)))
     if suppress_positions:
         suppress_radius = max(_LOCAL_SUPPRESS_RADIUS_FLOOR_PX, search_radius_px // 3)
         if any((hit_x - sx) ** 2 + (hit_y - sy) ** 2 <= suppress_radius ** 2
@@ -583,56 +581,8 @@ def _follow_cached_template(
         native_w,
         native_h,
     )
-    # A weak frame must not destroy the only identity anchor. Keep it intact
-    # for the expanded same-template recovery pass on the next attempt.
-    if not _template_identity_ok(detector, frame_bgr, descriptor, bbox):
-        return None
-
-    previous_hits = int(getattr(template, "verified_hits", 0)) + 1
-    # Static GRF descriptors skip the periodic native verify entirely — the
-    # every-hit ``_template_identity_ok`` color/body check is their identity
-    # guarantee, and skipping the gate removes the flicker-miss class.
-    reanchor_verified = (
-        previous_hits % _TEMPLATE_VERIFY_EVERY == 0
-        and not _fast_track_accept(detector, descriptor)
-    )
-    if reanchor_verified:
-        accepted, _verified_bbox, _similarity = detector.score_at(
-            frame_bgr, descriptor, hit_x, hit_y, scale,
-        )
-        if not accepted:
-            # Preserve the last trusted anchor; a single failed verification is
-            # a recovery event, not permission to re-identify generically.
-            return None
-        # Only a periodic native-verified hit may replace the stable anchor.
-        # Ordinary animated frames update the coordinate but never teach the
-        # tracker to follow a wrong edge/background patch.
-        _remember_track_template(
-            detector,
-            track_id=track_id,
-            frame_bgr=frame_bgr,
-            bbox=bbox,
-            scale=scale,
-        )
-
-    current = _template_store(detector).get(track_id)
-    if current is not None:
-        _template_store(detector)[track_id] = _TrackTemplate(
-            image_gray=current.image_gray,
-            width=current.width,
-            height=current.height,
-            center_x=current.center_x,
-            center_y=current.center_y,
-            scale=current.scale,
-            verified_hits=previous_hits,
-        )
-    opacity_score = measure_opacity_score(
-        frame_bgr,
-        descriptor,
-        bbox,
-        float(descriptor.max_sprite_palette_distance),
-        float(detector.config["minSpritePaletteMatch"]),
-    )
+    # Keep the original template stable. Replacing it on every frame causes
+    # template drift; only the current-frame palette bbox may publish a center.
     return LocalTrackResult(
         track_id=track_id,
         found=True,
@@ -640,39 +590,7 @@ def _follow_cached_template(
         y=hit_y + offset_y,
         confidence=float(max_val),
         miss_reason="",
-        opacity_score=opacity_score,
-    )
-
-
-def _template_identity_ok(
-    detector: MobDetector,
-    frame_bgr: np.ndarray,
-    descriptor: MobDescriptor,
-    bbox: tuple[int, int, int, int],
-) -> bool:
-    """Cheap color/body identity check for warm temporal hits."""
-    x, y, width, height = bbox
-    frame_h, frame_w = frame_bgr.shape[:2]
-    x0 = max(0, int(x))
-    y0 = max(0, int(y))
-    x1 = min(frame_w, int(x + width))
-    y1 = min(frame_h, int(y + height))
-    if x1 <= x0 or y1 <= y0:
-        return False
-    region = frame_bgr[y0:y1, x0:x1]
-    sprite = sprite_palette_heatmap(
-        region,
-        descriptor.match_palette_bgr,
-        float(descriptor.max_sprite_palette_distance),
-    )
-    body = palette_heatmap(region, descriptor.body_palette)
-    sprite_fraction = float(
-        (sprite >= float(detector.config["minSpritePaletteMatch"])).mean()
-    )
-    body_fraction = float((body >= 0.5).mean())
-    return (
-        sprite_fraction >= _TEMPLATE_MIN_SPRITE_FRACTION
-        and body_fraction >= _TEMPLATE_MIN_BODY_FRACTION
+        opacity_score=0.0,
     )
 
 
@@ -754,31 +672,30 @@ def _find_local_peak(
     peak_x = int(round(peak_x_local * pyramid + x0 + (pyramid - 1) / 2))
     peak_y = int(round(peak_y_local * pyramid + y0 + (pyramid - 1) / 2))
     if _fast_track_accept(detector, descriptor):
-            # Static modified sprites (distinctive red, one frame): the local
-            # follow heatmap peak is already palette-driven, so accept it via a
-            # cheap sprite/body color-fraction check instead of the expensive
-            # native-resolution silhouette gate. This is the dominant per-tick
-            # cost for large sprites (Anubis) and a common miss source when the
-            # gate flickers on a deformed extract. The peak must clear a strong
-            # heat multiple (not just the floor) since no silhouette verify runs.
-            # Refine before identity validation so a slightly off-edge heat
-            # peak is corrected onto the sprite instead of becoming a miss.
-            peak_x, peak_y = _refine_hit_to_sprite_center(
+            # Static modified sprites are already palette-driven, so accept the
+            # local peak without the expensive native silhouette gate. The peak
+            # must clear a strong heat multiple to avoid weak terrain fragments.
+            # Every successful local peak must be anchored by the current
+            # sprite mask. An unanchored heat peak is a miss, never a fallback
+            # coordinate.
+            projected = _refine_hit_to_sprite_center(
                 detector, frame_bgr, descriptor, peak_x, peak_y, scale,
             )
+            if projected is None:
+                return None
+            peak_x, peak_y = projected
             bbox = _descriptor_sized_bbox(descriptor, peak_x, peak_y, scale)
-            if (
-                bbox is not None
-                and peak_val >= _LOCAL_FAST_MIN_HEAT_MULT * min_heat
-                and _template_identity_ok(detector, frame_bgr, descriptor, bbox)
-            ):
+            if bbox is not None and peak_val >= _LOCAL_FAST_MIN_HEAT_MULT * min_heat:
                 return peak_x, peak_y, peak_val, float(peak_val), bbox
     else:
         accepted, bbox, sim = detector.score_at(
             frame_bgr, descriptor, peak_x, peak_y, scale,
         )
         if accepted and bbox is not None:
-            return peak_x, peak_y, peak_val, sim, bbox
+            # Native gate returns the best current sprite extract. Carry its
+            # center forward instead of retaining the heatmap peak offset.
+            bx, by, bw, bh = bbox
+            return bx + bw // 2, by + bh // 2, peak_val, sim, bbox
     return None
 
 
@@ -823,26 +740,17 @@ def _refine_hit_to_sprite_center(
     cx: int,
     cy: int,
     scale: float,
-) -> tuple[int, int]:
-    """Re-center a hit on the mob's sprite (palette-CC bbox center).
+) -> tuple[int, int] | None:
+    """Re-anchor a hit to the current sprite-colored bbox center.
 
-    Heat peaks and template-patch centers can sit off the sprite body (a dense
-    color region or asymmetric pose). The palette-CC bounding box of the mob
-    inside a 1.5x descriptor-sized window around the hit is the same sprite
-    anchor discovery and ``score_at`` use, so every consumer sees one
-    consistent on-sprite point and the aim click lands on the mob. The
-    connected component overlapping the window center (the hit) is isolated so
-    an adjacent mob's pixels cannot drag the anchor between two sprites. Falls
-    back to the input when no palette match is visible.
+    This is one local palette pass and min/max arithmetic only. If animation or
+    occlusion leaves no local palette pixels, return ``None`` and fail the frame
+    closed; the same-template recovery ladder handles the next fresh frame.
     """
-    w = max(
-        _FAST_BBOX_MIN_PX,
-        int(round(descriptor.avg_width * scale * _REFINE_WINDOW_SCALE)),
-    )
-    h = max(
-        _FAST_BBOX_MIN_PX,
-        int(round(descriptor.avg_height * scale * _REFINE_WINDOW_SCALE)),
-    )
+    sprite_w = max(_FAST_BBOX_MIN_PX, int(round(descriptor.avg_width * scale)))
+    sprite_h = max(_FAST_BBOX_MIN_PX, int(round(descriptor.avg_height * scale)))
+    w = max(_FAST_BBOX_MIN_PX, int(round(sprite_w * _REFINE_WINDOW_SCALE)))
+    h = max(_FAST_BBOX_MIN_PX, int(round(sprite_h * _REFINE_WINDOW_SCALE)))
     fh, fw = frame_bgr.shape[:2]
     x0 = max(0, int(round(cx - w / 2)))
     y0 = max(0, int(round(cy - h / 2)))
@@ -851,7 +759,8 @@ def _refine_hit_to_sprite_center(
     x0 = max(0, x1 - w)
     y0 = max(0, y1 - h)
     if x1 <= x0 or y1 <= y0:
-        return int(cx), int(cy)
+        return None
+
     region = frame_bgr[y0:y1, x0:x1]
     heat = sprite_palette_heatmap(
         region,
@@ -860,50 +769,53 @@ def _refine_hit_to_sprite_center(
     )
     mask = heat >= float(detector.config["minSpritePaletteMatch"])
     if not np.any(mask):
-        return int(cx), int(cy)
+        return None
 
     local_cx = int(cx) - x0
     local_cy = int(cy) - y0
-    nlab, labels, _stats, _centroids = cv2.connectedComponentsWithStats(
-        mask.astype(np.uint8), connectivity=8,
-    )
-    chosen = 0
-    if (
-        nlab > 1
-        and 0 <= local_cx < mask.shape[1]
-        and 0 <= local_cy < mask.shape[0]
-    ):
-        chosen = int(labels[local_cy, local_cx])
-    if chosen <= 0 and nlab > 1:
-        # Hit fell just outside a component (e.g. a template edge). Choose the
-        # nearest component to the hit, not the largest component, so center
-        # correction remains local when another mob is nearby.
-        candidates: list[tuple[float, int]] = []
-        for label in range(1, nlab):
-            component_y, component_x = np.where(labels == label)
-            if component_x.size == 0:
-                continue
-            centroid_x = float(component_x.mean())
-            centroid_y = float(component_y.mean())
-            distance_sq = (
-                (centroid_x - local_cx) ** 2
-                + (centroid_y - local_cy) ** 2
-            )
-            candidates.append((distance_sq, label))
-        if candidates:
-            distance_sq, label = min(candidates)
-            # A hit just outside the component may be corrected, but never
-            # across most of the refinement window where another mob could be.
-            max_distance_sq = (max(w, h) * 0.4) ** 2
-            if distance_sq <= max_distance_sq:
-                chosen = label
-    if chosen <= 0:
-        return int(cx), int(cy)
+    # Restrict ownership to one descriptor-sized window, then select the
+    # connected palette component tied to this hit. Separate nearby identical
+    # mobs can never contribute pixels to the published center.
+    owner_x0 = max(0, local_cx - sprite_w // 2)
+    owner_y0 = max(0, local_cy - sprite_h // 2)
+    owner_x1 = min(mask.shape[1], owner_x0 + sprite_w)
+    owner_y1 = min(mask.shape[0], owner_y0 + sprite_h)
+    owner = mask[owner_y0:owner_y1, owner_x0:owner_x1]
+    if not np.any(owner):
+        return None
 
-    ys, xs = np.where(labels == chosen)
-    center_x = x0 + int(round((float(xs.min()) + float(xs.max())) / 2.0))
-    center_y = y0 + int(round((float(ys.min()) + float(ys.max())) / 2.0))
-    return center_x, center_y
+    if not (0 <= local_cx < mask.shape[1] and 0 <= local_cy < mask.shape[0]):
+        return None
+    if not (owner_x0 <= local_cx < owner_x1 and owner_y0 <= local_cy < owner_y1):
+        return None
+    # Animated sprites commonly have a small palette gap at their visual
+    # center. Bridge only that tiny internal gap inside this Track's ownership
+    # window; never search for or merge a neighboring component.
+    bridge = cv2.dilate(
+        owner.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        iterations=1,
+    )
+    n_labels, labels, _stats, _centroids = cv2.connectedComponentsWithStats(
+        bridge, connectivity=8,
+    )
+    if n_labels <= 1:
+        return None
+    hit_x = local_cx - owner_x0
+    hit_y = local_cy - owner_y0
+    selected_label = int(labels[hit_y, hit_x])
+    # A hit outside the bridged current-frame sprite is ambiguous. Do not guess
+    # a nearby identical mob; let the same-template recovery ladder retry.
+    if selected_label <= 0:
+        return None
+
+    selected = (labels == selected_label) & owner
+    ys, xs = np.where(selected)
+    if xs.size == 0:
+        return None
+    local_center_x = owner_x0 + int(round((float(xs.min()) + float(xs.max())) / 2.0))
+    local_center_y = owner_y0 + int(round((float(ys.min()) + float(ys.max())) / 2.0))
+    return x0 + local_center_x, y0 + local_center_y
 
 
 def _build_local_follow_heatmap(

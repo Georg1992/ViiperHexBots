@@ -20,10 +20,12 @@ from pybot.recognition.fixtures import (
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
 from pybot.recognition.detector.tracking.local_tracker import (
     LocalTrackResult,
-    clear_track_states,
-    transfer_track_state,
+    _find_local_peak,
     _local_follow_scales,
+    _refine_hit_to_sprite_center,
+    clear_track_states,
     track_local,
+    transfer_track_state,
 )
 
 ROOT = PROJECT_ROOT
@@ -71,6 +73,42 @@ class LocalTrackerTests(unittest.TestCase):
         track.update(overrides)
         return track
 
+    def test_center_projection_fails_closed_without_current_sprite_mask(self) -> None:
+        """A non-sprite frame cannot preserve/publish the old coordinate."""
+        detector = self._detector()
+        descriptor = detector.ensure_descriptor("horn")
+        blank = np.zeros_like(self.roi)
+        self.assertIsNone(
+            _refine_hit_to_sprite_center(detector, blank, descriptor, 100, 100, 0.9),
+        )
+
+    def test_tracking_fails_closed_when_current_center_is_unavailable(self) -> None:
+        """A raw heat/template hit is never published without a sprite center."""
+        detector = self._detector()
+        anchor = self._living_anchor(detector)
+        from pybot.recognition.detector.tracking import local_tracker
+
+        with patch.object(
+            local_tracker,
+            "_find_local_peak",
+            return_value=(anchor.center_x, anchor.center_y, 1.0, 0.9, (
+                anchor.center_x - 10, anchor.center_y - 10, 20, 20,
+            )),
+        ), patch.object(
+            local_tracker,
+            "_refine_hit_to_sprite_center",
+            return_value=None,
+        ):
+            result = track_local(
+                detector,
+                self.roi,
+                "horn",
+                self._build_track_dict(anchor, track_id=-404),
+            )
+
+        self.assertFalse(result.found)
+        self.assertEqual(result.miss_reason, "center_projection_failed")
+
     def test_finds_mob_at_discovery_coords(self) -> None:
         detector = self._detector()
         anchor = self._living_anchor(detector)
@@ -79,7 +117,8 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertIsInstance(result, LocalTrackResult)
         self.assertTrue(result.found)
         self.assertGreater(result.confidence, 0.0)
-        self.assertGreater(result.opacity_score, 0.0)
+        # Warm tracking intentionally does not run opacity probing; it must
+        # keep the attack-coordinate path lightweight.
         self.assertEqual(result.miss_reason, "")
         dist = abs(result.x - anchor.center_x) + abs(result.y - anchor.center_y)
         self.assertLess(dist, 40)
@@ -228,17 +267,12 @@ class LocalTrackerTests(unittest.TestCase):
             center_x=115,
             center_y=80,
             scale=0.9,
-            verified_hits=0,
         )
 
         with patch.object(
             local_tracker,
             "_refine_hit_to_sprite_center",
             side_effect=lambda _detector, _frame, _descriptor, cx, cy, _scale: (cx, cy),
-        ), patch.object(
-            local_tracker,
-            "_template_identity_ok",
-            return_value=True,
         ):
             result = local_tracker._follow_cached_template(
                 detector,
