@@ -97,7 +97,7 @@ class GateController:
     """Event gate logic: which workers may run, sit/storage/heal lifecycle, waits.
 
     Owns: stop_event, pause_event, resume_gate, sitting_event, storage_event,
-    healing_event, discovery_wake, attack_wake, discovery_suspend,
+    healing_event, discovery_wake, tracking_wake, attack_wake, discovery_suspend,
     _sit_storage_lock.
     """
 
@@ -109,6 +109,9 @@ class GateController:
         # It is not a request or ownership flag; the owner re-reads facts.
         self.danger_wake = threading.Event()
         self.discovery_wake = threading.Event()
+        # Set when discovery publishes new candidates. Tracking consumes this
+        # wake so candidate-to-track handoff does not wait for its normal tick.
+        self.tracking_wake = threading.Event()
         # Set when tracking commits a new live track. Gameplay consumes this
         # wake so a newly confirmed mob is attacked immediately instead of
         # waiting for the idle polling slice.

@@ -127,6 +127,15 @@ class HuntRuntimeContext:
         self.gates.discovery_wake = event
 
     @property
+    def tracking_wake(self) -> threading.Event:
+        """Wake tracking when discovery publishes a candidate."""
+        return self.gates.tracking_wake
+
+    @tracking_wake.setter
+    def tracking_wake(self, event: threading.Event) -> None:
+        self.gates.tracking_wake = event
+
+    @property
     def attack_wake(self) -> threading.Event:
         """Wake gameplay when tracking publishes a newly live target."""
         return self.gates.attack_wake
@@ -497,6 +506,7 @@ class HuntRuntimeContext:
             # with the track store so the next hunt cannot spin on a stale
             # producer signal before discovery confirms the new screen.
             self.attack_wake.clear()
+            self.tracking_wake.clear()
             # Local tracker patches are screen-local. Retaining them after a
             # teleport makes every new track ID live beside old image patches
             # and gradually increases work/memory across long sessions.

@@ -78,6 +78,9 @@ class CoordTrackingWorkerContext(
     @property
     def resume_gate(self) -> object: ...
 
+    @property
+    def tracking_wake(self) -> object: ...
+
     def should_run_tracking(self) -> bool: ...
 
 
@@ -94,6 +97,9 @@ class DiscoveryWorkerContext(
     Protocol,
 ):
     """Hunt runtime subset consumed by DiscoveryWorker."""
+
+    @property
+    def tracking_wake(self) -> object: ...
 
     def should_run_discovery(self) -> bool: ...
 

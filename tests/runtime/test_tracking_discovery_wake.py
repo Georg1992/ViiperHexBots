@@ -18,7 +18,9 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         self.tracks = HuntTracks(load_detector_config())
         self.ctx = MagicMock()
         self.ctx.tracks = self.tracks
+        self.ctx.tracking_wake = threading.Event()
         self.ctx.discovery_suspend = threading.Event()
+
         self.ctx.discovery_wake = threading.Event()
         self.ctx.attack_wake = threading.Event()
         self.ctx.capture.is_valid.return_value = True
@@ -107,6 +109,81 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
 
         self.assertEqual(self.tracks.get_track_count(), 0)
         self.assertTrue(self.tracks.has_pending_discovery_candidates())
+
+    def test_tracking_worker_consumes_discovery_wake_before_next_cadence(self) -> None:
+        """A discovery wake is consumed immediately between tracking ticks."""
+        ctx = MagicMock()
+        ctx.stop_event = threading.Event()
+        ctx.should_run_tracking.return_value = True
+        ctx.tracking_wake = MagicMock()
+        ctx.tracking_wake.is_set.return_value = True
+        ctx.tracking_wake.wait.return_value = False
+        worker = CoordTrackingWorker(ctx)
+        calls = {"count": 0}
+
+        def tick() -> None:
+            calls["count"] += 1
+            if calls["count"] == 2:
+                ctx.stop_event.set()
+
+        worker._tick = MagicMock(side_effect=tick)
+
+        worker.run()
+
+        self.assertEqual(calls["count"], 2)
+        ctx.tracking_wake.wait.assert_called_once()
+        ctx.tracking_wake.clear.assert_called_once_with()
+
+    def test_discovery_candidate_wakes_tracking_immediately(self) -> None:
+        """A positive discovery scan wakes the coordinator before its cadence."""
+        from pybot.recognition.rules import DiscoveryDetection
+        from pybot.runtime.workers.discovery_worker import DiscoveryWorker
+
+        ctx = MagicMock()
+        ctx.stop_event = threading.Event()
+        ctx.config.discovery_interval_ms = 250
+        ctx.config.mob_name = "horn"
+        ctx.config.use_sprite_grf = True
+        ctx.should_run_discovery.return_value = True
+        ctx.discovery_wake = threading.Event()
+        ctx.tracking_wake = threading.Event()
+        ctx.area_transition_lock = threading.RLock()
+        ctx.observation_publication_lock = threading.Lock()
+        ctx.hunt_generation = 0
+        ctx.capture.is_valid.return_value = True
+        ctx.capture.get_hunt_roi.return_value = SimpleNamespace(
+            x=0, y=0, w=200, h=200,
+            center_x=100, center_y=100,
+        )
+        ctx.capture.capture_roi.return_value = MagicMock(size=1)
+        ctx.tracks = self.tracks
+        ctx.detector.discover_frame.return_value = SimpleNamespace(
+            ok=True,
+            fail_reason="",
+            raw_count=1,
+            accepted_count=1,
+            duration_ms=1,
+            timing={},
+            detections=[SimpleNamespace(
+                x=100,
+                y=100,
+                confidence=0.9,
+                candidate_scale=0.9,
+                bbox=(90, 90, 20, 20),
+                living=True,
+            )],
+        )
+        ctx.overlay = MagicMock()
+        ctx.validation = MagicMock()
+        ctx.mark_startup_area_clear = MagicMock()
+        hunt_mode = MagicMock()
+        worker = DiscoveryWorker(ctx, hunt_mode)
+
+        worker._scan()
+
+        self.assertTrue(ctx.tracking_wake.is_set())
+        self.assertTrue(self.tracks.has_pending_discovery_candidates())
+        hunt_mode.note_discovery_scan_completed.assert_called_once()
 
     def test_created_track_wakes_attack_after_template_commit(self) -> None:
         """Tracking signals attack only after the live track is fully committed."""

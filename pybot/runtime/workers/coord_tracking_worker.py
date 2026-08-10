@@ -56,8 +56,23 @@ class CoordTrackingWorker:
             try:
                 if ctx.should_run_tracking():
                     self._tick()
-                    # Yield the capture session so discovery and
-                    # character-state sampling get predictable turns.
+                    if ctx.stop_event.is_set():
+                        break
+                    # Discovery can publish a candidate while this worker is
+                    # between ticks. Consume that wake immediately; otherwise
+                    # retain the small cadence yield that prevents capture
+                    # starvation during ordinary tracking.
+                    tracking_wake = getattr(ctx, "tracking_wake", None)
+                    if (
+                        tracking_wake is not None
+                        and callable(getattr(tracking_wake, "wait", None))
+                    ):
+                        woke = tracking_wake.wait(TRACKING_LOOP_INTERVAL_S)
+                        if ctx.stop_event.is_set():
+                            break
+                        if woke or tracking_wake.is_set():
+                            tracking_wake.clear()
+                            continue
                     ctx.stop_event.wait(TRACKING_LOOP_INTERVAL_S)
                     if ctx.stop_event.is_set():
                         break

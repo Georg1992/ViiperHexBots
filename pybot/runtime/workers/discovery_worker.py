@@ -229,6 +229,12 @@ class DiscoveryWorker:
                     area_epoch=area_epoch,
                     hunt_roi=roi,
                 )
+                if summary.added_count > 0:
+                    # Discovery has published candidates; wake the coordinator
+                    # immediately instead of waiting for its 20 ms cadence.
+                    tracking_wake = getattr(ctx, "tracking_wake", None)
+                    if tracking_wake is not None:
+                        tracking_wake.set()
 
                 # A scan that began on the old screen must fail closed before
                 # it can publish any observable state.
