@@ -99,14 +99,6 @@ class CoordTrackingWorker:
                 x=track.x,
                 y=track.y,
                 scale=track.discovery_scale,
-                moving=track.moving,
-                vel_x=track.vel_x,
-                vel_y=track.vel_y,
-                lost_count=track.lost_count,
-                created_tick=track.created_tick,
-                now_tick=now_ms,
-                updated_tick=track.updated_tick,
-                prediction_valid=True,
             )
             for track in alive_tracks
             if track.discovery_scale > 0
@@ -169,8 +161,6 @@ class CoordTrackingWorker:
                 x=candidate.x,
                 y=candidate.y,
                 scale=candidate.candidate_scale,
-                now_tick=now_ms,
-                updated_tick=now_ms,
             ))
         if not snapshots:
             return 0

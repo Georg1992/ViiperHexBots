@@ -331,33 +331,17 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         )
         ctx.hunt_mode.on_no_attackable_targets.assert_not_called()
 
-    def test_tracking_snapshot_preserves_motion_prediction(self) -> None:
-        """The coordinator passes fresh motion state to local tracking.
-
-        LocalTracker uses the smoothed displacement to search one frame ahead;
-        zeroing it would make fast/kiting mobs harder to follow.
-        """
+    def test_tracking_snapshot_contains_only_center_follow_inputs(self) -> None:
+        """The hot path receives the current center and scale, not momentum state."""
         track = self.tracks.create_track(
             "horn", 100, 100, 0.8, 0.9, now_tick=1
-        )
-        assert track is not None
-        self.tracks.apply_tracking(
-            [SimpleNamespace(
-                track_id=track.id,
-                found=True,
-                x=125,
-                y=110,
-                confidence=0.9,
-                opacity_score=0.0,
-            )],
-            now_tick=20,
         )
         self.ctx.tracker.track_locals_frame.return_value = SimpleNamespace(
             results=[SimpleNamespace(
                 track_id=track.id,
                 found=True,
-                x=125,
-                y=110,
+                x=100,
+                y=100,
                 confidence=0.9,
                 opacity_score=0.0,
             )]
@@ -368,9 +352,10 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         snapshots = self.ctx.tracker.track_locals_frame.call_args.args[2]
         self.assertEqual(len(snapshots), 1)
         snapshot = snapshots[0]
-        self.assertEqual(snapshot.vel_x, 12.5)
-        self.assertEqual(snapshot.vel_y, 5.0)
-        self.assertTrue(snapshot.prediction_valid)
+        self.assertEqual((snapshot.x, snapshot.y), (100, 100))
+        self.assertEqual(snapshot.scale, 0.9)
+        self.assertFalse(hasattr(snapshot, "vel_x"))
+        self.assertFalse(hasattr(snapshot, "prediction_valid"))
 
     def test_local_miss_wakes_discovery_and_keeps_track(self) -> None:
         track = self.tracks.create_track(

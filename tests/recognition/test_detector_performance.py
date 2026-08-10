@@ -182,7 +182,6 @@ class DetectorPerformanceTests(unittest.TestCase):
             x=frame.shape[1] // 2,
             y=frame.shape[0] // 2,
             scale=1.0,
-            now_tick=1,
         )
         barrier = threading.Barrier(3)
         heavy_entered = threading.Barrier(2)

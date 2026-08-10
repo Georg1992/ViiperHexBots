@@ -21,9 +21,7 @@ from pybot.recognition.detector.tracking.local_tracker import (
     LocalTrackResult,
     clear_track_states,
     transfer_track_state,
-    _effective_search_radius,
     _local_follow_scales,
-    _predicted_center,
     track_local,
 )
 
@@ -146,91 +144,6 @@ class LocalTrackerTests(unittest.TestCase):
         dist = abs(result.x - anchor.center_x) + abs(result.y - anchor.center_y)
         self.assertLess(dist, 50)
 
-    def test_large_sprite_gets_bounded_scale_aware_search_radius(self) -> None:
-        """Large runners get more room without allowing unbounded scans."""
-        detector = self._detector()
-        descriptor = detector.ensure_descriptor("horn")
-        base = detector.local_track_moving_search_radius_px
-        self.assertEqual(
-            _effective_search_radius(detector, descriptor, 0.9),
-            base,
-        )
-
-        large_descriptor = type(
-            "DescriptorStub",
-            (),
-            {"avg_width": 180.0, "avg_height": 245.0},
-        )()
-        expanded = _effective_search_radius(detector, large_descriptor, 1.0)
-        self.assertGreater(expanded, base)
-        self.assertLessEqual(expanded, detector.local_track_max_search_radius_px)
-
-        # The real modified-sprite Anubis descriptor is large enough to use the
-        # adaptive path; this guards the universal change against a test-only
-        # synthetic size.
-        anubis = detector.ensure_descriptor("anubis")
-        anubis_radius = _effective_search_radius(detector, anubis, 1.0)
-        self.assertGreater(anubis_radius, base)
-        self.assertLessEqual(anubis_radius, detector.local_track_max_search_radius_px)
-
-        # Anubis runs through the modified-sprite/sprite.grf descriptor in the
-        # actual runtime path, so verify that descriptor is adaptive too.
-        grf_detector = MobDetector(ROOT, detector.config, use_sprite_grf=True)
-        grf_anubis = grf_detector.ensure_descriptor("anubis")
-        grf_radius = _effective_search_radius(grf_detector, grf_anubis, 1.0)
-        self.assertGreater(grf_radius, base)
-        self.assertLessEqual(grf_radius, grf_detector.local_track_max_search_radius_px)
-
-    def test_velocity_prediction_centers_healthy_follow_crop(self) -> None:
-        detector = self._detector()
-        center = _predicted_center(
-            {
-                "prediction_valid": True,
-                "lostCount": 0,
-                "velX": 42.0,
-                "velY": -18.0,
-            },
-            500,
-            400,
-            detector,
-        )
-        self.assertEqual(center, (542, 382))
-
-    def test_velocity_prediction_is_disabled_after_miss(self) -> None:
-        detector = self._detector()
-        center = _predicted_center(
-            {
-                "prediction_valid": True,
-                "lostCount": 1,
-                "velX": 42.0,
-                "velY": -18.0,
-            },
-            500,
-            400,
-            detector,
-        )
-        self.assertEqual(center, (500, 400))
-
-    def test_velocity_prediction_is_clamped_and_reacquires(self) -> None:
-        """A bad momentum hint cannot move the search outside its local disk."""
-        detector = self._detector()
-        anchor = self._living_anchor(detector)
-        radius = detector.local_track_moving_search_radius_px
-        track = self._build_track_dict(
-            anchor,
-            trackId=-6,
-            x=anchor.center_x,
-            y=anchor.center_y,
-            moving=True,
-            velX=400.0,
-            velY=-400.0,
-        )
-        result = track_local(detector, self.roi, "horn", track)
-        self.assertTrue(result.found, result.miss_reason)
-        self.assertLessEqual(
-            abs(result.x - anchor.center_x), radius + 50
-        )
-
     def test_finds_mob_at_center_no_cache_state(self) -> None:
         detector = self._detector()
         anchor = self._living_anchor(detector)
@@ -247,8 +160,8 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertEqual(_local_follow_scales([0.35, 0.45], 0.35), [0.35, 0.45])
         self.assertEqual(_local_follow_scales([], 0.90), [0.90])
 
-    def test_anubis_modified_sprite_tracking_is_fast_and_moving_tolerant(self) -> None:
-        """Large Anubis follows on the same optimized path used in production."""
+    def test_anubis_modified_sprite_tracking_is_fast_and_centered(self) -> None:
+        """Large Anubis follows from a nearby center without prediction state."""
         detector = MobDetector(ROOT, self.base_config, use_sprite_grf=True)
         suite = next(
             suite for suite in MOB_FIXTURE_SUITES if suite.mob_name == "anubis"
@@ -267,11 +180,8 @@ class LocalTrackerTests(unittest.TestCase):
         track = self._build_track_dict(
             anchor,
             trackId=-77,
-            x=anchor.center_x - 400,
-            y=anchor.center_y - 30,
-            moving=True,
-            velX=400.0,
-            velY=30.0,
+            x=anchor.center_x - 60,
+            y=anchor.center_y - 20,
         )
         started = time.perf_counter()
         result = track_local(detector, frame, "anubis", track)
@@ -279,55 +189,22 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertTrue(result.found, result.miss_reason)
         self.assertLess(elapsed, 0.5)
 
-    def test_area_reset_cache_clear_drops_temporal_patches(self) -> None:
-        """Screen-local templates must not survive a teleport boundary."""
+    def test_area_reset_has_no_temporal_state_to_clear(self) -> None:
+        """The centered follower keeps no stale screen-local cache."""
         detector = self._detector()
         clear_track_states(detector)
-        self.assertEqual(getattr(detector, "_local_track_states", {}), {})
+        self.assertFalse(hasattr(detector, "_local_track_states"))
 
-    def test_confirmed_track_uses_fast_temporal_follow(self) -> None:
-        """A second frame follows the cached patch instead of reacquiring."""
+    def test_centered_follow_reacquires_current_bbox_center(self) -> None:
+        """A fresh-frame local hit publishes the accepted bbox center directly."""
         detector = self._detector()
         anchor = self._living_anchor(detector)
-        track = self._build_track_dict(anchor, track_id=-88)
-
-        first = track_local(detector, self.roi, "horn", track)
-        self.assertTrue(first.found, first.miss_reason)
-
-        # Move the complete playfield by a small amount, preserving the mob's
-        # appearance. The first call seeds the temporal template; the second
-        # must follow it rather than depend on a fresh discovery heatmap.
-        shifted = cv2.warpAffine(
-            self.roi,
-            np.float32([[1, 0, 18], [0, 1, 7]]),
-            (self.roi.shape[1], self.roi.shape[0]),
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(0, 0, 0),
-        )
-        transfer_track_state(detector, -88, 88)
-        # The snapshot contains the last published coordinate. The fresh
-        # frame—not the snapshot—is shifted, so tracking must measure the
-        # +18/+7 drift itself.
-        moved = dict(
-            track,
-            trackId=88,
-            x=first.x,
-            y=first.y,
-            moving=True,
-            velX=18.0,
-            velY=7.0,
-            prediction_valid=True,
-            lostCount=0,
-        )
-        started = time.perf_counter()
-        second = track_local(detector, shifted, "horn", moved)
-        elapsed = time.perf_counter() - started
-        self.assertTrue(second.found, second.miss_reason)
-        self.assertLess(abs(second.x - first.x - 18), 20)
-        # Sprite-center refinement and animated-pose edges can add a few
-        # pixels of vertical jitter while the identity remains correct.
-        self.assertLess(abs(second.y - first.y - 7), 12)
-        self.assertLess(elapsed, 0.15)
+        track = self._build_track_dict(anchor, track_id=88)
+        result = track_local(detector, self.roi, "horn", track)
+        self.assertTrue(result.found, result.miss_reason)
+        self.assertLessEqual(abs(result.x - anchor.center_x), 12)
+        self.assertLessEqual(abs(result.y - anchor.center_y), 12)
+        self.assertFalse(hasattr(detector, "_local_track_states"))
 
     def test_benchmark_one_three_six_tracks(self) -> None:
         detector = self._detector()

@@ -63,15 +63,7 @@ class StateTrackSnapshot:
     opacity_baseline: float = 0.0
     opacity_baseline_samples: int = 0
     opacity_decay_streak: int = 0
-    moving: bool = False
-    vel_x: float = 0.0
-    vel_y: float = 0.0
-    lost_count: int = 0
     attack_count: int = 0
-    created_tick: int = 0
-    now_tick: int = 0
-    updated_tick: int = 0
-    prediction_valid: bool = True
 
 
 @dataclass(frozen=True)
@@ -190,13 +182,6 @@ class DetectorSession:
             "x": snapshot.x - roi.x,
             "y": snapshot.y - roi.y,
             "scale": snapshot.scale,
-            "moving": snapshot.moving,
-            "velX": snapshot.vel_x,
-            "velY": snapshot.vel_y,
-            "lostCount": snapshot.lost_count,
-            "nowTick": snapshot.now_tick,
-            "updatedTick": snapshot.updated_tick,
-            "prediction_valid": snapshot.prediction_valid,
         }
         try:
             result = self._detector.track_local(
