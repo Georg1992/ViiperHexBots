@@ -281,7 +281,7 @@ def apply_track_observation(
     """Tracking owns position + liveness. Fresh coords on hit; hold on miss.
 
     Misses do **not** coast along velocity — local follow searches around a
-    bounded one-frame prediction but the published coordinate remains the last
+    bounded recovery prediction but the published coordinate remains the last
     confirmed hit. Coordinate freshness therefore remains tied to the last
     successful observation, not to a miss attempt.
     """

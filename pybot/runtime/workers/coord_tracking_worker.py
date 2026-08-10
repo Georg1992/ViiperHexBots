@@ -101,7 +101,11 @@ class CoordTrackingWorker:
                 scale=track.discovery_scale,
                 vel_x=track.vel_x,
                 vel_y=track.vel_y,
-                prediction_valid=track.lost_count == 0,
+                # Keep the last reliable direction through the bounded local
+                # recovery ladder. Disabling prediction on the first miss made
+                # a fast mob disappear from the next local search window.
+                prediction_valid=track.lost_count < 8,
+                lost_count=track.lost_count,
                 anchor_required=True,
             )
             for track in alive_tracks

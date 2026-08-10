@@ -357,6 +357,34 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         self.assertEqual(snapshot.vel_x, 0.0)
         self.assertEqual(snapshot.vel_y, 0.0)
         self.assertTrue(snapshot.prediction_valid)
+        self.assertEqual(snapshot.lost_count, 0)
+
+    def test_fast_track_keeps_prediction_through_first_local_miss(self) -> None:
+        """A single weak frame must not turn off the runner's motion lead."""
+        track = self.tracks.create_track(
+            "horn", 100, 100, 0.8, 0.9, now_tick=1
+        )
+        track.vel_x = 42.0
+        track.vel_y = -6.0
+        track.lost_count = 1
+        self.ctx.tracker.track_locals_frame.return_value = SimpleNamespace(
+            results=[SimpleNamespace(
+                track_id=track.id,
+                found=False,
+                x=track.x,
+                y=track.y,
+                confidence=0.0,
+                tracking_lost=False,
+            )]
+        )
+
+        self.worker._tick()
+
+        snapshot = self.ctx.tracker.track_locals_frame.call_args.args[2][0]
+        self.assertTrue(snapshot.prediction_valid)
+        self.assertEqual(snapshot.lost_count, 1)
+        self.assertEqual(snapshot.vel_x, 42.0)
+        self.assertEqual(snapshot.vel_y, -6.0)
 
     def test_local_miss_wakes_discovery_and_keeps_track(self) -> None:
         track = self.tracks.create_track(

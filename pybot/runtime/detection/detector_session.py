@@ -60,9 +60,9 @@ class StateTrackSnapshot:
     x: int
     y: int
     scale: float = 0.0
-    # One-frame displacement prediction from the last confirmed hit. The local
-    # follower uses this only to center its bounded search window; it never
-    # publishes a coasted coordinate.
+    # Bounded displacement prediction from the last confirmed hit. The local
+    # follower uses this only to lead its bounded search window during a short
+    # recovery streak; it never publishes a coasted coordinate.
     vel_x: float = 0.0
     vel_y: float = 0.0
     prediction_valid: bool = True
@@ -73,6 +73,9 @@ class StateTrackSnapshot:
     opacity_baseline_samples: int = 0
     opacity_decay_streak: int = 0
     attack_count: int = 0
+    # Number of consecutive local misses at snapshot time. The local follower
+    # uses this to extend a bounded motion prediction during recovery.
+    lost_count: int = 0
 
 
 
@@ -195,6 +198,7 @@ class DetectorSession:
             "velX": snapshot.vel_x,
             "velY": snapshot.vel_y,
             "prediction_valid": snapshot.prediction_valid,
+            "lost_count": snapshot.lost_count,
             "anchor_required": snapshot.anchor_required,
         }
         try:

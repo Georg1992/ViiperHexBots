@@ -2,7 +2,7 @@
 
 Deterministic follow around the predicted position:
 1. Build one lightweight local color/sprite heatmap on a small image pyramid.
-2. Search the strongest local peak(s) around a one-frame velocity prediction.
+2. Search the strongest local peak(s) around a bounded recovery prediction.
 3. Verify only the winning peak(s) with the native-resolution silhouette gate.
 
 The expensive gate is deliberately not run at the old center first: that center
@@ -150,16 +150,22 @@ def track_local(
     screen_cx = cx + offset_x
     screen_cy = cy + offset_y
 
-    # ``velX``/``velY`` are a smoothed one-frame displacement from the shared
-    # track state. Predict one frame ahead so a kiting mob stays near the
-    # center of the search crop instead of being found at its outer edge after
-    # every update. A long gap means the displacement is stale rather than a
-    # reliable one-frame velocity, so stale callers can explicitly disable it
-    # with ``prediction_valid=False``.
+    # ``velX``/``velY`` are smoothed frame displacements from the shared track
+    # state. Lead the search during a short miss streak so a kiting mob stays
+    # near the center of the crop instead of reaching its outer edge. Stale
+    # callers can explicitly disable this with ``prediction_valid=False``;
+    # ``lost_count`` carries the bounded recovery horizon.
     prediction_valid = track.get("prediction_valid", True) is not False
     anchor_required = bool(track.get("anchor_required", False))
+    lost_count = max(0, int(track.get("lost_count", 0)))
     prediction_dx = float(track.get("velX", 0.0)) if prediction_valid else 0.0
     prediction_dy = float(track.get("velY", 0.0)) if prediction_valid else 0.0
+    # During the bounded recovery ladder, keep leading in the same direction.
+    # The predicted center is only a search hint; the last confirmed center
+    # remains the identity origin below, so prediction cannot accumulate a swap.
+    prediction_horizon = min(3, lost_count + 1) if prediction_valid else 0
+    prediction_dx *= prediction_horizon
+    prediction_dy *= prediction_horizon
     prediction_len = (prediction_dx * prediction_dx + prediction_dy * prediction_dy) ** 0.5
     if prediction_len > float(radius) and prediction_len > 0.0:
         factor = float(radius) / prediction_len
@@ -167,6 +173,8 @@ def track_local(
         prediction_dy *= factor
     search_cx = int(round(cx + prediction_dx))
     search_cy = int(round(cy + prediction_dy))
+    identity_cx = cx
+    identity_cy = cy
 
     # Candidate resolution is an explicit one-shot phase. Provisional IDs use
     # the local heatmap; the resulting hit becomes the stable positive-track
@@ -220,6 +228,9 @@ def track_local(
         suppress_positions=suppress_positions,
         offset_x=offset_x,
         offset_y=offset_y,
+        identity_cx=identity_cx,
+        identity_cy=identity_cy,
+        identity_radius_px=radius,
     )
     if template_hit is None and track_id in template_store:
         # The warm anchor missed. Search farther for the SAME cached template;
@@ -241,6 +252,9 @@ def track_local(
             suppress_positions=suppress_positions,
             offset_x=offset_x,
             offset_y=offset_y,
+            identity_cx=identity_cx,
+            identity_cy=identity_cy,
+            identity_radius_px=radius,
         )
         if recovered is not None:
             _track_miss_store(detector).pop(track_id, None)
@@ -477,6 +491,9 @@ def _follow_cached_template(
     suppress_positions: list[tuple[int, int]] | None,
     offset_x: int,
     offset_y: int,
+    identity_cx: int,
+    identity_cy: int,
+    identity_radius_px: int,
 ) -> LocalTrackResult | None:
     """Follow a previously confirmed patch; return None when reacquisition is needed."""
     template = _template_store(detector).get(track_id)
@@ -519,7 +536,8 @@ def _follow_cached_template(
     # MatchTemplate searches the crop including the descriptor margin. Enforce
     # the actual motion radius as an identity bound so a farther identical mob
     # cannot win simply because its grayscale correlation is higher.
-    if (hit_x - cx) ** 2 + (hit_y - cy) ** 2 > search_radius_px ** 2:
+    identity_radius = max(1, int(identity_radius_px))
+    if (hit_x - identity_cx) ** 2 + (hit_y - identity_cy) ** 2 > identity_radius ** 2:
         return None
     if suppress_positions:
         suppress_radius = max(_LOCAL_SUPPRESS_RADIUS_FLOOR_PX, search_radius_px // 3)

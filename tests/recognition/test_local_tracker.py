@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -126,6 +127,80 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertTrue(result.found)
         dist = abs(result.x - anchor.center_x) + abs(result.y - anchor.center_y)
         self.assertLess(dist, 50)
+
+    def test_real_fast_frame_shift_recovery_stays_on_same_anchor(self) -> None:
+        """A fast one-cycle displacement is recovered without generic reacquire."""
+        detector = self._detector()
+        anchor = self._living_anchor(detector)
+        provisional = self._build_track_dict(anchor, track_id=-92)
+        first = track_local(detector, self.roi, "horn", provisional)
+        self.assertTrue(first.found, first.miss_reason)
+        self.assertTrue(transfer_track_state(detector, -92, 92))
+
+        shift_x, shift_y = 30, -8
+        matrix = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
+        shifted = cv2.warpAffine(
+            self.roi,
+            matrix,
+            (self.roi.shape[1], self.roi.shape[0]),
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0),
+        )
+        result = track_local(
+            detector,
+            shifted,
+            "horn",
+            self._build_track_dict(
+                anchor,
+                track_id=92,
+                velX=shift_x,
+                velY=shift_y,
+                lost_count=1,
+                prediction_valid=True,
+                anchor_required=True,
+            ),
+        )
+
+        self.assertTrue(result.found, result.miss_reason)
+        self.assertLessEqual(abs(result.x - (first.x + shift_x)), 12)
+        self.assertLessEqual(abs(result.y - (first.y + shift_y)), 12)
+
+    def test_prediction_leads_cached_follow_after_a_miss(self) -> None:
+        """Recovery searches ahead of the held coordinate for a fast mob."""
+        detector = self._detector()
+        anchor = self._living_anchor(detector)
+        track = self._build_track_dict(
+            anchor,
+            track_id=91,
+            velX=18.0,
+            velY=-4.0,
+            lost_count=1,
+            prediction_valid=True,
+            anchor_required=True,
+        )
+        # The visual anchor is already committed; replace the expensive matcher
+        # only to assert the exact predicted center passed to the warm follower.
+        from pybot.recognition.detector.tracking import local_tracker
+        local_tracker._template_store(detector)[91] = SimpleNamespace(
+            image_gray=np.ones((4, 4), dtype=np.uint8),
+        )
+        with patch.object(
+            local_tracker,
+            "_follow_cached_template",
+            return_value=LocalTrackResult(
+                track_id=91,
+                found=True,
+                x=anchor.center_x + 36,
+                y=anchor.center_y - 8,
+                confidence=0.9,
+                miss_reason="",
+            ),
+        ) as follow:
+            result = track_local(detector, self.roi, "horn", track)
+
+        self.assertTrue(result.found)
+        self.assertEqual(follow.call_args.kwargs["cx"], anchor.center_x + 36)
+        self.assertEqual(follow.call_args.kwargs["cy"], anchor.center_y - 8)
 
     def test_wide_radius_finds_mob_lagged_behind_last_known(self) -> None:
         """No velocity needed — fixed wide disk around last-known catches runners."""
