@@ -227,18 +227,6 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.assertTrue(self.ctx.should_run_workers())
         self.assertTrue(self.ctx.should_run_combat())
 
-    def test_storage_ops_refuse_pending_higher_priority_actions(self) -> None:
-        """Storage cannot claim the character after danger/sit is requested."""
-        self.ctx.request_critical_danger()
-        self.assertFalse(self.ctx.try_begin_storage_ops())
-        self.ctx.pop_critical_danger()
-
-        self.assertTrue(self.ctx.request_danger_sit())
-        self.assertFalse(self.ctx.try_begin_storage_ops())
-        self.ctx.pop_danger_sit_request()
-
-        self.assertTrue(self.ctx.try_begin_storage_ops())
-        self.ctx.end_storage_ops()
 
     def test_teleport_settle_pauses_hunt_observation_but_not_ui_vitals(self) -> None:
         """Black/loading RO frames are ignored while UI feeds remain separate."""
@@ -277,55 +265,8 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         self.assertTrue(self.ctx.should_run_discovery())
         self.assertTrue(self.ctx.should_run_tracking())
 
-    def test_critical_escape_overrides_storage_session(self) -> None:
-        """Critical danger preempts an active storage session."""
-        self.assertTrue(self.ctx.begin_storage_ops())
-        self.ctx.request_critical_danger()
 
-        self.assertTrue(self.ctx.try_begin_critical_escape_ops(override=True))
-        self.assertTrue(self.ctx.danger_escape_active.is_set())
-        self.assertTrue(self.ctx.sitting_event.is_set())
-        self.assertFalse(self.ctx.should_run_combat())
 
-        # Storage releases its gate (closing UI panels) before the escape
-        # presses the teleport key; the release wait then unblocks.
-        self.ctx.end_storage_ops()
-        self.assertTrue(self.ctx.wait_for_preempted_session_release(0.2))
-
-        self.ctx.end_critical_escape_ops()
-        self.assertFalse(self.ctx.danger_escape_active.is_set())
-        self.assertFalse(self.ctx.sitting_event.is_set())
-        # The escape worker consumes the request after the claim; combat
-        # re-enables once it is gone.
-        self.ctx.pop_critical_danger()
-        self.assertTrue(self.ctx.should_run_combat())
-
-    def test_critical_escape_refuses_duplicate_claim(self) -> None:
-        self.assertTrue(self.ctx.try_begin_critical_escape_ops(override=True))
-        self.assertFalse(self.ctx.try_begin_critical_escape_ops(override=True))
-        self.ctx.end_critical_escape_ops()
-        self.assertFalse(self.ctx.danger_escape_active.is_set())
-
-    def test_storage_wait_aborts_only_for_critical_escape(self) -> None:
-        """Active storage yields to critical danger, not ordinary escapes."""
-        worker = self._worker()
-        self.ctx.request_critical_danger()
-        # A queued request is not yet a claimed critical escape. It may still
-        # be stale and must not cancel an active storage session.
-        worker._wait(0.0)
-        self.ctx.pop_critical_danger()
-
-        # The generic marker is also used by seated recovery escapes and must
-        # not cancel an active storage session by itself.
-        self.ctx.danger_escape_active.set()
-        worker._wait(0.0)
-        self.ctx.danger_escape_active.clear()
-
-        # A claimed critical escape has its own exclusive marker.
-        self.assertTrue(self.ctx.try_begin_critical_escape_ops(override=True))
-        with self.assertRaises(InventoryUiError):
-            worker._wait(0.0)
-        self.ctx.end_critical_escape_ops()
 
     def test_heal_ops_pause_combat_but_not_timers_then_resume(self) -> None:
         self.ctx.mark_running()

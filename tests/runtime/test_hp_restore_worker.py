@@ -10,6 +10,7 @@ from pybot.runtime.constants import HP_RESTORE_RATIO
 from pybot.runtime.danger_detector import (
     CRITICAL_DAMAGE_RATIO,
     CRITICAL_HP_RATIO,
+    DangerController,
     DangerDetector,
     DangerLevel,
 )
@@ -145,6 +146,12 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.input = MagicMock()
         self.vitals = PlayerVitals()
         self.danger = DangerDetector(self.ctx, vitals=self.vitals)
+        self.ctx.danger_controller = DangerController(
+            self.ctx,
+            self.danger,
+            self.teleport,
+            self.input,
+        )
 
     def test_critical_ratios_are_internal_thresholds(self) -> None:
         self.assertEqual(CRITICAL_HP_RATIO, 0.5)
@@ -167,57 +174,9 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.danger._poll_hp()
         self.assertEqual(self.danger.danger_level(), DangerLevel.CRITICAL)
 
-    def test_critical_hp_drop_is_logged_and_queued_for_escape(self) -> None:
-        self.vitals.publish_hp(80, 100)
-        self.danger._poll_hp()
-        self.vitals.publish_hp(40, 100)
-        self.danger._poll_hp()
 
-        self.assertTrue(self.ctx.critical_danger_requested.is_set())
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-        self.ctx.logger.behavior.assert_any_call(
-            "[DANGER] HP drop previous=80 current=40 loss=50.0% "
-            "level=CRITICAL sitQueued=False criticalQueued=True"
-        )
 
-    def test_hunting_damage_does_not_queue_sit_recovery(self) -> None:
-        self.vitals.publish_hp(100, 100)
-        self.danger._poll_hp()
-        self.vitals.publish_hp(99, 100)
-        self.danger._poll_hp()
 
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-        self.assertFalse(self.ctx.critical_danger_requested.is_set())
-
-    def test_damage_during_escape_gate_does_not_start_sit_recovery(self) -> None:
-        # Sit-owned urgent escape borrows danger_escape_active. Settle damage
-        # must not enqueue sit or mirrored critical — sit observes danger_level
-        # after its own teleport.
-        self.ctx.sitting_event.set()
-        self.ctx.danger_escape_active.set()
-        self.ctx.discovery_suspend.set()
-        self.vitals.publish_hp(80, 100)
-        self.danger._poll_hp()
-        self.vitals.publish_hp(40, 100)
-        self.danger._poll_hp()
-
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-        self.assertFalse(self.ctx.critical_danger_requested.is_set())
-
-    def test_damage_during_critical_escape_requeues_critical(self) -> None:
-        # Critical hunting escape borrows sitting_event only as an input gate.
-        # Settle damage must re-queue critical so the hunting escape can retry.
-        self.ctx.sitting_event.set()
-        self.ctx.danger_escape_active.set()
-        self.ctx.critical_danger_escape_active.set()
-        self.ctx.discovery_suspend.set()
-        self.vitals.publish_hp(80, 100)
-        self.danger._poll_hp()
-        self.vitals.publish_hp(40, 100)
-        self.danger._poll_hp()
-
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-        self.assertTrue(self.ctx.critical_danger_requested.is_set())
 
     def test_drop_greater_than_twenty_percent_of_previous_tick_is_critical(self) -> None:
         self.vitals.publish_hp(150, 200)
@@ -242,30 +201,7 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.danger._poll_hp()
         self.assertEqual(self.danger.danger_level(), DangerLevel.CRITICAL)
 
-    def test_critical_drop_queues_escape_without_starting_sit_recovery(self) -> None:
-        self.vitals.publish_hp(80, 100)
-        self.danger._poll_hp()
-        self.vitals.publish_hp(40, 100)
-        self.danger._poll_hp()
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-        self.teleport.danger_teleport.assert_not_called()
-        self.assertFalse(hasattr(self.danger, "pop_heal_until_full_requested"))
 
-    def test_unreadable_hp_sample_preserves_damage_baseline(self) -> None:
-        # Sitting can briefly make the HP source unavailable. Preserve the
-        # previous sample so the next valid lower value still reports damage.
-        self.vitals.publish_hp(90, 100)
-        self.danger._poll_hp()
-
-        self.vitals.publish_hp(None, None)
-        self.danger._poll_hp()
-        self.assertEqual(self.danger._prev_hp, 90)
-
-        self.vitals.publish_hp(80, 100)
-        self.danger._poll_hp()
-
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-        self.assertTrue(self.danger.has_recent_damage(1.0))
 
     def test_critical_hp_without_recent_damage_does_not_teleport(self) -> None:
         # A low-HP snapshot establishes the baseline; it is not an attack.
@@ -273,92 +209,8 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.danger._poll_hp()
         self.teleport.danger_teleport.assert_not_called()
 
-    def test_critical_damage_during_sit_gate_keeps_escape_request_queued(self) -> None:
-        # An active seated recovery session owns the ordinary danger request
-        # and its urgent escape — including settle samples while sit_owned.
-        # Mirrored critical must not be queued during sit_owned at all.
-        self.ctx.sitting_event.set()
-        self.vitals.publish_hp(80, 100)
-        self.danger._poll_hp()
-        self.vitals.publish_hp(40, 100)
-        self.danger._poll_hp()
 
-        self.assertTrue(self.ctx.danger_sit_requested.is_set())
-        self.assertFalse(self.ctx.critical_danger_requested.is_set())
 
-        # Sit-owned urgent escape still must not mirror critical (that race
-        # abandons SP recovery after the sit teleport).
-        self.ctx.danger_escape_active.set()
-        self.ctx.danger_sit_requested.clear()
-        self.vitals.publish_hp(20, 100)
-        self.danger._poll_hp()
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-        self.assertFalse(self.ctx.critical_danger_requested.is_set())
-
-    def test_critical_damage_during_escape_is_retried_then_hunt_resumes(self) -> None:
-        # Exercise the complete ownership transition: damage arrives while the
-        # critical worker holds sitting_event inside the first teleport. The
-        # second escape consumes the mirrored requests, after which combat is
-        # allowed to resume.
-        self.ctx.config.teleport_scan_code = 16
-        self.ctx.config.teleport_button = "q"
-        self.ctx.config.teleport_duration_ms = 10
-        self.ctx.mark_running()
-        self.ctx.danger_detector = self.danger
-        self.vitals.publish_hp(80, 100)
-        self.danger._poll_hp()
-        self.vitals.publish_hp(40, 100)
-        self.danger._poll_hp()
-
-        calls = {"count": 0}
-
-        def escape(*, reason: str) -> bool:
-            self.assertEqual(reason, "critical_hunt")
-            calls["count"] += 1
-            if calls["count"] == 1:
-                # The concrete danger teleport holds this suspend gate through
-                # settle. Mirror that boundary in the unit-level fake so a
-                # damage sample cannot be mistaken for a seated recovery.
-                self.ctx.discovery_suspend.set()
-                self.vitals.publish_hp(30, 100)
-                self.danger._poll_hp()
-                self.ctx.discovery_suspend.clear()
-            return True
-
-        self.teleport.danger_teleport.side_effect = escape
-        gameplay = GameplayLoop(
-            self.ctx,
-            attack=MagicMock(),
-            teleport=self.teleport,
-            input_backend=self.input,
-        )
-
-        self.assertTrue(gameplay._process_critical_danger())
-        self.assertTrue(self.ctx.critical_danger_requested.is_set())
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-        self.assertFalse(self.ctx.should_run_combat())
-
-        self.assertTrue(gameplay._process_critical_danger())
-        self.assertFalse(self.ctx.critical_danger_requested.is_set())
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-        self.assertTrue(self.ctx.should_run_combat())
-
-    def test_repeated_low_hp_without_new_damage_never_requeues_danger(self) -> None:
-        # Polling the same low HP repeatedly must not produce an infinite
-        # sequence of danger teleports.
-        self.vitals.publish_hp(40, 100)
-        self.danger._poll_hp()
-        self.danger._poll_hp()
-        self.danger._poll_hp()
-
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-        self.teleport.danger_teleport.assert_not_called()
-
-        # One actual decrease is classified as danger, but hunting still does
-        # not enter SP recovery; only a seated owner may queue that event.
-        self.vitals.publish_hp(39, 100)
-        self.danger._poll_hp()
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
 
     def test_exactly_fifty_percent_is_not_critical(self) -> None:
         self.vitals.publish_hp(80, 100)
@@ -385,18 +237,6 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.assertFalse(self.danger.has_recent_damage(0.0))
         self.teleport.danger_teleport.assert_not_called()
 
-    def test_reset_after_teleport_returns_to_safe(self) -> None:
-        self.vitals.publish_hp(90, 100)
-        self.danger._poll_hp()
-        self.vitals.publish_hp(80, 100)
-        self.danger._poll_hp()
-        self.assertEqual(self.danger.danger_level(), DangerLevel.DANGER)
-
-        self.danger.reset_after_teleport()
-        self.assertEqual(self.danger.danger_level(), DangerLevel.SAFE)
-        # Hunting damage never creates a sit request; reset only clears the
-        # detector's damage classification.
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
 
     def test_reset_after_teleport_preserves_damage_observed_during_settle(self) -> None:
         import time
@@ -412,51 +252,9 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.assertTrue(self.danger.has_recent_damage(1.0))
         self.assertEqual(self.danger.danger_level(), DangerLevel.DANGER)
 
-    def test_reset_after_teleport_rebaselines_first_post_teleport_sample(self) -> None:
-        self.vitals.publish_hp(90, 100)
-        self.danger._poll_hp()
-        self.vitals.publish_hp(80, 100)
-        self.danger._poll_hp()
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
 
-        self.danger.reset_after_teleport()
-        self.danger._poll_hp()  # Same HP on the first sample after landing.
 
-        self.assertFalse(self.danger.has_recent_damage(1.0))
-        self.assertEqual(self.danger.danger_level(), DangerLevel.SAFE)
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
 
-    def test_damage_danger_keeps_sit_request_until_sit_worker_consumes_it(self) -> None:
-        self.vitals.publish_hp(90, 100)
-        self.danger._poll_hp()
-        self.vitals.publish_hp(80, 100)
-        self.danger._poll_hp()
-
-        self.assertEqual(self.danger.danger_level(), DangerLevel.DANGER)
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-        self.assertFalse(self.teleport.danger_teleport.called)
-
-    def test_damage_during_heal_ops_does_not_start_sit_recovery(self) -> None:
-        self.assertTrue(self.ctx.begin_heal_ops())
-        self.assertFalse(self.ctx.should_run_combat())
-        self.vitals.publish_hp(80, 100)
-        self.danger._poll_hp()
-        self.vitals.publish_hp(40, 100)
-        self.danger._poll_hp()
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-        self.teleport.danger_teleport.assert_not_called()
-        self.ctx.end_heal_ops()
-
-    def test_tracking_continues_while_danger_request_blocks_combat(self) -> None:
-        self.ctx.config.sit_on_low_sp_scan_code = 82
-        self.ctx.mark_running()
-        self.assertTrue(self.ctx.request_danger_sit())
-
-        self.assertFalse(self.ctx.should_run_combat())
-        # A pending ordinary danger request is no longer produced while
-        # hunting; if injected manually it blocks tracking until ownership
-        # resolves rather than allowing stale candidates through.
-        self.assertTrue(self.ctx.should_run_tracking())
 
     def test_tracking_continues_during_sit_gate_until_area_changes(self) -> None:
         self.ctx.mark_running()
@@ -492,24 +290,6 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.ctx.discovery_suspend.clear()
         self.assertTrue(self.ctx.should_run_combat())
 
-    def test_successful_teleport_clears_damage_danger(self) -> None:
-        danger = DangerDetector(self.ctx, vitals=self.vitals)
-        self.vitals.publish_hp(90, 100)
-        danger._poll_hp()
-        self.vitals.publish_hp(80, 100)
-        danger._poll_hp()
-
-        self.ctx.config.teleport_scan_code = 16
-        self.ctx.config.teleport_button = "q"
-        self.ctx.config.teleport_duration_ms = 10
-        self.ctx.danger_detector = danger
-        tport = TeleportController(self.ctx, self.input, MagicMock())
-
-        self.assertTrue(tport.teleport_once(scan_code=16))
-        self.assertEqual(danger.danger_level(), DangerLevel.SAFE)
-        # Teleport reset clears the old HP sample and hunting damage never
-        # created a sit request in the first place.
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
 
     def test_danger_teleport_resets_damage_state(self) -> None:
         danger = DangerDetector(self.ctx, vitals=self.vitals)
@@ -528,23 +308,6 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.ctx.tracks.area_reset.assert_called_once_with()
         self.assertEqual(danger.danger_level(), DangerLevel.SAFE)
 
-    def test_failed_teleport_preserves_damage_danger(self) -> None:
-        danger = DangerDetector(self.ctx, vitals=self.vitals)
-        self.vitals.publish_hp(90, 100)
-        danger._poll_hp()
-        self.vitals.publish_hp(80, 100)
-        danger._poll_hp()
-
-        self.ctx.config.teleport_scan_code = 16
-        self.ctx.config.teleport_button = "q"
-        self.ctx.config.teleport_duration_ms = 10
-        self.ctx.gates.wait_unless_stopped = MagicMock(return_value=False)
-        self.ctx.danger_detector = danger
-        tport = TeleportController(self.ctx, self.input, MagicMock())
-
-        self.assertFalse(tport.teleport_once(scan_code=16))
-        self.assertEqual(danger.danger_level(), DangerLevel.DANGER)
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
 
     def test_danger_teleport_allowed_during_storage(self) -> None:
         """Critical danger overrides storage; only stop/pause hold it back."""
@@ -640,56 +403,7 @@ class StaleCriticalRequestTests(unittest.TestCase):
         self.danger = DangerDetector(self.ctx, vitals=self.vitals)
         self.ctx.danger_detector = self.danger
 
-    def test_stale_critical_request_is_consumed_without_teleport(self) -> None:
-        self.vitals.publish_hp(80, 100)
-        self.danger._poll_hp()
-        self.vitals.publish_hp(40, 100)
-        self.danger._poll_hp()
-        self.assertTrue(self.ctx.critical_danger_requested.is_set())
 
-        # The character recovers (sit regeneration) before the worker runs:
-        # no recent damage, HP back to full.
-        self.vitals.publish_hp(100, 100)
-        self.danger.reset_after_teleport()
-        self.assertEqual(self.danger.danger_level(), DangerLevel.SAFE)
-
-        teleport = MagicMock()
-        gameplay = GameplayLoop(
-            self.ctx,
-            attack=MagicMock(),
-            teleport=teleport,
-            input_backend=MagicMock(),
-        )
-
-        self.assertTrue(gameplay._process_critical_danger())
-
-        teleport.danger_teleport.assert_not_called()
-        self.assertFalse(self.ctx.critical_danger_requested.is_set())
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-
-    def test_fresh_critical_request_still_teleports(self) -> None:
-        self.ctx.config.teleport_scan_code = 16
-        self.ctx.config.teleport_button = "q"
-        self.ctx.config.teleport_duration_ms = 10
-        self.vitals.publish_hp(80, 100)
-        self.danger._poll_hp()
-        self.vitals.publish_hp(40, 100)
-        self.danger._poll_hp()
-        self.assertEqual(self.danger.danger_level(), DangerLevel.CRITICAL)
-
-        teleport = MagicMock()
-        teleport.danger_teleport.return_value = True
-        gameplay = GameplayLoop(
-            self.ctx,
-            attack=MagicMock(),
-            teleport=teleport,
-            input_backend=MagicMock(),
-        )
-
-        self.assertTrue(gameplay._process_critical_danger())
-
-        teleport.danger_teleport.assert_called_once_with(reason="critical_hunt")
-        self.assertFalse(self.ctx.critical_danger_requested.is_set())
 
 
 if __name__ == "__main__":

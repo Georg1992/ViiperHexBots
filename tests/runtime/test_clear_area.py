@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
 from pybot.runtime.constants import SIT_SP_POLL_INTERVAL_S
+from pybot.runtime.danger_detector import DangerLevel
 from pybot.runtime.teleport import TeleportController
 
 
@@ -17,6 +17,8 @@ class TeleportUntilQuietTests(unittest.TestCase):
         self.ctx.wait_unless_stopped.return_value = True
         self.ctx.logger = MagicMock()
         self.ctx.capture.is_valid.return_value = False
+        self.ctx.danger_detector = MagicMock()
+        self.ctx.danger_detector.danger_level.return_value = DangerLevel.SAFE
         self.input = MagicMock()
         self.hunt_mode = MagicMock()
         self.tport = TeleportController(self.ctx, self.input, self.hunt_mode)
@@ -56,12 +58,11 @@ class TeleportUntilQuietTests(unittest.TestCase):
         self.assertEqual(self.tport._scan_living_count.call_count, 2)
 
     def test_danger_interrupts_idle_before_post_idle_scan(self) -> None:
-        self.ctx.danger_sit_requested = threading.Event()
         self.tport._scan_living_count = MagicMock(return_value=0)  # type: ignore[method-assign]
         self.tport.teleport_until_clear = MagicMock(return_value=True)  # type: ignore[method-assign]
 
         def wait_and_raise(_timeout: float) -> bool:
-            self.ctx.danger_sit_requested.set()
+            self.ctx.danger_detector.danger_level.return_value = DangerLevel.DANGER
             return True
 
         self.ctx.wait_unless_stopped.side_effect = wait_and_raise

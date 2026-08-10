@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import unittest
 
-from pybot.app.main_window import MainWindow
 from pybot.config.clients import load_client_profile, memory_addresses_from_dict
 from pybot.paths import PROJECT_ROOT
 
@@ -36,12 +35,6 @@ class MemoryAddressParseTests(unittest.TestCase):
         self.assertEqual(profile.memory.current_sp, 0x011FF910)
         self.assertEqual(profile.memory.current_weight, 0x011FBAA0)
         self.assertFalse(hasattr(profile.memory, "current_hp"))
-
-    def test_format_pair(self) -> None:
-        self.assertEqual(MainWindow._format_pair(100, 200), "100/200")
-        self.assertEqual(MainWindow._format_pair(None, None), "—")
-        self.assertEqual(MainWindow._format_pair(12, None), "12")
-        self.assertEqual(MainWindow._format_pair(None, 99), "—/99")
 
 
 if __name__ == "__main__":

@@ -17,10 +17,11 @@ from pybot.config.clients import load_client_profile
 from pybot.game_state import GameMemoryPoller
 
 MEMORY_POLL_MS = 500
-# A memory read must never pin its pending flag forever: a wedged read would
-# silently kill the SP/weight feed (and with it storage/SP automation) with
-# no error and no log line. After this long the worker is abandoned and
-# recreated.
+# A memory read must never pin the logical pending flag forever: a wedged
+# read would silently kill the SP/weight feed (and with it storage/SP
+# automation) with no error and no log line. The runner invalidates the
+# generation at this deadline, but deliberately keeps one worker/queue so a
+# blocked native read cannot multiply threads or overlap a retry.
 MEMORY_READ_TIMEOUT_S = 6.0
 
 
@@ -59,8 +60,6 @@ class MemoryStatsFeed(PeriodicTaskRunner):
         self._poller.reset()
 
     def should_submit(self) -> int | None:
-        if not self.active:
-            return None
         if not self._config.use_memory_reading:
             self._on_name("—")
             return None
@@ -98,20 +97,10 @@ class MemoryStatsFeed(PeriodicTaskRunner):
 
         return _read
 
-    def apply_result(self, result) -> None:
-        if len(result) == 3:
-            hwnd, snap, observation_epoch = result
-        else:
-            # Legacy callers cannot prove when this sample was captured. Keep
-            # compatibility before the first teleport; after an epoch change,
-            # reject the ambiguous result rather than restoring stale SP.
-            if getattr(self._vitals, "observation_epoch", 0):
-                return
-            hwnd, snap = result
-            observation_epoch = None
+    def apply_result(self, result: tuple[int, object, int | None]) -> None:
+        hwnd, snap, observation_epoch = result
         if (
-            not self.active
-            or hwnd != self._config.window_id
+            hwnd != self._config.window_id
             or not self._config.use_memory_reading
         ):
             return
@@ -144,8 +133,5 @@ class MemoryStatsFeed(PeriodicTaskRunner):
     def on_failure(self, exc: Exception, generation: int) -> None:
         self._log(f"[UI] Memory read failed: {exc}")
 
-    def on_recover(self, stall_count: int) -> None:
-        self._log(
-            "[UI] Memory read stalled — restarted memory reader "
-            f"(stall #{stall_count})"
-        )
+    def on_terminal_failure(self, message: str) -> None:
+        self._log(f"[UI] Memory reader stopped: {message}")

@@ -1,9 +1,9 @@
-"""Generic Tk-scheduled background-read task with bounded queue recovery.
+"""Deterministic Tk-scheduled background-read task.
 
-The process-memory feed still uses this runner. The status-panel feed keeps
-this class only for shared compatibility helpers, but owns its production
-reader loop separately so OCR scheduling and vitals publication do not depend
-on Tk callbacks.
+The process-memory feed uses one owned worker queue. A native operation is
+never replaced or retried behind the original operation: a timeout is a
+terminal feed fault that is reported explicitly. The status-panel feed owns
+its own production reader loop and does not use this runner.
 """
 
 from __future__ import annotations
@@ -17,11 +17,12 @@ from pybot.app.ui_work_queue import UiWorkQueue
 
 
 class PeriodicTaskRunner:
-    """Owns the poll / request / result / stall-recovery cycle for one feed.
+    """Owns one periodic producer and its single worker lifecycle.
 
     Subclasses implement :meth:`should_submit`, :meth:`build_job`, and
-    :meth:`apply_result`; :meth:`on_failure`, :meth:`on_recover`, and
-    :meth:`pending_delay` may be overridden to specialise diagnostics.
+    :meth:`apply_result`. A worker exception or a native timeout is reported
+    through the failure hooks and permanently disables this feed; there is no
+    hidden retry or replacement worker.
     """
 
     def __init__(
@@ -33,7 +34,6 @@ class PeriodicTaskRunner:
         default_delay_ms: int,
         post_to_tk: Callable[[Callable[[], None]], None],
         log: Callable[[str], None],
-        use_work_queue: bool = True,
     ) -> None:
         self._root = root
         self._name = name
@@ -43,18 +43,20 @@ class PeriodicTaskRunner:
         self._log = log
         self._after_id = None
         self._stopped = False
-        self._started = False
-        self._active = True
         self._pending = False
+        self._pending_generation: int | None = None
         self._generation = 0
         self._started_at = 0.0
-        self._stall_count = 0
+        self._terminal_fault = False
         self._results: queue.Queue = queue.Queue(maxsize=1)
         # Publication happens on worker threads while consumption happens on
         # Tk. Keep the single-slot queue from allowing an older result to
         # evict a newer one after reset/restart.
         self._result_lock = threading.Lock()
-        self._work = UiWorkQueue(name=name) if use_work_queue else None
+        self._work = UiWorkQueue(
+            name=name,
+            on_error=self._on_worker_error,
+        )
 
     # ── Subclass hooks ──────────────────────────────────────────────
 
@@ -77,25 +79,55 @@ class PeriodicTaskRunner:
     def on_failure(self, exc: Exception, generation: int) -> None:
         """Handle a worker exception for a still-current generation."""
 
-    def on_recover(self, stall_count: int) -> None:
-        """Diagnose a stalled read that was abandoned and restarted."""
-        self._log(
-            f"[UI] {self._name} read stalled — restarted reader "
-            f"(stall #{stall_count})"
+    def on_terminal_failure(self, message: str) -> None:
+        """Report a terminal producer failure; subclasses may add context."""
+        self._log(f"[UI] {self._name} stopped: {message}")
+
+    def _on_worker_error(self, exc: Exception) -> None:
+        """Stop the producer when its worker catches an uncategorized error."""
+        self._fail_terminal(
+            f"worker exception {type(exc).__name__}: {exc}"
         )
+
+    @property
+    def faulted(self) -> bool:
+        """True when this producer stopped because it cannot continue safely."""
+        return self._terminal_fault
+
+    @property
+    def worker_alive(self) -> bool:
+        """True while the owned queue worker is still executing or draining."""
+        thread = getattr(self._work, "_thread", None)
+        return bool(thread is not None and thread.is_alive())
+
+    @property
+    def shutdown_safe(self) -> bool:
+        """True when the UI may close without accepting more feed callbacks.
+
+        A faulted native call may still be alive on the daemon worker. That is
+        deliberately reported by :attr:`worker_alive`; this property means
+        only that the producer is permanently disabled and cannot touch Tk.
+        """
+        return self._terminal_fault or self.idle
 
     # ── Public API ──────────────────────────────────────────────────
 
     def start(self) -> None:
         """Begin the periodic poll loop."""
+        if self._terminal_fault:
+            self.on_terminal_failure("start requested after terminal failure")
+            return
         self._stopped = False
-        self._started = True
         self._schedule_next()
 
     def stop(self) -> None:
-        """Cancel the periodic poll loop."""
-        self._stopped = True
-        self._started = False
+        """Cancel polling and invalidate every result from the old lifecycle."""
+        with self._result_lock:
+            self._stopped = True
+            self._generation += 1
+            self._pending = False
+            self._pending_generation = None
+            self._started_at = 0.0
         if self._after_id is not None:
             try:
                 self._root.after_cancel(self._after_id)
@@ -104,43 +136,27 @@ class PeriodicTaskRunner:
             self._after_id = None
 
     def close(self) -> None:
-        """Stop polling and release the worker thread at app shutdown."""
+        """Stop polling and release the feed's single worker at app shutdown."""
         self.stop()
-        if self._work is not None:
-            self._work.close()
+        self._work.close()
 
     @property
     def idle(self) -> bool:
         """True when the worker queue has drained."""
-        return self._work is None or self._work.idle
+        # A terminal fault does not make a live native worker idle. The caller
+        # must see the real ownership state and keep shutdown ownership until
+        # that worker exits; Python cannot honestly claim the resource is gone.
+        return self._work.idle
 
     def reset(self) -> None:
-        """Drop any in-flight read so the next submit is a fresh one."""
+        """Invalidate an in-flight read before a new configuration is used."""
         with self._result_lock:
+            if self._terminal_fault:
+                return
             self._generation += 1
-            self._pending = False
-            self._started_at = 0.0
-
-    def set_active(self, active: bool) -> None:
-        """Enable reads only for the lifecycle states that own this feed.
-
-        Disabling invalidates the current generation, so a read that was
-        already in native code cannot publish values after pause/stop. The
-        periodic Tk tick remains installed; it simply declines submissions
-        until the feed is enabled again.
-        """
-        active = bool(active)
-        if active == self._active:
-            return
-        self._active = active
-        self.reset()
-        if active and self._started:
-            self.request_now()
-
-    @property
-    def active(self) -> bool:
-        """Whether this feed is currently allowed to start/apply reads."""
-        return self._active
+            if not self._pending:
+                self._pending_generation = None
+                self._started_at = 0.0
 
     def request_now(self) -> None:
         """Run one immediate submit cycle (window/profile changed)."""
@@ -155,7 +171,7 @@ class PeriodicTaskRunner:
         until the stall watchdog fires.
         """
         with self._result_lock:
-            if generation != self._generation:
+            if generation != self._generation or self._stopped or self._terminal_fault:
                 return
             try:
                 self._results.put_nowait((generation, result))
@@ -192,42 +208,49 @@ class PeriodicTaskRunner:
         next read (the feeds' original consume-then-submit contract).
         """
         self.consume_results()
-        if not self._active:
+        if self._terminal_fault:
             return self._default_delay_ms
         if self._pending:
-            # A wedged read must not pin the pending flag forever: after the
-            # stall timeout the worker is abandoned and recreated so the next
-            # tick retries on a fresh thread.
+            # A native call cannot be cancelled safely from Python. Do not
+            # clear the flag and retry: that would hide the real fault and
+            # create competing work. Stop this producer permanently and report
+            # the exact terminal condition.
             if (
                 self._started_at
                 and time.monotonic() - self._started_at >= self._timeout_s
             ):
-                self._recover_stall()
+                self._fail_terminal(
+                    f"native read exceeded {self._timeout_s:.1f}s"
+                )
             return self.pending_delay()
         delay = self.should_submit()
         if delay is None:
             # The feed declined a read this tick (no window/profile/panel).
             return self._default_delay_ms
-        job = self.build_job(self._generation + 1)
+        try:
+            job = self.build_job(self._generation + 1)
+        except Exception as exc:
+            self._fail_terminal(
+                f"read job construction failed with {type(exc).__name__}: {exc}"
+            )
+            return delay
         if job is None:
             return delay
         with self._result_lock:
             self._pending = True
             self._generation += 1
+            generation = self._generation
+            self._pending_generation = generation
             self._started_at = time.monotonic()
-        if self._work is None:
-            # Compatibility mode for small deterministic callers that disable
-            # the queue. Production feeds should provide a queue or own their
-            # reader loop; never silently drop a submitted job.
+
+        def run_job() -> None:
             try:
                 job()
-            except Exception as exc:
-                self._pending = False
-                self._started_at = 0.0
-                self.on_failure(exc, self._generation)
-        elif not self._work.submit(job):
-            self._pending = False
-            self._started_at = 0.0
+            finally:
+                self._worker_finished(generation)
+
+        if not self._work.submit(run_job):
+            self._fail_terminal("worker queue rejected the read")
         return delay
 
     def consume_results(self) -> None:
@@ -237,34 +260,63 @@ class PeriodicTaskRunner:
                 generation, result = self._results.get_nowait()
             except queue.Empty:
                 return
-        if generation != self._generation or not self._active:
+        if (
+            generation != self._generation
+            or self._stopped
+            or self._terminal_fault
+        ):
             # A newer request owns the pending flag now. Drop the stale
             # result without releasing or overwriting the newer request. An
             # inactive feed also drops a completion from before pause/stop.
             return
         self._pending = False
-        self._stall_count = 0
+        self._pending_generation = None
+        self._started_at = 0.0
         self.apply_result(result)
 
     def _handle_failure(self, generation: int, exc: Exception) -> None:
         if generation != self._generation:
             return
         self._pending = False
-        self.on_failure(exc, generation)
+        self._pending_generation = None
+        self._started_at = 0.0
+        try:
+            self.on_failure(exc, generation)
+        finally:
+            self._fail_terminal(
+                f"read failed with {type(exc).__name__}: {exc}"
+            )
 
-    def _recover_stall(self) -> None:
-        """Abandon a stalled read and restart on a fresh worker thread."""
-        # Invalidate the abandoned worker before replacing its queue. Native
-        # reads may still return later; they must never publish as the retry.
+    def _fail_terminal(self, message: str) -> None:
+        """Stop this producer after an unrecoverable operation failure.
+
+        The current worker is never replaced. Its late completion is rejected
+        by the generation token, while the feed remains explicitly faulted and
+        never schedules another native operation.
+        """
         with self._result_lock:
+            if self._terminal_fault:
+                return
+            self._terminal_fault = True
+            self._stopped = True
             self._generation += 1
             self._pending = False
+            self._pending_generation = None
             self._started_at = 0.0
-        if self._work is not None:
-            self._work.close()
-            self._work = UiWorkQueue(name=self._name)
-        self._stall_count += 1
-        self.on_recover(self._stall_count)
+        self._work.discard_pending()
+        self.on_terminal_failure(message)
+
+    def _worker_finished(self, generation: int) -> None:
+        """Release a reset generation only after its queued native work exits."""
+        with self._result_lock:
+            if (
+                self._pending
+                and self._pending_generation == generation
+                and generation != self._generation
+            ):
+                self._pending = False
+                self._pending_generation = None
+                self._started_at = 0.0
 
     def _schedule_next(self) -> None:
         if self._stopped:

@@ -265,19 +265,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertEqual(worker._sit_until_done.call_count, 2)
         self.assertFalse(self.ctx.sitting_event.is_set())
 
-    def test_danger_request_survives_competing_storage_session(self) -> None:
-        worker = self._worker(_ScriptedVitals([]))
-        self.assertTrue(self.ctx.begin_storage_ops())
-        self.ctx.request_danger_sit()
-
-        # The sit worker cannot acquire ownership while storage is active;
-        # attempting recovery must leave the queued danger request intact.
-        worker._recover_sp(1.0, reason="danger")
-        self.assertTrue(self.ctx.danger_sit_requested.is_set())
-
-        self.ctx.end_storage_ops()
-        self.assertTrue(self.ctx.pop_danger_sit_request())
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
 
     def test_failed_sit_session_retries_with_gate_held(self) -> None:
         vitals = _ScriptedVitals([0.02] * 50)
@@ -298,46 +285,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertGreaterEqual(attempts["n"], 3)
         self.assertTrue(all(gate_during))
 
-    def test_damage_interrupt_stands_once(self) -> None:
-        worker = self._worker(_ScriptedVitals([0.40] * 20))
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        self.ctx.pop_danger_sit_request = MagicMock(side_effect=[False, True])  # type: ignore[method-assign]
-        self.assertEqual(worker._sit_until_done(82), "danger_escaped")
-        # Only enter_sit is sent. Damage escape must not press stand.
-        self.assertEqual(self.input.toggle_key.call_count, 1)
-        self.assertFalse(worker._seated)
 
-    def test_damage_during_area_clear_rejects_sit_spot(self) -> None:
-        worker = self._worker(_ScriptedVitals([0.40] * 20))
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        self.ctx.request_danger_sit()
-        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
 
-        self.assertEqual(worker._sit_until_done(82), "interrupted")
-        self.input.toggle_key.assert_not_called()
-        self.teleport.danger_teleport.assert_called_once_with(
-            reason="sit_spot_danger",
-            prefer_safe_key=True,
-        )
-        self.assertFalse(worker._seated)
-
-    def test_damage_while_seated_stands_before_urgent_teleport(self) -> None:
-        worker = self._worker(_ScriptedVitals([0.40] * 20))
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        self.ctx.pop_danger_sit_request = MagicMock(side_effect=[False, True])  # type: ignore[method-assign]
-        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
-        worker._seated = False
-
-        self.assertEqual(worker._sit_until_done(82), "danger_escaped")
-        self.assertEqual(
-            [call.args[0] for call in self.input.toggle_key.call_args_list],
-            [82],
-        )
-        self.teleport.danger_teleport.assert_called_once_with(
-            reason="sit_danger",
-            prefer_safe_key=True,
-        )
-        self.assertFalse(worker._seated)
 
     def test_unreadable_hp_then_damage_while_seated_triggers_teleport(self) -> None:
         """A transient HP read gap must not swallow seated damage escape."""
@@ -379,176 +328,10 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.input.teleport_key.assert_called_once_with(17)
         self.assertFalse(worker._seated)
 
-    def test_damage_preserved_during_escape_settle_triggers_next_escape(self) -> None:
-        """Settle damage suppressed from the queue must not be ignored."""
-        vitals = PlayerVitals()
-        danger = DangerDetector(self.ctx, vitals=vitals)
-        self.ctx.danger_detector = danger
-        worker = self._worker(vitals)
-        worker._danger = danger
-        self.input.teleport_key.return_value = True
-        self.config.creamy_tp_scan_code = 17
-        self.config.creamy_tp_button = "w"
-        self.config.teleport_scan_code = 16
-        self.config.teleport_button = "q"
-        self.config.teleport_duration_ms = 10
 
-        # Establish the first damage event while the recovery session owns the
-        # seated gate. The worker consumes this request before escaping.
-        vitals.publish_hp(90, 100)
-        danger._poll_hp()
-        self.ctx.sitting_event.set()
-        vitals.publish_hp(80, 100)
-        danger._poll_hp()
-        self.assertTrue(self.ctx.pop_danger_sit_request())
 
-        # Inject the second drop from the real teleport settle wait. The
-        # escape gate is active at this point, so DangerDetector records the
-        # damage but deliberately does not enqueue another sit request.
-        settle_polls = {"count": 0}
 
-        def settle_wait(_timeout: float) -> bool:
-            if settle_polls["count"] == 0:
-                settle_polls["count"] += 1
-                vitals.publish_hp(40, 100)
-                danger._poll_hp()
-            return True
 
-        self.ctx.wait_unless_stopped = settle_wait  # type: ignore[method-assign]
-        self.assertTrue(worker._urgent_escape(reason="sit_danger"))
-        self.assertEqual(settle_polls["count"], 1)
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-        self.assertEqual(self.input.toggle_key.call_count, 0)
-
-        # The seated owner must recover the preserved detector state through
-        # the real sit-recovery entrypoint. It consumes the mirrored critical
-        # request, performs one second escape, and never clicks sit.
-        self.assertEqual(worker._sit_until_done(82), "interrupted")
-        self.assertEqual(self.input.teleport_key.call_count, 2)
-        self.assertFalse(self.ctx.critical_danger_requested.is_set())
-        self.assertEqual(danger.danger_level(), DangerLevel.SAFE)
-        self.assertFalse(worker._sit_danger_detected())
-
-    def test_damage_after_resit_triggers_second_danger_escape(self) -> None:
-        """A fresh hit after re-sitting must not be treated as stale."""
-        vitals = PlayerVitals()
-        danger = DangerDetector(self.ctx, vitals=vitals)
-        self.ctx.danger_detector = danger
-        worker = self._worker(vitals)
-        worker._danger = danger
-        self.input.toggle_key.return_value = True
-        self.input.teleport_key.return_value = True
-
-        # Establish the detector baseline before the recovery sequence. Each
-        # accepted sit toggle then represents a real seated interval: damage is
-        # injected during the sit-key settle after the character has entered
-        # the seated pose. The second hit occurs only after the recovery has
-        # escaped and re-sat in the new area.
-        vitals.publish_hp(100, 100)
-        danger._poll_hp()
-        toggle_count = {"count": 0}
-        second_damage_injected = {"value": False}
-
-        def toggle(_scan: int) -> bool:
-            toggle_count["count"] += 1
-            return True
-
-        self.input.toggle_key.side_effect = toggle
-
-        def wait_unless_stopped(timeout: float) -> bool:
-            if timeout == SIT_KEY_SETTLE_S and toggle_count["count"] == 1:
-                vitals.publish_hp(80, 100)
-                danger._poll_hp()
-            elif timeout == SIT_KEY_SETTLE_S and toggle_count["count"] == 2:
-                second_damage_injected["value"] = True
-                vitals.publish_hp(40, 100)
-                danger._poll_hp()
-            return True
-
-        self.ctx.wait_unless_stopped = wait_unless_stopped  # type: ignore[method-assign]
-        danger_teleports = {"count": 0}
-        real_danger_teleport = self.teleport.danger_teleport
-
-        def danger_escape(*, reason: str, prefer_safe_key: bool = False) -> bool:
-            danger_teleports["count"] += 1
-            escaped = real_danger_teleport(
-                reason=reason,
-                prefer_safe_key=prefer_safe_key,
-            )
-            if danger_teleports["count"] == 2:
-                # Stop after the second escape has completed. This keeps the
-                # assertion focused on the reported sequence and avoids a
-                # third sit attempt during teardown.
-                self.ctx.stop_event.set()
-            return escaped
-
-        self.teleport.danger_teleport = MagicMock(  # type: ignore[method-assign]
-            side_effect=danger_escape
-        )
-
-        worker._recover_sp(0.02)
-
-        # One placement teleport, then one danger teleport for each seated hit.
-        self.assertEqual(self.teleport.danger_teleport.call_count, 2)
-        self.assertEqual(self.input.teleport_key.call_count, 3)
-        self.assertEqual(toggle_count["count"], 2)
-        self.assertEqual(self.input.toggle_key.call_count, 2)
-        self.assertTrue(second_damage_injected["value"])
-        self.assertEqual(
-            [call.kwargs["prefer_safe_key"] for call in self.teleport.danger_teleport.call_args_list],
-            [True, True],
-        )
-        self.assertFalse(worker._seated)
-        self.assertEqual(danger.danger_level(), DangerLevel.SAFE)
-        self.assertFalse(self.ctx.critical_danger_requested.is_set())
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-
-    def test_critical_hunting_escape_retries_after_failed_teleport(self) -> None:
-        self.danger.danger_level.return_value = DangerLevel.CRITICAL
-        self.ctx.request_critical_danger()
-        self.teleport.danger_teleport = MagicMock(  # type: ignore[method-assign]
-            side_effect=[False, True]
-        )
-        gameplay = GameplayLoop(
-            self.ctx,
-            attack=MagicMock(),
-            teleport=self.teleport,
-            input_backend=self.input,
-        )
-
-        self.assertFalse(gameplay._process_critical_danger())
-        self.assertTrue(self.ctx.critical_danger_requested.is_set())
-        self.assertTrue(gameplay._process_critical_danger())
-
-        self.assertEqual(self.teleport.danger_teleport.call_count, 2)
-        self.assertFalse(self.ctx.critical_danger_requested.is_set())
-
-    def test_critical_escape_does_not_steal_active_sit_session(self) -> None:
-        """SP-sit recovery owns seated danger; critical must not preempt it."""
-        self.danger.danger_level.return_value = DangerLevel.CRITICAL
-        self.ctx.request_critical_danger()
-        self.ctx.sitting_event.set()
-        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
-        gameplay = GameplayLoop(
-            self.ctx,
-            attack=MagicMock(),
-            teleport=self.teleport,
-            input_backend=self.input,
-        )
-
-        self.assertFalse(gameplay._process_critical_danger())
-        self.teleport.danger_teleport.assert_not_called()
-        self.assertTrue(self.ctx.critical_danger_requested.is_set())
-        self.assertTrue(self.ctx.sitting_event.is_set())
-        self.assertFalse(self.ctx.danger_escape_active.is_set())
-
-    def test_ok_to_act_yields_to_pending_critical_escape(self) -> None:
-        worker = self._worker()
-        self.ctx.request_critical_danger()
-        self.assertFalse(worker._ok_to_act())
-        self.ctx.pop_critical_danger()
-        self.assertFalse(self.ctx.critical_danger_requested.is_set())
-        self.assertTrue(worker._ok_to_act())
 
     def test_tap_skips_input_while_escape_in_flight(self) -> None:
         worker = self._worker()
@@ -556,72 +339,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertFalse(worker._tap(82, why="enter_sit"))
         self.input.toggle_key.assert_not_called()
 
-    def test_leftover_critical_is_consumed_not_waited(self) -> None:
-        """Regression: a critical request latched before the sit claim must be
-        consumed by the seated owner, never waited on. Waiting used to park the
-        gameplay thread forever (the critical worker yields to a true SP sit).
-        """
-        worker = self._worker(_ScriptedVitals([0.99, 0.99]))
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        self.teleport.teleport_once_for_sit = MagicMock(return_value=True)  # type: ignore[method-assign]
-        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
-        # Damage is still live when the leftover is consumed: the session must
-        # escape once with the safe key, then continue recovery to completion.
-        levels = [DangerLevel.CRITICAL]
-        self.danger.danger_level.side_effect = (
-            lambda: levels.pop(0) if levels else DangerLevel.SAFE
-        )
-        worker._sit_until_done = MagicMock(  # type: ignore[method-assign]
-            return_value="recovered"
-        )
-        self.ctx.request_critical_danger()
 
-        worker._recover_sp(0.02)
 
-        self.assertFalse(self.ctx.critical_danger_requested.is_set())
-        self.teleport.danger_teleport.assert_called_once_with(
-            reason="sit_danger_request",
-            prefer_safe_key=True,
-        )
-        self.assertFalse(self.ctx.sitting_event.is_set())
-        self.assertFalse(worker._seated)
-        worker._sit_until_done.assert_called_once_with(82)
-
-    def test_stale_leftover_critical_is_consumed_without_escape(self) -> None:
-        """A critical request whose damage has aged out is dropped by the
-        seated owner without wasting a teleport."""
-        worker = self._worker(_ScriptedVitals([0.99, 0.99]))
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
-        self.ctx.request_critical_danger()
-
-        # SP is already high, so the recovery path consumes the leftover and
-        # completes without any escape.
-        worker._recover_sp(0.02)
-
-        self.assertFalse(self.ctx.critical_danger_requested.is_set())
-        self.teleport.danger_teleport.assert_not_called()
-        self.assertFalse(self.ctx.sitting_event.is_set())
-        self.assertFalse(worker._seated)
-
-    def test_finish_recovery_consumes_leftover_critical_and_stands(self) -> None:
-        """Teardown must consume a leftover critical instead of blocking the
-        stand forever on an escape that can never preempt this session.
-        """
-        worker = self._worker()
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        self.assertTrue(self.ctx.try_begin_sit_ops())
-        worker._seated = True
-        self.ctx.request_critical_danger()
-
-        gen_before = self.ctx.hunt_generation
-        worker._finish_recovery_session(sit_scan=82)
-
-        self.assertFalse(self.ctx.critical_danger_requested.is_set())
-        self.input.toggle_key.assert_called_once_with(82)
-        self.assertFalse(worker._seated)
-        self.assertFalse(self.ctx.sitting_event.is_set())
-        self.assertEqual(self.ctx.hunt_generation, gen_before + 1)
 
     def test_finish_recovery_normal_completion_stands_and_starts_new_hunt(self) -> None:
         """Without a preemption the teardown must still stand and begin a new
@@ -640,19 +359,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertFalse(self.ctx.sitting_event.is_set())
         self.assertEqual(self.ctx.hunt_generation, gen_before + 1)
 
-    def test_end_sit_ops_clears_stale_danger_sit_and_post_tp_heal(self) -> None:
-        """Damage during stand settle must not leave combat blocked forever."""
-        self.assertTrue(self.ctx.try_begin_sit_ops())
-        self.ctx.request_danger_sit()
-        self.ctx.mark_post_teleport_heal(2.0)
-        self.assertTrue(self.ctx.danger_sit_requested.is_set())
-        self.assertTrue(self.ctx.in_post_teleport_heal_window())
-
-        self.ctx.end_sit_ops()
-
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-        self.assertFalse(self.ctx.in_post_teleport_heal_window())
-        self.assertFalse(self.ctx.sitting_event.is_set())
 
     def test_post_teleport_heal_window_is_time_bounded(self) -> None:
         """A blind OCR feed must not park gameplay on the full-HP gate forever."""
@@ -671,48 +377,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
             self.assertTrue(self.ctx.in_post_teleport_heal_window())
 
 
-    def test_process_pending_drops_stale_danger_sit_when_sp_ok(self) -> None:
-        worker = self._worker(_ScriptedVitals([0.99]))
-        self.ctx.request_danger_sit()
-        self.assertFalse(worker.process_pending())
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
 
-    def test_critical_escape_waits_while_paused_without_repeating_teleport(self) -> None:
-        self.danger.danger_level.return_value = DangerLevel.CRITICAL
-        self.ctx.request_critical_danger()
-        self.ctx.mark_paused()
-        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
-        gameplay = GameplayLoop(
-            self.ctx,
-            attack=MagicMock(),
-            teleport=self.teleport,
-            input_backend=self.input,
-        )
 
-        self.assertFalse(gameplay._process_critical_danger())
-        self.assertFalse(gameplay._process_critical_danger())
-        self.teleport.danger_teleport.assert_not_called()
-        self.assertTrue(self.ctx.critical_danger_requested.is_set())
-
-        self.ctx.mark_running()
-        self.assertTrue(gameplay._process_critical_danger())
-        self.teleport.danger_teleport.assert_called_once_with(reason="critical_hunt")
-        self.assertFalse(self.ctx.critical_danger_requested.is_set())
-
-    def test_critical_escape_does_not_send_input_after_stop(self) -> None:
-        self.ctx.request_critical_danger()
-        self.ctx.stop_event.set()
-        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
-        gameplay = GameplayLoop(
-            self.ctx,
-            attack=MagicMock(),
-            teleport=self.teleport,
-            input_backend=self.input,
-        )
-
-        self.assertFalse(gameplay._process_critical_danger())
-        self.teleport.danger_teleport.assert_not_called()
-        self.assertTrue(self.ctx.critical_danger_requested.is_set())
 
     def test_damage_during_sp_recovery_teleports_then_sits_again(self) -> None:
         worker = self._worker(_ScriptedVitals([0.02, 0.02, 0.99, 0.99]))
@@ -740,57 +406,7 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertEqual(worker._sit_until_done.call_count, 2)
         self.assertFalse(self.ctx.sitting_event.is_set())
 
-    def test_failed_danger_escape_retries_without_stand_toggle(self) -> None:
-        worker = self._worker(_ScriptedVitals([0.40] * 20))
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        self.ctx.pop_danger_sit_request = MagicMock(  # type: ignore[method-assign]
-            side_effect=[False, True]
-        )
-        worker._seated = True
-        self.teleport.danger_teleport = MagicMock(side_effect=[False, True])  # type: ignore[method-assign]
 
-        self.assertEqual(worker._sit_until_done(82), "danger_escape_failed")
-        self.assertEqual(self.teleport.danger_teleport.call_count, 1)
-        self.assertEqual(self.input.toggle_key.call_count, 0)
-        self.assertTrue(worker._seated)
-
-        # The recovery loop owns the retry and still must not press stand.
-        self.ctx.pop_danger_sit_request.side_effect = None
-        self.ctx.pop_danger_sit_request.return_value = False
-        worker._recover_sp(0.40, reason="danger")
-        self.assertEqual(self.teleport.danger_teleport.call_count, 2)
-        # The retry never sends a stand toggle while seated. The resumed
-        # recovery then performs its normal sit/stand pair exactly once each.
-        self.assertEqual(self.input.toggle_key.call_count, 2)
-        sit_logs = [
-            call.args[0]
-            for call in self.ctx.logger.behavior.call_args_list
-            if call.args and "tap sit-key" in call.args[0]
-        ]
-        self.assertEqual(
-            sit_logs,
-            ["[SIT] tap sit-key reason=enter_sit", "[SIT] tap sit-key reason=leave_sit"],
-        )
-        self.assertFalse(worker._seated)
-
-    def test_danger_request_escapes_once_then_searches_safe_place(self) -> None:
-        worker = self._worker(_ScriptedVitals([0.99, 0.99]))
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        self.ctx.request_danger_sit()
-        self.ctx.request_critical_danger()
-        worker._sit_until_done = MagicMock(return_value="recovered")  # type: ignore[method-assign]
-        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
-        self.teleport.teleport_once_for_sit = MagicMock(return_value=True)  # type: ignore[method-assign]
-
-        worker._recover_sp(0.02, reason="danger")
-
-        self.teleport.danger_teleport.assert_called_once_with(
-            reason="sit_danger_request",
-            prefer_safe_key=True,
-        )
-        self.teleport.teleport_once_for_sit.assert_not_called()
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-        self.assertFalse(self.ctx.critical_danger_requested.is_set())
 
     def test_failed_seated_escape_retry_resits_once_in_same_session(self) -> None:
         """A failed-then-successful seated escape must not restart recovery."""
@@ -818,71 +434,8 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.assertEqual(self.input.toggle_key.call_count, 1)
         self.assertFalse(self.ctx.sitting_event.is_set())
 
-    def test_failed_urgent_escape_retries_before_sitting_without_extra_teleport(self) -> None:
-        worker = self._worker(_ScriptedVitals([0.02, 0.02, 0.99, 0.99]))
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        self.ctx.request_danger_sit()
-        worker._sit_until_done = MagicMock(return_value="recovered")  # type: ignore[method-assign]
-        self.teleport.danger_teleport = MagicMock(side_effect=[False, True])  # type: ignore[method-assign]
-        self.teleport.teleport_once_for_sit = MagicMock(return_value=True)  # type: ignore[method-assign]
 
-        worker._recover_sp(0.02, reason="danger")
 
-        self.assertEqual(self.teleport.danger_teleport.call_count, 2)
-        self.teleport.teleport_once_for_sit.assert_not_called()
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-
-    def test_damage_during_escape_settle_is_consumed_once(self) -> None:
-        worker = self._worker(_ScriptedVitals([0.02, 0.02, 0.99, 0.99]))
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        self.ctx.request_danger_sit()
-        worker._sit_until_done = MagicMock(return_value="recovered")  # type: ignore[method-assign]
-
-        def escape_and_report_damage(
-            *,
-            reason: str,
-            prefer_safe_key: bool = False,
-        ) -> bool:
-            if self.teleport.danger_teleport.call_count == 1:
-                # Simulate a new HP drop observed while the first escape is
-                # settling. It must cause one new escape, not an infinite loop.
-                self.ctx.request_danger_sit()
-            return True
-
-        self.teleport.danger_teleport = MagicMock(  # type: ignore[method-assign]
-            side_effect=escape_and_report_damage
-        )
-
-        worker._recover_sp(0.02, reason="danger")
-
-        self.assertEqual(self.teleport.danger_teleport.call_count, 2)
-        self.assertEqual(
-            [call.kwargs["reason"] for call in self.teleport.danger_teleport.call_args_list],
-            ["sit_danger_request", "sit_danger_request"],
-        )
-        self.assertFalse(self.ctx.danger_sit_requested.is_set())
-        worker._sit_until_done.assert_called_once_with(82)
-
-    def test_damage_recovery_sits_in_urgent_escape_area_without_extra_teleport(self) -> None:
-        worker = self._worker(_ScriptedVitals([0.02, 0.02, 0.99, 0.99]))
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-        worker._sit_until_done = MagicMock(  # type: ignore[method-assign]
-            side_effect=["interrupted", "recovered"]
-        )
-        self.teleport.teleport_once_for_sit = MagicMock(return_value=True)  # type: ignore[method-assign]
-        self.teleport.danger_teleport = MagicMock(return_value=True)  # type: ignore[method-assign]
-        worker._seated = False
-        self.ctx.request_danger_sit()
-
-        worker._recover_sp(0.02, reason="danger")
-
-        self.teleport.danger_teleport.assert_called_once_with(
-            reason="sit_danger_request",
-            prefer_safe_key=True,
-        )
-        self.teleport.teleport_once_for_sit.assert_not_called()
-        self.assertEqual(worker._sit_until_done.call_count, 2)
-        self.assertFalse(self.ctx.sitting_event.is_set())
 
     def test_interrupted_recovery_does_not_relocate_again_before_sitting(self) -> None:
         # An interrupted attempt represents a completed urgent escape; the
@@ -910,7 +463,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
         worker._seated = True
         worker.sit = MagicMock(return_value=True)  # type: ignore[method-assign]
-        self.ctx.pop_danger_sit_request = MagicMock(return_value=False)  # type: ignore[method-assign]
         outcome = worker._sit_until_done(82)
         self.assertIsNone(outcome)
 

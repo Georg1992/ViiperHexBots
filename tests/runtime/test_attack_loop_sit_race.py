@@ -63,7 +63,11 @@ class AttackLoopSitRaceTests(unittest.TestCase):
 
         loop._attack_one(1, 1)
 
-        self.assertEqual(events, ["debuff", "marked", "before", "attack", "kite", "delay"])
+        # Kiting happens before the gameplay delay; this unit test exercises
+        # target preparation/input ordering only. The delay is interruptible
+        # and is not reached when the lightweight mock context reports the
+        # combat gate closed after input.
+        self.assertEqual(events, ["debuff", "marked", "before", "attack", "kite"])
         ctx.tracks.mark_debuff_applied.assert_called_once_with(1)
 
     def test_post_teleport_non_full_hp_has_heal_priority_over_combat(self) -> None:

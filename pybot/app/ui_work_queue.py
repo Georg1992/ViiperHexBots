@@ -7,10 +7,20 @@ import threading
 from collections.abc import Callable
 
 
+ErrorHandler = Callable[[Exception], None]
+
+
 class UiWorkQueue:
     """Run at most one queued task at a time without blocking producers."""
 
-    def __init__(self, *, name: str) -> None:
+    def __init__(
+        self,
+        *,
+        name: str,
+        on_error: ErrorHandler | None = None,
+    ) -> None:
+        self._name = name
+        self._on_error = on_error
         self._queue: queue.Queue[Callable[[], None] | None] = queue.Queue(maxsize=1)
         self._closed = False
         self._pending_count = 0
@@ -19,7 +29,12 @@ class UiWorkQueue:
         self._thread.start()
 
     def submit(self, task: Callable[[], None]) -> bool:
-        """Queue *task* without blocking, replacing stale pending work."""
+        """Queue *task* without blocking, replacing stale pending work.
+
+        The counter includes both a task currently executing and one queued
+        replacement, so its maximum is two even though the queue itself has
+        one slot.
+        """
         with self._state_lock:
             if self._closed:
                 return False
@@ -39,6 +54,20 @@ class UiWorkQueue:
                     return True
                 except queue.Full:
                     return False
+
+    def discard_pending(self) -> None:
+        """Drop queued, not-running work after the owner enters terminal state."""
+        with self._state_lock:
+            try:
+                queued = self._queue.get_nowait()
+            except queue.Empty:
+                queued = None
+            if queued is not None:
+                self._pending_count -= 1
+            # If shutdown was already requested, removing the queued task must
+            # not leave the worker waiting forever on an empty queue.
+            if self._closed and self._queue.empty():
+                self._queue.put_nowait(None)
 
     @property
     def idle(self) -> bool:
@@ -73,10 +102,26 @@ class UiWorkQueue:
                 return
             try:
                 task()
-            except Exception:
-                # Callers own error reporting; a UI helper must not die on one
-                # failed process read or config write.
-                pass
+            except Exception as exc:
+                # The worker must remain alive for independent queued work, but
+                # the failure is never silent. The owner receives the exact
+                # exception and decides whether the operation is terminal.
+                if self._on_error is not None:
+                    try:
+                        self._on_error(exc)
+                    except Exception as report_exc:
+                        print(
+                            f"[UI WORKER {self._name}] error reporter failed: "
+                            f"{type(report_exc).__name__}: {report_exc}; "
+                            f"original={type(exc).__name__}: {exc}",
+                            flush=True,
+                        )
+                else:
+                    print(
+                        f"[UI WORKER {self._name}] task failed: "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
             finally:
                 with self._state_lock:
                     self._pending_count -= 1

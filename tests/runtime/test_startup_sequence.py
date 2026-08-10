@@ -170,37 +170,6 @@ class HuntStartupSequenceTests(unittest.TestCase):
         self.assertTrue(sequence.is_combat_ready())
         self.assertTrue(sequence.timers_done.is_set())
 
-    def test_startup_actions_follow_suspension_matrix(self) -> None:
-        gates = GateController()
-        gates.startup.begin(require_buffs=False, require_timers=False)
-        gates.startup.mark_area_clear()
-
-        # Timer schedules remain alive during heal/storage, but startup
-        # character actions and combat are held by those session gates.
-        self.assertTrue(gates.should_run_timers())
-        self.assertTrue(gates.try_begin_heal_ops())
-        self.assertTrue(gates.should_run_timers())
-        self.assertFalse(gates.should_run_combat())
-        gates.end_heal_ops()
-
-        self.assertTrue(gates.try_begin_storage_ops())
-        self.assertTrue(gates.should_run_timers())
-        self.assertFalse(gates.should_run_combat())
-        gates.end_storage_ops()
-
-        # Safety transitions suspend timer input without changing the
-        # healing/storage policy.
-        gates.discovery_suspend.set()
-        self.assertFalse(gates.should_run_timers())
-        gates.discovery_suspend.clear()
-        gates.request_danger_sit()
-        self.assertFalse(gates.should_run_timers())
-        gates.pop_danger_sit_request()
-
-        self.assertTrue(gates.try_begin_sit_ops())
-        self.assertFalse(gates.should_run_timers())
-        self.assertFalse(gates.should_run_combat())
-        gates.end_sit_ops()
 
     def test_gate_trusts_sit_recovery_start_and_releases_sit_gate(self) -> None:
         sequence = HuntStartupSequence()

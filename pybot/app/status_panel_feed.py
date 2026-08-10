@@ -25,9 +25,8 @@ STATUS_PANEL_SEARCH_MS = 1000
 STATUS_PANEL_VALUE_MS = 200
 # Re-parse max SP / Weight this often while the panel stays locked.
 STATUS_PANEL_MAX_REFRESH_S = 1.0
-# Avoid flooding the application log when SP/weight OCR is transiently bad.
-STATUS_PANEL_HP_ONLY_LOG_S = 5.0
-_STATUS_PANEL_WATCHDOG_GRACE_S = 1.0
+# Avoid flooding the application log when OCR is transiently bad.
+STATUS_PANEL_LOG_INTERVAL_S = 5.0
 
 
 class StatusPanelFeed:
@@ -36,7 +35,6 @@ class StatusPanelFeed:
     def __init__(
         self,
         *,
-        root,
         config,
         vitals,
         overlay,
@@ -56,10 +54,6 @@ class StatusPanelFeed:
         self._on_weight = on_weight
         self._status_panel_confirmed: StatusPanelValues | None = None
         self._status_panel_max_read_at = 0.0
-        self._last_hp_only_log_at = 0.0
-        # Monotonic time the Basic Info panel was last seen missing, or None.
-        self._status_panel_missing_since: float | None = None
-        self._last_panel_missing_log_at = 0.0
         # Throttle for the panel-open-but-digits-unreadable diagnostic so a
         # persistently blind feed is visible in the log instead of silent.
         self._last_digits_missing_log_at = 0.0
@@ -72,7 +66,7 @@ class StatusPanelFeed:
         self._status_panel_client_hint: tuple[int, int, int, int] | None = None
         self._feed_state_lock = threading.RLock()
         self._stopped = False
-        self._started = False
+        self._terminal_fault = False
         self._ocr_stop = threading.Event()
         self._ocr_thread: threading.Thread | None = None
         self._lifecycle_epoch = 0
@@ -97,8 +91,10 @@ class StatusPanelFeed:
     def start(self) -> None:
         """Start the one long-lived OCR reader, independent of Tk scheduling."""
         with self._feed_state_lock:
+            if self._terminal_fault:
+                self._log("[UI] Status-panel reader start ignored after terminal failure")
+                return
             self._stopped = False
-            self._started = True
             self._ocr_stop.clear()
             thread = self._ocr_thread
             if thread is None or not thread.is_alive():
@@ -114,7 +110,6 @@ class StatusPanelFeed:
         """Stop the reader and invalidate results already queued for Tk."""
         with self._feed_state_lock:
             self._stopped = True
-            self._started = False
             self._lifecycle_epoch += 1
             self._ocr_stop.set()
         with self._ui_result_lock:
@@ -130,18 +125,25 @@ class StatusPanelFeed:
         thread = self._ocr_thread
         return thread is None or not thread.is_alive()
 
-    def set_active(self, active: bool) -> None:
-        """Compatibility no-op: status OCR is session-owned, never gated.
+    @property
+    def faulted(self) -> bool:
+        """True when a reader/producer failure permanently disabled the feed."""
+        with self._feed_state_lock:
+            return self._terminal_fault
 
-        The hunt lifecycle may pause combat, sitting, storage, and timers, but
-        it must not pause the observation producer. Consumers always read the
-        last published values from ``PlayerVitals``.
-        """
-        return
-
-    def request_now(self) -> None:
-        """Compatibility no-op; consumers cannot wake or reconfigure OCR."""
-        return
+    def _fail_terminal(self, message: str) -> None:
+        """Permanently stop the producer after an unsafe reader failure."""
+        with self._feed_state_lock:
+            if self._terminal_fault:
+                return
+            self._terminal_fault = True
+            self._stopped = True
+            self._lifecycle_epoch += 1
+            self._ocr_stop.set()
+        with self._ui_result_lock:
+            self._latest_ui_result = None
+            self._ui_result_pending = False
+        self._log(f"[UI] Status-panel reader stopped: {message}")
 
     def _ocr_loop(self) -> None:
         """Continuously read status pixels and publish them to ``PlayerVitals``."""
@@ -153,11 +155,19 @@ class StatusPanelFeed:
             try:
                 result = self._read_snapshot()
             except Exception as exc:
-                self._log(f"[UI] Status-panel read failed: {exc}")
-                result = None
+                self._fail_terminal(
+                    f"{type(exc).__name__}: {exc}"
+                )
+                break
             if self._ocr_stop.is_set():
                 break
             if result is not None:
+                if result.state == "read_failed":
+                    detail = getattr(result, "error", None)
+                    self._fail_terminal(
+                        "read_failed" + (f": {detail}" if detail else "")
+                    )
+                    break
                 # This is the producer boundary. Vitals are committed here,
                 # before any optional Tk projection, so consumers never ask
                 # the OCR thread for a value and a blocked UI cannot stop it.
@@ -168,7 +178,10 @@ class StatusPanelFeed:
                         observation_epoch=observation_epoch,
                     )
                 except Exception as exc:
-                    self._log(f"[UI] Status-panel result commit failed: {exc}")
+                    self._fail_terminal(
+                        f"commit {type(exc).__name__}: {exc}"
+                    )
+                    break
                 current_observation_epoch = getattr(
                     self._vitals, "observation_epoch", None
                 )
@@ -179,12 +192,15 @@ class StatusPanelFeed:
                     continue
                 try:
                     self._queue_ui_result(
-                    epoch,
-                    result,
-                    observation_epoch=observation_epoch,
-                )
+                        epoch,
+                        result,
+                        observation_epoch=observation_epoch,
+                    )
                 except Exception as exc:
-                    self._log(f"[UI] Status-panel projection queue failed: {exc}")
+                    self._log(
+                        f"[UI] Status-panel projection disabled: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
             with self._feed_state_lock:
                 confirmed = self._status_panel_confirmed
             delay_ms = STATUS_PANEL_VALUE_MS if confirmed else STATUS_PANEL_SEARCH_MS
@@ -217,26 +233,16 @@ class StatusPanelFeed:
         # another daemon thread or a process-wide single-flight lock here. The
         # live producer performs one fixed full-value parse and publishes only
         # complete fresh snapshots; no fallback cascade can change its timing.
-        try:
-            return read_status_panel_snapshot(
-                hwnd,
-                confirmed,
-                refresh_max=refresh_max,
-                timeout_s=STATUS_PANEL_READ_TIMEOUT_S,
-                client_hint=client_hint,
-                refresh_client=False,
-                reanchor=False,
-                allow_partial=False,
-            )
-        except Exception as exc:
-            # A parser/capture exception must become one ordinary result, not
-            # terminate the permanent producer. The next loop simply retries
-            # the same static layout; no consumer-driven recovery is needed.
-            return StatusPanelReadResult(
-                hwnd=hwnd,
-                state="read_failed",
-                error=f"{type(exc).__name__}: {exc}",
-            )
+        return read_status_panel_snapshot(
+            hwnd,
+            confirmed,
+            refresh_max=refresh_max,
+            timeout_s=STATUS_PANEL_READ_TIMEOUT_S,
+            client_hint=client_hint,
+            refresh_client=False,
+            reanchor=False,
+            allow_partial=False,
+        )
 
     def _record_reader_result(
         self,
@@ -262,15 +268,12 @@ class StatusPanelFeed:
             # A new teleport epoch invalidates the confirmed anchor and every
             # cached value. Never commit a result from a read associated with a
             # different producer epoch, even if the caller supplied an object
-            # that happens to have the same window handle. Untagged legacy
-            # calls remain compatible with the pre-epoch test adapter.
+            # that happens to have the same window handle.
             if (
                 observation_epoch is not None
                 and observation_epoch != self._last_observation_epoch
             ):
                 return
-            if result.state in {"values", "hp_only", "sp_only", "hp_sp_only"}:
-                self._status_panel_missing_since = None
             if result.state in {
                 "values",
                 "hp_only",
@@ -365,7 +368,6 @@ class StatusPanelFeed:
                 return
             if result.state in {
                 "inactive",
-                "read_failed",
                 "panel_missing",
                 "roi_missing",
                 "read_timeout",
@@ -427,7 +429,7 @@ class StatusPanelFeed:
         """Render a reader snapshot on Tk without mutating reader state."""
         if result.state == "read_timeout":
             now = time.monotonic()
-            if now - self._last_read_timeout_log_at >= STATUS_PANEL_HP_ONLY_LOG_S:
+            if now - self._last_read_timeout_log_at >= STATUS_PANEL_LOG_INTERVAL_S:
                 self._last_read_timeout_log_at = now
                 detail = getattr(result, "error", None)
                 self._log(
@@ -435,18 +437,12 @@ class StatusPanelFeed:
                     + (f": {detail}" if detail else "")
                 )
             return
-        if result.state in {"inactive", "read_failed", "client_missing"}:
+        if result.state in {"inactive", "client_missing"}:
             self._status_panel_overlay.hide()
             self._on_hp("—")
             if self._panel_owns_sp_weight():
                 self._on_sp("—")
                 self._on_weight("—")
-            if result.state == "read_failed":
-                detail = getattr(result, "error", None)
-                self._log(
-                    "[UI] Status-panel read failed"
-                    + (f": {detail}" if detail else "")
-                )
             return
         if result.state == "panel_missing":
             self._on_hp("—")
@@ -488,27 +484,7 @@ class StatusPanelFeed:
                 self._on_sp(format_pair(values.sp, values.sp_max))
                 self._on_weight(format_pair(values.weight, values.weight_max))
 
-    def apply_result(self, result: StatusPanelReadResult) -> None:
-        """Compatibility API that uses the same passive producer commit path."""
-        with self._feed_state_lock:
-            epoch = self._lifecycle_epoch
-        # Compatibility callers have no capture token. Before any teleport,
-        # epoch zero is the original session and remains safe for old tests and
-        # adapters. Once a teleport advanced the observation epoch, an untagged
-        # completion is ambiguous and must be dropped rather than treated as a
-        # fresh SP sample. Production reads use _ocr_loop and carry the token
-        # captured before the native read.
-        observation_epoch = getattr(self._vitals, "observation_epoch", 0)
-        if observation_epoch:
-            return
-        self._record_reader_result(result, epoch)
-        self._project_result(result)
-
     # ── Panel state helpers ─────────────────────────────────────────
-
-    def reset(self) -> None:
-        """Compatibility no-op; the status producer is session-owned."""
-        return
 
     def _panel_owns_sp_weight(self) -> bool:
         """True when SP/Weight come from Basic Info OCR (Generic / no memory)."""
@@ -522,88 +498,10 @@ class StatusPanelFeed:
         danger detector goes blind, so surface it instead of failing silently.
         """
         now = time.monotonic()
-        if now - self._last_digits_missing_log_at < STATUS_PANEL_HP_ONLY_LOG_S:
+        if now - self._last_digits_missing_log_at < STATUS_PANEL_LOG_INTERVAL_S:
             return
         self._last_digits_missing_log_at = now
-        since = ""
-        if self._status_panel_missing_since is not None:
-            since = (
-                f" (panel missing {int(now - self._status_panel_missing_since)}s)"
-            )
         self._log(
             "[UI] Status panel open but HP/SP/weight digits unreadable"
-            f"{since} — feed paused until OCR recovers"
+            " — feed paused until OCR recovers"
         )
-
-    def _apply_sp_only_result(self, sp: tuple[int, int] | None) -> None:
-        """Publish SP even when HP/Weight OCR failed in the same frame."""
-        if sp is None:
-            return
-        if self._panel_owns_sp_weight():
-            self._vitals.publish_sp(*sp)
-            self._on_sp(format_pair(*sp))
-
-    def _apply_hp_only_result(self, hp: tuple[int, int] | None) -> None:
-        """Publish HP even when another status-panel row failed OCR."""
-        if hp is None:
-            return
-        # An hp_only read means the panel header/origin was found, so a live
-        # HP OCR is proof the panel feed is back — end a missing spell even
-        # when the SP/weight rows are still unreadable.
-        if self._status_panel_missing_since is not None:
-            duration = time.monotonic() - self._status_panel_missing_since
-            self._status_panel_missing_since = None
-            self._log(
-                f"[UI] Status panel recovered (HP only) after {int(duration)}s"
-            )
-        self._vitals.publish_hp(*hp)
-        self._on_hp(format_pair(*hp))
-        now = time.monotonic()
-        if now - self._last_hp_only_log_at >= STATUS_PANEL_HP_ONLY_LOG_S:
-            self._last_hp_only_log_at = now
-            self._log(
-                f"[UI] Status panel HP-only read hp={hp[0]}/{hp[1]}; "
-                "SP/weight OCR unavailable"
-            )
-
-    def _commit_status_panel(
-        self,
-        values: StatusPanelValues,
-        *,
-        client_left: int,
-        client_top: int,
-        publish_vitals: bool = True,
-    ) -> None:
-        """Store a successful read; UI stats update only when numbers change."""
-        if self._status_panel_missing_since is not None:
-            duration = time.monotonic() - self._status_panel_missing_since
-            self._status_panel_missing_since = None
-            self._log(
-                f"[UI] Status panel recovered after {int(duration)}s"
-            )
-        self._status_panel_confirmed = values
-        self._status_panel_anchor = values.panel_origin
-        self._status_panel_overlay.update(
-            values, client_left=client_left, client_top=client_top
-        )
-        # HP is vision-only — always mirror into the bot UI from panel OCR.
-        self._on_hp(format_pair(values.hp, values.hp_max))
-        # Publish HP and SP to vitals every successful OCR tick.
-        # HP goes to vitals unconditionally (hunt workers need it for danger).
-        if publish_vitals:
-            self._vitals.publish_hp(values.hp, values.hp_max)
-            if self._panel_owns_sp_weight():
-                self._vitals.publish_sp(values.sp, values.sp_max)
-                self._vitals.publish_weight(values.weight, values.weight_max)
-        # The reader already committed ``previous`` before this UI projection.
-        # Projection must still refresh the labels on the first frame; avoid
-        # using the reader's state cache as a UI-change detector.
-        if self._panel_owns_sp_weight():
-            self._apply_status_panel_stats(values)
-
-    def _apply_status_panel_stats(self, values: StatusPanelValues) -> None:
-        """Apply vision SP/Weight when memory is off (HP set in commit)."""
-        if not self._panel_owns_sp_weight():
-            return
-        self._on_sp(format_pair(values.sp, values.sp_max))
-        self._on_weight(format_pair(values.weight, values.weight_max))

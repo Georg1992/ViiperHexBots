@@ -22,7 +22,6 @@ from pybot.app.memory_stats_feed import MemoryStatsFeed
 from pybot.app.overlay import StatusPanelOverlay, Win32HuntOverlay
 from pybot.game_state import PlayerVitals
 from pybot.app.session_log import AppSessionLog
-from pybot.app.status_display import format_pair
 from pybot.app.status_panel_feed import StatusPanelFeed
 from pybot.app.ui_work_queue import UiWorkQueue
 from pybot.app.startup_splash import preload_mob_descriptors
@@ -70,7 +69,6 @@ class MainWindow:
         # ── Data layer ──────────────────────────────────────────────
         self.config = AppConfig().load()
         self.mob_catalog = load_mob_catalog(ensure_assets=False)
-        self._check_mob_catalog()
         self.session = AppSessionLog()
         self._hunt_overlay = Win32HuntOverlay()
         self._status_panel_overlay = StatusPanelOverlay()
@@ -119,7 +117,6 @@ class MainWindow:
             on_weight=self._set_memory_weight,
         )
         self._status_feed = StatusPanelFeed(
-            root=self.root,
             config=self.config,
             vitals=self.vitals,
             overlay=self._status_panel_overlay,
@@ -142,10 +139,25 @@ class MainWindow:
         # never be dropped while its pending flag is set.
         self._ui_callback_queue: queue.Queue[callable] = queue.Queue()
         self._exit_requested = False
-        self._config_work = UiWorkQueue(name="ui-config-writer")
-        self._shutdown_work = UiWorkQueue(name="ui-shutdown")
+        self._config_work = UiWorkQueue(
+            name="ui-config-writer",
+            on_error=lambda exc: self.log_pipe.log(
+                f"[UI] config worker failed: {type(exc).__name__}: {exc}"
+            ),
+        )
+        self._shutdown_work = UiWorkQueue(
+            name="ui-shutdown",
+            on_error=lambda exc: self.log_pipe.log(
+                f"[UI] shutdown worker failed: {type(exc).__name__}: {exc}"
+            ),
+        )
         self._shutdown_cleanup_pending = False
-        self._resume_work = UiWorkQueue(name="ui-resume")
+        self._resume_work = UiWorkQueue(
+            name="ui-resume",
+            on_error=lambda exc: self.log_pipe.log(
+                f"[UI] resume worker failed: {type(exc).__name__}: {exc}"
+            ),
+        )
         self._resume_pending = False
         # Ignore widget callbacks while building; enable at end of _build_ui.
         self._settings_apply_enabled = False
@@ -171,11 +183,6 @@ class MainWindow:
         threading.Thread(target=self.lifecycle.init_viiper, daemon=True).start()
 
     # ── Pre-flight ──────────────────────────────────────────────────
-
-    def _check_mob_catalog(self) -> None:
-        if not self.mob_catalog:
-            # Drop zone can add the first mob; do not exit the app.
-            pass
 
     def _fit_window_to_content(self) -> None:
         """Grow the window to the UI's natural size; block shrink below that."""
@@ -1065,11 +1072,6 @@ class MainWindow:
         """Memory reading follows the profile: Generic off, server profiles on."""
         self.config.use_memory_reading = memory_reading_enabled(self.client_combo.get())
 
-    @staticmethod
-    def _format_pair(current: int | None, maximum: int | None) -> str:
-        """Compatibility wrapper around the pure status display helper."""
-        return format_pair(current, maximum)
-
     def _set_memory_name(self, text: str) -> None:
         self.memory_name.configure(text=text)
 
@@ -1411,9 +1413,26 @@ class MainWindow:
             self._shutdown_work,
             self._resume_work,
         )
-        if not all(work.idle for work in queues):
+        if not all(
+            getattr(work, "shutdown_safe", work.idle)
+            for work in queues
+        ):
             self.root.after(25, self._poll_auxiliary_shutdown)
             return
+        faulted = [
+            name
+            for name, work in (
+                ("memory-reader", self._memory_feed),
+                ("status-reader", self._status_feed),
+            )
+            if getattr(work, "faulted", False)
+            and getattr(work, "worker_alive", False)
+        ]
+        if faulted:
+            self.log_pipe.log(
+                "[UI] shutdown continuing with faulted native worker still "
+                f"unwinding: {', '.join(faulted)}"
+            )
         self.root.destroy()
 
     def run(self) -> None:
