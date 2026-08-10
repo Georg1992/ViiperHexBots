@@ -30,6 +30,18 @@ _grab_worker_started = False
 _grab_state_lock = threading.Lock()
 
 
+def _new_capture_session() -> mss.mss:
+    """Create a capture session with the hardware cursor excluded.
+
+    Tracking and discovery must see game pixels only.  ``mss`` defaults to
+    cursor-off on Windows, but set it explicitly so a future library/default
+    change cannot paint the OS cursor into a mob sprite and disturb matching.
+    """
+    sct = mss.MSS()
+    sct.with_cursor = False
+    return sct
+
+
 class _GrabRequest:
     """One native grab with a completion event and result slot."""
 
@@ -282,7 +294,7 @@ class _UiCaptureChannel:
                     return
                 try:
                     if sct is None:
-                        sct = mss.MSS()
+                        sct = _new_capture_session()
                     request.result = sct.grab(request.monitor)
                 except BaseException as exc:  # noqa: BLE001 - surface any native failure
                     request.error = exc
@@ -464,7 +476,7 @@ def capture_region(x: int, y: int, width: int, height: int) -> np.ndarray | None
         with _capture_state_lock:
             lock = _capture_lock
             if _sct is None:
-                _sct = mss.MSS()
+                _sct = _new_capture_session()
             sct = _sct
             work_queue = _grab_queue
 

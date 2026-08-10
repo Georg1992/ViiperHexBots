@@ -28,6 +28,7 @@ class CaptureRegionTests(unittest.TestCase):
 
         self.assertIsNone(frame)
         self.assertEqual(fake_sct.grab.call_count, 2)
+        self.assertFalse(fake_sct.with_cursor)
         fake_sct.close.assert_called()
 
     def test_reset_does_not_orphan_busy_capture_session(self) -> None:
@@ -244,6 +245,7 @@ class UiCaptureChannelTests(unittest.TestCase):
                 frame = channel.capture(10, 20, 4, 4)
 
         self.assertIsNotNone(frame)
+        self.assertFalse(fake_sct.with_cursor)
         # The runtime pipeline's global session stays untouched.
         self.assertIsNone(capture_mod._sct)
         fake_sct.grab.assert_called_once()

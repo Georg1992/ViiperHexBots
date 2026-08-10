@@ -26,6 +26,7 @@ from pybot.recognition.detector.tracking.local_tracker import (
     clear_track_states,
     track_local,
     transfer_track_state,
+    _TrackAnchor,
 )
 
 ROOT = PROJECT_ROOT
@@ -221,7 +222,9 @@ class LocalTrackerTests(unittest.TestCase):
         # only to assert the exact predicted center passed to the warm follower.
         from pybot.recognition.detector.tracking import local_tracker
         local_tracker._template_store(detector)[91] = SimpleNamespace(
-            image_gray=np.ones((4, 4), dtype=np.uint8),
+            anchors=(_TrackAnchor(np.ones((4, 4), dtype=np.uint8), 0, 0),),
+            width=8,
+            height=8,
         )
         with patch.object(
             local_tracker,
@@ -261,7 +264,10 @@ class LocalTrackerTests(unittest.TestCase):
         frame = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
         track_id = 901
         local_tracker._template_store(detector)[track_id] = SimpleNamespace(
-            image_gray=template,
+            anchors=(
+                _TrackAnchor(template, 0, 0),
+                _TrackAnchor(template, 0, 0),
+            ),
             width=24,
             height=24,
             center_x=115,
@@ -296,6 +302,119 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertLessEqual(abs(result.x - 115), 4)
         self.assertLessEqual(abs(result.y - 80), 4)
 
+    def test_acquired_multi_anchor_follow_survives_cursor_occlusion(self) -> None:
+        """Real acquisition stores corner anchors that survive a cursor block."""
+        detector = self._detector()
+        anchor = self._living_anchor(detector)
+        track_id = 946
+        provisional = self._build_track_dict(anchor, track_id=-track_id)
+        first = track_local(detector, self.roi, "horn", provisional)
+        self.assertTrue(first.found, first.miss_reason)
+        template = detector._local_track_templates[-track_id]
+        self.assertGreaterEqual(len(template.anchors), 2)
+        self.assertTrue(transfer_track_state(detector, -track_id, track_id))
+
+        shifted = cv2.warpAffine(
+            self.roi,
+            np.float32([[1, 0, 12], [0, 1, 8]]),
+            (self.roi.shape[1], self.roi.shape[0]),
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0),
+        )
+        # Cover the translated sprite center with a cursor-sized block. Corner
+        # anchors remain available; center refinement must use the dominant
+        # current sprite component rather than the black hole pixel.
+        cursor_x = first.x + 12
+        cursor_y = first.y + 8
+        desc = detector.ensure_descriptor("horn")
+        cursor_w = max(8, int(round(desc.avg_width * 0.22)))
+        cursor_h = max(8, int(round(desc.avg_height * 0.22)))
+        shifted[
+            cursor_y - cursor_h // 2:cursor_y + cursor_h // 2,
+            cursor_x - cursor_w // 2:cursor_x + cursor_w // 2,
+        ] = 0
+        result = track_local(
+            detector,
+            shifted,
+            "horn",
+            self._build_track_dict(
+                anchor,
+                track_id=track_id,
+                x=anchor.center_x,
+                y=anchor.center_y,
+                velX=12,
+                velY=8,
+                prediction_valid=True,
+                anchor_required=True,
+            ),
+        )
+        self.assertTrue(result.found, result.miss_reason)
+        self.assertLessEqual(abs(result.x - (first.x + 12)), 16)
+        self.assertLessEqual(abs(result.y - (first.y + 8)), 16)
+
+    def test_multi_anchor_follow_survives_game_cursor_occluding_one_quadrant(self) -> None:
+        """Remaining sprite anchors keep the Track on the same moving mob."""
+        detector = self._detector()
+        descriptor = detector.ensure_descriptor("horn")
+        from pybot.recognition.detector.tracking import local_tracker
+
+        rng = np.random.default_rng(41)
+        sprite = rng.integers(20, 235, size=(48, 48), dtype=np.uint8)
+        previous = np.zeros((190, 260), dtype=np.uint8)
+        previous[56:104, 82:130] = sprite
+        current = np.zeros_like(previous)
+        current[64:112, 96:144] = sprite
+        # The large game cursor covers the upper-left sprite quadrant. The
+        # other independent anchors remain visible in the current frame.
+        current[64:84, 96:118] = 0
+
+        anchors = tuple(
+            _TrackAnchor(
+                cv2.resize(
+                    sprite[y:y + 12, x:x + 12],
+                    (6, 6),
+                    interpolation=cv2.INTER_AREA,
+                ),
+                x + 6 - 24,
+                y + 6 - 24,
+            )
+            for x, y in ((2, 2), (34, 2), (2, 34), (34, 34))
+        )
+        track_id = 944
+        local_tracker._template_store(detector)[track_id] = SimpleNamespace(
+            anchors=anchors,
+            width=48,
+            height=48,
+        )
+        frame_bgr = cv2.cvtColor(current, cv2.COLOR_GRAY2BGR)
+        with patch.object(
+            local_tracker,
+            "_refine_hit_to_sprite_center",
+            side_effect=lambda _detector, _frame, _descriptor, cx, cy, _scale: (cx, cy),
+        ):
+            result = local_tracker._follow_cached_template(
+                detector,
+                frame_bgr,
+                descriptor,
+                track_id=track_id,
+                cx=120,
+                cy=88,
+                scale=0.9,
+                search_radius_px=35,
+                suppress_positions=None,
+                offset_x=0,
+                offset_y=0,
+                identity_cx=120,
+                identity_cy=88,
+                identity_radius_px=35,
+            )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertLessEqual(abs(result.x - 120), 4)
+        self.assertLessEqual(abs(result.y - 88), 4)
+        self.assertGreaterEqual(result.confidence, 0.42)
+
     def test_expanded_recovery_keeps_same_template_identity_bound(self) -> None:
         """A wider miss recovery also widens its bound without generic reacquire."""
         detector = self._detector()
@@ -304,7 +423,9 @@ class LocalTrackerTests(unittest.TestCase):
         from pybot.recognition.detector.tracking import local_tracker
 
         local_tracker._template_store(detector)[track_id] = SimpleNamespace(
-            image_gray=np.ones((4, 4), dtype=np.uint8),
+            anchors=(_TrackAnchor(np.ones((4, 4), dtype=np.uint8), 0, 0),),
+            width=8,
+            height=8,
         )
         calls: list[dict] = []
 

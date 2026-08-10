@@ -40,7 +40,7 @@ _FAST_BBOX_MIN_PX = 8
 # fragment could produce.
 _LOCAL_FAST_MIN_HEAT_MULT = 2.0
 # Keep re-anchoring to one small descriptor-sized local window. The center
-# calculation deliberately avoids connected components and extra identity gates.
+# calculation is independent of the temporal anchors and remains fail-closed.
 _REFINE_WINDOW_SCALE = 1.25
 _LOCAL_CROSS_TRACK_SUPPRESS_DIV = 2
 _LOCAL_FOLLOW_MIN_HEAT_FRAC = 0.5
@@ -65,14 +65,38 @@ _LOCAL_TRACK_LOST_MISSES = 8
 
 
 @dataclass(frozen=True)
-class _TrackTemplate:
+class _TrackAnchor:
+    """One small visual anchor inside a confirmed sprite patch."""
+
     image_gray: np.ndarray
+    # Native-pixel offset from the full sprite patch center.
+    offset_x: int
+    offset_y: int
+
+
+@dataclass(frozen=True)
+class _TrackTemplate:
+    # Several independent anchors keep tracking alive when the game cursor
+    # occludes one part of the sprite. The full patch dimensions are retained
+    # only to rebuild the candidate sprite window after anchor consensus.
+    anchors: tuple[_TrackAnchor, ...]
     # Native-frame dimensions and the sprite center inside the cached patch.
     width: int
     height: int
     center_x: int
     center_y: int
     scale: float
+
+
+# Keep anchors away from the sprite center: the large game cursor most often
+# covers that area. Four independent corners are enough to survive one blocked
+# region while keeping the hot path bounded.
+_ANCHOR_GRID = ((0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75))
+_ANCHOR_MIN_NATIVE_PX = 6
+_ANCHOR_MAX_COUNT = 4
+_ANCHOR_CONSENSUS_RADIUS_PX = 8
+_ANCHOR_MIN_COUNT = 2
+_CENTER_HOLE_MAX_GAP_PX = 8
 
 
 @dataclass(frozen=True)
@@ -461,24 +485,61 @@ def _remember_track_template(
     gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
     if gray.size == 0 or float(gray.std()) < _TEMPLATE_MIN_STD:
         return
-    reduced = cv2.resize(
-        gray,
-        (max(1, gray.shape[1] // _TEMPLATE_DOWNSCALE),
-         max(1, gray.shape[0] // _TEMPLATE_DOWNSCALE)),
-        interpolation=cv2.INTER_AREA,
+
+    patch_h, patch_w = gray.shape[:2]
+    anchor_w = min(
+        patch_w,
+        max(_ANCHOR_MIN_NATIVE_PX, int(round(patch_w / 3.0))),
     )
+    anchor_h = min(
+        patch_h,
+        max(_ANCHOR_MIN_NATIVE_PX, int(round(patch_h / 3.0))),
+    )
+    anchors_with_quality: list[tuple[float, _TrackAnchor]] = []
+    for rel_x, rel_y in _ANCHOR_GRID:
+        center_x = int(round(rel_x * max(0, patch_w - 1)))
+        center_y = int(round(rel_y * max(0, patch_h - 1)))
+        ax0 = max(0, min(patch_w - anchor_w, center_x - anchor_w // 2))
+        ay0 = max(0, min(patch_h - anchor_h, center_y - anchor_h // 2))
+        anchor_gray = gray[ay0:ay0 + anchor_h, ax0:ax0 + anchor_w]
+        quality = float(anchor_gray.std())
+        if anchor_gray.size == 0 or quality < _TEMPLATE_MIN_STD:
+            continue
+        reduced = cv2.resize(
+            anchor_gray,
+            (
+                max(1, anchor_gray.shape[1] // _TEMPLATE_DOWNSCALE),
+                max(1, anchor_gray.shape[0] // _TEMPLATE_DOWNSCALE),
+            ),
+            interpolation=cv2.INTER_AREA,
+        )
+        anchors_with_quality.append((
+            quality,
+            _TrackAnchor(
+                image_gray=reduced,
+                offset_x=int(round(ax0 + anchor_gray.shape[1] / 2.0 - patch_w / 2.0)),
+                offset_y=int(round(ay0 + anchor_gray.shape[0] / 2.0 - patch_h / 2.0)),
+            ),
+        ))
+
+    if not anchors_with_quality:
+        return
+    # Prefer the most textured independent regions. Keeping the set bounded is
+    # important because this runs once per acquisition, not on every tick.
+    anchors_with_quality.sort(key=lambda item: item[0], reverse=True)
+    anchors = tuple(anchor for _quality, anchor in anchors_with_quality[:_ANCHOR_MAX_COUNT])
     store = _template_store(detector)
     store[track_id] = _TrackTemplate(
-        image_gray=reduced,
+        anchors=anchors,
         width=x1 - x0,
         height=y1 - y0,
         center_x=(x0 + x1) // 2,
         center_y=(y0 + y1) // 2,
         scale=scale,
     )
-    # There is exactly one small anchor per active Track. Runtime lifecycle
-    # pruning removes anchors when Tracks disappear; never evict an arbitrary
-    # live Track's identity anchor under a global byte cap.
+    # The anchor set is stable for the Track. Runtime lifecycle pruning removes
+    # it when the Track disappears; never replace it with cursor-corrupted
+    # current-frame pixels.
 
 
 def _follow_cached_template(
@@ -502,8 +563,8 @@ def _follow_cached_template(
     template = _template_store(detector).get(track_id)
     if template is None:
         return None
-    template_gray = template.image_gray
-    if template_gray.size == 0:
+    anchors = tuple(template.anchors)
+    if not anchors:
         return None
 
     frame_h, frame_w = frame_bgr.shape[:2]
@@ -524,36 +585,71 @@ def _follow_cached_template(
          max(1, crop_gray.shape[0] // _TEMPLATE_DOWNSCALE)),
         interpolation=cv2.INTER_AREA,
     )
-    th, tw = template_gray.shape[:2]
-    if tw > work.shape[1] or th > work.shape[0]:
-        return None
     if float(work.std()) < _TEMPLATE_MIN_STD:
         return None
-    scores = cv2.matchTemplate(work, template_gray, cv2.TM_CCOEFF_NORMED)
-    # Select the best *identity-valid* correlation, not the global best hit.
-    # With identical mobs nearby, the strongest grayscale match can belong to
-    # the neighbor; rejecting it after minMaxLoc would discard a weaker but
-    # correct hit for the original Track. The mask is built in native pixels
-    # from the predicted identity corridor before peak selection.
-    valid_scores = np.array(scores, copy=True)
-    score_h, score_w = valid_scores.shape[:2]
-    score_x = np.arange(score_w, dtype=np.float32)[None, :]
-    score_y = np.arange(score_h, dtype=np.float32)[:, None]
-    candidate_x = x0 + (score_x + tw / 2.0) * _TEMPLATE_DOWNSCALE
-    candidate_y = y0 + (score_y + th / 2.0) * _TEMPLATE_DOWNSCALE
+
     identity_radius = max(1, int(identity_radius_px))
-    valid = (
-        (candidate_x - identity_cx) ** 2
-        + (candidate_y - identity_cy) ** 2
-        <= float(identity_radius * identity_radius)
-    )
-    valid_scores[~valid] = -np.inf
-    _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(valid_scores)
-    if not np.isfinite(max_val) or max_val < _TEMPLATE_MIN_SCORE:
+    candidate_hits: list[tuple[int, int, float]] = []
+    score_x = np.arange(work.shape[1], dtype=np.float32)[None, :]
+    score_y = np.arange(work.shape[0], dtype=np.float32)[:, None]
+    for anchor in anchors:
+        anchor_gray = anchor.image_gray
+        ah, aw = anchor_gray.shape[:2]
+        if anchor_gray.size == 0 or aw > work.shape[1] or ah > work.shape[0]:
+            continue
+        if float(anchor_gray.std()) < _TEMPLATE_MIN_STD:
+            continue
+        scores = cv2.matchTemplate(work, anchor_gray, cv2.TM_CCOEFF_NORMED)
+        score_h, score_w = scores.shape[:2]
+        # Each anchor proposes the full sprite center from its own matched
+        # center minus its fixed offset. This is the identity-constrained
+        # equivalent of tracking several small pixels/boxes independently.
+        candidate_x = np.broadcast_to(
+            x0 + (score_x[:, :score_w] + aw / 2.0) * _TEMPLATE_DOWNSCALE
+            - float(anchor.offset_x),
+            (score_h, score_w),
+        )
+        candidate_y = np.broadcast_to(
+            y0 + (score_y[:score_h, :] + ah / 2.0) * _TEMPLATE_DOWNSCALE
+            - float(anchor.offset_y),
+            (score_h, score_w),
+        )
+        valid = (
+            (candidate_x - identity_cx) ** 2
+            + (candidate_y - identity_cy) ** 2
+            <= float(identity_radius * identity_radius)
+        )
+        valid_scores = np.array(scores, copy=True)
+        valid_scores[~valid] = -np.inf
+        _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(valid_scores)
+        if np.isfinite(max_val) and max_val >= _TEMPLATE_MIN_SCORE:
+            hit_x = int(round(candidate_x[max_loc[1], max_loc[0]]))
+            hit_y = int(round(candidate_y[max_loc[1], max_loc[0]]))
+            candidate_hits.append((hit_x, hit_y, float(max_val)))
+
+    if not candidate_hits:
         return None
 
-    hit_x = int(round(x0 + (max_loc[0] + tw / 2.0) * _TEMPLATE_DOWNSCALE))
-    hit_y = int(round(y0 + (max_loc[1] + th / 2.0) * _TEMPLATE_DOWNSCALE))
+    # A cursor-corrupted anchor is simply absent. Select the largest tight
+    # consensus among the surviving anchors; a single valid anchor is still
+    # useful when the cursor covers the rest, but it remains identity-bounded.
+    best_cluster: list[tuple[int, int, float]] = []
+    best_score = float("-inf")
+    for seed in candidate_hits:
+        cluster = [
+            candidate for candidate in candidate_hits
+            if (candidate[0] - seed[0]) ** 2 + (candidate[1] - seed[1]) ** 2
+            <= _ANCHOR_CONSENSUS_RADIUS_PX ** 2
+        ]
+        cluster_score = float(sum(candidate[2] for candidate in cluster))
+        if (len(cluster), cluster_score) > (len(best_cluster), best_score):
+            best_cluster = cluster
+            best_score = cluster_score
+    if len(best_cluster) < _ANCHOR_MIN_COUNT:
+        return None
+    hit_x = int(round(float(np.median([candidate[0] for candidate in best_cluster]))))
+    hit_y = int(round(float(np.median([candidate[1] for candidate in best_cluster]))))
+    max_val = max(candidate[2] for candidate in best_cluster)
     # Every successful warm frame must be anchored by the current sprite mask.
     # No raw template coordinate is publishable.
     projected = _refine_hit_to_sprite_center(
@@ -567,8 +663,8 @@ def _follow_cached_template(
         > float(identity_radius * identity_radius)
     ):
         return None
-    native_w = max(1, int(round(tw * _TEMPLATE_DOWNSCALE)))
-    native_h = max(1, int(round(th * _TEMPLATE_DOWNSCALE)))
+    native_w = max(1, int(template.width))
+    native_h = max(1, int(template.height))
     if suppress_positions:
         suppress_radius = max(_LOCAL_SUPPRESS_RADIUS_FLOOR_PX, search_radius_px // 3)
         if any((hit_x - sx) ** 2 + (hit_y - sy) ** 2 <= suppress_radius ** 2
@@ -743,8 +839,8 @@ def _refine_hit_to_sprite_center(
 ) -> tuple[int, int] | None:
     """Re-anchor a hit to the current sprite-colored bbox center.
 
-    This is one local palette pass and min/max arithmetic only. If animation or
-    occlusion leaves no local palette pixels, return ``None`` and fail the frame
+    This is one bounded local palette pass. If animation or occlusion leaves no
+    local palette pixels, return ``None`` and fail the frame
     closed; the same-template recovery ladder handles the next fresh frame.
     """
     sprite_w = max(_FAST_BBOX_MIN_PX, int(round(descriptor.avg_width * scale)))
@@ -804,10 +900,43 @@ def _refine_hit_to_sprite_center(
     hit_x = local_cx - owner_x0
     hit_y = local_cy - owner_y0
     selected_label = int(labels[hit_y, hit_x])
-    # A hit outside the bridged current-frame sprite is ambiguous. Do not guess
-    # a nearby identical mob; let the same-template recovery ladder retry.
     if selected_label <= 0:
-        return None
+        # A software cursor can cut a large hole through the exact inferred
+        # center while leaving one connected sprite component around it. Accept
+        # that component only when its bounding box contains the hit and it is
+        # clearly the dominant component in this ownership window. This is not
+        # a nearby-component guess: the descriptor-sized ownership window and
+        # containment rule still bind the correction to this Track's sprite.
+        candidates: list[int] = []
+        owner_area = int(owner.sum())
+        for label in range(1, n_labels):
+            component_x, component_y, component_w, component_h, component_area = (
+                int(value) for value in _stats[label]
+            )
+            contains_hit = (
+                component_x <= hit_x < component_x + component_w
+                and component_y <= hit_y < component_y + component_h
+            )
+            dominant = component_area >= max(12, int(owner_area * 0.35))
+            if contains_hit and dominant:
+                # Measure proximity from original palette pixels, not the
+                # dilated labels: dilation must not manufacture evidence that
+                # a neighboring component actually approaches the hole.
+                component_ys, component_xs = np.where(
+                    (labels == label) & owner.astype(bool)
+                )
+                close_to_hit = bool(
+                    component_xs.size
+                    and np.min(
+                        (component_xs - hit_x) ** 2
+                        + (component_ys - hit_y) ** 2
+                    ) <= _CENTER_HOLE_MAX_GAP_PX ** 2
+                )
+                if close_to_hit:
+                    candidates.append(label)
+        if len(candidates) != 1:
+            return None
+        selected_label = candidates[0]
 
     selected = (labels == selected_label) & owner
     ys, xs = np.where(selected)
