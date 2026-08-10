@@ -98,6 +98,17 @@ _ANCHOR_CONSENSUS_RADIUS_PX = 8
 _ANCHOR_MIN_COUNT = 2
 _CENTER_HOLE_MAX_GAP_PX = 8
 
+# Warm tracking searches each anchor only inside a small disk around its
+# expected position (predicted sprite center + cached anchor offset). The
+# whole crop was the historical cost: several full-region matchTemplate
+# passes per mob per frame made a 3-4 mob batch eat the entire 20 ms tick.
+# A healthy mob stays within a fraction of the search radius of its predicted
+# position, so the window scales with the radius and the recovery ladder
+# (which doubles the radius) naturally widens it.
+_ANCHOR_WINDOW_FRAC = 0.4
+_ANCHOR_WINDOW_FLOOR_PX = 40
+_ANCHOR_WINDOW_MAX_PX = 140
+
 
 @dataclass(frozen=True)
 class LocalTrackResult:
@@ -197,6 +208,15 @@ def track_local(
     # the generic detector path.
     template_store = _template_store(detector)
     if track_id < 0 or (track_id not in template_store and not anchor_required):
+        # Acquisition is a one-shot seed refinement from an already-precise
+        # discovery center, so it uses the smaller configured acquisition
+        # radius, not the wide kiting radius used by warm follow. This was
+        # the original intent of ``localTrackSearchRadiusPx`` (120) and it
+        # keeps a multi-candidate acquisition batch cheap.
+        acquisition_radius = max(
+            int(getattr(detector, "local_track_search_radius_px", radius)),
+            radius // 2,
+        )
         peak = _find_local_peak(
             detector,
             frame_bgr,
@@ -204,7 +224,7 @@ def track_local(
             search_cx,
             search_cy,
             scale,
-            search_radius_px=radius,
+            search_radius_px=acquisition_radius,
             suppress_positions=suppress_positions,
         )
         if peak is None:
@@ -254,6 +274,7 @@ def track_local(
         identity_cy=identity_cy,
         identity_radius_px=radius,
     )
+
     if template_hit is None and track_id in template_store:
         # The warm anchor missed. Search farther for the SAME cached template;
         # do not fall back to a generic peak, because that can swap onto a
@@ -570,7 +591,23 @@ def _follow_cached_template(
     frame_h, frame_w = frame_bgr.shape[:2]
     margin_x = int(round(descriptor.avg_width * scale * _COVERAGE_SIZE_FRAC))
     margin_y = int(round(descriptor.avg_height * scale * _COVERAGE_SIZE_FRAC))
-    pad = search_radius_px + max(margin_x, margin_y)
+    # Each anchor only searches a small disk around its expected position
+    # (predicted sprite center + cached offset). The disk scales with the
+    # search radius so the recovery ladder widens it automatically, but the
+    # healthy path never scans the whole crop: that full-region matchTemplate
+    # pass was the per-mob bottleneck that made multi-mob batches slow.
+    window_radius = max(
+        _ANCHOR_WINDOW_FLOOR_PX,
+        min(
+            _ANCHOR_WINDOW_MAX_PX,
+            int(round(search_radius_px * _ANCHOR_WINDOW_FRAC)),
+        ),
+    )
+    max_anchor_offset = max(
+        (abs(int(anchor.offset_x)), abs(int(anchor.offset_y)))
+        for anchor in anchors
+    ) if anchors else (0, 0)
+    pad = window_radius + max(max_anchor_offset) + max(margin_x, margin_y)
     x0 = max(0, int(cx - pad))
     y0 = max(0, int(cy - pad))
     x1 = min(frame_w, int(cx + pad + 1))
@@ -590,8 +627,6 @@ def _follow_cached_template(
 
     identity_radius = max(1, int(identity_radius_px))
     candidate_hits: list[tuple[int, int, float]] = []
-    score_x = np.arange(work.shape[1], dtype=np.float32)[None, :]
-    score_y = np.arange(work.shape[0], dtype=np.float32)[:, None]
     for anchor in anchors:
         anchor_gray = anchor.image_gray
         ah, aw = anchor_gray.shape[:2]
@@ -599,18 +634,39 @@ def _follow_cached_template(
             continue
         if float(anchor_gray.std()) < _TEMPLATE_MIN_STD:
             continue
-        scores = cv2.matchTemplate(work, anchor_gray, cv2.TM_CCOEFF_NORMED)
+        # Expected anchor center in the current frame: predicted sprite
+        # center plus the anchor's fixed offset from the sprite center.
+        exp_x = cx + int(anchor.offset_x)
+        exp_y = cy + int(anchor.offset_y)
+        wx0 = max(0, (exp_x - window_radius - x0) // _TEMPLATE_DOWNSCALE)
+        wy0 = max(0, (exp_y - window_radius - y0) // _TEMPLATE_DOWNSCALE)
+        wx1 = min(
+            work.shape[1],
+            (exp_x + window_radius - x0) // _TEMPLATE_DOWNSCALE + 1,
+        )
+        wy1 = min(
+            work.shape[0],
+            (exp_y + window_radius - y0) // _TEMPLATE_DOWNSCALE + 1,
+        )
+        if wx1 - wx0 < aw or wy1 - wy0 < ah:
+            continue
+        window_work = work[wy0:wy1, wx0:wx1]
+        scores = cv2.matchTemplate(
+            window_work, anchor_gray, cv2.TM_CCOEFF_NORMED,
+        )
         score_h, score_w = scores.shape[:2]
         # Each anchor proposes the full sprite center from its own matched
         # center minus its fixed offset. This is the identity-constrained
         # equivalent of tracking several small pixels/boxes independently.
+        score_x = np.arange(score_w, dtype=np.float32)[None, :]
+        score_y = np.arange(score_h, dtype=np.float32)[:, None]
         candidate_x = np.broadcast_to(
-            x0 + (score_x[:, :score_w] + aw / 2.0) * _TEMPLATE_DOWNSCALE
+            x0 + (wx0 + score_x + aw / 2.0) * _TEMPLATE_DOWNSCALE
             - float(anchor.offset_x),
             (score_h, score_w),
         )
         candidate_y = np.broadcast_to(
-            y0 + (score_y[:score_h, :] + ah / 2.0) * _TEMPLATE_DOWNSCALE
+            y0 + (wy0 + score_y + ah / 2.0) * _TEMPLATE_DOWNSCALE
             - float(anchor.offset_y),
             (score_h, score_w),
         )
@@ -623,8 +679,8 @@ def _follow_cached_template(
         valid_scores[~valid] = -np.inf
         _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(valid_scores)
         if np.isfinite(max_val) and max_val >= _TEMPLATE_MIN_SCORE:
-            hit_x = int(round(candidate_x[max_loc[1], max_loc[0]]))
-            hit_y = int(round(candidate_y[max_loc[1], max_loc[0]]))
+            hit_x = int(round(float(candidate_x[max_loc[1], max_loc[0]])))
+            hit_y = int(round(float(candidate_y[max_loc[1], max_loc[0]])))
             candidate_hits.append((hit_x, hit_y, float(max_val)))
 
     if not candidate_hits:

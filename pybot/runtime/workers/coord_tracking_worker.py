@@ -21,6 +21,13 @@ from pybot.runtime.detection.detector_session import StateTrackSnapshot
 from pybot.runtime.diagnostics import format_thread_dump, game_process_cpu_snapshot
 from pybot.runtime.workers.worker_contexts import CoordTrackingWorkerContext
 
+# Game-process CPU attribution is a Win32 syscall pair (OpenProcess +
+# GetProcessTimes) that only feeds the SLOW diagnostic. Sampling it on every
+# 20 ms tick would put hot-path syscalls on the tracking thread for a log line
+# that fires at most every few seconds; once per second is plenty to attribute
+# a multi-second stall.
+_GAME_CPU_PROBE_INTERVAL_MS = 1000
+
 
 class CoordTrackingWorker:
     """Single coordinator for all active local Tracks."""
@@ -31,6 +38,9 @@ class CoordTrackingWorker:
         self._last_slow_track_log_ms = 0
         self._logged_first_tick: set[tuple[int, int]] = set()
         self._logged_first_tick_epoch: int | None = None
+        self._last_game_cpu_probe_ms = 0
+        # (pid, game_cpu_s, wall_s) of the last probe window, for the SLOW log.
+        self._game_cpu_delta: tuple[int, float, float] | None = None
 
     def run(self) -> None:
         ctx = self._ctx
@@ -113,20 +123,42 @@ class CoordTrackingWorker:
             if track.discovery_scale > 0
         ]
         if snapshots:
-            # The game client's process is identified through the captured window.
+            # The game-CPU probe only feeds the SLOW diagnostic, so it runs
+            # at a 1 Hz cadence instead of on every tick: the tracking thread
+            # never blocks behind Win32 process syscalls on the hot path.
             window_id = getattr(ctx.capture, "hwnd", None)
-            game_cpu_before = game_process_cpu_snapshot(window_id)
+            now_ms = monotonic_ms()
+            probe_due = (
+                window_id is not None
+                and now_ms - self._last_game_cpu_probe_ms
+                >= _GAME_CPU_PROBE_INTERVAL_MS
+            )
+            game_cpu_before = (
+                game_process_cpu_snapshot(window_id) if probe_due else None
+            )
+            probe_wall_started = time.perf_counter() if probe_due else 0.0
             batch = ctx.tracker.track_locals_frame(frame, roi, snapshots)
+            if probe_due:
+                self._last_game_cpu_probe_ms = now_ms
+                game_cpu_after = game_process_cpu_snapshot(window_id)
+                if game_cpu_before is not None and game_cpu_after is not None:
+                    self._game_cpu_delta = (
+                        game_cpu_after[0],
+                        game_cpu_after[1] - game_cpu_before[1],
+                        time.perf_counter() - probe_wall_started,
+                    )
+                else:
+                    # A failed probe must not keep attributing a stale window
+                    # to future SLOW lines.
+                    self._game_cpu_delta = None
             game_cpu_diag = ""
-            game_cpu_after = game_process_cpu_snapshot(window_id)
-            if game_cpu_before is not None and game_cpu_after is not None:
-                game_cpu_ms = int(
-                    (game_cpu_after[1] - game_cpu_before[1]) * 1000
-                )
+            if self._game_cpu_delta is not None:
+                game_pid, game_cpu_s, game_wall_s = self._game_cpu_delta
+                game_cpu_ms = int(game_cpu_s * 1000)
                 game_cpu_diag = (
                     f"gameCpu={game_cpu_ms}ms "
-                    f"gameCpuWall={game_cpu_ms / max(1.0, getattr(batch, 'duration_ms', 0)):.2f} "
-                    f"gamePid={game_cpu_after[0]} "
+                    f"gameCpuWall={game_cpu_ms / max(1.0, game_wall_s * 1000):.2f} "
+                    f"gamePid={game_pid} "
                 )
             if ctx.should_run_tracking() and ctx.tracks.area_epoch == area_epoch:
                 completed_ms = monotonic_ms()

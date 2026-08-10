@@ -551,6 +551,55 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertLessEqual(abs(result.y - anchor.center_y), 12)
         self.assertFalse(hasattr(detector, "_local_track_states"))
 
+    def test_warm_follow_benchmark_stays_cheap_per_track(self) -> None:
+        """Warm multi-anchor follow must stay cheap as track count grows.
+
+        The full-crop matchTemplate path cost ~7 ms per warm track, so a
+        3-mob batch alone blew the 20 ms tracking budget and mobs fell behind.
+        Per-anchor local windows cut this below 5 ms per track; assert a bound
+        that separates the two implementations without being CI-flaky.
+        """
+        detector = self._detector()
+        discovery = detector.detect(self.roi, "horn")
+        living = [c for c in discovery.accepted][:6]
+        if len(living) < 2:
+            self.skipTest("fixture needs at least 2 living horns")
+
+        warm: list[dict] = []
+        for index, candidate in enumerate(living):
+            provisional = self._build_track_dict(candidate, track_id=-(index + 1))
+            first = track_local(detector, self.roi, "horn", provisional)
+            if not first.found:
+                self.skipTest("fixture acquisition failed")
+            track_id = index + 1
+            self.assertTrue(transfer_track_state(detector, -(index + 1), track_id))
+            warm.append({
+                "trackId": track_id,
+                "x": first.x,
+                "y": first.y,
+                "scale": candidate.candidate_scale,
+                "prediction_valid": True,
+                "lost_count": 0,
+                "anchor_required": True,
+            })
+
+        def bench(tracks: list[dict]) -> float:
+            start = time.perf_counter()
+            for _ in range(5):
+                for track in tracks:
+                    result = track_local(detector, self.roi, "horn", track)
+                    self.assertTrue(result.found, result.miss_reason)
+            return (time.perf_counter() - start) / 5.0 * 1000.0
+
+        elapsed = bench(warm)
+        print(
+            f"\nwarm follow: {len(warm)} track(s) = {elapsed:.2f} ms/frame "
+            f"({elapsed / max(1, len(warm)):.2f} ms/track)"
+        )
+        # ~2 ms/track after the local-window change; 12 ms/track is a
+        # generous CI-safe ceiling that the old full-crop path exceeded.
+        self.assertLess(elapsed / max(1, len(warm)), 12.0)
+
     def test_benchmark_one_three_six_tracks(self) -> None:
         detector = self._detector()
         discovery = detector.detect(self.roi, "horn")
