@@ -56,6 +56,9 @@ class GrfDetectorModeTests(unittest.TestCase):
 
     def test_modified_descriptors_are_static_single_frame(self) -> None:
         """The modified descriptor references the one static frame (all refs identical)."""
+        from pybot.mobs.catalog import ensure_mob_assets
+
+        ensure_mob_assets(log_fn=lambda _message: None)
         grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
         for mob in ("anubis", "horn"):
             descriptor = grf.ensure_descriptor(mob)
@@ -71,6 +74,9 @@ class GrfDetectorModeTests(unittest.TestCase):
         self.assertFalse(normal.descriptor_is_static(horn))
 
     def test_grf_aspect_band_widened(self) -> None:
+        from pybot.mobs.catalog import ensure_mob_assets
+
+        ensure_mob_assets(log_fn=lambda _message: None)
         normal = MobDetector(ROOT, self.config)
         grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
         descriptor = grf.ensure_descriptor("anubis")

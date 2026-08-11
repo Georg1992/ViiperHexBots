@@ -28,7 +28,10 @@ from pybot.recognition.detector.descriptors.palette_groups import (
 )
 
 
-DESCRIPTOR_VERSION = 50
+# Version 51 normalizes aspect bands to the descriptor mean aspect. Runtime
+# geometry compares normalized blob aspects, so every generated descriptor must
+# use the same coordinate system.
+DESCRIPTOR_VERSION = 51
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -312,7 +315,11 @@ class DescriptorBuilder:
         min_dim = min(profile["size"].avg_width, profile["size"].avg_height)
         aspect_margin = max(ASPECT_MARGIN_BASE, ASPECT_MARGIN_BASE * (ASPECT_MARGIN_REF_SIZE / max(min_dim, 1.0)))
         min_aspect, max_aspect = self._measure_aspect_band(
-            all_facing_frames, margin=aspect_margin,
+            all_facing_frames,
+            margin=aspect_margin,
+            reference_aspect=(
+                profile["size"].avg_width / profile["size"].avg_height
+            ),
         )
 
         # Body_strong floor: measure on actual sprite frames. Diversity-
@@ -1011,13 +1018,17 @@ class DescriptorBuilder:
         frames: list[np.ndarray],
         *,
         margin: float = 0.15,
+        reference_aspect: float,
     ) -> tuple[float, float]:
-        """Measure sprite tight-bbox aspect ratios from rendered frames.
+        """Measure a normalized tight-bbox aspect band from rendered frames.
 
-        Each frame's opaque bounding box gives a width/height ratio.
-        The band is [min * (1-margin), max * (1+margin)] so runtime
-        blob imprecision does not reject valid detections.
+        Runtime geometry compares ``(blob_w / blob_h)`` normalized by the
+        descriptor mean aspect. Store the build-time band in that same space;
+        otherwise raw width/height bounds become invalid for narrow or wide
+        sprites. The universal floor is applied after normalization.
         """
+        if reference_aspect <= 0.0:
+            raise ValueError("reference_aspect must be positive")
         aspects: list[float] = []
         for bgra in frames:
             alpha = bgra[:, :, 3]
@@ -1030,9 +1041,11 @@ class DescriptorBuilder:
                 aspects.append(w / h)
         if not aspects:
             raise RuntimeError("no opaque sprite frames to measure aspect band")
-        raw_min = float(np.min(aspects))
-        raw_max = float(np.max(aspects))
-        return max(MIN_ASPECT_FLOOR, raw_min * (1.0 - margin)), raw_max * (1.0 + margin)
+        raw_min = float(np.min(aspects)) * (1.0 - margin)
+        raw_max = float(np.max(aspects)) * (1.0 + margin)
+        normalized_min = raw_min / reference_aspect
+        normalized_max = raw_max / reference_aspect
+        return max(MIN_ASPECT_FLOOR, normalized_min), normalized_max
 
     @staticmethod
     def _measure_body_cluster_floor(

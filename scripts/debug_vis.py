@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 
 from pybot.mobs.catalog import ensure_mob_assets
-from pybot.paths import PROJECT_ROOT
+from pybot.paths import PROJECT_ROOT, RECOGNITION_FIXTURES_DIR
 from pybot.recognition.detector.descriptors.descriptor import (
     ColorCluster,
     MobDescriptor,
@@ -351,30 +351,52 @@ def draw_timing_overlay(pane: np.ndarray, timing: dict[str, float], y0: int = 10
 def draw_detection_overlay(frame: np.ndarray, result: DetectionResult) -> np.ndarray:
     overlay = frame.copy()
     silhouette_checks = result.silhouette_checks
-    accepted_centers = {(c.center_x, c.center_y) for c in result.accepted}
+    # Associate checks with accepted candidates by the detector's stable blob
+    # identity. The accepted center is refined from the palette extract, so
+    # exact center matching would incorrectly color most successful checks as
+    # orange when extraction shifts the center by only a few pixels.
+    accepted_candidate_ids = {
+        candidate.candidate_id
+        for candidate in result.accepted
+        if candidate.candidate_id >= 0
+    }
 
     for idx, check in enumerate(silhouette_checks):
         cx, cy = check.center_x, check.center_y
-        is_accepted = check.passed and (cx, cy) in accepted_centers
+        is_accepted = (
+            check.passed
+            and check.candidate_id in accepted_candidate_ids
+        )
 
         if is_accepted:
+            # BGR: green — accepted by the final detector result.
             color = (0, 220, 0)
             thickness = 3
         elif check.passed:
-            color = (0, 180, 255)
+            # BGR: cyan — silhouette passed but was removed by final
+            # deduplication/max-candidate filtering.
+            color = (255, 220, 0)
             thickness = 2
         else:
-            color = (0, 120, 255)
+            # BGR: orange — rejected by a pre-gate or silhouette gate.
+            color = (0, 140, 255)
             thickness = 2
 
-        # Single box = exact palette-CC crop fed into silhouette check.
+        # Prefer the exact palette extraction box. For pre-extraction rejects,
+        # show the original heatmap component instead so every diagnostic
+        # candidate remains visible and its stage is unambiguous.
         crop = check.extract_bbox
+        box_kind = "extract"
+        if crop is None:
+            crop = check.discovery_bbox
+            box_kind = "discovery" if crop is not None else "none"
         if crop is None:
             continue
         bx, by, bw, bh = crop
         cv2.rectangle(overlay, (bx, by), (bx + bw, by + bh), color, thickness)
         cv2.circle(overlay, (cx, cy), 5, color, -1)
         tag = f"{idx}:" + ("ACC" if is_accepted else ("SIL" if check.passed else "FAIL"))
+        tag += f":{box_kind}"
         if check.extract_bloated:
             tag += ":B"
         if check.content_noisy:
@@ -401,7 +423,8 @@ def draw_detection_overlay(frame: np.ndarray, result: DetectionResult) -> np.nda
     )
     cv2.putText(
         overlay,
-        "green=accepted  cyan=sil-pass  orange=sil-fail  box=sil-crop",
+        "green=accepted  cyan=sil-pass/not-final  orange=gate-fail  "
+        "extract=palette box  discovery=heatmap box",
         (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1,
     )
     cv2.putText(
@@ -508,16 +531,23 @@ def render_descriptor_info(
     config: dict,
     *,
     descriptor_file: Path | None = None,
+    descriptor_label: str = "PROD descriptor",
+    min_recall: float | None = None,
+    min_precision: float | None = None,
 ) -> np.ndarray:
     sil_scale = float(config["silhouettePaletteDistanceScale"])
     runtime_sil = float(descriptor.max_silhouette_palette_distance) * sil_scale
+    if min_recall is None:
+        min_recall = float(config["minSilhouetteRecall"])
+    if min_precision is None:
+        min_precision = float(config["minSilhouettePrecision"])
     desc_path = (
         str(descriptor_file.relative_to(PROJECT_ROOT))
         if descriptor_file is not None
         else "(in-memory)"
     )
     header = _text_block([
-        f"{descriptor.mob_name}  v{descriptor.version}  PROD descriptor",
+        f"{descriptor.mob_name}  v{descriptor.version}  {descriptor_label}",
         desc_path,
         f"size avg={descriptor.avg_width}x{descriptor.avg_height}",
         (
@@ -532,8 +562,8 @@ def render_descriptor_info(
             f"runtimeSil={runtime_sil:.1f} (x{sil_scale:.2f})"
         ),
         (
-            f"sil gate: rec>={float(config['minSilhouetteRecall']):.2f}  "
-            f"prec>={float(config['minSilhouettePrecision']):.2f}  "
+            f"sil gate: rec>={min_recall:.2f}  "
+            f"prec>={min_precision:.2f}  "
             f"(build gateRefUniqueIoU={float(config['gateRefUniqueIoU']):.2f})"
         ),
         "SIL render = prod gate occupancy (hard+stable core, cyan=soft halo)",
@@ -1015,6 +1045,77 @@ def write_pipeline_structure(path: Path) -> None:
     path.write_text(format_discovery_pipeline_text(), encoding="utf-8")
 
 
+def render_modified_sprite_fixtures(config: dict) -> int:
+    """Render fixtures captured with the static modified SPR/ACT assets.
+
+    These captures must use the GRF detector session: it selects
+    ``modified_sprite_descriptor.json`` and the relaxed static-sprite gate.
+    Keep this path separate from ``MOB_FIXTURE_SUITES`` because those suites
+    exercise the normal animated descriptors.
+    """
+    fixture_dir = RECOGNITION_FIXTURES_DIR / "game-screenshots" / "Dokebi"
+    if not fixture_dir.is_dir():
+        return 0
+
+    detector = MobDetector(PROJECT_ROOT, config, use_sprite_grf=True)
+    descriptor = detector.ensure_descriptor("dokebi")
+    min_recall, min_precision = detector.silhouette_gate_thresholds()
+    mob_dir = OUT_DIR / "dokebi"
+    mob_dir.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(
+        str(mob_dir / "modified_sprite_descriptor.png"),
+        render_descriptor_info(
+            descriptor,
+            config,
+            descriptor_file=detector.descriptor_path("dokebi"),
+            descriptor_label="MODIFIED SPRITE / GRF descriptor",
+            min_recall=min_recall,
+            min_precision=min_precision,
+        ),
+    )
+    print(
+        f"  dokebi          wrote modified_sprite_descriptor.png  "
+        f"({detector.descriptor_path('dokebi').relative_to(PROJECT_ROOT)} v{descriptor.version})"
+    )
+
+    viz_count = 0
+    for image_path in sorted(fixture_dir.glob("*_Modified_Sprite.png")):
+        frame = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if frame is None:
+            continue
+        frame = fixture_search_frame(frame)
+        result = detector.detect(frame, "dokebi")
+        pane_heat = heatmap_to_color(result.sprite_heatmap)
+        annotate_heatmap_pane(pane_heat, result)
+        pane_overlay = draw_detection_overlay(frame, result)
+        pane_sil = allocate_silhouette_panel(
+            result.descriptor,
+            result.silhouette_checks,
+            420,
+            frame.shape[0],
+            min_recall=min_recall,
+            min_precision=min_precision,
+        )
+        combined_height = max(
+            pane_heat.shape[0], pane_overlay.shape[0], pane_sil.shape[0],
+        )
+        combined = np.hstack([
+            pad_to_height(pane_heat, combined_height),
+            pad_to_height(pane_overlay, combined_height),
+            pad_to_height(pane_sil, combined_height),
+        ])
+        stem = image_path.stem
+        output_path = mob_dir / f"{stem}_viz.png"
+        cv2.imwrite(str(output_path), combined)
+        viz_count += 1
+        print(
+            f"  dokebi [GRF]    {stem:32s}  "
+            f"got={len(result.accepted)}  sil={len(result.silhouette_checks)}  "
+            f"descriptor={detector.descriptor_path('dokebi').name}"
+        )
+    return viz_count
+
+
 def main() -> None:
     config = load_detector_config()
     # Same auto-build path as the production app before detection.
@@ -1160,9 +1261,10 @@ def main() -> None:
             for key, sec in result.timing.items():
                 timing_totals[key] = timing_totals.get(key, 0.0) + sec
 
+    modified_viz_count = render_modified_sprite_fixtures(config)
     print(
-        f"\nDone — {viz_count} viz, {descriptor_count} descriptors, "
-        f"1 pipeline in {OUT_DIR.resolve()}/"
+        f"\nDone — {viz_count} normal viz + {modified_viz_count} modified-sprite viz, "
+        f"{descriptor_count} descriptors, 1 pipeline in {OUT_DIR.resolve()}/"
     )
     if timing_runs:
         print(f"\nAverage discovery timing over {timing_runs} frames:")

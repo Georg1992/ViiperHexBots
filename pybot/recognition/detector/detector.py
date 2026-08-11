@@ -180,6 +180,10 @@ class DetectionCandidate:
     accepted: bool
     rejection_reason: str
     candidate_scale: float = 1.0
+    # Stable identity linking this accepted candidate back to its discovery
+    # blob/silhouette check. Spatial centers are intentionally not used for
+    # this association because extraction refines the center by a few pixels.
+    candidate_id: int = -1
 
     def to_dict(self) -> dict:
         x, y, w, h = self.bbox
@@ -193,6 +197,7 @@ class DetectionCandidate:
             "heatmapScore": round(self.heatmap_score, 4),
             "accepted": self.accepted,
             "rejectionReason": self.rejection_reason,
+            "candidateId": self.candidate_id,
         }
 
 
@@ -203,12 +208,19 @@ class SilhouetteCheck:
     heat_score: float
     passed: bool
     similarity: float
+    # Stable identity for visualization/result association. This is the blob
+    # ordinal in the current detection result, not a coordinate approximation.
+    candidate_id: int = -1
     precision: float = 0.0
     recall: float = 0.0
     candidate_mask: list[float] | None = None
     matched_mask_index: int = 0
     mask_similarities: list[float] | None = None
     extract_bbox: tuple[int, int, int, int] | None = None
+    # Original heatmap component. This remains available when a candidate is
+    # rejected before palette extraction, so diagnostics can show where the
+    # pre-gate candidate was found.
+    discovery_bbox: tuple[int, int, int, int] | None = None
     # Cleanup hooks: bloated crop and/or noisy silhouette content.
     noisy_extract: bool = False
     extract_bloated: bool = False
@@ -496,7 +508,7 @@ class MobDetector:
         max_gate_elapsed_s = 0.0
         max_gate_bbox: tuple[int, int, int, int] = (0, 0, 0, 0)
 
-        for cx, cy, heat_score, comp_bbox in blobs:
+        for candidate_id, (cx, cy, heat_score, comp_bbox) in enumerate(blobs):
             bx, by, bw, bh = comp_bbox
             bbox = (bx, by, bw, bh)
             # All blobs must clear geometry + color structure pre-gates.
@@ -509,6 +521,8 @@ class MobDetector:
                     heat_score=heat_score,
                     passed=False,
                     similarity=0.0,
+                    candidate_id=candidate_id,
+                    discovery_bbox=comp_bbox,
                 ))
                 continue
 
@@ -521,6 +535,8 @@ class MobDetector:
                         heat_score=heat_score,
                         passed=False,
                         similarity=0.0,
+                        candidate_id=candidate_id,
+                        discovery_bbox=comp_bbox,
                     ))
                     continue
 
@@ -536,6 +552,8 @@ class MobDetector:
                     heat_score=heat_score,
                     passed=False,
                     similarity=0.0,
+                    candidate_id=candidate_id,
+                    discovery_bbox=comp_bbox,
                 ))
                 continue
 
@@ -594,6 +612,8 @@ class MobDetector:
                 heat_score=heat_score,
                 passed=passed,
                 similarity=similarity,
+                candidate_id=candidate_id,
+                discovery_bbox=comp_bbox,
                 precision=precision,
                 recall=recall,
                 candidate_mask=candidate_mask,
@@ -624,6 +644,7 @@ class MobDetector:
                     heatmap_score=heat_score,
                     accepted=True,
                     rejection_reason="",
+                    candidate_id=candidate_id,
                 ))
 
 
