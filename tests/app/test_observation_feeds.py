@@ -280,7 +280,6 @@ class StatusPanelFeedTests(unittest.TestCase):
             timeout_s=6.0,
             client_hint=None,
             refresh_client=False,
-            reanchor=False,
             allow_partial=False,
         )
         self.assertIs(result, direct)

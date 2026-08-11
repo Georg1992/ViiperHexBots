@@ -423,10 +423,6 @@ class UiCaptureChannelTests(unittest.TestCase):
             capture_mod._ui_capture_channel._queue,
             capture_mod._grab_queue,
         )
-        self.assertIsNot(
-            capture_mod._ui_capture_channel._session_lock,
-            capture_mod._capture_lock,
-        )
 
     def test_discovery_and_tracking_observers_have_independent_channels(self) -> None:
         """A wedged observer channel cannot serialize the other observer."""

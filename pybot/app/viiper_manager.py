@@ -72,7 +72,6 @@ class ViiperManager:
 
         # Bus and device info (populated by start())
         self.bus_id: int = 0
-        self.keyboard_dev_id: str = ""
         self.mouse_dev_id: str = ""
 
         # Persistent device streams (keep devices alive)
@@ -293,7 +292,6 @@ class ViiperManager:
                 except BaseException:
                     pass
             raise
-        self.keyboard_dev_id = kb_dev_id
         self.mouse_dev_id = mouse_dev_id
         self._kb_stream = kb_stream
         self._mouse_stream = mouse_stream

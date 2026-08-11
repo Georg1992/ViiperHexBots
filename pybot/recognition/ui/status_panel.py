@@ -643,14 +643,6 @@ def _to_ink_mask(bgr: np.ndarray) -> np.ndarray:
     return mask
 
 
-def _trim_empty(glyph: np.ndarray) -> np.ndarray | None:
-    cols = np.where(glyph.any(axis=0))[0]
-    rows = np.where(glyph.any(axis=1))[0]
-    if cols.size == 0 or rows.size == 0:
-        return None
-    return glyph[rows[0] : rows[-1] + 1, cols[0] : cols[-1] + 1].copy()
-
-
 def _split_wide_glyph(
     glyph: np.ndarray,
     base_x: int = 0,

@@ -18,7 +18,6 @@ from pybot.runtime.constants import (
 from pybot.runtime.danger_detector import DangerDetector, DangerLevel
 from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.runtime_context import HuntRuntimeContext
-from pybot.runtime.workers.attack_loop import GameplayLoop
 from pybot.runtime.workers.sit_on_low_sp_worker import SitOnLowSpWorker
 
 
@@ -75,7 +74,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         self.input = MagicMock(spec=ShadowInputBackend)
         from pybot.runtime.teleport import TeleportController
         self.teleport = TeleportController(self.ctx, self.input, MagicMock())
-        self.teleport.teleport_until_quiet = MagicMock(return_value=True)  # type: ignore[method-assign]
         self.danger = MagicMock(spec=DangerDetector)
         self.danger.danger_level.return_value = DangerLevel.SAFE
         self.ctx.danger_detector = self.danger
@@ -263,7 +261,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         worker._recover_sp(0.02)
 
         self.teleport.teleport_once_for_sit.assert_called_once_with(log_tag="SIT")
-        self.teleport.teleport_until_quiet.assert_not_called()
         worker._sit_until_done.assert_called_once_with(82)
         self.assertFalse(self.ctx.sitting_event.is_set())
 

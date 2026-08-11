@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from pybot.runtime.teleport import TeleportController
 
 CRITICAL_HP_RATIO = 0.5
-CRITICAL_DAMAGE_RATIO = 0.2
+CRITICAL_DAMAGE_RATIO = 0.15
 
 
 class DangerLevel(IntEnum):
@@ -79,11 +79,6 @@ class DangerDetector:
         """Monotonic count of observed HP drops."""
         with self._damage_lock:
             return self._damage_sequence
-
-    @property
-    def last_damage_mono(self) -> float | None:
-        with self._damage_lock:
-            return self._last_damage_mono
 
     def run(self) -> None:
         """Observe HP continuously; no event or input side effects in production."""
@@ -263,9 +258,6 @@ class DangerController:
         return level is DangerLevel.CRITICAL or (
             seated and level is DangerLevel.DANGER
         )
-
-    def is_active(self) -> bool:
-        return bool(self._ctx.danger_escape_active.is_set())
 
     def process(self, *, seated: bool = False) -> bool:
         """Process one danger tick; return True when a transition completed."""

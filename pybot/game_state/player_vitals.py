@@ -26,8 +26,6 @@ class PlayerVitals:
         self._hp_changed_ms: int = 0
         self._sp_observed_ms: int = 0
         self._sp_changed_ms: int = 0
-        self._weight_observed_ms: int = 0
-        self._weight_changed_ms: int = 0
         # Incremented at the moment a teleport input is accepted. Observation
         # producers capture this token before their read and may publish only
         # if it is still current. A newly-created epoch remains quarantined
@@ -62,10 +60,8 @@ class PlayerVitals:
             self._weight_max = None
             self._hp_observed_ms = now
             self._sp_observed_ms = now
-            self._weight_observed_ms = now
             self._hp_changed_ms = now
             self._sp_changed_ms = now
-            self._weight_changed_ms = now
             return self._observation_epoch
 
     def complete_observation_epoch(self, epoch: int | None = None) -> bool:
@@ -101,7 +97,6 @@ class PlayerVitals:
             now = int(time.monotonic() * 1000)
             self._hp_observed_ms = now
             self._sp_observed_ms = now
-            self._weight_observed_ms = now
             if hp != self._hp or hp_max != self._hp_max:
                 self._hp = hp
                 self._hp_max = hp_max
@@ -113,7 +108,6 @@ class PlayerVitals:
             if weight != self._weight or weight_max != self._weight_max:
                 self._weight = weight
                 self._weight_max = weight_max
-                self._weight_changed_ms = now
             return True
 
     # ── HP ────────────────────────────────────────────────────────
@@ -200,12 +194,6 @@ class PlayerVitals:
             return self._sp_max
 
     @property
-    def updated_ms(self) -> int:
-        """Last SP observation time (compat alias for ``observed_ms``)."""
-        with self._lock:
-            return self._sp_observed_ms
-
-    @property
     def observed_ms(self) -> int:
         """Last SP observation time."""
         with self._lock:
@@ -231,12 +219,9 @@ class PlayerVitals:
 
     def publish_weight(self, weight: int | None, weight_max: int | None) -> None:
         with self._lock:
-            now = int(time.monotonic() * 1000)
-            self._weight_observed_ms = now
             if weight != self._weight or weight_max != self._weight_max:
                 self._weight = weight
                 self._weight_max = weight_max
-                self._weight_changed_ms = now
 
     def publish_weight_if_current(
         self,
@@ -247,18 +232,12 @@ class PlayerVitals:
         with self._lock:
             if not self._epoch_is_current(epoch):
                 return False
-            now = int(time.monotonic() * 1000)
-            self._weight_observed_ms = now
             if weight != self._weight or weight_max != self._weight_max:
                 self._weight = weight
                 self._weight_max = weight_max
-                self._weight_changed_ms = now
             return True
 
     def weight_pair(self) -> tuple[int | None, int | None]:
         """Atomic ``(weight, weight_max)`` for storage checks."""
         with self._lock:
             return self._weight, self._weight_max
-
-    def clear_weight(self) -> None:
-        self.publish_weight(None, None)

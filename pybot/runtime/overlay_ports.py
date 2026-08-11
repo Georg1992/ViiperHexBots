@@ -6,8 +6,6 @@ from typing import Protocol
 
 
 class HuntOverlay(Protocol):
-    def set_scan_living(self, count: int) -> None: ...
-
     def set_track_stats(self, track_count: int, alive_count: int) -> None: ...
 
     def set_track_positions(self, positions: list[tuple[int, int]]) -> None: ...
@@ -22,9 +20,6 @@ class HuntOverlay(Protocol):
 
 
 class NullOverlay:
-    def set_scan_living(self, count: int) -> None:
-        return None
-
     def set_track_stats(self, track_count: int, alive_count: int) -> None:
         return None
 

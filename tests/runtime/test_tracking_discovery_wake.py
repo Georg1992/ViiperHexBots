@@ -106,7 +106,6 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
 
     def test_discovery_candidate_wakes_tracking_immediately(self) -> None:
         """A positive discovery scan wakes the coordinator before its cadence."""
-        from pybot.recognition.rules import DiscoveryDetection
         from pybot.runtime.workers.discovery_worker import DiscoveryWorker
 
         ctx = MagicMock()

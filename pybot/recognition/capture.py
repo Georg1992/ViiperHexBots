@@ -248,7 +248,6 @@ class _UiCaptureChannel:
         self._state_lock = threading.Lock()
         # Kept as a descriptive compatibility alias for tests/integrations
         # that inspect the channel's session serialization primitive.
-        self._session_lock = self._state_lock
         self._queue: "queue.Queue[_GrabRequest | None]" = queue.Queue(maxsize=16)
         self._worker_started = False
         # A timed-out native grab cannot be cancelled. Retiring its queue and

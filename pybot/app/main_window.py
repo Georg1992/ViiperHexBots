@@ -26,6 +26,7 @@ from pybot.app.status_panel_feed import StatusPanelFeed
 from pybot.app.ui_work_queue import UiWorkQueue
 from pybot.app.startup_splash import preload_mob_descriptors
 from pybot.app.viiper_manager import ViiperManager
+from pybot.runtime.constants import CELL_SIZE_PX
 from pybot.runtime.input.viiper_backend import ViiperStreamStore
 from pybot.app.win32_util import (
     enum_game_windows,
@@ -987,7 +988,7 @@ class MainWindow:
 
     def _update_search_label(self, *_args) -> None:
         cells = int(float(self.search_range.get()))
-        px = cells * 64
+        px = cells * CELL_SIZE_PX
         self.search_label.configure(text=f"{cells} ({px}px)")
         self.lifecycle.set_search_range_cells(cells)
         self._apply_ui_settings()

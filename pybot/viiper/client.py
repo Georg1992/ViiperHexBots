@@ -66,14 +66,6 @@ class ViiperClient:
         resp = self._do("bus/create", payload)
         return int(resp["busId"])
 
-    def bus_remove(self, bus_id: int) -> int:
-        """Remove a bus and all devices on it.
-
-        Returns:
-            The removed bus ID.
-        """
-        resp = self._do("bus/remove", str(bus_id))
-        return int(resp["busId"])
 
     # ── Device management ─────────────────────────────────────────────
 

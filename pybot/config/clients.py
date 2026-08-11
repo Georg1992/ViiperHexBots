@@ -35,8 +35,6 @@ class MemoryAddresses:
 @dataclass(frozen=True)
 class ClientProfile:
     name: str
-    process_name: str
-    window_title_hint: str
     memory: MemoryAddresses
     raw: dict
 
@@ -89,8 +87,6 @@ def load_client_profile(
     memory = data.get("memory")
     return ClientProfile(
         name=str(data.get("name") or profile_name),
-        process_name=str(data.get("processName") or ""),
-        window_title_hint=str(data.get("windowTitleHint") or ""),
         memory=memory_addresses_from_dict(memory if isinstance(memory, dict) else None),
         raw=data,
     )

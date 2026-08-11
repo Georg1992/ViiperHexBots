@@ -60,7 +60,8 @@ class ColorStructureGateTests(unittest.TestCase):
         raise AssertionError("unreachable")
 
     def test_wild_rose_crop_passes_structure(self) -> None:
-        comp, crop = self._heat_crop(self.frame, self.descriptor, (163, 262))
+        # First wild-rose heat blob at the CELL_SIZE_PX cell crop (1024×1024).
+        comp, crop = self._heat_crop(self.frame, self.descriptor, (165, 261))
         present, second, coverage, body_strong = required_groups_structure(
             crop,
             self.descriptor,
@@ -95,8 +96,10 @@ class ColorStructureGateTests(unittest.TestCase):
 
 
     def test_poring_crop_fails_body_strong(self) -> None:
-        # Locate Poring on the base palette heatmap (body diversity may press
-        # the final heat peak away). Foreign pink blob has no Wild Rose body.
+        # Locate the impostor on the base palette heatmap (body diversity may
+        # press the final heat peak away). Foreign pink blob has no Wild Rose
+        # body. At the 64 px crop the palette-heat cluster sits at (511, 461);
+        # scan a window around it like the legacy test did.
         from pybot.recognition.detector.scoring.heatmap_detector import (
             weighted_sprite_palette_heatmap,
         )
@@ -107,7 +110,7 @@ class ColorStructureGateTests(unittest.TestCase):
             float(self.descriptor.max_sprite_palette_distance),
             return_similarity=True,
         )
-        y0, x0 = 400, 800
+        y0, x0 = 421, 471
         patch = base[y0 : y0 + 80, x0 : x0 + 80]
         py, px = np.unravel_index(int(patch.argmax()), patch.shape)
         cx, cy = int(x0 + px), int(y0 + py)
@@ -130,9 +133,11 @@ class ColorStructureGateTests(unittest.TestCase):
     def test_wild_rose_fixture_two_rejects_poring(self) -> None:
         result = self.detector.detect(self.frame, "wild_rose")
         self.assertEqual(len(result.accepted), 2)
+        # Impostor palette-heat cluster sits at (511, 461) in the CELL_SIZE_PX
+        # crop; it must never be among the accepted wild-rose candidates.
         for cand in result.accepted:
             self.assertGreater(
-                abs(cand.center_x - 838) + abs(cand.center_y - 430),
+                abs(cand.center_x - 511) + abs(cand.center_y - 461),
                 40,
                 "Poring blob must not be accepted",
             )

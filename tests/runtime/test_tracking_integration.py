@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 import unittest
 
 import cv2
@@ -38,11 +37,9 @@ def make_context(
     *,
     roi: HuntRoi,
     detector: DetectorSession,
-    stop_event: threading.Event | None = None,
 ) -> HuntRuntimeContext:
     logger = HuntLogger(session_id="test_tracking_integration")
     tracks = HuntTracks()
-    stop = stop_event or threading.Event()
     return HuntRuntimeContext(
         config=config,
         logger=logger,
@@ -55,8 +52,6 @@ def make_context(
         control=RuntimeControl(None),
         gates=GateController(),
     )
-    ctx.stop_event = stop
-    return ctx
 
 
 def create_tracks_from_candidates(tracks, detector, frame, roi, candidates, now_tick):

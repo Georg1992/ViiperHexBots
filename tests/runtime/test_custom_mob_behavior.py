@@ -12,6 +12,7 @@ from pybot.config.schema import AppSettings, MobCustomSettings
 from pybot.game_state import PlayerVitals
 from pybot.config.runtime import SelfBuffRuntime, CustomBehaviorRuntime
 from pybot.runtime.gate_controller import CharacterActionGate
+from pybot.runtime.constants import CELL_SIZE_PX
 from pybot.runtime.mob_behaviors import (
     AnubisBehavior,
     ConfiguredMobBehavior,
@@ -52,7 +53,7 @@ class CustomMobBehaviorConfigTests(unittest.TestCase):
 
         self.assertTrue(config.custom_behavior.configured)
         self.assertEqual(config.custom_behavior.kiting_tick_ms, 750)
-        self.assertEqual(config.custom_behavior.kite_distance_px, 7 * 64)
+        self.assertEqual(config.custom_behavior.kite_distance_px, 7 * CELL_SIZE_PX)
         self.assertEqual(config.custom_behavior.debuff_scan_code, 19)
         self.assertEqual(config.custom_behavior.heal_scan_code, 16)
         self.assertEqual(len(config.custom_behavior.buffs), 1)
@@ -146,12 +147,14 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
 
         target_x, target_y = backend.move_and_click.call_args.args
         self.assertEqual(target_x, 100)
-        self.assertEqual(abs(target_y - 100), 320)
+        # Default kite distance is 5 cells × CELL_SIZE_PX.
+        self.assertEqual(abs(target_y - 100), 5 * CELL_SIZE_PX)
 
     def test_kiting_uses_configured_distance(self) -> None:
         settings = SimpleNamespace(
             kiting_tick_ms=1,
-            kite_distance_px=5 * 64,
+            # An explicit configured distance distinct from the 5-cell default.
+            kite_distance_px=320,
             debuff_scan_code=0,
             heal_scan_code=0,
             buffs=(),
@@ -283,8 +286,6 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
             heal_scan_code=0,
             buffs=(),
         )
-        vitals = PlayerVitals()
-        danger = MagicMock()
         legacy = AnubisBehavior()
         backend = MagicMock()
         backend.move_and_click.return_value = True
@@ -295,7 +296,9 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
         behavior.before_attack(100, 100, backend, all_mobs=[(120, 100)])
         behavior.kite_after_attack(100, 100, backend, all_mobs=[(120, 100)])
 
-        backend.move_and_click.assert_called_once_with(-220, 100)
+        backend.move_and_click.assert_called_once_with(
+            100 - 5 * CELL_SIZE_PX, 100
+        )
 
 
 class SelfBuffWorkerTests(unittest.TestCase):

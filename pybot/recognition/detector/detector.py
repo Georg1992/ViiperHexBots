@@ -247,10 +247,6 @@ def load_detector_config(path: Optional[Path] = None) -> dict:
     return dict(_load_detector_config_cached(str(Path(config_path).resolve())))
 
 
-def clear_detector_config_cache() -> None:
-    _load_detector_config_cached.cache_clear()
-
-
 def configure_opencv_runtime() -> None:
     """Bound native OpenCV parallelism for the live observer runtime.
 

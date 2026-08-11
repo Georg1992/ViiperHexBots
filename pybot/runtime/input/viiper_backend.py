@@ -154,7 +154,6 @@ class ViiperBackend(ShadowInputBackend):
         self._kb_stream: DeviceStream | None = None
         self._mouse_stream: DeviceStream | None = None
         self._mouse_buttons: int = 0  # current button state
-        self._mouse_button_left = 0  # button index for left click
         self._connected = False
         self._connect_lock = threading.Lock()
         self._operation_lock = self._store.operation_lock
@@ -216,17 +215,6 @@ class ViiperBackend(ShadowInputBackend):
             DeviceStream.open(self._addr, bus_id, kb_dev_id),
             DeviceStream.open(self._addr, bus_id, mouse_dev_id),
         )
-
-    def disconnect(self) -> None:
-        """Drop this instance's handles without closing shared streams.
-
-        Closing the TCP streams starts VIIPER's ~5s device-removal timer.
-        The shared store's ``close()`` is only called on application exit.
-        """
-        with self._connect_lock:
-            self._kb_stream = None
-            self._mouse_stream = None
-            self._connected = False
 
     # ── Input methods ─────────────────────────────────────────────────
 
@@ -312,24 +300,6 @@ class ViiperBackend(ShadowInputBackend):
         finally:
             self._mouse_button(MOUSE_BUTTON_LEFT, down=False)
 
-    def skill_click(self, scan_code: int) -> bool:
-        """Press a keyboard key, left-click, then release the key.
-
-        Args:
-            scan_code: Windows scan code for the skill key.
-
-        Returns:
-            True if successful.
-        """
-        if scan_code <= 0:
-            return False
-
-        with self._operation_lock:
-            if self._cancel_event.is_set():
-                return False
-            self._ensure_connected()
-            return self._skill_click_locked(scan_code)
-
     def skill_click_at(
         self,
         scan_code: int,
@@ -390,19 +360,6 @@ class ViiperBackend(ShadowInputBackend):
             self._left_click_locked()
         return not self._cancel_event.is_set()
 
-    def right_click(self) -> bool:
-        """Right button down 50ms, then up."""
-        with self._operation_lock:
-            if self._cancel_event.is_set():
-                return False
-            self._ensure_connected()
-            self._mouse_button(MOUSE_BUTTON_RIGHT, down=True)
-            try:
-                self._wait_or_cancel(0.05)
-            finally:
-                self._mouse_button(MOUSE_BUTTON_RIGHT, down=False)
-        return not self._cancel_event.is_set()
-
     def set_left_button(self, down: bool) -> bool:
         """Press or release the left mouse button (for drag).
 
@@ -438,15 +395,6 @@ class ViiperBackend(ShadowInputBackend):
         if not click_ok:
             return False
         return self._wait_or_cancel(ALT_MOUSE_CLICK_DELAY_S)
-
-    def alt_right_clicks(self, times: int = 1) -> bool:
-        """AHK ``AltClicks``: Alt+RMB × N with 100ms after each click."""
-        if times <= 0:
-            return False
-        for _ in range(times):
-            if not self.alt_right_click():
-                return False
-        return True
 
     def key_tap(
         self,

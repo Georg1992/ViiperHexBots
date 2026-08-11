@@ -16,7 +16,6 @@ from pathlib import Path
 import numpy as np
 
 from pybot.paths import PROJECT_ROOT
-from pybot.recognition.capture import capture_region
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
 from pybot.recognition.detector.tracking.local_tracker import (
     LocalTrackResult,
@@ -131,12 +130,6 @@ class DetectorSession:
     @property
     def mob_name(self) -> str:
         return self._mob_name
-
-    def discover(self, roi: HuntRoi) -> DiscoveryScanResult:
-        frame = capture_region(roi.x, roi.y, roi.w, roi.h)
-        if frame is None:
-            return DiscoveryScanResult(False, "capture_failed", 0, 0, [], 0, 0.0)
-        return self.discover_frame(frame, roi)
 
     def discover_frame(
         self,

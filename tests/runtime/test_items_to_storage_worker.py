@@ -46,7 +46,6 @@ def _default_worker_patch_targets():
     """Return a fresh dict of {target: mock_or_DEFAULT} for storage tests."""
     return {
         "time.sleep": MagicMock(return_value=None),
-        f"{_AUTOMATION}.cursor_pos": MagicMock(return_value=(150, 100)),
         "key_name_to_scan_code": MagicMock(return_value=0x1C),
         "InventoryAutomation.close_menus": MagicMock(),
         "InventoryAutomation.ensure_storage_open": MagicMock(),
@@ -133,12 +132,6 @@ class _RecordingInput(ShadowInputBackend):
 
     def alt_right_click(self) -> bool:
         self.calls.append(("alt_rmb",))
-        return True
-
-    def alt_right_clicks(self, times: int = 1) -> bool:
-        for _ in range(times):
-            if not self.alt_right_click():
-                return False
         return True
 
     def key_tap(
@@ -353,8 +346,6 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         with patch.object(worker, "storage_session") as storage_session:
             storage_session.return_value = None
             self.assertTrue(worker.process_pending())
-        teleport.teleport_until_quiet.assert_not_called()
-        teleport.no_visible_mobs_now.assert_not_called()
         storage_session.assert_called_once_with(dump=True, restock=True)
         self.assertFalse(self.ctx.storage_event.is_set())
 
@@ -367,15 +358,12 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             "Clear", (), {"clear": True}
         )()
         teleport = MagicMock()
-        teleport.no_visible_mobs_now.return_value = False
         worker = self._worker(hunt_mode=mode, teleport=teleport)
         self.vitals.publish_weight(85, 100)
 
         with patch.object(worker, "storage_session") as storage_session:
             self.assertTrue(worker.process_pending())
 
-        teleport.teleport_until_quiet.assert_not_called()
-        teleport.no_visible_mobs_now.assert_not_called()
         storage_session.assert_called_once_with(dump=True, restock=True)
         self.assertFalse(self.ctx.storage_event.is_set())
 
@@ -415,7 +403,7 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             self.vitals.publish_weight(90, 100)
             self.vitals.publish_hp(1000, 1000)
             worker = self._worker()
-            worker.items_to_storage()
+            worker.storage_session(dump=True, restock=False)
 
             kinds = [c[0] for c in self.input.calls]
             m["InventoryAutomation.ensure_storage_open"].assert_called()
@@ -439,7 +427,7 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             self.vitals.publish_weight(90, 100)
             self.vitals.publish_hp(1000, 1000)
             worker = self._worker()
-            worker.items_to_storage()
+            worker.storage_session(dump=True, restock=False)
 
             kinds = [c[0] for c in self.input.calls]
             self.assertNotIn("key_tap", kinds)
@@ -465,7 +453,7 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             self.vitals.publish_hp(1000, 1000)
             worker = self._worker()
             self.assertEqual(self.ctx.wingcount, 0)
-            worker.get_fly_wings()
+            worker.storage_session(dump=False, restock=True)
 
             m["InventoryAutomation.ensure_inventory_open"].assert_called()
             m["InventoryAutomation.ensure_storage_open"].assert_called()
@@ -495,7 +483,7 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             self.vitals.publish_weight(10, 100)
             self.vitals.publish_hp(1000, 1000)
             worker = self._worker()
-            worker.get_fly_wings()
+            worker.storage_session(dump=False, restock=True)
 
             m["InventoryAutomation.close_menus"].assert_called()
             self.assertTrue(self.ctx.fly_wings_exhausted)

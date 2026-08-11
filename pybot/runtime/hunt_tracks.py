@@ -125,19 +125,6 @@ class HuntTracks:
         with self._lock:
             return not any(is_alive(track) for track in self._tracks) and not self._discovery_candidates
 
-    def try_claim_clear_for_teleport(self) -> bool:
-        """Atomically claim an empty area for teleport.
-
-        Kept for callers/tests that need the old claim-and-reset operation.
-        Danger/mode teleport paths should use :meth:`can_claim_clear_for_teleport`
-        followed by the accepted-input reset owned by ``teleport_once``.
-        """
-        with self._lock:
-            if not self.can_claim_clear_for_teleport():
-                return False
-            self._area_reset_locked()
-            return True
-
     def _area_reset_locked(self) -> None:
         self._area_epoch += 1
         self._tracks = []
@@ -155,10 +142,6 @@ class HuntTracks:
     def get_track_count(self) -> int:
         with self._lock:
             return len(self._tracks)
-
-    def get_alive_count(self, now_tick: int | None = None) -> int:
-        with self._lock:
-            return sum(1 for track in self._tracks if is_alive(track))
 
     def has_alive_tracks(self, now_tick: int | None = None) -> bool:
         with self._lock:
@@ -218,13 +201,12 @@ class HuntTracks:
             track.debuff_applied = True
             return True
 
-    def apply_attack_event(self, track_id: int, *, now_tick: int | None = None) -> bool:
-        tick = now_tick if now_tick is not None else monotonic_ms()
+    def apply_attack_event(self, track_id: int) -> bool:
         with self._lock:
             track = self._get_track_by_id_locked(track_id)
             if track is None:
                 return False
-            apply_attack_event(track, tick)
+            apply_attack_event(track)
             return True
 
     def perform_if_current(
@@ -373,7 +355,6 @@ class HuntTracks:
                 empty = ReconcileSummary(
                     tracks_before=len(self._tracks),
                     tracks_after=len(self._tracks),
-                    alive_before=sum(1 for t in self._tracks if is_alive(t)),
                     alive_after=sum(1 for t in self._tracks if is_alive(t)),
                     created_ids=[],
                     removed_ids=[],
@@ -420,7 +401,6 @@ class HuntTracks:
                 if track is not None:
                     apply_discovery_match(
                         track,
-                        now_tick=tick,
                         detection=detection,
                         config=config,
                     )
@@ -483,7 +463,6 @@ class HuntTracks:
             summary = ReconcileSummary(
                 tracks_before=alive_after + len(remove_ids),
                 tracks_after=alive_after,
-                alive_before=alive_after + len(remove_ids),
                 alive_after=alive_after,
                 created_ids=[],
                 removed_ids=sorted(remove_ids),

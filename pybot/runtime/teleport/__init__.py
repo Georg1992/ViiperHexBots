@@ -6,8 +6,6 @@ Responsibilities
   Danger/critical: wing key when Teleport Key is assigned, else creamy.
 * **Execution** — press teleport key, wait for settle, track wings/overlay.
 * **Danger teleport** — the sit worker's urgent escape primitive.
-* **Area clear** — scan-loop that teleports until discovery sees zero mobs.
-* **Quiet area** — clear + idle + re-scan for recovery/sit placement.
 * **Mode teleport** — discovery-gated teleport with suspend/release (for TeleportStrategy).
 
 Usage
@@ -23,12 +21,9 @@ import time
 
 from pybot.runtime.constants import (
     HP_POST_TELEPORT_HEAL_S,
-    SIT_IDLE_BEFORE_SIT_S,
     SIT_SP_POLL_INTERVAL_S,
 )
-from pybot.runtime.detection.discovery_filter import filter_scan_candidates
 from pybot.runtime.event_utils import event_is_set
-from pybot.runtime.danger_detector import DangerLevel
 from pybot.runtime.input.input_backend import InputBackend
 from pybot.game_state import PlayerVitals
 
@@ -327,108 +322,6 @@ class TeleportController:
             lambda: self.teleport_once(scan_code=tp),
         )
 
-    # ── Area clear loops ─────────────────────────────────────────
-
-    def teleport_until_clear(self, log_tag: str) -> bool:
-        """Teleport + settle until discovery finds zero living mobs.
-
-        Returns ``True`` when the area is clear, ``False`` if stopped.
-        """
-        tp = self.active_scan_code()
-        if tp <= 0:
-            key_name = self.active_button() or "(unset)"
-            self._ctx.logger.behavior(
-                f"[{log_tag}] no teleport key configured ({key_name!r}) — "
-                "cannot clear area"
-            )
-            return False
-
-        while not self._ctx.is_stopped():
-            if self._escape_in_flight():
-                return False
-            if self._danger_is_active():
-                return False
-            living = self._scan_living_count()
-            if living is None:
-                self._ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
-                continue
-            if living == 0:
-                self._ctx.logger.behavior(
-                    f"[{log_tag}] discovery sees no mobs"
-                )
-                self._reset_tracking(f"{log_tag.lower()}_clear", log_tag=log_tag)
-                return True
-
-            self._ctx.logger.behavior(
-                f"[{log_tag}] discovery living={living} — teleport before UI"
-            )
-            # Danger has priority even if it arrives after the scan but before
-            # the storage clear teleport. Never issue a competing teleport
-            # once the urgent request is visible.
-            if self._escape_in_flight() or self._danger_is_active():
-                return False
-            if not self.teleport_once():
-                return False
-        return False
-
-    def _danger_is_active(self) -> bool:
-        """Read current observer facts without consulting request gates."""
-        danger = getattr(self._ctx, "danger_detector", None)
-        return danger is not None and danger.danger_level() is not DangerLevel.SAFE
-
-    def teleport_until_quiet(
-        self,
-        log_tag: str,
-        idle_s: float = SIT_IDLE_BEFORE_SIT_S,
-    ) -> bool:
-        """Clear area, idle, then re-scan, aborting promptly for danger."""
-        while not self._ctx.is_stopped():
-            if self._escape_in_flight():
-                return False
-            if self._danger_is_active():
-                return False
-            if not self.teleport_until_clear(log_tag=log_tag):
-                return False
-            self._ctx.logger.behavior(
-                f"[{log_tag}] area clear — idle {idle_s:.0f}s before proceed"
-            )
-
-            deadline = time.monotonic() + idle_s
-            while True:
-                if self._escape_in_flight():
-                    return False
-                # The detector is fact-only; never consult removed request
-                # events while waiting in a quiet area. The gameplay owner
-                # will perform the escape on the next deterministic tick.
-                if self._danger_is_active():
-                    return False
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                # Check at the worker cadence so a damage request cannot wait
-                # through the whole idle window.
-                wait_s = min(SIT_SP_POLL_INTERVAL_S, remaining)
-                if not self._ctx.wait_unless_stopped(wait_s):
-                    return False
-
-            if self._escape_in_flight():
-                return False
-            if self._danger_is_active():
-                return False
-            living = self._scan_living_count()
-            if living is None:
-                self._ctx.logger.behavior(
-                    f"[{log_tag}] post-idle scan failed — clear again"
-                )
-                continue
-            if living == 0:
-                self._ctx.logger.behavior(f"[{log_tag}] still clear after idle")
-                return True
-            self._ctx.logger.behavior(
-                f"[{log_tag}] mobs during idle (living={living}) — clear again"
-            )
-        return False
-
     # ── Mode teleport (for TeleportStrategy) ──────────────────────
 
     def mode_teleport(self) -> bool:
@@ -491,33 +384,6 @@ class TeleportController:
         finally:
             ctx.discovery_suspend.clear()
             ctx.discovery_wake.set()
-
-    def no_visible_mobs_now(self) -> bool:
-        """Return true only when an immediate discovery scan sees zero mobs.
-
-        This is intentionally a fresh detector read rather than the cached
-        strategy flag. Storage uses it immediately before opening inventory so
-        a mob appearing after the quiet-area wait cannot be treated as safe.
-        """
-        living = self._scan_living_count()
-        return living == 0
-
-    def _scan_living_count(self) -> int | None:
-        """Run one discovery scan; return filtered living count or ``None``."""
-        ctx = self._ctx
-        if not ctx.capture.is_valid():
-            return None
-        roi = ctx.capture.get_hunt_roi()
-        if roi is None:
-            return None
-        frame = ctx.capture.capture_roi(roi)
-        if frame is None or frame.size == 0:
-            return None
-        scan = ctx.detector.discover_frame(frame, roi)
-        if not scan.ok:
-            return None
-        filtered = filter_scan_candidates(scan.detections)
-        return len(filtered)
 
     def _reset_tracking(self, reason: str, *, log_tag: str) -> None:
         """Clear tracks/policy/overlay and hunt-mode flags after teleport."""

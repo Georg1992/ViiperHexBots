@@ -100,28 +100,3 @@ def crop_frame_to_hunt_search_roi(
     if x1 <= x0 or y1 <= y0:
         return frame
     return frame[y0:y1, x0:x1].copy()
-
-
-def player_ignore_box(
-    roi: HuntRoi,
-    cell_size_px: int,
-) -> tuple[int, int, int, int]:
-    """Mirrors GetMobSearchPlayerIgnore — center 2x2 cells."""
-    ignore_w = cell_size_px * 2
-    ignore_h = cell_size_px * 2
-    ignore_x = roi.x + (roi.w // 2) - (ignore_w // 2)
-    ignore_y = roi.y + (roi.h // 2) - (ignore_h // 2)
-    return ignore_x, ignore_y, ignore_w, ignore_h
-
-
-def point_inside_ignore(
-    x: int,
-    y: int,
-    ignore_x: int,
-    ignore_y: int,
-    ignore_w: int,
-    ignore_h: int,
-) -> bool:
-    if ignore_w <= 0 or ignore_h <= 0:
-        return False
-    return ignore_x <= x <= ignore_x + ignore_w and ignore_y <= y <= ignore_y + ignore_h

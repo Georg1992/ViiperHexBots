@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import threading
-import time
 import unittest
 from unittest.mock import patch
 
@@ -15,7 +13,6 @@ from pybot.paths import PROJECT_ROOT
 from pybot.recognition.fixtures import default_horn_fixture
 from pybot.runtime.capture.window_roi import HuntRoi
 from pybot.runtime.detection.detector_session import DetectorSession, StateTrackSnapshot
-from pybot.recognition.detector.detector import load_detector_config
 
 ROOT = PROJECT_ROOT
 FIXTURE = default_horn_fixture()

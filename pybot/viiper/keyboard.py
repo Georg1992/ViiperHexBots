@@ -79,7 +79,6 @@ KEY_GRAVE = 0x35
 KEY_COMMA = 0x36
 KEY_PERIOD = 0x37
 KEY_SLASH = 0x38
-KEY_CAPS_LOCK = 0x39
 
 KEY_F1 = 0x3A
 KEY_F2 = 0x3B
@@ -94,9 +93,6 @@ KEY_F10 = 0x43
 KEY_F11 = 0x44
 KEY_F12 = 0x45
 
-KEY_PRINT_SCREEN = 0x46
-KEY_SCROLL_LOCK = 0x47
-KEY_PAUSE = 0x48
 KEY_INSERT = 0x49
 KEY_HOME = 0x4A
 KEY_PAGE_UP = 0x4B
@@ -109,12 +105,10 @@ KEY_LEFT = 0x50
 KEY_DOWN = 0x51
 KEY_UP = 0x52
 
-KEY_NUM_LOCK = 0x53
 KEY_KP_SLASH = 0x54
 KEY_KP_ASTERISK = 0x55
 KEY_KP_MINUS = 0x56
 KEY_KP_PLUS = 0x57
-KEY_KP_ENTER = 0x58
 KEY_KP1 = 0x59
 KEY_KP2 = 0x5A
 KEY_KP3 = 0x5B
@@ -126,8 +120,6 @@ KEY_KP8 = 0x60
 KEY_KP9 = 0x61
 KEY_KP0 = 0x62
 KEY_KP_DOT = 0x63
-
-KEY_APPLICATION = 0x65
 
 
 class KeyboardState:
@@ -148,11 +140,6 @@ class KeyboardState:
             byte_idx = key // 8
             bit_idx = key % 8
             self.key_bitmap[byte_idx] |= 1 << bit_idx
-
-    def release_all(self) -> None:
-        """Clear all pressed keys (keeps modifiers)."""
-        for i in range(32):
-            self.key_bitmap[i] = 0
 
     def marshal(self) -> bytes:
         """Encode to VIIPER wire format: modifiers:u8 count:u8 keys:u8*count."""

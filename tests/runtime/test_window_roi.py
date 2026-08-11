@@ -9,8 +9,6 @@ import numpy as np
 from pybot.runtime.capture.window_roi import (
     crop_frame_to_hunt_search_roi,
     hunt_roi_from_client_rect,
-    player_ignore_box,
-    point_inside_ignore,
     search_box_size_px,
 )
 
@@ -61,24 +59,6 @@ class WindowRoiTests(unittest.TestCase):
         self.assertEqual(cropped.shape[1], 1024)
         self.assertEqual(roi.x, (frame_w // 2) - 512)
         self.assertEqual(roi.y, (frame_h // 2) - 512)
-
-    def test_player_ignore_centered_two_by_two_cells(self) -> None:
-        roi = hunt_roi_from_client_rect(
-            0,
-            0,
-            1600,
-            900,
-            search_range_cells=16,
-            cell_size_px=64,
-        )
-        assert roi is not None
-        ignore_x, ignore_y, ignore_w, ignore_h = player_ignore_box(roi, 64)
-        self.assertEqual(ignore_w, 128)
-        self.assertEqual(ignore_h, 128)
-        self.assertEqual(ignore_x, roi.center_x - 64)
-        self.assertEqual(ignore_y, roi.center_y - 64)
-        self.assertTrue(point_inside_ignore(roi.center_x, roi.center_y, ignore_x, ignore_y, ignore_w, ignore_h))
-        self.assertFalse(point_inside_ignore(roi.x, roi.y, ignore_x, ignore_y, ignore_w, ignore_h))
 
 
 if __name__ == "__main__":

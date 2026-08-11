@@ -143,12 +143,6 @@ class TeleportKeySelectionTests(unittest.TestCase):
         self.assertFalse(self.tport.teleport_once_for_sit(log_tag="SIT"))
         self.input.teleport_key.assert_not_called()
 
-    def test_until_quiet_aborts_when_escape_claims(self) -> None:
-        self.ctx.is_stopped.return_value = False
-        self._set_escape_in_flight()
-        self.assertFalse(self.tport.teleport_until_quiet(log_tag="SAFE"))
-        self.input.teleport_key.assert_not_called()
-
     def test_mode_teleport_refuses_during_critical_escape(self) -> None:
         self._set_escape_in_flight()
         self.assertFalse(self.tport.mode_teleport())

@@ -16,7 +16,6 @@ from pybot.runtime.danger_detector import (
 )
 from pybot.runtime.teleport import TeleportController
 from pybot.runtime.runtime_context import HuntRuntimeContext
-from pybot.runtime.workers.attack_loop import GameplayLoop
 from pybot.runtime.workers.hp_restore_worker import HpRestoreWorker
 
 
@@ -163,7 +162,7 @@ class DangerTeleportPriorityTests(unittest.TestCase):
 
     def test_critical_ratios_are_internal_thresholds(self) -> None:
         self.assertEqual(CRITICAL_HP_RATIO, 0.5)
-        self.assertEqual(CRITICAL_DAMAGE_RATIO, 0.2)
+        self.assertEqual(CRITICAL_DAMAGE_RATIO, 0.15)
 
     def test_danger_level_transitions_safe_danger_critical(self) -> None:
         self.assertEqual(self.danger.danger_level(), DangerLevel.SAFE)
@@ -210,7 +209,7 @@ class DangerTeleportPriorityTests(unittest.TestCase):
 
 
 
-    def test_drop_greater_than_twenty_percent_of_previous_tick_is_critical(self) -> None:
+    def test_drop_greater_than_fifteen_percent_of_previous_tick_is_critical(self) -> None:
         self.vitals.publish_hp(150, 200)
         self.danger._poll_hp()
         # 22% of the previous tick's 150 HP; current/max is still 58.5%.
@@ -218,12 +217,23 @@ class DangerTeleportPriorityTests(unittest.TestCase):
         self.danger._poll_hp()
         self.assertEqual(self.danger.danger_level(), DangerLevel.CRITICAL)
 
-    def test_drop_of_exactly_twenty_percent_is_not_critical(self) -> None:
-        self.vitals.publish_hp(150, 200)
+    def test_drop_of_exactly_fifteen_percent_is_not_critical(self) -> None:
+        """A 15% hit is not critical; only drops strictly above 15% are."""
+        self.vitals.publish_hp(200, 300)
         self.danger._poll_hp()
-        self.vitals.publish_hp(120, 200)
+        # Exactly 15% of the previous tick's 200 HP.
+        self.vitals.publish_hp(170, 300)
         self.danger._poll_hp()
         self.assertEqual(self.danger.danger_level(), DangerLevel.DANGER)
+
+    def test_drop_slightly_above_fifteen_percent_is_critical(self) -> None:
+        """A 16% hit (strictly above the 15% line) is critical."""
+        self.vitals.publish_hp(200, 300)
+        self.danger._poll_hp()
+        # 168/200 = 16% drop; current/max is 56%.
+        self.vitals.publish_hp(168, 300)
+        self.danger._poll_hp()
+        self.assertEqual(self.danger.danger_level(), DangerLevel.CRITICAL)
 
     def test_drop_uses_previous_hp_not_hp_max_for_ratio(self) -> None:
         self.vitals.publish_hp(300, 1000)

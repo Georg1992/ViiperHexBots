@@ -6,10 +6,8 @@ Extracted from ItemsToStorageWorker so the worker owns only orchestration
 
 from __future__ import annotations
 
-import ctypes
 import threading
 import time
-from ctypes import wintypes
 
 from pybot.recognition.ui.inventory import (
     InventoryUiError,
@@ -20,16 +18,6 @@ from pybot.recognition.ui.inventory import (
     require_template,
 )
 from pybot.runtime.input.input_backend import InputBackend
-
-
-def cursor_pos() -> tuple[int, int]:
-    windll = getattr(ctypes, "windll", None)
-    if windll is None:
-        raise RuntimeError("cursor_pos requires Windows (ctypes.windll)")
-    pt = wintypes.POINT()
-    if not windll.user32.GetCursorPos(ctypes.byref(pt)):
-        raise RuntimeError("GetCursorPos failed")
-    return int(pt.x), int(pt.y)
 
 
 class InventoryAutomation:
@@ -61,10 +49,6 @@ class InventoryAutomation:
             raise InventoryUiError("client rect unavailable")
         return int(client[0]), int(client[1])
 
-    def cursor_in_client(self) -> tuple[int, int]:
-        sx, sy = cursor_pos()
-        ox, oy = self.client_origin()
-        return sx - ox, sy - oy
 
     def _wait(self, seconds: float) -> None:
         """Wait for UI settling, aborting promptly on stop/focus cancellation."""
@@ -245,12 +229,6 @@ class InventoryAutomation:
         self.cursor_off_screen()
         self._wait(0.5)
 
-    def menus_are_open(self) -> bool:
-        """True when inventory and/or storage is visible (cursor cleared first)."""
-        self.cursor_off_screen()
-        frame = self.capture_client()
-        return is_inventory_open(frame) or is_storage_open(frame)
-
     def close_menus(self) -> None:
         """Close storage and/or inventory until both are gone.
 
@@ -285,16 +263,6 @@ class InventoryAutomation:
             f"storage_open={is_storage_open(frame)})"
         )
 
-    def close_menus_best_effort(self) -> None:
-        """Force-close panels. Never raise."""
-        try:
-            if not self.menus_are_open():
-                return
-            self.close_menus()
-        except InventoryUiError:
-            pass
-        except Exception:
-            pass
 
     # ── Tab selection ────────────────────────────────────────────
 

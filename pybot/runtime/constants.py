@@ -67,7 +67,7 @@ HP_RESTORE_RATIO = 0.5
 # Vision HP poll / min gap between HP Item Key presses.
 HP_RESTORE_POLL_S = 1.0
 # Minimum gap between successful custom skill-heal casts.
-HP_RESTORE_COOLDOWN_S = 1.5
+HP_RESTORE_COOLDOWN_S = 1.8
 # No HP drop for this long before custom self-heal may run.
 HP_HEAL_DAMAGE_QUIET_S = 1.0
 # Critical danger must escape at the detector's cadence, not the sit poll.

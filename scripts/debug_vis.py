@@ -1021,7 +1021,6 @@ def main() -> None:
     print("Ensuring prod descriptors (ensure_mob_assets)...")
     ensure_mob_assets()
     detector = MobDetector(PROJECT_ROOT, config)
-    detector_spritegrf = MobDetector(PROJECT_ROOT, config, use_sprite_grf=True)
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     if OUT_DIR.exists():
@@ -1119,89 +1118,47 @@ def main() -> None:
             if frame is None:
                 continue
 
-            is_modified = "_ModifiedSprite" in image.file_name
             frame = fixture_search_frame(frame)
 
-            # ── normal path (skip ModifiedSprite fixtures) ──
-            if not is_modified:
-                result = detector.detect(frame, mob_name)
+            result = detector.detect(frame, mob_name)
 
-                pane_heat = heatmap_to_color(result.sprite_heatmap)
-                annotate_heatmap_pane(pane_heat, result)
-                pane_overlay = draw_detection_overlay(frame, result)
-                pane_sil = allocate_silhouette_panel(
-                    result.descriptor,
-                    result.silhouette_checks,
-                    420,
-                    frame.shape[0],
-                    min_recall=float(config["minSilhouetteRecall"]),
-                    min_precision=float(config["minSilhouettePrecision"]),
-                )
+            pane_heat = heatmap_to_color(result.sprite_heatmap)
+            annotate_heatmap_pane(pane_heat, result)
+            pane_overlay = draw_detection_overlay(frame, result)
+            pane_sil = allocate_silhouette_panel(
+                result.descriptor,
+                result.silhouette_checks,
+                420,
+                frame.shape[0],
+                min_recall=float(config["minSilhouetteRecall"]),
+                min_precision=float(config["minSilhouettePrecision"]),
+            )
 
-                combined_height = max(
-                    pane_heat.shape[0], pane_overlay.shape[0], pane_sil.shape[0],
-                )
-                combined = np.hstack([
-                    pad_to_height(pane_heat, combined_height),
-                    pad_to_height(pane_overlay, combined_height),
-                    pad_to_height(pane_sil, combined_height),
-                ])
+            combined_height = max(
+                pane_heat.shape[0], pane_overlay.shape[0], pane_sil.shape[0],
+            )
+            combined = np.hstack([
+                pad_to_height(pane_heat, combined_height),
+                pad_to_height(pane_overlay, combined_height),
+                pad_to_height(pane_sil, combined_height),
+            ])
 
-                stem = image.file_name.replace(".png", "")
-                cv2.imwrite(str(mob_dir / f"{stem}_viz.png"), combined)
-                viz_count += 1
+            stem = image.file_name.replace(".png", "")
+            cv2.imwrite(str(mob_dir / f"{stem}_viz.png"), combined)
+            viz_count += 1
 
-                n_acc = len(result.accepted)
-                expected = image.expected_count
-                ok = "OK" if n_acc == expected else "FAIL"
-                print(
-                    f"  {mob_name:15s} {stem:20s}  "
-                    f"expect={expected} got={n_acc}  "
-                    f"sil={len(result.silhouette_checks)}  {ok}"
-                )
-                print(f"    {format_timing_ms(result.timing)}")
-                timing_runs += 1
-                for key, sec in result.timing.items():
-                    timing_totals[key] = timing_totals.get(key, 0.0) + sec
-
-            # ── sprite.grf pass (ModifiedSprite fixtures only) ──
-            if is_modified and mod_desc_path.is_file():
-                expected = image.expected_count
-                result_sg = detector_spritegrf.detect(frame, mob_name)
-
-                pane_heat_sg = heatmap_to_color(result_sg.sprite_heatmap)
-                annotate_heatmap_pane(pane_heat_sg, result_sg)
-                pane_overlay_sg = draw_detection_overlay(frame, result_sg)
-                pane_sil_sg = allocate_silhouette_panel(
-                    result_sg.descriptor,
-                    result_sg.silhouette_checks,
-                    420,
-                    frame.shape[0],
-                    min_recall=float(config["minSilhouetteRecall"]),
-                    min_precision=float(config["minSilhouettePrecision"]),
-                )
-
-                combined_height_sg = max(
-                    pane_heat_sg.shape[0], pane_overlay_sg.shape[0], pane_sil_sg.shape[0],
-                )
-                combined_sg = np.hstack([
-                    pad_to_height(pane_heat_sg, combined_height_sg),
-                    pad_to_height(pane_overlay_sg, combined_height_sg),
-                    pad_to_height(pane_sil_sg, combined_height_sg),
-                ])
-
-                stem = image.file_name.replace(".png", "")
-                cv2.imwrite(str(mob_dir / f"{stem}_viz_spritegrf.png"), combined_sg)
-                viz_count += 1
-
-                n_acc_sg = len(result_sg.accepted)
-                ok_sg = "OK" if n_acc_sg == expected else "FAIL"
-                print(
-                    f"  {mob_name:15s} {stem:20s}  "
-                    f"[spritegrf] expect={expected} got={n_acc_sg}  "
-                    f"sil={len(result_sg.silhouette_checks)}  {ok_sg}"
-                )
-                print(f"    {format_timing_ms(result_sg.timing)}")
+            n_acc = len(result.accepted)
+            expected = image.expected_count
+            ok = "OK" if n_acc == expected else "FAIL"
+            print(
+                f"  {mob_name:15s} {stem:20s}  "
+                f"expect={expected} got={n_acc}  "
+                f"sil={len(result.silhouette_checks)}  {ok}"
+            )
+            print(f"    {format_timing_ms(result.timing)}")
+            timing_runs += 1
+            for key, sec in result.timing.items():
+                timing_totals[key] = timing_totals.get(key, 0.0) + sec
 
     print(
         f"\nDone — {viz_count} viz, {descriptor_count} descriptors, "

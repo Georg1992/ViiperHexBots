@@ -8,7 +8,6 @@ from unittest.mock import MagicMock
 
 from pybot.runtime.capture.hunt_capture import HuntWindowCapture
 from pybot.paths import PROJECT_ROOT
-from pybot.recognition.rules import DiscoveryDetection
 from pybot.config.runtime import HuntRuntimeConfig
 from pybot.runtime.control import RuntimeControl
 from pybot.runtime.hunt_mode import create_hunt_mode
@@ -330,7 +329,7 @@ class HuntModeTests(unittest.TestCase):
     def test_attacks_when_alive_tracks_exist_does_not_teleport(self) -> None:
         now = monotonic_ms()
         track = self.tracks.create_track("horn", 100, 200, 0.7, 0.9, now_tick=now)
-        self.tracks.apply_attack_event(track.id, now_tick=now + 10)
+        self.tracks.apply_attack_event(track.id)
         self.mode.note_discovery_scan_completed(
             living_count=1,
             added_count=1,

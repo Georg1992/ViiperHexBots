@@ -79,11 +79,6 @@ class WingTracker:
             self._fly_wings_exhausted = True
             self._wingcount = 0
 
-    def set_count(self, count: int) -> None:
-        """Set the wing count after a successful restock."""
-        with self._lock:
-            self._wingcount = count
-
     def reset(self) -> None:
         """Reset to initial state for a new hunt session."""
         with self._lock:

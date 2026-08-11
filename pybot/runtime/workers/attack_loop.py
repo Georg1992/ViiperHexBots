@@ -354,7 +354,7 @@ class AttackLoop:
             # Keep the complete skill-heal cooldown before deciding that the
             # cast was stale and starting a retry teleport. The teleport is a
             # recovery action for the failed cast, so it must not happen during
-            # the same 1.5-second heal window.
+            # the same 1.8-second heal window.
             if elapsed_ms < int(HP_RESTORE_COOLDOWN_S * 1000):
                 return "waiting"
             if hp_changed_ms <= self._last_skill_heal_ms:
@@ -769,7 +769,7 @@ class AttackLoop:
                 f"pre_sp={pre_sp} post_sp={post_sp} — SP spent, now accessible"
             )
 
-        ctx.tracks.apply_attack_event(target_id, now_tick=now_tick)
+        ctx.tracks.apply_attack_event(target_id)
         ctx.policy.note_attack_target(target_id)
         ctx.overlay.increment_attacks()
         ctx.logger.behavior(
@@ -886,9 +886,6 @@ class GameplayLoop:
         if found or (self._buffs is None and self._timers is None):
             self._startup_seed_generation = generation
 
-    def deferred_statuses(self, *, now_ms: int | None = None):
-        """Expose scheduler state for diagnostics and focused tests."""
-        return self._scheduler.statuses(now_ms=monotonic_ms() if now_ms is None else now_ms)
 
     def run(self) -> None:
         self._ctx.logger.behavior("[GAMEPLAY] loop started")

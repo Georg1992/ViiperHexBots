@@ -474,14 +474,6 @@ class ItemsToStorageWorker:
             self._wait(0.5)
             raise
 
-    def items_to_storage(self) -> None:
-        """AHK ``ItemsToStorage`` — dump only, single open/close."""
-        self.storage_session(dump=True, restock=False)
-
-    def get_fly_wings(self) -> None:
-        """AHK ``GetFlyWings`` — restock only, single open/close."""
-        self.storage_session(dump=False, restock=True)
-
     def _abandon_fly_wings(self, reason: str) -> None:
         """Close menus, disable GetFlyWings for this hunt."""
         ctx = self._ctx

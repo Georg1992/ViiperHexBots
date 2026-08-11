@@ -354,7 +354,6 @@ class DiscoveryWorker:
                 ):
                     return
 
-            ctx.overlay.set_scan_living(len(filtered))
             verbose = (
                 summary.added_count > 0
                 or summary.removed_count > 0

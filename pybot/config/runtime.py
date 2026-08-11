@@ -66,11 +66,9 @@ class HuntRuntimeConfig:
     skill_timers: tuple[SkillTimerRuntime, ...] = ()
     custom_behavior: CustomBehaviorRuntime = CustomBehaviorRuntime()
     save_point_button: str = ""
-    save_point_scan_code: int = 0
     hp_button: str = ""
     hp_scan_code: int = 0
     sp_button: str = ""
-    sp_scan_code: int = 0
     # (button, scan_code, delay_ms) for each assigned Open Storage chain step.
     open_storage_steps: tuple[tuple[str, int, int], ...] = ()
     weight_modifier: int = 85
@@ -208,11 +206,9 @@ def hunt_runtime_config_from_settings(
         skill_timers=tuple(skill_timers),
         custom_behavior=custom_behavior,
         save_point_button=settings.save_point_button,
-        save_point_scan_code=key_name_to_scan_code(settings.save_point_button),
         hp_button=settings.hp_button,
         hp_scan_code=key_name_to_scan_code(settings.hp_button),
         sp_button=settings.sp_button,
-        sp_scan_code=key_name_to_scan_code(settings.sp_button),
         open_storage_steps=_open_storage_steps_from_settings(settings),
         weight_modifier=min(
             STORAGE_WEIGHT_MODIFIER_MAX,

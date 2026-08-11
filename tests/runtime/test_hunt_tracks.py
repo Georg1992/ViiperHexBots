@@ -446,29 +446,6 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertIsNotNone(self.tracks.get_track_by_id(first))
         self.assertIsNotNone(self.tracks.get_track_by_id(second))
 
-    def test_try_claim_clear_for_teleport_rejects_alive_tracks(self) -> None:
-        self._create(874, 578)
-        self.assertFalse(self.tracks.try_claim_clear_for_teleport())
-        self.assertEqual(self.tracks.get_track_count(), 1)
-        self.assertEqual(self.tracks.area_epoch, 0)
-
-    def test_try_claim_clear_for_teleport_rejects_pending_candidates(self) -> None:
-        self.tracks.process_discovery_scan(
-            [det(100, 100)],
-            mob_name="horn",
-            now_tick=self.now,
-        )
-        self.assertTrue(self.tracks.has_pending_discovery_candidates())
-        self.assertFalse(self.tracks.try_claim_clear_for_teleport())
-        self.assertEqual(self.tracks.area_epoch, 0)
-        status = self.tracks.get_area_clear_candidate()
-        self.assertFalse(status.clear)
-        self.assertEqual(status.reason, "pending_candidates")
-
-    def test_try_claim_clear_for_teleport_advances_epoch(self) -> None:
-        self.assertTrue(self.tracks.try_claim_clear_for_teleport())
-        self.assertEqual(self.tracks.area_epoch, 1)
-        self.assertEqual(self.tracks.get_track_count(), 0)
 
     def test_can_claim_clear_for_teleport_is_read_only(self) -> None:
         self.assertTrue(self.tracks.can_claim_clear_for_teleport())
@@ -519,7 +496,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         ).id
         self.assertNotEqual(new_id, track_id)
         self.assertIsNotNone(self.tracks.get_track_by_id(new_id))
-        self.assertEqual(self.tracks.get_alive_count(), 1)
+        self.assertEqual(self.tracks.get_track_count(), 1)
 
     def test_stale_tracking_after_area_reset_is_ignored(self) -> None:
         track_id = self._create(874, 578)
@@ -619,7 +596,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
         self.assertEqual(track.lost_count, 1)
-        self.tracks.apply_attack_event(track_id, now_tick=self.now + 50)
+        self.tracks.apply_attack_event(track_id)
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
         self.assertEqual(track.lost_count, 1)
@@ -953,7 +930,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         )
         self.assertEqual(summary.added_count, 0)
         self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 0)
-        self.assertEqual(self.tracks.get_alive_count(), 0)
+        self.assertEqual(self.tracks.get_track_count(), 0)
 
         # Drift within deathSiteRadiusPx (160) — still blocked, site follows.
         summary = self.tracks.process_discovery_scan(

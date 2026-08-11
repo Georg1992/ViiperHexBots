@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock

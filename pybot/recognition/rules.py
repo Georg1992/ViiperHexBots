@@ -55,7 +55,6 @@ class DiscoveryDetection:
 class ReconcileSummary:
     tracks_before: int = 0
     tracks_after: int = 0
-    alive_before: int = 0
     alive_after: int = 0
     created_ids: list[int] | None = None
     removed_ids: list[int] | None = None
@@ -81,8 +80,6 @@ class MobTrack:
     created_tick: int = 0
     updated_tick: int = 0
     last_found_tick: int = 0
-    last_attack_tick: int = 0
-    last_discovery_tick: int = 0
     discovery_scale: float = 0.0
     candidate_scale: float = 0.0
     # Last matched discovery heat blob (for stationary = blob unchanged).
@@ -130,7 +127,6 @@ class MobTrack:
             created_tick=now_tick,
             updated_tick=now_tick,
             last_found_tick=now_tick,
-            last_discovery_tick=now_tick,
             discovery_scale=discovery_scale,
             candidate_scale=discovery_scale,
             area_epoch=area_epoch,
@@ -142,10 +138,9 @@ def is_alive(track: MobTrack) -> bool:
     return track.state == "alive"
 
 
-def apply_attack_event(track: MobTrack, now_tick: int) -> None:
+def apply_attack_event(track: MobTrack) -> None:
     """Record one attack directed at this mob track (attack-owned fields only)."""
     track.attack_count += 1
-    track.last_attack_tick = now_tick
 
 
 def select_target_id(
@@ -221,7 +216,6 @@ def detection_matches_existing(
 def apply_discovery_match(
     track: MobTrack,
     *,
-    now_tick: int,
     detection: DiscoveryDetection,
     config: dict,
 ) -> None:
@@ -233,7 +227,6 @@ def apply_discovery_match(
     Sets ``discovery_stationary`` when the discovery blob center did not
     move (within ``movementStopThresholdPx``) vs the previous match.
     """
-    track.last_discovery_tick = now_tick
     track.discovery_miss_count = 0
     if detection.candidate_scale > 0:
         # Keep local-follow scale current as the mob's apparent size changes.

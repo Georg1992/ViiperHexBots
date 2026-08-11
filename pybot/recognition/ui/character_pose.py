@@ -32,7 +32,6 @@ class CharacterPose:
     """Body occupancy measured at the client center."""
 
     body_height: int
-    fg_count: int
 
 
 def measure_center_pose(frame_bgr: np.ndarray) -> CharacterPose | None:
@@ -59,7 +58,7 @@ def measure_center_pose(frame_bgr: np.ndarray) -> CharacterPose | None:
     body_h = _body_run_height(profile, thr)
     if body_h is None or body_h < 20:
         return None
-    return CharacterPose(body_height=body_h, fg_count=int(mask.sum()))
+    return CharacterPose(body_height=body_h)
 
 
 def _foreground_mask(bgr: np.ndarray) -> np.ndarray:

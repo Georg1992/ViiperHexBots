@@ -240,7 +240,6 @@ class StatusPanelFeed:
             timeout_s=STATUS_PANEL_READ_TIMEOUT_S,
             client_hint=client_hint,
             refresh_client=False,
-            reanchor=False,
             allow_partial=False,
         )
 

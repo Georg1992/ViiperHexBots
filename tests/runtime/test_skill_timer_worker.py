@@ -232,7 +232,6 @@ class SkillTimerWorkerTests(unittest.TestCase):
         clock = {"ms": 100_000}
         running = {"ok": True}
         suspended = {"value": False}
-        generation = {"value": 0}
 
         def teleport_key(scan_code: int) -> None:
             presses.append((scan_code, clock["ms"]))

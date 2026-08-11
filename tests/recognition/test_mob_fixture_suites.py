@@ -48,11 +48,6 @@ class MobFixtureSuiteTests(unittest.TestCase):
                 self._assert_image_count(suite, image)
 
     def _assert_image_count(self, suite: MobFixtureSuite, image: MobFixtureImage) -> None:
-        if "_ModifiedSprite" in image.file_name:
-            self.skipTest(
-                f"{image.file_name} requires use_sprite_grf / detect_simple_palette"
-            )
-
         frame = cv2.imread(str(image.path), cv2.IMREAD_COLOR)
         self.assertIsNotNone(frame, f"missing or unreadable fixture: {image.path}")
 

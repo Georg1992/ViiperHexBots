@@ -112,7 +112,6 @@ class HuntPipelineIntegrationTests(unittest.TestCase):
         }
 
         for tick in range(5):
-            at = now + tick * 2_000
             result = track_local(detector, self.roi, "horn", track_req)
             self.assertTrue(result.found, f"tick={tick} local follow must keep mob visible")
             track_req["x"] = result.x

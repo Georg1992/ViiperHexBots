@@ -44,6 +44,18 @@ class MobFixtureSuite:
             return {}
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def _manifest_expected_counts(self) -> dict[str, int]:
+        """Per-file in-hunt-range expected counts (override the filename count).
+
+        The filename's leading digit is the ground-truth mob count visible in
+        the full screenshot. The manifest may pin a lower ``expectedCounts``
+        entry for files whose mobs sit outside the current production search
+        box (16 cells × CELL_SIZE_PX); entries are exact detector calibrations,
+        never approximations.
+        """
+        raw = self.manifest().get("expectedCounts") or {}
+        return {str(name): int(count) for name, count in raw.items()}
+
     @classmethod
     def from_manifest(
         cls,
@@ -66,6 +78,7 @@ class MobFixtureSuite:
     def images(self) -> list[MobFixtureImage]:
         if not self.image_dir.is_dir():
             return []
+        expected_counts = self._manifest_expected_counts()
         fixtures: list[MobFixtureImage] = []
         for path in sorted(self.image_dir.glob("*.png")):
             match = self.pattern.match(path.name)
@@ -75,7 +88,9 @@ class MobFixtureSuite:
                 MobFixtureImage(
                     file_name=path.name,
                     path=path,
-                    expected_count=int(match.group(1)),
+                    expected_count=expected_counts.get(
+                        path.name, int(match.group(1))
+                    ),
                     gray_world="_Gray" in path.stem,
                 )
             )
@@ -104,14 +119,14 @@ MOB_FIXTURE_SUITES: tuple[MobFixtureSuite, ...] = (
         mob_name="noxious",
         pattern=re.compile(r"^(\d+)Noxious(?:_Gray)?\.png$", re.IGNORECASE),
     ),
-    MobFixtureSuite.from_manifest(
-        folder="Anubis",
-        mob_name="anubis",
-        pattern=re.compile(
-            r"^(\d+)Anubis(?:_Gray_ModifiedSprite|_Gray\d*)?\.png$",
-            re.IGNORECASE,
-        ),
-    ),
+    # Anubis — the ModifiedSprite in-world screenshots were made for legacy
+    # sprites and removed; GRF descriptor-mode tests live in
+    # tests/recognition/test_grf_detector_mode.py.
+    # MobFixtureSuite.from_manifest(
+    #     folder="Anubis",
+    #     mob_name="anubis",
+    #     pattern=re.compile(r"^(\d+)Anubis(?:_Gray\d*)?\.png$", re.IGNORECASE),
+    # ),
     # Creamy — no SPR/ACT assets yet; fixtures kept for future use.
     # MobFixtureSuite.from_manifest(
     #     folder="Creamy",
@@ -127,7 +142,7 @@ MOB_FIXTURE_SUITES: tuple[MobFixtureSuite, ...] = (
         folder="WildRose",
         mob_name="wild_rose",
         pattern=re.compile(
-            r"^(\d+)WildRose(?:_ModifiedSprite_Gray|_Gray\d*|False\d*)?\.png$",
+            r"^(\d+)WildRose(?:_Gray\d*|False\d*)?\.png$",
             re.IGNORECASE,
         ),
     ),

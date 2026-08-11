@@ -45,8 +45,6 @@ class InputBackend(Protocol):
 
     def move_and_double_click(self, x: int, y: int) -> bool: ...
 
-    def skill_click(self, scan_code: int) -> bool: ...
-
     def skill_click_at(
         self,
         scan_code: int,
@@ -60,13 +58,9 @@ class InputBackend(Protocol):
 
     def left_click(self) -> bool: ...
 
-    def right_click(self) -> bool: ...
-
     def set_left_button(self, down: bool) -> bool: ...
 
     def alt_right_click(self) -> bool: ...
-
-    def alt_right_clicks(self, times: int = 1) -> bool: ...
 
     def key_tap(
         self,
@@ -116,11 +110,6 @@ class ShadowInputBackend:
         del x, y
         return self.left_click() and self.left_click()
 
-    def skill_click(self, scan_code: int) -> bool:
-        if scan_code <= 0:
-            return False
-        return True
-
     def skill_click_at(
         self,
         scan_code: int,
@@ -142,22 +131,11 @@ class ShadowInputBackend:
     def left_click(self) -> bool:
         return True
 
-    def right_click(self) -> bool:
-        return True
-
     def set_left_button(self, down: bool) -> bool:
         return True
 
     def alt_right_click(self) -> bool:
         """Alt+RMB once, then always wait ``ALT_MOUSE_CLICK_DELAY_S``."""
-        return True
-
-    def alt_right_clicks(self, times: int = 1) -> bool:
-        if times <= 0:
-            return False
-        for _ in range(times):
-            if not self.alt_right_click():
-                return False
         return True
 
     def key_tap(

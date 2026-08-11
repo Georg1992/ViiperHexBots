@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import MagicMock
 
 from pybot.mobs.catalog import load_mob_catalog
+from pybot.runtime.constants import CELL_SIZE_PX
 from pybot.runtime.mob_behaviors import (
     AnubisBehavior,
     MobBehavior,
@@ -50,12 +51,13 @@ class MobBehaviorRegistryTests(unittest.TestCase):
         behavior = AnubisBehavior()
         backend = MagicMock()
         backend.move_and_click.return_value = True
-        # Char at (100, 100); one mob at (120, 100) → kite left by 320px.
+        # Char at (100, 100); one mob at (120, 100) → kite left by 5 cells
+        # (5 × CELL_SIZE_PX).
         ok = behavior.kite_after_attack(
             100, 100, backend, all_mobs=[(120, 100)],
         )
         self.assertTrue(ok)
-        backend.move_and_click.assert_called_once_with(-220, 100)
+        backend.move_and_click.assert_called_once_with(100 - 5 * CELL_SIZE_PX, 100)
 
 
 if __name__ == "__main__":

@@ -12,15 +12,10 @@ import numpy as np
 
 from pybot.paths import PROJECT_ROOT, RECOGNITION_DIR
 from pybot.recognition.cli import apply_scale_calibration
-from pybot.recognition.fixtures import (
-    MOB_FIXTURE_SUITES,
-    default_horn_fixture,
-    fixture_search_frame,
-)
+from pybot.recognition.fixtures import default_horn_fixture
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
 from pybot.recognition.detector.tracking.local_tracker import (
     LocalTrackResult,
-    _find_local_peak,
     _local_follow_scales,
     _refine_hit_to_sprite_center,
     clear_track_states,
@@ -504,35 +499,6 @@ class LocalTrackerTests(unittest.TestCase):
         )
         self.assertEqual(_local_follow_scales([0.35, 0.45], 0.35), [0.35, 0.45])
         self.assertEqual(_local_follow_scales([], 0.90), [0.90])
-
-    def test_anubis_modified_sprite_tracking_is_fast_and_centered(self) -> None:
-        """Large Anubis follows from a nearby center without prediction state."""
-        detector = MobDetector(ROOT, self.base_config, use_sprite_grf=True)
-        suite = next(
-            suite for suite in MOB_FIXTURE_SUITES if suite.mob_name == "anubis"
-        )
-        image = next(
-            image for image in suite.images()
-            if "ModifiedSprite" in image.file_name
-        )
-        frame = cv2.imread(str(image.path), cv2.IMREAD_COLOR)
-        self.assertIsNotNone(frame)
-        assert frame is not None
-        frame = fixture_search_frame(frame)
-        discovery = detector.detect(frame, "anubis")
-        self.assertGreater(len(discovery.accepted), 0)
-        anchor = discovery.accepted[0]
-        track = self._build_track_dict(
-            anchor,
-            trackId=-77,
-            x=anchor.center_x - 60,
-            y=anchor.center_y - 20,
-        )
-        started = time.perf_counter()
-        result = track_local(detector, frame, "anubis", track)
-        elapsed = time.perf_counter() - started
-        self.assertTrue(result.found, result.miss_reason)
-        self.assertLess(elapsed, 0.5)
 
     def test_area_reset_has_no_temporal_state_to_clear(self) -> None:
         """The centered follower keeps no stale screen-local cache."""

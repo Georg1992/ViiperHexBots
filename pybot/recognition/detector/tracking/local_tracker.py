@@ -719,20 +719,12 @@ def _follow_cached_template(
         > float(identity_radius * identity_radius)
     ):
         return None
-    native_w = max(1, int(template.width))
-    native_h = max(1, int(template.height))
     if suppress_positions:
         suppress_radius = max(_LOCAL_SUPPRESS_RADIUS_FLOOR_PX, search_radius_px // 3)
         if any((hit_x - sx) ** 2 + (hit_y - sy) ** 2 <= suppress_radius ** 2
                for sx, sy in suppress_positions):
             return None
 
-    bbox = (
-        hit_x - native_w // 2,
-        hit_y - native_h // 2,
-        native_w,
-        native_h,
-    )
     # Keep the original template stable. Replacing it on every frame causes
     # template drift; only the current-frame palette bbox may publish a center.
     return LocalTrackResult(

@@ -220,11 +220,6 @@ def _static_source_frame(frame: ActFrameRef) -> ActFrameRef:
     )
 
 
-def _palette_bytes(spr_file: SprFile) -> bytes:
-    raw = bytearray()
-    for color in spr_file.palette:
-        raw.extend((color.red, color.green, color.blue, color.alpha))
-    return bytes(raw)
 
 
 def _encode_rle(indices: bytes) -> bytes:

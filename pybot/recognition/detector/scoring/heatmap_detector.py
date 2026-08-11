@@ -729,12 +729,6 @@ class HeatmapDetector:
         self.small_scale_cutoff = float(config["smallScaleCutoff"])
         self.min_body_cluster_strong = float(config["minBodyClusterStrong"])
         self.min_required_groups = int(config["minRequiredPaletteGroups"])
-        # Cached full-frame body map from the last build_sprite_heatmap call
-        # (at work resolution). Keyed by descriptor identity to avoid cross-mob
-        # poisoning when detect() is called for different mobs on the same frame.
-        self._last_body_best: np.ndarray | None = None
-        self._last_body_downscale: int = 0
-        self._last_body_descriptor_id: int = 0
         # Sub-stage wall timings from the last build_sprite_heatmap call, for
         # the SLOW diagnostic: work-resize / palette pass / finish (edge,
         # blur, upscale).
@@ -818,9 +812,6 @@ class HeatmapDetector:
                 descriptor.match_palette_bgr,
                 descriptor.max_sprite_palette_distance,
             )
-            self._last_body_best = None
-            self._last_body_downscale = 0
-            self._last_body_descriptor_id = 0
         elif descriptor.use_body_cluster_diversity:
             # Keep the weighted base heatmap, but do not retain a full-frame
             # per-palette similarity tensor. Diversity only needs one 2-D
@@ -831,7 +822,7 @@ class HeatmapDetector:
                 descriptor,
                 descriptor.max_sprite_palette_distance,
             )
-            sprite, div_maps = apply_body_cluster_diversity(
+            sprite, _div_maps = apply_body_cluster_diversity(
                 base_sprite,
                 work_bgr,
                 descriptor,
@@ -842,18 +833,12 @@ class HeatmapDetector:
                 avg_height=descriptor.size.avg_height,
                 downscale=downscale,
             )
-            self._last_body_best = div_maps["body_best"]
-            self._last_body_downscale = downscale
-            self._last_body_descriptor_id = id(descriptor)
         else:
             sprite = weighted_sprite_palette_heatmap(
                 work_bgr,
                 descriptor,
                 descriptor.max_sprite_palette_distance,
             )
-            self._last_body_best = None
-            self._last_body_downscale = 0
-            self._last_body_descriptor_id = 0
         palette_elapsed = time.perf_counter() - palette_started
 
         # --- 2. Edge-density boost ---

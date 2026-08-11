@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 import unittest
 from unittest.mock import patch
 
@@ -11,88 +10,11 @@ import numpy as np
 from pybot.recognition.ui.status_panel import StatusPanelValues
 
 from pybot.app.status_panel_worker import (
-    StatusPanelReadResult,
     read_status_panel_snapshot,
-    read_status_panel_snapshot_bounded,
 )
 
 
 class StatusPanelWorkerTests(unittest.TestCase):
-    def test_bounded_read_does_not_overlap_previous_native_read(self) -> None:
-        """A timed-out helper blocks overlap while a fresh retry returns fast."""
-        started = threading.Event()
-        release = threading.Event()
-        finished = threading.Event()
-        calls = 0
-        calls_lock = threading.Lock()
-
-        def blocked_first_read(*_args, **_kwargs):
-            nonlocal calls
-            with calls_lock:
-                calls += 1
-                call_number = calls
-            if call_number == 1:
-                started.set()
-                release.wait(timeout=1.0)
-                finished.set()
-            return StatusPanelReadResult(hwnd=123, state="inactive")
-
-        with patch(
-            "pybot.app.status_panel_worker.read_status_panel_snapshot",
-            side_effect=blocked_first_read,
-        ):
-            result_holder: list[StatusPanelReadResult] = []
-
-            def invoke() -> None:
-                result_holder.append(
-                    read_status_panel_snapshot_bounded(
-                        123,
-                        None,
-                        refresh_max=True,
-                        timeout_s=0.01,
-                    )
-                )
-
-            try:
-                caller = threading.Thread(target=invoke, daemon=True)
-                caller.start()
-                self.assertTrue(started.wait(timeout=1.0))
-                caller.join(timeout=1.0)
-                self.assertFalse(caller.is_alive())
-                self.assertEqual(result_holder[0].state, "read_timeout")
-
-                # The first helper is still abandoned. A retry must not spawn
-                # another native OCR operation while it owns the single-flight
-                # lock; it returns immediately instead.
-                second = read_status_panel_snapshot_bounded(
-                    123,
-                    None,
-                    refresh_max=True,
-                    timeout_s=0.1,
-                )
-                self.assertEqual(second.state, "read_timeout")
-                self.assertIn("still in flight", second.error or "")
-                self.assertEqual(calls, 1)
-            finally:
-                release.set()
-            self.assertTrue(finished.wait(timeout=1.0))
-
-            # Once the abandoned helper has actually exited, a later read may
-            # acquire the guard and execute normally again.
-            third = None
-            for _ in range(20):
-                candidate = read_status_panel_snapshot_bounded(
-                    123,
-                    None,
-                    refresh_max=True,
-                    timeout_s=0.1,
-                )
-                if candidate.state == "inactive":
-                    third = candidate
-                    break
-            self.assertIsNotNone(third)
-            self.assertEqual(calls, 2)
-
     @patch("pybot.app.status_panel_worker.is_window_minimized", return_value=True)
     @patch("pybot.app.status_panel_worker.window_exists", return_value=True)
     def test_minimized_window_returns_without_capture(self, _exists, _minimized) -> None:
@@ -156,24 +78,6 @@ class StatusPanelWorkerTests(unittest.TestCase):
             123,
             None,
             refresh_max=True,
-            client_hint=(10, 20, 100, 100),
-        )
-        self.assertEqual(result.state, "panel_missing")
-        client_rect.assert_not_called()
-        capture.assert_called_once_with(10, 20, 100, 100)
-
-    @patch("pybot.app.status_panel_worker.is_window_minimized", side_effect=AssertionError("must be skipped"))
-    @patch("pybot.app.status_panel_worker.window_exists", side_effect=AssertionError("must be skipped"))
-    @patch("pybot.app.status_panel_worker.client_rect_screen", side_effect=AssertionError("must be skipped"))
-    @patch("pybot.app.status_panel_worker.ui_capture_region", return_value=None)
-    def test_bounded_cached_read_keeps_working_without_win32_probes(
-        self, capture, client_rect, _minimized, _exists
-    ) -> None:
-        result = read_status_panel_snapshot_bounded(
-            123,
-            None,
-            refresh_max=True,
-            timeout_s=0.2,
             client_hint=(10, 20, 100, 100),
         )
         self.assertEqual(result.state, "panel_missing")

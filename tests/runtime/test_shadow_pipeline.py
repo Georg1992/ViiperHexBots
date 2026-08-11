@@ -60,7 +60,7 @@ class ShadowPipelineTests(unittest.TestCase):
             gates=GateController(),
         )
         ctx.stop_event = stop
-        hunt_mode = create_hunt_mode(ctx, ShadowInputBackend())
+        create_hunt_mode(ctx, ShadowInputBackend())
 
         from pybot.recognition.rules import DiscoveryDetection
 

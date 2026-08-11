@@ -49,11 +49,11 @@ class CharacterPoseTests(unittest.TestCase):
     def test_falcon_merge_band_is_ambiguous_not_standing(self) -> None:
         """Heights where falcon glues onto a sit must not read as standing."""
         for height in (77, 80, 85):
-            pose = CharacterPose(body_height=height, fg_count=1000)
+            pose = CharacterPose(body_height=height)
             self.assertIsNone(check_is_sitting(pose), msg=height)
             self.assertIsNone(check_is_standing(pose), msg=height)
-        self.assertTrue(check_is_sitting(CharacterPose(76, 1)))
-        self.assertTrue(check_is_standing(CharacterPose(86, 1)))
+        self.assertTrue(check_is_sitting(CharacterPose(76)))
+        self.assertTrue(check_is_standing(CharacterPose(86)))
 
 
 if __name__ == "__main__":

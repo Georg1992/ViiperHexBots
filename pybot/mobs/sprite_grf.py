@@ -192,7 +192,6 @@ class SpriteGrf:
         self._entries: list[_GrfEntry] = []
         self._data_section: bytes = b""  # decompressed merged file data
         self._header_size: int = _GRF_HEADER_SIZE  # actual header size (auto-detected)
-        self._table_compressed_first: bool = True  # True=comp→uncomp, False=uncomp→comp
         self._orig_header_tail: bytes = b""  # raw[16:header_size] from original file
         self._raw_container: bytes = b""  # raw compressed file data (between header and table)
         if self._path.is_file():
@@ -241,10 +240,8 @@ class SpriteGrf:
             table_data = zlib.decompress(comp_table)
             if len(table_data) != uncomp_table_size:
                 raise ValueError
-            self._table_compressed_first = True
         except (zlib.error, ValueError):
             # Try swapped: u2=comp, u1=uncomp
-            self._table_compressed_first = False
             comp_table_size, uncomp_table_size = u2, u1
             comp_table = raw[table_hdr_off + 8 : table_hdr_off + 8 + comp_table_size]
             try:
@@ -303,23 +300,6 @@ class SpriteGrf:
     #  Query
     # ------------------------------------------------------------------
 
-    def files(self) -> list[str]:
-        """Return all file paths in the archive."""
-        return [e.path for e in self._entries]
-
-    def has_file(self, path: str) -> bool:
-        """Check whether *path* exists in the archive."""
-        return any(e.path == path for e in self._entries)
-
-    def has_file_by_name(self, filename: str) -> bool:
-        """Check whether any entry's path ends with *filename*.
-
-        This allows detecting mobs that are already in the GRF under a
-        different folder name (e.g. Korean ``바이올렛`` for wild_rose).
-        """
-        # Match the trailing component after the last backslash.
-        return any(e.path.rsplit("\\", 1)[-1] == filename for e in self._entries)
-
     # ------------------------------------------------------------------
     #  Write
     # ------------------------------------------------------------------
@@ -334,30 +314,6 @@ class SpriteGrf:
             if entry.path.rsplit("\\", 1)[-1] == filename:
                 self._entries.pop(i)
                 return
-
-    def add_file(self, path: str, file_data: bytes) -> None:
-        """Add a file to the archive (existing paths are skipped).
-
-        Callers must check ``has_file()`` before calling — this method
-        appends new entries only.
-
-        Files are stored raw locally; the ``save()`` method handles
-        individual zlib compression when writing to the GRF.
-        """
-        offset = len(self._data_section)
-
-        entry = _GrfEntry(
-            path=path,
-            comp_size=len(file_data),
-            aligned_size=len(file_data),
-            uncomp_size=len(file_data),
-            flags=0x01,
-            offset=offset,
-            raw_data=file_data,
-        )
-
-        self._data_section += file_data
-        self._entries.append(entry)
 
     def add_file_raw(self, path_bytes: bytes, file_data: bytes) -> None:
         """Add a file with raw path bytes (preserves encoding like EUC-KR).

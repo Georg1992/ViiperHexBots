@@ -19,8 +19,7 @@ class PlayerVitalsTests(unittest.TestCase):
         self.assertEqual(vitals.sp, 120)
         self.assertEqual(vitals.sp_max, 200)
         self.assertEqual(vitals.sp_pair(), (120, 200))
-        self.assertGreater(vitals.updated_ms, 0)
-        self.assertEqual(vitals.updated_ms, vitals.observed_ms)
+        self.assertGreater(vitals.observed_ms, 0)
         self.assertEqual(vitals.changed_ms, vitals.observed_ms)
 
         vitals.clear_sp()

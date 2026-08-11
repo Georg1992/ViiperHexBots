@@ -41,7 +41,6 @@ SWP_NOACTIVATE = 0x0010
 WM_PAINT = 0x000F
 WM_ERASEBKGND = 0x0014
 WM_DESTROY = 0x0002
-WM_TIMER = 0x0113
 
 # Explicit argtypes for DefWindowProcW so 64-bit WPARAM/LPARAM don't overflow
 user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
@@ -97,7 +96,6 @@ class _OverlayState:
     hwnd: int = 0
     font_status: int = 0
     visible: bool = False
-    last_scan_living: int = 0
     track_count: int = 0
     alive_count: int = 0
     total_attacks: int = 0
@@ -459,13 +457,6 @@ def destroy() -> None:
         gdi32.DeleteObject(font_status)
     _destroy_brushes()
 
-def set_scan_living(count: int) -> None:
-    """Update the 'scan living' count shown in the overlay status line."""
-    with _state._lock:
-        _state.last_scan_living = count
-    _mark_dirty()
-
-
 def set_track_stats(
     track_count: int,
     alive_count: int,
@@ -569,7 +560,6 @@ def _sync_hunt_search_roi() -> None:
 def reset_stats() -> None:
     """Reset all counters and positions (call when a new bot session starts)."""
     with _state._lock:
-        _state.last_scan_living = 0
         _state.track_count = 0
         _state.alive_count = 0
         _state.total_attacks = 0
@@ -624,9 +614,6 @@ class Win32HuntOverlay:
 
     def last_error(self) -> str:
         return last_error()
-
-    def set_scan_living(self, count: int) -> None:
-        set_scan_living(count)
 
     def set_track_stats(self, track_count: int, alive_count: int) -> None:
         set_track_stats(track_count, alive_count)

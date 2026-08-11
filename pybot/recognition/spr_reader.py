@@ -29,7 +29,6 @@ class SprFrame:
     rgba: np.ndarray
     offset_x: int = 0
     offset_y: int = 0
-    is_rgba: bool = False
 
 
 @dataclass
@@ -199,7 +198,7 @@ class SprReader:
             indices = reader.read_bytes(pixel_count)
 
         rgba = indices_to_rgba(indices, width, height, palette)
-        return SprFrame(index=index, width=width, height=height, rgba=rgba, is_rgba=False)
+        return SprFrame(index=index, width=width, height=height, rgba=rgba)
 
     def _read_rgba_frame(self, reader: BinaryReader, index: int) -> SprFrame:
         width = reader.read_int16()
@@ -208,4 +207,4 @@ class SprReader:
             raise SprParseError(f"invalid RGBA frame size: {width}x{height}")
         raw = reader.read_bytes(width * height * 4)
         rgba = abgr_to_bgra(raw, width, height)
-        return SprFrame(index=index, width=width, height=height, rgba=rgba, is_rgba=True)
+        return SprFrame(index=index, width=width, height=height, rgba=rgba)

@@ -197,59 +197,6 @@ class BotLifecycleManager:
 
         self._post_to_main(_mark_input_ready)
 
-    def await_shutdown(self, timeout: float = DEFAULT_STOP_JOIN_TIMEOUT_S + 1.0) -> bool:
-        """Wait for async lifecycle threads; return whether shutdown completed."""
-        with self._ownership_lock:
-            self._start_cancelled = True
-            start_thread = self._start_thread
-            stop_joiner = self._stop_joiner
-            bot = self._bot
-        deadline = time.monotonic() + timeout
-        if start_thread is not None and start_thread.is_alive():
-            start_thread.join(timeout=max(0.0, deadline - time.monotonic()))
-        if stop_joiner is not None and stop_joiner.is_alive():
-            stop_joiner.join(timeout=max(0.0, deadline - time.monotonic()))
-        # A bounded joiner intentionally yields after a finite retry budget.
-        # If ownership is still retained, start one more bounded attempt when
-        # shutdown is requested again instead of requiring a hidden UI action.
-        with self._ownership_lock:
-            current_joiner = self._stop_joiner
-            needs_retry = (
-                self._stopping
-                and self._bot is not None
-                and (
-                    current_joiner is None or not current_joiner.is_alive()
-                )
-            )
-            bot = self._bot
-            epoch = self._overlay_epoch
-        if needs_retry and bot is not None and time.monotonic() < deadline:
-            self._start_stop_joiner(
-                bot,
-                overlay_epoch=epoch,
-                end_session=self._failed_start_session_owner is bot,
-            )
-            with self._ownership_lock:
-                retry_joiner = self._stop_joiner
-            if retry_joiner is not None:
-                retry_joiner.join(
-                    timeout=max(0.0, deadline - time.monotonic())
-                )
-        with self._ownership_lock:
-            return not (
-                (
-                    self._start_thread is not None
-                    and self._start_thread.is_alive()
-                )
-                or (
-                    self._stop_joiner is not None
-                    and self._stop_joiner.is_alive()
-                )
-                or self._stopping
-                or self._pending_start_callbacks > 0
-                or self._failed_start_session_owner is not None
-                or bool(self._orphan_cleanup_bots)
-            )
 
     def _is_current_start(self, generation: int) -> bool:
         """True when *generation* is still the active, non-cancelled start."""

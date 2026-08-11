@@ -21,9 +21,6 @@ class BinaryReader:
         self.offset += count
         return chunk
 
-    def read_uint8(self) -> int:
-        return self.read_bytes(1)[0]
-
     def read_uint16(self) -> int:
         return struct.unpack_from("<H", self.read_bytes(2))[0]
 
@@ -45,6 +42,3 @@ class BinaryReader:
 
     def skip(self, count: int) -> None:
         self.read_bytes(count)
-
-    def peek_uint16(self) -> int:
-        return struct.unpack_from("<H", self.data, self.offset)[0]

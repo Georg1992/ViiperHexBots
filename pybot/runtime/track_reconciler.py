@@ -23,7 +23,6 @@ class DiscoveryReconcileResult:
 
     new_candidates: list[DiscoveryDetection]
     matched: list[tuple[int, DiscoveryDetection]]
-    matched_ids: list[int]
     removed_ids: list[int]
     matched_count: int
 
@@ -111,7 +110,6 @@ class TrackReconciler:
         return DiscoveryReconcileResult(
             new_candidates=new_candidates,
             matched=matched,
-            matched_ids=[tid for tid, _det in matched],
             removed_ids=sorted(unmatched_ids),
             matched_count=matched_count,
         )
@@ -326,20 +324,3 @@ class TrackReconciler:
             return True
         return False
 
-    @staticmethod
-    def _match_track_id(
-        x: int,
-        y: int,
-        track_positions: list[tuple],
-        unmatched_ids: set[int],
-        *,
-        radius_sq: int,
-        moving_radius: int,
-    ) -> int | None:
-        """Compatibility helper for callers/tests that match one point."""
-        detection = DiscoveryDetection(x=x, y=y, confidence=0.0)
-        assignment = TrackReconciler._assign_track_ids(
-            [detection], track_positions, unmatched_ids,
-            radius_sq=radius_sq, moving_radius=moving_radius,
-        )
-        return assignment.get(0)
