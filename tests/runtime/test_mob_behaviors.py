@@ -1,63 +1,169 @@
-"""Mob behavior registry — custom behavior is Anubis-only."""
+"""Explicitly configured mob behavior tests."""
 
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
-from pybot.mobs.catalog import load_mob_catalog
 from pybot.runtime.constants import CELL_SIZE_PX
 from pybot.runtime.mob_behaviors import (
-    AnubisBehavior,
+    ConfiguredMobBehavior,
     MobBehavior,
-    _BEHAVIOR_REGISTRY,
-    get_mob_behavior,
-    mob_has_custom_behavior,
+    get_configured_mob_behavior,
 )
 
 
-class MobBehaviorRegistryTests(unittest.TestCase):
-    def test_registry_contains_only_anubis(self) -> None:
-        self.assertEqual(set(_BEHAVIOR_REGISTRY.keys()), {"anubis"})
-        self.assertIsInstance(_BEHAVIOR_REGISTRY["anubis"], AnubisBehavior)
-
-    def test_anubis_has_custom_behavior(self) -> None:
-        self.assertTrue(mob_has_custom_behavior("anubis"))
-        self.assertTrue(mob_has_custom_behavior("Anubis"))
-        self.assertIsInstance(get_mob_behavior("anubis"), AnubisBehavior)
-
-    def test_other_catalog_mobs_have_no_custom_behavior(self) -> None:
-        catalog = load_mob_catalog(ensure_assets=False)
-        self.assertGreater(len(catalog), 1)
-        for mob in catalog:
-            if mob.descriptor_name.lower() == "anubis":
-                self.assertTrue(mob_has_custom_behavior(mob.descriptor_name))
-                continue
-            self.assertFalse(
-                mob_has_custom_behavior(mob.descriptor_name),
-                msg=f"{mob.descriptor_name} must not have custom behavior",
+class MobBehaviorTests(unittest.TestCase):
+    def test_default_behavior_is_no_op(self) -> None:
+        behavior = get_configured_mob_behavior(
+            SimpleNamespace(
+                kiting_tick_ms=0,
+                kite_distance_px=None,
+                debuff_scan_code=0,
+                debuff_button="",
+                heal_scan_code=0,
+                heal_button="",
+                buffs=(),
             )
-            self.assertIsInstance(get_mob_behavior(mob.descriptor_name), MobBehavior)
-            self.assertNotIsInstance(
-                get_mob_behavior(mob.descriptor_name), AnubisBehavior
-            )
-
-    def test_unknown_mob_has_no_custom_behavior(self) -> None:
-        self.assertFalse(mob_has_custom_behavior("horn"))
-        self.assertFalse(mob_has_custom_behavior(""))
-        self.assertIsInstance(get_mob_behavior("not_a_mob"), MobBehavior)
-
-    def test_anubis_kite_moves_away_from_mob_center(self) -> None:
-        behavior = AnubisBehavior()
-        backend = MagicMock()
-        backend.move_and_click.return_value = True
-        # Char at (100, 100); one mob at (120, 100) → kite left by 5 cells
-        # (5 × CELL_SIZE_PX).
-        ok = behavior.kite_after_attack(
-            100, 100, backend, all_mobs=[(120, 100)],
         )
-        self.assertTrue(ok)
-        backend.move_and_click.assert_called_once_with(100 - 5 * CELL_SIZE_PX, 100)
+        self.assertIsInstance(behavior, ConfiguredMobBehavior)
+        self.assertIsInstance(behavior, MobBehavior)
+
+        backend = MagicMock()
+        self.assertFalse(
+            behavior.kite_after_attack(
+                100, 100, backend, all_mobs=[(120, 100)]
+            )
+        )
+        backend.move_and_double_click.assert_not_called()
+
+    def test_unset_distance_disables_kiting_even_with_interval(self) -> None:
+        behavior = ConfiguredMobBehavior(
+            SimpleNamespace(
+                kiting_tick_ms=1_000,
+                kite_distance_px=None,
+                debuff_scan_code=0,
+                debuff_button="",
+                heal_scan_code=0,
+                heal_button="",
+                buffs=(),
+            )
+        )
+        backend = MagicMock()
+
+        with patch("pybot.runtime.mob_behaviors.monotonic_ms", return_value=10):
+            self.assertFalse(
+                behavior.kite_after_attack(
+                    100, 100, backend, all_mobs=[(120, 100)]
+                )
+            )
+        backend.move_and_double_click.assert_not_called()
+
+    def test_configured_distance_moves_away_from_mob(self) -> None:
+        behavior = ConfiguredMobBehavior(
+            SimpleNamespace(
+                kiting_tick_ms=1,
+                kite_distance_px=5 * CELL_SIZE_PX,
+                debuff_scan_code=0,
+                debuff_button="",
+                heal_scan_code=0,
+                heal_button="",
+                buffs=(),
+            )
+        )
+        backend = MagicMock()
+        backend.move_and_double_click.return_value = True
+
+        with patch("pybot.runtime.mob_behaviors.monotonic_ms", return_value=10):
+            self.assertTrue(
+                behavior.kite_after_attack(
+                    100, 100, backend, all_mobs=[(120, 100)]
+                )
+            )
+
+        backend.move_and_double_click.assert_called_once_with(
+            100 - 5 * CELL_SIZE_PX, 100
+        )
+
+    def test_kiting_uses_atomic_double_click(self) -> None:
+        class DoubleClickBackend:
+            def __init__(self) -> None:
+                self.calls: list[tuple[int, int]] = []
+
+            def move_and_double_click(self, x: int, y: int) -> bool:
+                self.calls.append((x, y))
+                return True
+
+        backend = DoubleClickBackend()
+        self.assertTrue(
+            get_configured_mob_behavior(
+                SimpleNamespace(
+                    kiting_tick_ms=1,
+                    kite_distance_px=320,
+                    debuff_scan_code=0,
+                    debuff_button="",
+                    heal_scan_code=0,
+                    heal_button="",
+                    buffs=(),
+                )
+            ).kite_after_attack(
+                100, 100, backend, all_mobs=[(200, 100)]
+            )
+        )
+        self.assertEqual(backend.calls, [(-220, 100)])
+
+    def test_kiting_chooses_open_direction_when_centered(self) -> None:
+        backend = MagicMock()
+        backend.move_and_double_click.return_value = True
+        behavior = ConfiguredMobBehavior(
+            SimpleNamespace(
+                kiting_tick_ms=1,
+                kite_distance_px=320,
+                debuff_scan_code=0,
+                debuff_button="",
+                heal_scan_code=0,
+                heal_button="",
+                buffs=(),
+            )
+        )
+
+        with patch("pybot.runtime.mob_behaviors.monotonic_ms", return_value=10):
+            self.assertTrue(
+                behavior.kite_after_attack(
+                    100,
+                    100,
+                    backend,
+                    all_mobs=[(100, 100), (100, 100)],
+                )
+            )
+
+        backend.move_and_double_click.assert_called_once_with(100, -220)
+
+    def test_kiting_does_not_cast_heal(self) -> None:
+        settings = SimpleNamespace(
+            kiting_tick_ms=1,
+            kite_distance_px=320,
+            debuff_button="",
+            debuff_scan_code=0,
+            heal_button="q",
+            heal_scan_code=16,
+            buffs=(),
+        )
+        backend = MagicMock()
+        backend.move_and_double_click.return_value = True
+        backend.skill_click_at.return_value = True
+        behavior = ConfiguredMobBehavior(settings)
+
+        with patch("pybot.runtime.mob_behaviors.monotonic_ms", return_value=10):
+            behavior.kite_after_attack(
+                100, 100, backend, all_mobs=[(120, 100)]
+            )
+            behavior.before_attack(
+                100, 100, backend, all_mobs=[(120, 100)]
+            )
+
+        backend.skill_click_at.assert_not_called()
 
 
 if __name__ == "__main__":

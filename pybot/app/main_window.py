@@ -24,6 +24,7 @@ from pybot.game_state import PlayerVitals
 from pybot.app.session_log import AppSessionLog
 from pybot.app.status_panel_feed import StatusPanelFeed
 from pybot.app.ui_work_queue import UiWorkQueue
+from pybot.app.loading_dialog import LoadingDialog
 from pybot.app.startup_splash import preload_mob_descriptors
 from pybot.app.viiper_manager import ViiperManager
 from pybot.runtime.constants import CELL_SIZE_PX
@@ -35,11 +36,23 @@ from pybot.app.win32_util import (
 )
 from pybot.mobs.import_mob import (
     MobImportError,
+    delete_mob_assets,
     import_mob_from_paths,
     mob_assets_exist,
     resolve_spr_act_paths,
 )
 from pybot.config.clients import memory_reading_enabled
+from pybot.settings_defaults import (
+    DEFAULT_SKILL_DELAY_MS,
+    DEFAULT_SKILL_TIMER_INTERVAL_S,
+    DEFAULT_SIT_ON_LOW_SP_BUTTON,
+    DEFAULT_TELEPORT_DELAY_MS,
+    MAX_SEARCH_RANGE_CELLS,
+    MIN_SEARCH_RANGE_CELLS,
+    STORAGE_WEIGHT_DISABLED_VALUE,
+    STORAGE_WEIGHT_MODIFIER_MAX,
+    STORAGE_WEIGHT_MODIFIER_MIN,
+)
 from pybot.app.storage_chain_dialog import (
     StorageChainDialog,
     format_storage_chain_summary,
@@ -52,7 +65,6 @@ from pybot.config.schema import (
     SkillTimerSetting,
 )
 from pybot.mobs.catalog import load_mob_catalog
-from pybot.runtime.mob_behaviors import mob_has_custom_behavior
 from pybot.runtime.input.scan_codes import keysym_to_key_name
 from pybot.recognition.detector.detector import configure_opencv_runtime
 
@@ -164,8 +176,11 @@ class MainWindow:
         self._settings_apply_enabled = False
         self._mob_radios: list[ttk.Radiobutton] = []
         self._mob_settings_buttons: list[ttk.Button] = []
+        self._mob_delete_buttons: list[ttk.Button] = []
         self._settings_checkbuttons: list[ttk.Checkbutton] = []
         self._mob_import_busy = False
+        self._mob_delete_busy = False
+        self._mob_loading: LoadingDialog | None = None
         self._mob_radio_frame: ttk.Frame | None = None
 
         # Build UI (widgets created here, references shared to managers)
@@ -223,12 +238,13 @@ class MainWindow:
             radio.destroy()
         for button in self._mob_settings_buttons:
             button.destroy()
+        for button in self._mob_delete_buttons:
+            button.destroy()
         self._mob_radios.clear()
         self._mob_settings_buttons.clear()
+        self._mob_delete_buttons.clear()
         for index, mob in enumerate(self.mob_catalog, start=1):
             label = mob.display_name
-            if mob_has_custom_behavior(mob.descriptor_name):
-                label = f"{mob.display_name}  (legacy custom)"
             radio = ttk.Radiobutton(
                 frame,
                 text=label,
@@ -246,6 +262,14 @@ class MainWindow:
             )
             settings_button.grid(row=index - 1, column=1, sticky="w", padx=(6, 0))
             self._mob_settings_buttons.append(settings_button)
+            delete_button = ttk.Button(
+                frame,
+                text="Delete",
+                width=7,
+                command=lambda asset=mob.asset_name, descriptor=mob.descriptor_name: self._delete_mob(asset, descriptor),
+            )
+            delete_button.grid(row=index - 1, column=2, sticky="w", padx=(6, 0))
+            self._mob_delete_buttons.append(delete_button)
         if self.mob_catalog:
             current = int(self.mob_var.get() or 1)
             if current < 1 or current > len(self.mob_catalog):
@@ -306,6 +330,22 @@ class MainWindow:
 
         self._config_work.submit(_save)
 
+    def _show_mob_loading(self, *, title: str, heading: str, message: str) -> None:
+        """Show the shared modal loading UI for a mob operation."""
+        self._close_mob_loading()
+        self._mob_loading = LoadingDialog(
+            self.root,
+            title=title,
+            heading=heading,
+            message=message,
+        )
+
+    def _close_mob_loading(self) -> None:
+        """Close the current mob-operation loading dialog, if any."""
+        if self._mob_loading is not None:
+            self._mob_loading.close()
+            self._mob_loading = None
+
     def _browse_mob_assets(self) -> None:
         if not self._can_import_mob():
             return
@@ -322,8 +362,11 @@ class MainWindow:
             self._begin_mob_import([Path(p) for p in paths])
 
     def _can_import_mob(self) -> bool:
-        if self._mob_import_busy:
-            messagebox.showinfo("Import mob", "A mob import is already running.")
+        if self._mob_import_busy or self._mob_delete_busy:
+            messagebox.showinfo(
+                "Mob management",
+                "Another mob operation is already running.",
+            )
             return False
         if self.lifecycle.state != BotState.OFF:
             messagebox.showwarning(
@@ -355,8 +398,13 @@ class MainWindow:
             overwrite = True
 
         self._mob_import_busy = True
-        self._mob_browse_button.configure(state=tk.DISABLED)
         self._mob_import_status.configure(text=f"Building {stem}…")
+        self._lock_ui(self.lifecycle.state != BotState.OFF)
+        self._show_mob_loading(
+            title="Import mob",
+            heading="Building mob descriptor",
+            message=f"Building {stem}…",
+        )
         self.log_pipe.log(f"[MOB] importing {spr.name} + {act.name}")
 
         def _worker() -> None:
@@ -373,19 +421,79 @@ class MainWindow:
 
         threading.Thread(target=_worker, name="mob-import", daemon=True).start()
 
+    def _delete_mob(self, asset_name: str, descriptor_name: str) -> None:
+        if not self._can_import_mob():
+            return
+        if not messagebox.askyesno(
+            "Delete mob",
+            f"Delete '{asset_name}' completely?\n\n"
+            "This removes its SPR/ACT assets, generated descriptors, "
+            "saved custom behavior, and sprite.grf entries.\n\n"
+            "This cannot be undone.",
+            icon="warning",
+            parent=self.root,
+        ):
+            return
+
+        self._mob_delete_busy = True
+        self._mob_import_status.configure(text=f"Deleting {asset_name}…")
+        self._lock_ui(self.lifecycle.state != BotState.OFF)
+        self._show_mob_loading(
+            title="Delete mob",
+            heading="Deleting mob",
+            message=f"Deleting {asset_name}…",
+        )
+
+        def _worker() -> None:
+            try:
+                delete_mob_assets(asset_name, descriptor_name)
+            except Exception as exc:
+                self._post_ui_callback(
+                    lambda exc=exc: self._mob_delete_failed(asset_name, exc)
+                )
+                return
+            self._post_ui_callback(
+                lambda: self._mob_delete_succeeded(asset_name, descriptor_name)
+            )
+
+        threading.Thread(target=_worker, name="mob-delete", daemon=True).start()
+
+    def _mob_delete_failed(self, asset_name: str, exc: Exception) -> None:
+        self._close_mob_loading()
+        self._mob_delete_busy = False
+        self._lock_ui(self.lifecycle.state != BotState.OFF)
+        self._mob_import_status.configure(text=f"Delete failed: {asset_name}")
+        self.log_pipe.log(f"[MOB] delete failed for {asset_name}: {exc}")
+        messagebox.showerror(
+            "Delete mob",
+            f"Could not completely delete '{asset_name}':\n\n{exc}",
+            parent=self.root,
+        )
+
+    def _mob_delete_succeeded(self, asset_name: str, descriptor_name: str) -> None:
+        self._close_mob_loading()
+        self._mob_delete_busy = False
+        self.config.mob_custom_settings.pop(descriptor_name.strip().lower(), None)
+        self._save_config_async()
+        self._refresh_mob_radios()
+        self._lock_ui(self.lifecycle.state != BotState.OFF)
+        self._mob_import_status.configure(text=f"Deleted: {asset_name}")
+        self.log_pipe.log(f"[MOB] deleted: {asset_name}")
+        messagebox.showinfo("Delete mob", f"Mob '{asset_name}' was deleted.", parent=self.root)
+
     def _mob_import_failed(self, exc: Exception) -> None:
+        self._close_mob_loading()
         self._mob_import_busy = False
-        if self.lifecycle.state == BotState.OFF:
-            self._mob_browse_button.configure(state=tk.NORMAL)
+        self._lock_ui(self.lifecycle.state != BotState.OFF)
         self._mob_import_status.configure(text=f"Failed: {exc}")
         self.log_pipe.log(f"[MOB] import failed: {exc}")
         messagebox.showerror("Import mob", f"Failed to build descriptor:\n\n{exc}")
 
     def _mob_import_succeeded(self, stem: str) -> None:
+        self._close_mob_loading()
         self._mob_import_busy = False
-        if self.lifecycle.state == BotState.OFF:
-            self._mob_browse_button.configure(state=tk.NORMAL)
         self._refresh_mob_radios(select_stem=stem)
+        self._lock_ui(self.lifecycle.state != BotState.OFF)
         self._mob_import_status.configure(text=f"Ready: {stem}")
         self.log_pipe.log(f"[MOB] descriptor ready: {stem}")
         messagebox.showinfo("Import mob", f"Descriptor built for '{stem}'.")
@@ -540,7 +648,13 @@ class MainWindow:
         self.hunt_mode_combo.pack(side=tk.LEFT, padx=(6, 0))
         self.hunt_mode_combo.bind("<<ComboboxSelected>>", self._apply_ui_settings)
 
-        ttk.Label(mode_col, text="Search Range (9-16 cells):").grid(
+        ttk.Label(
+            mode_col,
+            text=(
+                f"Search Range ({MIN_SEARCH_RANGE_CELLS}-"
+                f"{MAX_SEARCH_RANGE_CELLS} cells):"
+            ),
+        ).grid(
             row=1, column=0, sticky="w", pady=(8, 0)
         )
         search_row = ttk.Frame(mode_col)
@@ -548,8 +662,8 @@ class MainWindow:
         self.search_range = tk.IntVar(value=self.config.search_range)
         self.search_scale = ttk.Scale(
             search_row,
-            from_=9,
-            to=16,
+            from_=MIN_SEARCH_RANGE_CELLS,
+            to=MAX_SEARCH_RANGE_CELLS,
             orient=tk.HORIZONTAL,
             variable=self.search_range,
             command=self._update_search_label,
@@ -590,7 +704,7 @@ class MainWindow:
         self.skill_delay = self._key_entry(
             keys_main,
             "Attack Delay:",
-            str(self.config.skill_delay or 500),
+            str(self.config.skill_delay or DEFAULT_SKILL_DELAY_MS),
             0,
             1,
             width=7,
@@ -612,7 +726,7 @@ class MainWindow:
         self.teleport_delay = self._key_entry(
             keys_main,
             "Teleport Delay:",
-            str(self.config.teleport_delay or 800),
+            str(self.config.teleport_delay or DEFAULT_TELEPORT_DELAY_MS),
             1,
             1,
             width=7,
@@ -646,7 +760,7 @@ class MainWindow:
         ttk.Label(sit_cell, text="Sit On Low Sp Key:").pack(side=tk.LEFT)
         self.sit_on_low_sp_button = ttk.Entry(sit_cell, width=6)
         self.sit_on_low_sp_button.insert(
-            0, self.config.sit_on_low_sp_button or "insert"
+            0, self.config.sit_on_low_sp_button or DEFAULT_SIT_ON_LOW_SP_BUTTON
         )
         self.sit_on_low_sp_button.pack(side=tk.LEFT, padx=(4, 0))
         self._bind_key_capture(self.sit_on_low_sp_button)
@@ -694,12 +808,15 @@ class MainWindow:
         weight_cell.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         ttk.Label(weight_cell, text="Items to storage weight:").pack(side=tk.LEFT)
         # 49 = Off (AHK); 50–85 = active threshold %.
-        initial_weight = max(49, min(85, int(self.config.weight_modifier)))
+        initial_weight = max(
+            STORAGE_WEIGHT_DISABLED_VALUE,
+            min(STORAGE_WEIGHT_MODIFIER_MAX, int(self.config.weight_modifier)),
+        )
         self.storage_weight = tk.IntVar(value=initial_weight)
         self.storage_weight_scale = ttk.Scale(
             weight_cell,
-            from_=49,
-            to=85,
+            from_=STORAGE_WEIGHT_DISABLED_VALUE,
+            to=STORAGE_WEIGHT_MODIFIER_MAX,
             orient=tk.HORIZONTAL,
             variable=self.storage_weight,
             command=self._update_storage_weight_label,
@@ -938,7 +1055,7 @@ class MainWindow:
             assert isinstance(delay, ttk.Entry)
             key.delete(0, tk.END)
             delay.delete(0, tk.END)
-            delay.insert(0, "20")
+            delay.insert(0, str(DEFAULT_SKILL_TIMER_INTERVAL_S))
             self._apply_ui_settings()
             return
         box = self._timer_boxes.pop(index)
@@ -975,7 +1092,9 @@ class MainWindow:
             assert isinstance(delay_entry, ttk.Entry)
             button = key_entry.get().strip()
             raw_delay = delay_entry.get().strip()
-            interval = int(raw_delay) if raw_delay else 20
+            interval = (
+                int(raw_delay) if raw_delay else DEFAULT_SKILL_TIMER_INTERVAL_S
+            )
             if button:
                 timers.append(
                     SkillTimerSetting(button=button, interval_s=max(1, interval))
@@ -995,7 +1114,7 @@ class MainWindow:
 
     def _update_storage_weight_label(self, *_args) -> None:
         percent = int(float(self.storage_weight.get()))
-        if percent < 50:
+        if percent < STORAGE_WEIGHT_MODIFIER_MIN:
             self.storage_weight_label.configure(text="Off")
         else:
             self.storage_weight_label.configure(text=f"{percent}%")
@@ -1107,11 +1226,15 @@ class MainWindow:
         self.config.take_fly_wings = self.fly_wings_var.get()
         self.config.skill_button = self.skill_button.get().strip()
         raw = self.skill_delay.get().strip()
-        self.config.skill_delay = int(raw) if raw else 500
+        self.config.skill_delay = (
+            int(raw) if raw else DEFAULT_SKILL_DELAY_MS
+        )
         self.config.teleport_button = self.teleport_button.get().strip()
         self.config.creamy_tp_button = self.creamy_tp_button.get().strip()
         raw_tp = self.teleport_delay.get().strip()
-        self.config.teleport_delay = int(raw_tp) if raw_tp else 800
+        self.config.teleport_delay = (
+            int(raw_tp) if raw_tp else DEFAULT_TELEPORT_DELAY_MS
+        )
         self.config.save_point_button = self.save_point_button.get().strip()
         # open_storage_chain is edited via the cog dialog
         self.config.weight_modifier = int(float(self.storage_weight.get()))
@@ -1298,8 +1421,13 @@ class MainWindow:
 
     def _lock_ui(self, locked: bool) -> None:
         """Enable/disable configuration widgets when bot is running."""
-        state = tk.DISABLED if locked else tk.NORMAL
+        busy = self._mob_import_busy or self._mob_delete_busy
+        state = tk.DISABLED if (locked or busy) else tk.NORMAL
         readonly = "disabled" if locked else "readonly"
+        if hasattr(self, "bot_button"):
+            self.bot_button.configure(
+                state=tk.DISABLED if (locked or busy) else tk.NORMAL
+            )
         self.window_combo.configure(state=readonly)
         self.client_combo.configure(state=readonly)
         self.hunt_mode_combo.configure(state=readonly)
@@ -1309,8 +1437,10 @@ class MainWindow:
             radio.configure(state=state)
         for button in self._mob_settings_buttons:
             button.configure(state=state)
+        for button in self._mob_delete_buttons:
+            button.configure(state=state)
         if hasattr(self, "_mob_browse_button"):
-            browse_state = tk.DISABLED if (locked or self._mob_import_busy) else tk.NORMAL
+            browse_state = tk.DISABLED if (locked or busy) else tk.NORMAL
             self._mob_browse_button.configure(state=browse_state)
         for check in self._settings_checkbuttons:
             check.configure(state=state)

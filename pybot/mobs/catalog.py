@@ -181,8 +181,7 @@ def ensure_mob_assets(*, log_fn: Callable[[str], None] | None = None) -> None:
 
     # Sync modified-sprite files into sprite.grf for GRF-modified servers.
     # NOTE: The RO viewer can only handle tables under ~150B compressed / ~130B
-    # from EOF, so we only sync shadow files here.  The per-mob sync happens
-    # later from bot_controller.py once the hunt target is known.
+    # from EOF, so only modified shadow files are synced into the archive.
     from pybot.mobs.sprite_grf import sync_sprite_grf
     try:
         added = sync_sprite_grf(PROJECT_ROOT, logger=_logger)

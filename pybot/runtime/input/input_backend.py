@@ -41,8 +41,6 @@ def perform_if_allowed(
 class InputBackend(Protocol):
     def move_mouse(self, x: int, y: int) -> bool: ...
 
-    def move_and_click(self, x: int, y: int) -> bool: ...
-
     def move_and_double_click(self, x: int, y: int) -> bool: ...
 
     def skill_click_at(
@@ -101,10 +99,6 @@ class ShadowInputBackend:
 
     def move_mouse(self, x: int, y: int) -> bool:
         return True
-
-    def move_and_click(self, x: int, y: int) -> bool:
-        del x, y
-        return self.left_click()
 
     def move_and_double_click(self, x: int, y: int) -> bool:
         del x, y

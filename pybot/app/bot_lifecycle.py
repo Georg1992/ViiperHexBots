@@ -489,6 +489,28 @@ class BotLifecycleManager:
         self._state = BotState.OFF
         self._emit_state(BotState.OFF)
 
+    def _stop_with_retries(
+        self,
+        bot: BotController,
+        *,
+        failure_message: str,
+        retry_message: str | None,
+        incomplete_message: str,
+    ) -> bool:
+        """Run the bounded stop contract shared by lifecycle joiners."""
+        for _attempt in range(_STOP_RETRY_ATTEMPTS):
+            stopped = False
+            try:
+                stopped = bot.stop(join_timeout=DEFAULT_STOP_JOIN_TIMEOUT_S)
+            except Exception as exc:
+                self._on_log(failure_message.format(error=exc))
+            if stopped:
+                return True
+            if retry_message is not None:
+                self._on_log(retry_message)
+        self._on_log(incomplete_message)
+        return False
+
     def _start_orphan_stop_joiner(
         self,
         bot: BotController,
@@ -504,23 +526,18 @@ class BotLifecycleManager:
         def _join_orphan() -> None:
             stopped = False
             try:
-                for _attempt in range(_STOP_RETRY_ATTEMPTS):
-                    try:
-                        if bot.stop(join_timeout=DEFAULT_STOP_JOIN_TIMEOUT_S):
-                            stopped = True
-                            break
-                    except Exception as exc:
-                        self._on_log(
-                            f"[STATE] Stale-start cleanup failed: {exc}"
-                        )
+                stopped = self._stop_with_retries(
+                    bot,
+                    failure_message="[STATE] Stale-start cleanup failed: {error}",
+                    retry_message=None,
+                    incomplete_message=(
+                        "[STATE] Stale-start cleanup incomplete; "
+                        "resources remain owned"
+                    ),
+                )
                 if stopped and end_session:
                     self._close_failed_start_session(
                         bot, "bot start superseded"
-                    )
-                if not stopped:
-                    self._on_log(
-                        "[STATE] Stale-start cleanup incomplete; "
-                        "resources remain owned"
                     )
             finally:
                 with self._ownership_lock:
@@ -775,25 +792,20 @@ class BotLifecycleManager:
                 return
 
         def _join() -> None:
-            stopped = False
             # Each call has a bounded join timeout. After a finite number of
             # attempts, yield the joiner while retaining ownership and the bot
             # handle so Stop can retry later without overlapping runtimes.
-            for _attempt in range(_STOP_RETRY_ATTEMPTS):
-                try:
-                    if bot.stop(join_timeout=DEFAULT_STOP_JOIN_TIMEOUT_S):
-                        stopped = True
-                        break
-                except Exception as exc:
-                    self._on_log(f"[STATE] Hunt stop retry failed: {exc}")
-                self._on_log(
+            stopped = self._stop_with_retries(
+                bot,
+                failure_message="[STATE] Hunt stop retry failed: {error}",
+                retry_message=(
                     "[STATE] Hunt thread still alive after stop join — retrying"
-                )
-
-            if not stopped:
-                self._on_log(
+                ),
+                incomplete_message=(
                     "[STATE] Hunt stop incomplete; ownership retained for retry"
-                )
+                ),
+            )
+            if not stopped:
                 # Keep STOPPING visible and keep ``_stopping`` true. A later
                 # Stop call will create another bounded joiner.
                 return

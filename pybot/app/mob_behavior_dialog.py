@@ -45,7 +45,8 @@ class MobBehaviorDialog(tk.Toplevel):
 
         ttk.Label(body, text="Kite distance (cells):").grid(row=2, column=0, sticky="w")
         self._kite_distance = ttk.Entry(body, width=8)
-        self._kite_distance.insert(0, str(settings.kite_distance_cells))
+        if settings.kite_distance_cells is not None:
+            self._kite_distance.insert(0, str(settings.kite_distance_cells))
         self._kite_distance.grid(row=2, column=1, sticky="w", padx=(8, 0))
 
         ttk.Separator(body, orient=tk.HORIZONTAL).grid(
@@ -124,24 +125,25 @@ class MobBehaviorDialog(tk.Toplevel):
     def _save(self) -> None:
         try:
             kiting_tick = float(self._kiting_tick.get().strip() or "0")
-            kite_distance = int(self._kite_distance.get().strip() or "5")
+            raw_distance = self._kite_distance.get().strip()
+            kite_distance = int(raw_distance) if raw_distance else None
             delays = [int(entry.get().strip() or "0") for entry in self._delay_entries]
         except ValueError:
             messagebox.showerror(
                 "Invalid custom behavior",
-                "Kiting tick and kite distance must be valid positive/non-negative numbers.",
+                "Kiting tick must be non-negative; kite distance must be a positive integer when set.",
                 parent=self,
             )
             return
         if (
             not math.isfinite(kiting_tick)
             or kiting_tick < 0
-            or kite_distance < 1
+            or (kite_distance is not None and kite_distance < 1)
             or any(delay < 0 for delay in delays)
         ):
             messagebox.showerror(
                 "Invalid custom behavior",
-                "Kiting tick and kite distance must be valid positive/non-negative numbers.",
+                "Kiting tick must be non-negative; kite distance must be a positive integer when set.",
                 parent=self,
             )
             return

@@ -6,14 +6,24 @@ import configparser
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from pybot.settings_defaults import (
+    DEFAULT_FLY_WINGS_AMOUNT,
+    DEFAULT_SIT_ON_LOW_SP_BUTTON,
+    MAX_SEARCH_RANGE_CELLS,
+    MIN_SEARCH_RANGE_CELLS,
+    MIN_SKILL_DELAY_MS,
+    STORAGE_WEIGHT_MODIFIER_MAX,
+)
 from pybot.config.ini_store import load_settings
-from pybot.config.schema import AppSettings, MobCustomSettings
+from pybot.config.schema import (
+    AppSettings,
+    MobCustomSettings,
+)
 from pybot.mobs.catalog import resolve_mob_descriptor_name
 from pybot.paths import CONFIG_PATH, SESSIONS_DIR
 from pybot.runtime.constants import (
     CELL_SIZE_PX,
     HUNT_DISCOVERY_INTERVAL_MS,
-    STORAGE_WEIGHT_MODIFIER_MAX,
 )
 from pybot.runtime.input.scan_codes import key_name_to_scan_code
 
@@ -34,9 +44,8 @@ class SelfBuffRuntime:
 
 @dataclass(frozen=True)
 class CustomBehaviorRuntime:
-    configured: bool = False
     kiting_tick_ms: int = 0
-    kite_distance_px: int = CELL_SIZE_PX * 5
+    kite_distance_px: int | None = None
     debuff_button: str = ""
     debuff_scan_code: int = 0
     heal_button: str = ""
@@ -71,11 +80,11 @@ class HuntRuntimeConfig:
     sp_button: str = ""
     # (button, scan_code, delay_ms) for each assigned Open Storage chain step.
     open_storage_steps: tuple[tuple[str, int, int], ...] = ()
-    weight_modifier: int = 85
+    weight_modifier: int = STORAGE_WEIGHT_MODIFIER_MAX
     take_fly_wings: bool = False
-    fly_wings_amount: int = 100
+    fly_wings_amount: int = DEFAULT_FLY_WINGS_AMOUNT
     sit_on_low_sp: bool = False
-    sit_on_low_sp_button: str = "insert"
+    sit_on_low_sp_button: str = DEFAULT_SIT_ON_LOW_SP_BUTTON
     sit_on_low_sp_scan_code: int = 0
     use_sprite_grf: bool = False
     client_profile: str = "Generic"
@@ -167,17 +176,21 @@ def hunt_runtime_config_from_settings(
                 )
             )
     search_range_cells = int(settings.search_range)
-    if not 9 <= search_range_cells <= 16:
+    if not MIN_SEARCH_RANGE_CELLS <= search_range_cells <= MAX_SEARCH_RANGE_CELLS:
         raise ValueError(
-            "Search range must be between 9 and 16 cells "
+            "Search range must be between "
+            f"{MIN_SEARCH_RANGE_CELLS} and {MAX_SEARCH_RANGE_CELLS} cells "
             f"(got {search_range_cells})."
         )
 
+    kite_distance_cells = custom_settings.kite_distance_cells
     custom_behavior = CustomBehaviorRuntime(
-        configured=resolved_mob_name.strip().lower()
-        in settings.mob_custom_settings,
         kiting_tick_ms=max(0, int(round(custom_settings.kiting_tick_s * 1000))),
-        kite_distance_px=max(1, int(custom_settings.kite_distance_cells)) * CELL_SIZE_PX,
+        kite_distance_px=(
+            int(kite_distance_cells) * CELL_SIZE_PX
+            if kite_distance_cells is not None
+            else None
+        ),
         debuff_button=custom_settings.debuff_button.strip(),
         debuff_scan_code=key_name_to_scan_code(custom_settings.debuff_button),
         heal_button=custom_settings.heal_button.strip(),
@@ -190,7 +203,7 @@ def hunt_runtime_config_from_settings(
         hwnd=hwnd,
         mob_name=resolved_mob_name,
         hunt_mode=settings.hunt_mode if hunt_mode is None else hunt_mode,
-        skill_delay_ms=max(200, settings.skill_delay),
+        skill_delay_ms=max(MIN_SKILL_DELAY_MS, settings.skill_delay),
         skill_button=settings.skill_button,
         skill_scan_code=key_name_to_scan_code(settings.skill_button),
         teleport_button=settings.teleport_button,

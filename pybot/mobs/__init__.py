@@ -10,6 +10,7 @@ from pybot.mobs.catalog import (
 )
 from pybot.mobs.import_mob import (
     MobImportError,
+    delete_mob_assets,
     import_mob_from_paths,
     mob_assets_exist,
     resolve_spr_act_paths,
@@ -19,6 +20,7 @@ __all__ = [
     "MobEntry",
     "MobImportError",
     "ensure_mob_assets",
+    "delete_mob_assets",
     "import_mob_from_paths",
     "load_mob_catalog",
     "mob_assets_exist",

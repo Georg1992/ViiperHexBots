@@ -261,15 +261,6 @@ class ViiperBackend(ShadowInputBackend):
                 return False
         return True
 
-    def move_and_click(self, x: int, y: int) -> bool:
-        """Move and click atomically under the input operation lock."""
-        with self._operation_lock:
-            self._ensure_connected()
-            user32.SetCursorPos(int(x), int(y))
-            if not self._wait_or_cancel(0.005):
-                return False
-            return self._left_click_locked()
-
     def move_and_double_click(self, x: int, y: int) -> bool:
         """Move and double-click atomically, with no post-click delay.
 

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from pybot.settings_defaults import (
+    DEFAULT_SEARCH_RANGE_CELLS,
+    STORAGE_WEIGHT_MODIFIER_MAX,
+    STORAGE_WEIGHT_MODIFIER_MIN,
+)
 from pybot.recognition.rules import HUNT_OBJECT_RADIUS
 
 HUNT_DISCOVERY_INTERVAL_MS = 250
 WORKER_SHUTDOWN_TIMEOUT_S = 2.0
 CELL_SIZE_PX = 64
-DEFAULT_SEARCH_RANGE_CELLS = 16
 WORKER_POLL_INTERVAL_S = 0.05
 # Tracking needs to follow moving mobs, but must yield the shared capture
 # session so discovery and character-state sampling are not starved.
@@ -91,8 +95,6 @@ STARTUP_BUFF_CURSOR_DELAY_S = 0.2
 # Storage / fly-wings deferred action. Storage is enabled at 50%+, with
 # 85% as the maximum supported threshold.
 STORAGE_WEIGHT_POLL_INTERVAL_S = 0.25
-STORAGE_WEIGHT_MODIFIER_MIN = 50
-STORAGE_WEIGHT_MODIFIER_MAX = 85
 # RO fly wing unit weight — used to decide ItemsToStorage before GetFlyWings.
 FLY_WING_WEIGHT = 5
 # AHK ItemsToStorage OK-dialog Enter (extended scan code).

@@ -5,6 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from pybot.settings_defaults import (
+    DEFAULT_FLY_WINGS_AMOUNT,
+    DEFAULT_SEARCH_RANGE_CELLS,
+    DEFAULT_SIT_ON_LOW_SP_BUTTON,
+    DEFAULT_SKILL_DELAY_MS,
+    DEFAULT_SKILL_TIMER_INTERVAL_S,
+    DEFAULT_TELEPORT_DELAY_MS,
+    DEFAULT_WEIGHT_MODIFIER,
+)
 from pybot.paths import CONFIG_PATH
 
 MAX_SKILL_TIMERS = 6
@@ -16,7 +25,8 @@ class MobCustomSettings:
     """Per-mob kiting and self-cast skill settings."""
 
     kiting_tick_s: float = 0.0
-    kite_distance_cells: int = 5
+    # Optional by design: kiting stays disabled until a distance is configured.
+    kite_distance_cells: int | None = None
     debuff_button: str = ""
     heal_button: str = ""
     buff1_button: str = ""
@@ -32,7 +42,7 @@ class SkillTimerSetting:
     """One periodic skill-timer key press."""
 
     button: str = ""
-    interval_s: int = 20
+    interval_s: int = DEFAULT_SKILL_TIMER_INTERVAL_S
 
 
 @dataclass
@@ -59,11 +69,11 @@ class AppSettings:
 
     selected_monster: int = 1
 
-    search_range: int = 16
+    search_range: int = DEFAULT_SEARCH_RANGE_CELLS
     hunt_mode: str = "teleport"
-    weight_modifier: int = 85
+    weight_modifier: int = DEFAULT_WEIGHT_MODIFIER
     take_fly_wings: bool = False
-    fly_wings_amount: int = 100
+    fly_wings_amount: int = DEFAULT_FLY_WINGS_AMOUNT
     detect_captcha: bool = False
     hunt_log_overlay: bool = True
     hunt_validation_log: bool = True
@@ -73,10 +83,10 @@ class AppSettings:
     warper_location: int = 0
 
     skill_button: str = "e"
-    skill_delay: int = 500
+    skill_delay: int = DEFAULT_SKILL_DELAY_MS
     teleport_button: str = ""
     creamy_tp_button: str = ""
-    teleport_delay: int = 800
+    teleport_delay: int = DEFAULT_TELEPORT_DELAY_MS
     save_point_button: str = ""
     hp_button: str = ""
     sp_button: str = ""
@@ -84,7 +94,7 @@ class AppSettings:
     skill_timers: list[SkillTimerSetting] = field(default_factory=list)
     mob_custom_settings: dict[str, MobCustomSettings] = field(default_factory=dict)
     sit_on_low_sp: bool = False
-    sit_on_low_sp_button: str = "insert"
+    sit_on_low_sp_button: str = DEFAULT_SIT_ON_LOW_SP_BUTTON
 
     use_sprite_grf: bool = False
 

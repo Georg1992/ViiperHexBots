@@ -315,6 +315,14 @@ class SpriteGrf:
                 self._entries.pop(i)
                 return
 
+    def remove_entries_by_path(self, path_bytes: bytes) -> int:
+        """Remove every entry whose raw archive path exactly matches *path_bytes*."""
+        kept = [entry for entry in self._entries if entry._path_bytes != path_bytes]
+        removed = len(self._entries) - len(kept)
+        if removed:
+            self._entries = kept
+        return removed
+
     def add_file_raw(self, path_bytes: bytes, file_data: bytes) -> None:
         """Add a file with raw path bytes (preserves encoding like EUC-KR).
 
@@ -440,10 +448,42 @@ class SpriteGrf:
 # ------------------------------------------------------------------
 
 
+def remove_mob_from_sprite_grf(
+    project_root: Path | None,
+    mob_name: str,
+) -> int:
+    """Remove all GRF sprite entries belonging to one mob.
+
+    The archive may contain duplicate entries from older syncs, so every
+    matching SPR/ACT entry is removed before the archive is saved.
+    """
+    root = project_root or Path.cwd()
+    grf_path = root / "sprite.grf"
+    if not grf_path.is_file():
+        return 0
+
+    grf = SpriteGrf(grf_path)
+    stem = mob_name.strip().lower()
+    removed = 0
+    for extension in ("spr", "act"):
+        path_bytes = _GRF_SPRITE_DIR_BYTES + b"\\" + f"{stem}.{extension}".encode(
+            "utf-8"
+        )
+        removed += grf.remove_entries_by_path(path_bytes)
+
+    if removed:
+        if grf._entries:
+            grf.save()
+        else:
+            grf_path.unlink(missing_ok=True)
+    return removed
+
+
 def sync_sprite_grf(
     project_root: Path | None = None,
     *,
     mob_name: str | None = None,
+    remove_mob_name: str | None = None,
     logger: object = None,
 ) -> int:
     """Ensure modified-sprite assets are synced into ``sprite.grf``.
@@ -451,9 +491,12 @@ def sync_sprite_grf(
     If ``sprite.grf`` does not exist a fresh archive is created.
     For each mob that has a ``modified_sprite/``
     folder, any existing entry with the same filename is removed and
-    replaced with the modified SPR+ACT pair.
+    replaced with the modified SPR+ACT pair. When ``remove_mob_name`` is
+    supplied, that mob's entries are removed during the same archive
+    regeneration and its source files are skipped.
 
-    Called at bot startup (from ``ensure_mob_assets``).  Returns the
+    Called at bot startup (from ``ensure_mob_assets``) and after mob asset
+    changes. Returns the
     number of files added or replaced.
     """
     from pybot.paths import MOBS_DIR
@@ -481,8 +524,21 @@ def sync_sprite_grf(
                 pass
 
     changed = 0
+    remove_key = remove_mob_name.strip().lower() if remove_mob_name else None
+    if remove_key:
+        for extension in ("spr", "act"):
+            path_bytes = _GRF_SPRITE_DIR_BYTES + b"\\" + f"{remove_key}.{extension}".encode(
+                "utf-8"
+            )
+            changed += grf.remove_entries_by_path(path_bytes)
+
     if not MOBS_DIR.is_dir():
-        return 0
+        if changed:
+            if grf._entries:
+                grf.save()
+            else:
+                grf_path.unlink(missing_ok=True)
+        return changed
 
     for mob_dir in sorted(MOBS_DIR.iterdir()):
         if not mob_dir.is_dir():
@@ -495,6 +551,8 @@ def sync_sprite_grf(
 
         for spr_path in sorted(modified_dir.glob("*.spr")):
             stem = spr_path.stem.lower()  # e.g. "alligator"
+            if remove_key and stem == remove_key:
+                continue
             act_src = modified_dir / f"{stem}.act"
             if not act_src.is_file():
                 continue
@@ -503,26 +561,30 @@ def sync_sprite_grf(
                 filename = f"{stem}.{ext}"
                 new_data = src.read_bytes()
                 
-                # Check if it already exists with identical data
-                existing_entry = next(
-                    (e for e in grf._entries if e.path.rsplit("\\", 1)[-1] == filename), 
-                    None
-                )
-                
-                if existing_entry and existing_entry.raw_data == new_data:
-                    continue  # already up to date
-                
-                if existing_entry:
-                    grf.remove_entry_by_name(filename)
-                    
                 path_bytes = _GRF_SPRITE_DIR_BYTES + b"\\" + filename.encode("utf-8")
+                matches = [
+                    entry
+                    for entry in grf._entries
+                    if entry._path_bytes == path_bytes
+                ]
+                existing_entry = matches[0] if matches else None
+
+                if len(matches) == 1 and existing_entry.raw_data == new_data:
+                    continue  # already up to date
+
+                if matches:
+                    changed += grf.remove_entries_by_path(path_bytes)
+
                 grf.add_file_raw(path_bytes, new_data)
                 changed += 1
                 _log(f"[GRF] {'replaced' if existing_entry else 'added'} "
                      f"{path_bytes.decode('utf-8', errors='replace')}")
 
     if changed > 0:
-        grf.save()
+        if grf._entries:
+            grf.save()
+        else:
+            grf_path.unlink(missing_ok=True)
         _log(f"[GRF] sprite.grf updated — {changed} file(s) changed")
 
     return changed

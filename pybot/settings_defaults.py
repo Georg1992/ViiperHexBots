@@ -1,0 +1,24 @@
+"""Shared persisted-setting defaults and bounds.
+
+This module intentionally has no imports from the config or runtime packages.
+It is safe for both layers to depend on without creating an import cycle.
+"""
+
+from __future__ import annotations
+
+DEFAULT_SKILL_TIMER_INTERVAL_S = 20
+
+MIN_SEARCH_RANGE_CELLS = 9
+MAX_SEARCH_RANGE_CELLS = 16
+DEFAULT_SEARCH_RANGE_CELLS = MAX_SEARCH_RANGE_CELLS
+
+STORAGE_WEIGHT_MODIFIER_MIN = 50
+STORAGE_WEIGHT_MODIFIER_MAX = 85
+STORAGE_WEIGHT_DISABLED_VALUE = STORAGE_WEIGHT_MODIFIER_MIN - 1
+DEFAULT_WEIGHT_MODIFIER = STORAGE_WEIGHT_MODIFIER_MAX
+
+DEFAULT_FLY_WINGS_AMOUNT = 100
+DEFAULT_SKILL_DELAY_MS = 500
+MIN_SKILL_DELAY_MS = 200
+DEFAULT_TELEPORT_DELAY_MS = 800
+DEFAULT_SIT_ON_LOW_SP_BUTTON = "insert"

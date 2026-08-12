@@ -31,10 +31,7 @@ from pybot.recognition.detector.detector import (
 from pybot.runtime.detection.detector_session import DetectorSession
 from pybot.runtime.workers.attack_loop import AttackLoop, GameplayLoop
 from pybot.runtime.workers.coord_tracking_worker import CoordTrackingWorker
-from pybot.runtime.mob_behaviors import (
-    get_configured_mob_behavior,
-    get_mob_behavior,
-)
+from pybot.runtime.mob_behaviors import get_configured_mob_behavior
 from pybot.runtime.danger_detector import DangerDetector
 from pybot.runtime.teleport import TeleportController
 from pybot.game_state import PlayerVitals
@@ -413,14 +410,7 @@ def create_runtime_deps(
         danger = ctx.danger_detector
         if danger is None:
             raise RuntimeError("danger detector was not wired into the context")
-        legacy_behavior = get_mob_behavior(config.mob_name)
-        if config.custom_behavior.configured:
-            mob_behavior = get_configured_mob_behavior(
-                config.custom_behavior,
-                legacy_behavior=legacy_behavior,
-            )
-        else:
-            mob_behavior = legacy_behavior
+        mob_behavior = get_configured_mob_behavior(config.custom_behavior)
 
         core_workers, attack = _build_core_workers(
             ctx, hunt_mode, input_backend, tport, player_vitals, mob_behavior,
@@ -566,30 +556,17 @@ class HuntRuntime:
         except BaseException:
             clean_shutdown = False
 
-        logger_closed = False
-        if clean_shutdown:
-            try:
-                logger_closed = self._close_logger()
-            except BaseException:
-                logger_closed = False
-        if clean_shutdown and logger_closed:
-            for session in (ctx.detector, ctx.tracker):
-                close_session = getattr(session, "close", None)
-                if callable(close_session):
-                    try:
-                        close_session()
-                    except BaseException:
-                        pass
-            try:
-                close_capture = getattr(ctx.capture, "close", None)
-                if callable(close_capture) and close_capture() is False:
-                    return False
-                reset_capture_session()
-            except BaseException:
+        if not clean_shutdown:
+            return False
+
+        try:
+            if not self._close_logger():
                 return False
-            self._shutdown_complete.set()
-            return True
-        return False
+            reset_capture_session()
+        except BaseException:
+            return False
+        self._shutdown_complete.set()
+        return True
 
     def stop(self) -> None:
         # Cancel input first so workers blocked inside a composite key/mouse

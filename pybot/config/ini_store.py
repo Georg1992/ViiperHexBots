@@ -7,6 +7,16 @@ import json
 from pathlib import Path
 
 from pybot.config.clients import memory_reading_enabled
+from pybot.settings_defaults import (
+    DEFAULT_FLY_WINGS_AMOUNT,
+    DEFAULT_SEARCH_RANGE_CELLS,
+    DEFAULT_SKILL_DELAY_MS,
+    DEFAULT_SKILL_TIMER_INTERVAL_S,
+    DEFAULT_SIT_ON_LOW_SP_BUTTON,
+    DEFAULT_TELEPORT_DELAY_MS,
+    DEFAULT_WEIGHT_MODIFIER,
+    STORAGE_WEIGHT_MODIFIER_MAX,
+)
 from pybot.config.schema import (
     MAX_OPEN_STORAGE_STEPS,
     MAX_SKILL_TIMERS,
@@ -16,7 +26,6 @@ from pybot.config.schema import (
     SkillTimerSetting,
 )
 from pybot.paths import CONFIG_PATH
-from pybot.runtime.constants import STORAGE_WEIGHT_MODIFIER_MAX
 
 
 def _load_open_storage_chain(parser: configparser.ConfigParser) -> list[KeyChainStep]:
@@ -24,7 +33,7 @@ def _load_open_storage_chain(parser: configparser.ConfigParser) -> list[KeyChain
     if raw:
         try:
             items = json.loads(raw)
-        except json.JSONDecodeError:
+        except (TypeError, json.JSONDecodeError):
             items = []
         steps: list[KeyChainStep] = []
         if isinstance(items, list):
@@ -73,9 +82,18 @@ def _load_mob_custom_settings(
         if not key:
             continue
         try:
+            raw_distance = item.get("kiteDistanceCells")
+            kite_distance_cells = None
+            if raw_distance is not None and str(raw_distance).strip():
+                try:
+                    parsed_distance = int(raw_distance)
+                except (TypeError, ValueError):
+                    parsed_distance = 0
+                if parsed_distance >= 1:
+                    kite_distance_cells = parsed_distance
             result[key] = MobCustomSettings(
                 kiting_tick_s=max(0.0, float(item.get("kitingTick", 0.0))),
-                kite_distance_cells=max(1, int(item.get("kiteDistanceCells", 5))),
+                kite_distance_cells=kite_distance_cells,
                 debuff_button=str(item.get("debuffKey", "")).strip(),
                 heal_button=str(item.get("healKey", "")).strip(),
                 buff1_button=str(item.get("buff1Key", "")).strip(),
@@ -100,7 +118,6 @@ def _save_mob_custom_settings(
             continue
         payload[key] = {
             "kitingTick": float(value.kiting_tick_s),
-            "kiteDistanceCells": int(value.kite_distance_cells),
             "debuffKey": value.debuff_button,
             "healKey": value.heal_button,
             "buff1Key": value.buff1_button,
@@ -110,6 +127,8 @@ def _save_mob_custom_settings(
             "buff3Key": value.buff3_button,
             "buff3Delay": int(value.buff3_delay_s),
         }
+        if value.kite_distance_cells is not None:
+            payload[key]["kiteDistanceCells"] = int(value.kite_distance_cells)
     return json.dumps(payload, separators=(",", ":"))
 
 
@@ -118,7 +137,7 @@ def _load_skill_timers(parser: configparser.ConfigParser):
     if raw:
         try:
             items = json.loads(raw)
-        except json.JSONDecodeError:
+        except (TypeError, json.JSONDecodeError):
             items = []
         timers: list[SkillTimerSetting] = []
         if isinstance(items, list):
@@ -126,13 +145,21 @@ def _load_skill_timers(parser: configparser.ConfigParser):
                 if not isinstance(item, dict):
                     continue
                 button = str(item.get("key") or item.get("button") or "").strip()
-                interval = int(item.get("delay") or item.get("interval_s") or 20)
+                interval = int(
+                    item.get("delay")
+                    or item.get("interval_s")
+                    or DEFAULT_SKILL_TIMER_INTERVAL_S
+                )
                 timers.append(SkillTimerSetting(button=button, interval_s=max(1, interval)))
         return timers
 
     # Migrate legacy single-timer keys.
     button = parser.get("Keybindings", "SkillTimerButton", fallback="").strip()
-    interval = parser.getint("Keybindings", "SkillTimerInterval", fallback=20)
+    interval = parser.getint(
+        "Keybindings",
+        "SkillTimerInterval",
+        fallback=DEFAULT_SKILL_TIMER_INTERVAL_S,
+    )
     if button:
         return [SkillTimerSetting(button=button, interval_s=max(1, interval))]
     return []
@@ -183,14 +210,20 @@ def load_settings(path: Path | None = None) -> AppSettings:
         ),
         selected_monster=parser.getint("MonsterSettings", "SelectedMonster", fallback=1),
         mob_custom_settings=_load_mob_custom_settings(parser),
-        search_range=parser.getint("Settings", "SearchRange", fallback=16),
+        search_range=parser.getint(
+            "Settings", "SearchRange", fallback=DEFAULT_SEARCH_RANGE_CELLS
+        ),
         hunt_mode=parser.get("Settings", "HuntMode", fallback="teleport"),
         weight_modifier=min(
             STORAGE_WEIGHT_MODIFIER_MAX,
-            parser.getint("Settings", "WeightModifier", fallback=85),
+            parser.getint(
+                "Settings", "WeightModifier", fallback=DEFAULT_WEIGHT_MODIFIER
+            ),
         ),
         take_fly_wings=parser.getint("Settings", "TakeFlyWings", fallback=0) == 1,
-        fly_wings_amount=parser.getint("Settings", "FlyWingsAmount", fallback=100),
+        fly_wings_amount=parser.getint(
+            "Settings", "FlyWingsAmount", fallback=DEFAULT_FLY_WINGS_AMOUNT
+        ),
         detect_captcha=parser.getint("Settings", "DetectCaptcha", fallback=0) == 1,
         hunt_log_overlay=parser.getint("Settings", "HuntLogOverlay", fallback=1) == 1,
         hunt_validation_log=parser.getint("Settings", "HuntValidationLog", fallback=1) == 1,
@@ -198,10 +231,14 @@ def load_settings(path: Path | None = None) -> AppSettings:
         warper_y=warper_y,
         warper_location=parser.getint("Warper", "warperLocation", fallback=0),
         skill_button=parser.get("Keybindings", "SkillButton", fallback="e"),
-        skill_delay=parser.getint("Keybindings", "SkillDelay", fallback=500),
+        skill_delay=parser.getint(
+            "Keybindings", "SkillDelay", fallback=DEFAULT_SKILL_DELAY_MS
+        ),
         teleport_button=parser.get("Keybindings", "TeleportButton", fallback=""),
         creamy_tp_button=parser.get("Keybindings", "CreamyTpButton", fallback=""),
-        teleport_delay=parser.getint("Keybindings", "TeleportDelay", fallback=800),
+        teleport_delay=parser.getint(
+            "Keybindings", "TeleportDelay", fallback=DEFAULT_TELEPORT_DELAY_MS
+        ),
         save_point_button=parser.get("Keybindings", "SavePointButton", fallback=""),
         hp_button=parser.get("Keybindings", "HPButton", fallback=""),
         sp_button=parser.get("Keybindings", "SPButton", fallback=""),
@@ -209,8 +246,12 @@ def load_settings(path: Path | None = None) -> AppSettings:
         skill_timers=_load_skill_timers(parser),
         sit_on_low_sp=parser.getint("Keybindings", "SitOnLowSp", fallback=0) == 1,
         sit_on_low_sp_button=(
-            parser.get("Keybindings", "SitOnLowSpButton", fallback="insert").strip()
-            or "insert"
+            parser.get(
+                "Keybindings",
+                "SitOnLowSpButton",
+                fallback=DEFAULT_SIT_ON_LOW_SP_BUTTON,
+            ).strip()
+            or DEFAULT_SIT_ON_LOW_SP_BUTTON
         ),
         use_sprite_grf=parser.getint("Settings", "UseSpriteGrf", fallback=0) == 1,
     )

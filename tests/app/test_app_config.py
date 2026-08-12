@@ -48,6 +48,37 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual(loaded.mob_custom_settings["horn"].heal_button, "q")
             self.assertEqual(loaded.mob_custom_settings["horn"].buff1_delay_s, 10)
 
+    def test_unset_kite_distance_round_trips_as_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.ini"
+            config = AppConfig(config_path=path)
+            config.mob_custom_settings["horn"] = MobCustomSettings(kiting_tick_s=1.0)
+            config.save()
+
+            loaded = AppConfig(config_path=path).load()
+            self.assertIsNone(loaded.mob_custom_settings["horn"].kite_distance_cells)
+            self.assertNotIn("kiteDistanceCells", path.read_text(encoding="utf-8"))
+
+    def test_invalid_kite_distances_disable_only_kiting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.ini"
+            path.write_text(
+                "[MonsterSettings]\n"
+                "CustomBehaviors={\"zero\":{\"kiteDistanceCells\":0,\"debuffKey\":\"r\"},"
+                "\"negative\":{\"kiteDistanceCells\":-2},"
+                "\"blank\":{\"kiteDistanceCells\":\" \"},"
+                "\"text\":{\"kiteDistanceCells\":\"far\",\"healKey\":\"q\"}}\n",
+                encoding="utf-8",
+            )
+
+            loaded = AppConfig(config_path=path).load()
+            self.assertIsNone(loaded.mob_custom_settings["zero"].kite_distance_cells)
+            self.assertIsNone(loaded.mob_custom_settings["negative"].kite_distance_cells)
+            self.assertIsNone(loaded.mob_custom_settings["blank"].kite_distance_cells)
+            self.assertIsNone(loaded.mob_custom_settings["text"].kite_distance_cells)
+            self.assertEqual(loaded.mob_custom_settings["zero"].debuff_button, "r")
+            self.assertEqual(loaded.mob_custom_settings["text"].heal_button, "q")
+
     def test_removed_heal_skill_setting_is_migrated_on_save(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.ini"
