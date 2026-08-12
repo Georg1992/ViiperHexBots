@@ -164,7 +164,7 @@ class DiscoveryWorker:
             detector_config = {}
         max_prediction = max(
             1,
-            int(detector_config.get("localTrackMaxSearchRadiusPx", 360)),
+            int(detector_config.get("localTrackMaxSearchRadiusPx", 600)),
         )
         for entry in existing_track_positions:
             track_id = int(entry[0])

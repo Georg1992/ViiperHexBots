@@ -41,9 +41,6 @@ REQUIRED_CONFIG_KEYS = {
     "gateRefUniqueIoU",
     "minSilhouetteRecall",
     "minSilhouettePrecision",
-    "grfMinSilhouetteRecall",
-    "grfMinSilhouettePrecision",
-    "grfLocalTrackSkipNativeGate",
     "grfAspectBandScale",
     "minRequiredPaletteGroups",
     "minSecondPaletteGroupShare",
@@ -322,19 +319,7 @@ class MobDetector:
             self.config.get("localTrackSpriteRadiusMultiplier", 1.5)
         )
         self.local_track_max_search_radius_px = int(
-            self.config.get("localTrackMaxSearchRadiusPx", 360)
-        )
-        # GRF mode (modified sprite.grf) relaxes the silhouette gate and lets
-        # static-descriptor local tracking skip the native verify. Defaults
-        # keep programmatic/older configs working.
-        self.grf_min_silhouette_recall = float(
-            self.config.get("grfMinSilhouetteRecall", 0.32)
-        )
-        self.grf_min_silhouette_precision = float(
-            self.config.get("grfMinSilhouettePrecision", 0.55)
-        )
-        self.grf_local_track_skip_native_gate = bool(
-            self.config.get("grfLocalTrackSkipNativeGate", True)
+            self.config.get("localTrackMaxSearchRadiusPx", 600)
         )
         # GRF mode widens the descriptor aspect band: a static red sprite's
         # palette CC is often clipped (head/feet shade outside the match radius),
@@ -1073,19 +1058,7 @@ class MobDetector:
         return refs
 
     def silhouette_gate_thresholds(self) -> tuple[float, float]:
-        """Return (min_recall, min_precision) for the active rendering mode.
-
-        Modified sprite.grf assets are a single deterministic static frame with
-        a distinctive red palette — far easier to recognize than the animated
-        originals. GRF mode therefore relaxes the silhouette gate so a partially
-        occluded or heavily deformed extract still passes, reducing discovery
-        misses (and the teleport-away risk) for static modified sprites.
-        """
-        if self.use_sprite_grf:
-            return (
-                self.grf_min_silhouette_recall,
-                self.grf_min_silhouette_precision,
-            )
+        """Return the strict silhouette thresholds for every rendering mode."""
         return (
             float(self.config["minSilhouetteRecall"]),
             float(self.config["minSilhouettePrecision"]),

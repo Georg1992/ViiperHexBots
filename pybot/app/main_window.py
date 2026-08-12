@@ -1408,7 +1408,10 @@ class MainWindow:
             self.status_indicator.configure(text=" STOP ", bg="#6d4c41")
             self._lock_ui(True)
         elif state == BotState.PAUSED:
-            self.bot_button.configure(text="Stop Bot")
+            # RUNNING locks the configuration and also disables this shared
+            # control button. Re-enable Stop explicitly while paused so the
+            # user can terminate a paused bot; Continue remains available.
+            self.bot_button.configure(text="Stop Bot", state=tk.NORMAL)
             self.bot_status.configure(text="Paused (game focus lost)")
             self.status_indicator.configure(text=" PAUSED ", bg="#f9a825")
             self.continue_button.configure(state=tk.NORMAL)

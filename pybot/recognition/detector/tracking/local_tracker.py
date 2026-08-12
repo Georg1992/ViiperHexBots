@@ -14,6 +14,7 @@ Warm tracking only publishes fresh coordinates; discovery owns absence/death val
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -31,14 +32,10 @@ if TYPE_CHECKING:
     from pybot.recognition.detector.detector import MobDetector
 
 _LOCAL_SUPPRESS_RADIUS_FLOOR_PX = 8
+_LOCAL_SUPPRESS_RADIUS_MAX_PX = 96
 # Same floor as detector._MIN_DESCRIPTOR_PX (kept local to avoid a circular
 # import from detector.py which lazily imports this module).
 _FAST_BBOX_MIN_PX = 8
-# Fast-path peaks must clear a multiple of the local-follow heat floor before
-# they are accepted WITHOUT the native silhouette gate. A real hit is a strong
-# palette peak; this rejects weak marginal blobs that a red-tinted terrain
-# fragment could produce.
-_LOCAL_FAST_MIN_HEAT_MULT = 2.0
 # Keep re-anchoring to one small descriptor-sized local window. The center
 # calculation is independent of the temporal anchors and remains fail-closed.
 _REFINE_WINDOW_SCALE = 1.25
@@ -105,9 +102,15 @@ _CENTER_HOLE_MAX_GAP_PX = 8
 # A healthy mob stays within a fraction of the search radius of its predicted
 # position, so the window scales with the radius and the recovery ladder
 # (which doubles the radius) naturally widens it.
-_ANCHOR_WINDOW_FRAC = 0.4
-_ANCHOR_WINDOW_FLOOR_PX = 40
-_ANCHOR_WINDOW_MAX_PX = 140
+_ANCHOR_WINDOW_FRAC = 0.5
+_ANCHOR_WINDOW_FLOOR_PX = 48
+_ANCHOR_WINDOW_MAX_PX = 220
+# Keep the broad search ROI separate from the identity corridor. A fast mob
+# may need a large crop, but an identical neighbor at the far edge must not
+# be allowed to steal the track.
+_IDENTITY_CORRIDOR_FLOOR_PX = 128
+_IDENTITY_CORRIDOR_MAX_PX = 220
+_IDENTITY_MOTION_ERROR_FRAC = 0.35
 
 
 @dataclass(frozen=True)
@@ -162,16 +165,7 @@ def track_local(
             reason="invalid_scale",
         )
 
-    # Use the configured runner radius as a floor, then give unusually large
-    # sprites a proportionally larger bounded search disk. A large mob can
-    # move farther between tracker frames while kiting, and its animation can
-    # also shift the strongest heat peak away from the last center. Keep an
-    # explicit caller radius authoritative for tests/specialized callers.
     descriptor = detector.ensure_descriptor(mob_name)
-    if search_radius_px is not None:
-        radius = int(search_radius_px)
-    else:
-        radius = _effective_search_radius(detector, descriptor, scale)
 
     screen_cx = cx + offset_x
     screen_cy = cy + offset_y
@@ -184,14 +178,31 @@ def track_local(
     prediction_valid = track.get("prediction_valid", True) is not False
     anchor_required = bool(track.get("anchor_required", False))
     lost_count = max(0, int(track.get("lost_count", 0)))
-    prediction_dx = float(track.get("velX", 0.0)) if prediction_valid else 0.0
-    prediction_dy = float(track.get("velY", 0.0)) if prediction_valid else 0.0
+    velocity_x = float(track.get("velX", 0.0)) if prediction_valid else 0.0
+    velocity_y = float(track.get("velY", 0.0)) if prediction_valid else 0.0
     # During the bounded recovery ladder, keep leading in the same direction.
-    # The predicted center is only a search hint; the last confirmed center
-    # remains the identity origin below, so prediction cannot accumulate a swap.
+    # The identity corridor is centered on this bounded prediction, so a fast
+    # mob can move ahead without allowing an unrelated far-edge match.
     prediction_horizon = min(3, lost_count + 1) if prediction_valid else 0
-    prediction_dx *= prediction_horizon
-    prediction_dy *= prediction_horizon
+    prediction_dx = velocity_x * prediction_horizon
+    prediction_dy = velocity_y * prediction_horizon
+
+    # Use the configured runner radius as a floor, then grow it for a fast mob's
+    # predicted displacement. This keeps the local ROI ahead of the last
+    # coordinate instead of letting a small sprite
+    # outrun a fixed-size search disk. Explicit caller radii remain authoritative
+    # for tests and specialized acquisition callers.
+    if search_radius_px is not None:
+        radius = int(search_radius_px)
+    else:
+        radius = _effective_search_radius(
+            detector,
+            descriptor,
+            scale,
+            velocity_x=velocity_x,
+            velocity_y=velocity_y,
+            prediction_horizon=prediction_horizon,
+        )
     prediction_len = (prediction_dx * prediction_dx + prediction_dy * prediction_dy) ** 0.5
     if prediction_len > float(radius) and prediction_len > 0.0:
         factor = float(radius) / prediction_len
@@ -199,8 +210,14 @@ def track_local(
         prediction_dy *= factor
     search_cx = int(round(cx + prediction_dx))
     search_cy = int(round(cy + prediction_dy))
-    identity_cx = cx
-    identity_cy = cy
+    identity_radius = _identity_corridor_radius(
+        descriptor,
+        scale,
+        velocity_x=velocity_x,
+        velocity_y=velocity_y,
+        prediction_horizon=prediction_horizon,
+        search_radius=radius,
+    )
 
     # Provisional IDs use the local heatmap once; the resulting hit becomes
     # the stable positive-track anchor after commit. A positive Track that has
@@ -270,9 +287,9 @@ def track_local(
         suppress_positions=suppress_positions,
         offset_x=offset_x,
         offset_y=offset_y,
-        identity_cx=identity_cx,
-        identity_cy=identity_cy,
-        identity_radius_px=radius,
+        identity_cx=search_cx,
+        identity_cy=search_cy,
+        identity_radius_px=identity_radius,
     )
 
     if template_hit is None and track_id in template_store:
@@ -303,7 +320,7 @@ def track_local(
             # crop from winning merely because its grayscale match is stronger.
             identity_cx=search_cx,
             identity_cy=search_cy,
-            identity_radius_px=radius,
+            identity_radius_px=identity_radius,
         )
         if recovered is not None:
             _track_miss_store(detector).pop(track_id, None)
@@ -337,6 +354,10 @@ def _effective_search_radius(
     detector: MobDetector,
     descriptor: MobDescriptor,
     scale: float,
+    *,
+    velocity_x: float = 0.0,
+    velocity_y: float = 0.0,
+    prediction_horizon: int = 0,
 ) -> int:
     """Return a bounded local-follow radius appropriate for sprite size.
 
@@ -353,7 +374,40 @@ def _effective_search_radius(
         float(descriptor.avg_width), float(descriptor.avg_height),
     ) * max(float(scale), 0.0)
     scaled_radius = int(round(rendered_extent * multiplier))
-    return min(cap, max(base, scaled_radius))
+    motion_padding = max(64.0, rendered_extent)
+    motion_radius = int(
+        round(
+            math.hypot(float(velocity_x), float(velocity_y))
+            * max(0, int(prediction_horizon))
+            + motion_padding
+        )
+    )
+    return min(cap, max(base, scaled_radius, motion_radius))
+
+
+def _identity_corridor_radius(
+    descriptor: MobDescriptor,
+    scale: float,
+    *,
+    velocity_x: float,
+    velocity_y: float,
+    prediction_horizon: int,
+    search_radius: int,
+) -> int:
+    """Return a bounded identity tolerance inside the larger search ROI."""
+    rendered_extent = max(
+        float(descriptor.avg_width), float(descriptor.avg_height),
+    ) * max(float(scale), 0.0)
+    predicted_displacement = math.hypot(
+        float(velocity_x), float(velocity_y),
+    ) * max(1, int(prediction_horizon))
+    motion_error = (
+        predicted_displacement * _IDENTITY_MOTION_ERROR_FRAC
+        + max(32.0, rendered_extent * 0.5)
+    )
+    corridor = max(float(_IDENTITY_CORRIDOR_FLOOR_PX), motion_error)
+    corridor = min(float(_IDENTITY_CORRIDOR_MAX_PX), corridor)
+    return min(max(1, int(search_radius)), max(1, int(round(corridor))))
 
 
 def _miss_result(
@@ -720,7 +774,16 @@ def _follow_cached_template(
     ):
         return None
     if suppress_positions:
-        suppress_radius = max(_LOCAL_SUPPRESS_RADIUS_FLOOR_PX, search_radius_px // 3)
+        sprite_extent = max(
+            float(descriptor.avg_width), float(descriptor.avg_height),
+        ) * max(float(scale), 0.0)
+        suppress_radius = min(
+            _LOCAL_SUPPRESS_RADIUS_MAX_PX,
+            max(
+                _LOCAL_SUPPRESS_RADIUS_FLOOR_PX,
+                int(round(sprite_extent * 0.75)),
+            ),
+        )
         if any((hit_x - sx) ** 2 + (hit_y - sy) ** 2 <= suppress_radius ** 2
                for sx, sy in suppress_positions):
             return None
@@ -815,66 +878,18 @@ def _find_local_peak(
     peak_y_local, peak_x_local = np.unravel_index(int(work.argmax()), work.shape)
     peak_x = int(round(peak_x_local * pyramid + x0 + (pyramid - 1) / 2))
     peak_y = int(round(peak_y_local * pyramid + y0 + (pyramid - 1) / 2))
-    if _fast_track_accept(detector, descriptor):
-            # Static modified sprites are already palette-driven, so accept the
-            # local peak without the expensive native silhouette gate. The peak
-            # must clear a strong heat multiple to avoid weak terrain fragments.
-            # Every successful local peak must be anchored by the current
-            # sprite mask. An unanchored heat peak is a miss, never a fallback
-            # coordinate.
-            projected = _refine_hit_to_sprite_center(
-                detector, frame_bgr, descriptor, peak_x, peak_y, scale,
-            )
-            if projected is None:
-                return None
-            peak_x, peak_y = projected
-            bbox = _descriptor_sized_bbox(descriptor, peak_x, peak_y, scale)
-            if bbox is not None and peak_val >= _LOCAL_FAST_MIN_HEAT_MULT * min_heat:
-                return peak_x, peak_y, peak_val, float(peak_val), bbox
-    else:
-        accepted, bbox, sim = detector.score_at(
-            frame_bgr, descriptor, peak_x, peak_y, scale,
-        )
-        if accepted and bbox is not None:
-            # Native gate returns the best current sprite extract. Carry its
-            # center forward instead of retaining the heatmap peak offset.
-            bx, by, bw, bh = bbox
-            return bx + bw // 2, by + bh // 2, peak_val, sim, bbox
-    return None
-
-
-def _fast_track_accept(
-    detector: MobDetector,
-    descriptor: MobDescriptor,
-) -> bool:
-    """True when local follow may accept a peak without the native silhouette gate.
-
-    Modified sprite.grf assets are a single deterministic static frame with a
-    distinctive red palette. The heatmap peak is already palette-driven, so the
-    native-resolution verify adds little for a static descriptor while costing
-    a large part of every tracking tick on big sprites (Anubis). Enabled only
-    when the mode flag is set AND the descriptor is truly single-frame, so the
-    animated-original path keeps its full verification.
-    """
-    return (
-        detector.use_sprite_grf
-        and bool(getattr(detector, "grf_local_track_skip_native_gate", True))
-        and detector.descriptor_is_static(descriptor)
+    # Every rendering mode uses the native silhouette gate for local
+    # acquisition. A palette heat peak alone is not sufficient evidence,
+    # including for static modified sprites.
+    accepted, bbox, sim = detector.score_at(
+        frame_bgr, descriptor, peak_x, peak_y, scale,
     )
-
-
-def _descriptor_sized_bbox(
-    descriptor: MobDescriptor,
-    cx: int,
-    cy: int,
-    scale: float,
-) -> tuple[int, int, int, int] | None:
-    """Descriptor-sized window around a peak (mirrors ``score_at``'s crop)."""
-    w = max(_FAST_BBOX_MIN_PX, int(round(descriptor.avg_width * scale)))
-    h = max(_FAST_BBOX_MIN_PX, int(round(descriptor.avg_height * scale)))
-    x = int(round(cx - w / 2))
-    y = int(round(cy - h / 2))
-    return (x, y, w, h)
+    if accepted and bbox is not None:
+        # Native gate returns the best current sprite extract. Carry its
+        # center forward instead of retaining the heatmap peak offset.
+        bx, by, bw, bh = bbox
+        return bx + bw // 2, by + bh // 2, peak_val, sim, bbox
+    return None
 
 
 def _refine_hit_to_sprite_center(

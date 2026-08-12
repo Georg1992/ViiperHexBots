@@ -239,6 +239,56 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertEqual(follow.call_args.kwargs["cx"], anchor.center_x + 36)
         self.assertEqual(follow.call_args.kwargs["cy"], anchor.center_y - 8)
 
+    def test_fast_velocity_expands_tracking_roi_ahead_of_last_coordinate(self) -> None:
+        """Fast runners get a wider predicted ROI before they can leave it."""
+        detector = self._detector()
+        anchor = self._living_anchor(detector)
+        track_id = 902
+        from pybot.recognition.detector.tracking import local_tracker
+
+        local_tracker._template_store(detector)[track_id] = SimpleNamespace(
+            anchors=(_TrackAnchor(np.ones((4, 4), dtype=np.uint8), 0, 0),),
+            width=8,
+            height=8,
+        )
+        with patch.object(
+            local_tracker,
+            "_follow_cached_template",
+            return_value=LocalTrackResult(
+                track_id=track_id,
+                found=True,
+                x=anchor.center_x + 360,
+                y=anchor.center_y,
+                confidence=0.9,
+                miss_reason="",
+            ),
+        ) as follow:
+            result = track_local(
+                detector,
+                self.roi,
+                "horn",
+                self._build_track_dict(
+                    anchor,
+                    track_id=track_id,
+                    velX=180.0,
+                    velY=0.0,
+                    lost_count=1,
+                    prediction_valid=True,
+                    anchor_required=True,
+                ),
+            )
+
+        self.assertTrue(result.found)
+        kwargs = follow.call_args.kwargs
+        self.assertGreater(
+            kwargs["search_radius_px"],
+            detector.local_track_moving_search_radius_px,
+        )
+        self.assertEqual(kwargs["cx"], anchor.center_x + 360)
+        self.assertEqual(kwargs["cy"], anchor.center_y)
+        self.assertEqual(kwargs["identity_cx"], anchor.center_x + 360)
+        self.assertLess(kwargs["identity_radius_px"], kwargs["search_radius_px"])
+
     def test_template_recovery_prefers_valid_corridor_over_identical_neighbor(self) -> None:
         """A stronger neighbor outside the corridor cannot steal the Track."""
         detector = self._detector()
@@ -410,6 +460,60 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertLessEqual(abs(result.y - 88), 4)
         self.assertGreaterEqual(result.confidence, 0.42)
 
+    def test_large_displacement_recovery_stays_on_predicted_target(self) -> None:
+        """A fast target is recovered from a large jump without neighbor theft."""
+        detector = self._detector()
+        descriptor = detector.ensure_descriptor("horn")
+        from pybot.recognition.detector.tracking import local_tracker
+
+        rng = np.random.default_rng(123)
+        template = rng.integers(0, 255, size=(12, 12), dtype=np.uint8)
+        desired = cv2.resize(template, (24, 24), interpolation=cv2.INTER_NEAREST)
+        frame_gray = np.zeros((220, 700), dtype=np.uint8)
+        # The target moved 300px from the last coordinate. An identical neighbor
+        # is inside the broad search ROI but outside the predicted identity band.
+        frame_gray[88:112, 388:412] = desired
+        frame_gray[88:112, 548:572] = desired
+        frame = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
+        track_id = 903
+        local_tracker._template_store(detector)[track_id] = SimpleNamespace(
+            anchors=(
+                _TrackAnchor(template, 0, 0),
+                _TrackAnchor(template, 0, 0),
+            ),
+            width=24,
+            height=24,
+            center_x=100,
+            center_y=100,
+            scale=0.9,
+        )
+
+        with patch.object(
+            local_tracker,
+            "_refine_hit_to_sprite_center",
+            side_effect=lambda _detector, _frame, _descriptor, cx, cy, _scale: (cx, cy),
+        ):
+            result = track_local(
+                detector,
+                frame,
+                "horn",
+                {
+                    "trackId": track_id,
+                    "x": 100,
+                    "y": 100,
+                    "scale": 0.9,
+                    "velX": 150.0,
+                    "velY": 0.0,
+                    "lost_count": 1,
+                    "prediction_valid": True,
+                    "anchor_required": True,
+                },
+            )
+
+        self.assertTrue(result.found, result.miss_reason)
+        self.assertLessEqual(abs(result.x - 400), 4)
+        self.assertLessEqual(abs(result.y - 100), 4)
+
     def test_expanded_recovery_keeps_same_template_identity_bound(self) -> None:
         """A wider miss recovery also widens its bound without generic reacquire."""
         detector = self._detector()
@@ -461,11 +565,12 @@ class LocalTrackerTests(unittest.TestCase):
         # boundary that prevents an identical neighbor at the far edge from
         # winning the expanded template search.
         self.assertEqual(
-            calls[1]["identity_radius_px"], calls[0]["search_radius_px"],
+            calls[1]["identity_radius_px"], calls[0]["identity_radius_px"],
         )
+        self.assertEqual(calls[0]["identity_cx"], anchor.center_x + 120)
         self.assertEqual(calls[1]["identity_cx"], anchor.center_x + 120)
         self.assertEqual(calls[1]["identity_cy"], anchor.center_y)
-        self.assertEqual(calls[0]["identity_radius_px"], calls[0]["search_radius_px"])
+        self.assertLess(calls[0]["identity_radius_px"], calls[0]["search_radius_px"])
 
     def test_wide_radius_finds_mob_lagged_behind_last_known(self) -> None:
         """No velocity needed — fixed wide disk around last-known catches runners."""

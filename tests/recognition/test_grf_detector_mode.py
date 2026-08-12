@@ -1,15 +1,15 @@
-"""GRF (modified sprite.grf) mode: relaxed gate + static single-frame tracking.
+"""GRF (modified sprite.grf) mode: strict gate + static single-frame tracking.
 
 Modified sprites are one deterministic static frame with a distinctive red
 palette. GRF mode therefore:
 - references that single frame (the modified descriptor carries one unique
   silhouette pose — ``descriptor_is_static``);
-- relaxes the silhouette gate (``grfMinSilhouetteRecall/Precision``);
+- uses the same strict silhouette recall and precision thresholds as normal
+  animated sprites;
 - widens the extract aspect band (``grfAspectBandScale``) so a clipped
   palette CC (e.g. Anubis head shade outside the match radius) is not
   rejected before the silhouette match;
-- lets local tracking follow a peak without the expensive native-resolution
-  silhouette verify (``grfLocalTrackSkipNativeGate``).
+- keeps native-resolution silhouette verification during local tracking.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import numpy as np
 from pybot.paths import PROJECT_ROOT
 from pybot.recognition.fixtures import default_horn_fixture
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
+from pybot.recognition.detector.tracking import local_tracker
 from pybot.recognition.detector.tracking.local_tracker import track_local
 
 ROOT = PROJECT_ROOT
@@ -42,17 +43,17 @@ class GrfDetectorModeTests(unittest.TestCase):
         cls.config = load_detector_config()
 
 
-    def test_silhouette_gate_thresholds_relaxed_in_grf_mode(self) -> None:
+    def test_silhouette_gate_thresholds_are_strict_in_both_modes(self) -> None:
         normal = MobDetector(ROOT, self.config)
         grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
-        n_recall, n_precision = normal.silhouette_gate_thresholds()
-        g_recall, g_precision = grf.silhouette_gate_thresholds()
-        self.assertLess(g_recall, n_recall)
-        self.assertLess(g_precision, n_precision)
-        self.assertEqual(n_recall, float(self.config["minSilhouetteRecall"]))
-        self.assertEqual(n_precision, float(self.config["minSilhouettePrecision"]))
-        self.assertEqual(g_recall, float(self.config["grfMinSilhouetteRecall"]))
-        self.assertEqual(g_precision, float(self.config["grfMinSilhouettePrecision"]))
+        normal_thresholds = normal.silhouette_gate_thresholds()
+        grf_thresholds = grf.silhouette_gate_thresholds()
+        expected = (
+            float(self.config["minSilhouetteRecall"]),
+            float(self.config["minSilhouettePrecision"]),
+        )
+        self.assertEqual(normal_thresholds, expected)
+        self.assertEqual(grf_thresholds, expected)
 
     def test_modified_descriptors_are_static_single_frame(self) -> None:
         """The modified descriptor references the one static frame (all refs identical)."""
@@ -85,6 +86,38 @@ class GrfDetectorModeTests(unittest.TestCase):
         self.assertEqual((n_min, n_max), (descriptor.min_aspect_ratio, descriptor.max_aspect_ratio))
         self.assertLess(g_min, n_min)
         self.assertGreater(g_max, n_max)
+
+    def test_modified_tracking_still_verifies_with_native_gate(self) -> None:
+        """Static modified sprites cannot bypass the strict silhouette gate."""
+        detector = MobDetector(ROOT, load_detector_config(), use_sprite_grf=True)
+        descriptor = detector.ensure_descriptor("horn")
+        frame = np.zeros((400, 400, 3), dtype=np.uint8)
+
+        def fake_local_heatmap(_heatmap_detector, work_bgr, _descriptor, _scale):
+            heatmap = np.zeros(work_bgr.shape[:2], dtype=np.float32)
+            heatmap[heatmap.shape[0] // 2, heatmap.shape[1] // 2] = 1.0
+            return heatmap
+
+        with (
+            patch.object(local_tracker, "_build_local_follow_heatmap", side_effect=fake_local_heatmap),
+            patch.object(
+                detector,
+                "score_at",
+                return_value=(True, (190, 190, 20, 20), 0.9),
+            ) as score_at,
+        ):
+            result = local_tracker._find_local_peak(
+                detector,
+                frame,
+                descriptor,
+                200,
+                200,
+                1.0,
+                search_radius_px=20,
+            )
+
+        self.assertIsNotNone(result)
+        score_at.assert_called_once()
 
     def test_normal_tracking_still_verifies_with_native_gate(self) -> None:
         """Animated originals keep the full silhouette verify on every reacquire."""
