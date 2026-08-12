@@ -7,7 +7,7 @@ import unittest
 import cv2
 import numpy as np
 
-from pybot.paths import PROJECT_ROOT
+from pybot.paths import PROJECT_ROOT, RECOGNITION_FIXTURES_DIR
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
 from pybot.recognition.detector.scoring.heatmap_detector import (
     required_groups_structure,
@@ -21,10 +21,7 @@ class ColorStructureGateTests(unittest.TestCase):
         cls.detector = MobDetector(PROJECT_ROOT, load_detector_config())
         cls.descriptor = cls.detector.ensure_descriptor("wild_rose")
         path = (
-            PROJECT_ROOT
-            / "pybot"
-            / "recognition"
-            / "test-fixtures"
+            RECOGNITION_FIXTURES_DIR
             / "game-screenshots"
             / "WildRose"
             / "2WildRose_Gray.png"
@@ -80,10 +77,7 @@ class ColorStructureGateTests(unittest.TestCase):
     def test_zero_wild_rose_gray_rejects_impostor(self) -> None:
         """0WildRose_Gray: tiny heat CC must not clear body_strong via cache/inflation."""
         path = (
-            PROJECT_ROOT
-            / "pybot"
-            / "recognition"
-            / "test-fixtures"
+            RECOGNITION_FIXTURES_DIR
             / "game-screenshots"
             / "WildRose"
             / "0WildRose_Gray.png"
@@ -145,10 +139,7 @@ class ColorStructureGateTests(unittest.TestCase):
     def test_foreign_wolf_crop_fails_wild_rose_palette(self) -> None:
         """Desert-wolf body colors are not Wild Rose palette — gate must reject."""
         wolf_path = (
-            PROJECT_ROOT
-            / "pybot"
-            / "recognition"
-            / "test-fixtures"
+            RECOGNITION_FIXTURES_DIR
             / "game-screenshots"
             / "Wolf"
             / "1Wolf_Gray.png"

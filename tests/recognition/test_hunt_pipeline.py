@@ -6,7 +6,7 @@ import unittest
 
 import cv2
 
-from pybot.paths import PROJECT_ROOT, RECOGNITION_DIR
+from pybot.paths import PROJECT_ROOT, RECOGNITION_FIXTURES_DIR
 from pybot.recognition.cli import apply_scale_calibration
 from pybot.recognition.fixtures import default_horn_fixture
 from pybot.recognition.rules import MobTrack, select_target_id
@@ -14,7 +14,7 @@ from pybot.recognition.detector.detector import MobDetector, load_detector_confi
 from pybot.recognition.detector.tracking.local_tracker import track_local
 
 ROOT = PROJECT_ROOT
-MOB_REC = RECOGNITION_DIR
+MOB_REC = RECOGNITION_FIXTURES_DIR
 
 
 def playfield_roi(frame):
@@ -31,7 +31,7 @@ class HuntPipelineIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.base_config = load_detector_config()
-        cls.fixture_dir = MOB_REC / "test-fixtures" / "game-screenshots"
+        cls.fixture_dir = MOB_REC / "game-screenshots"
         cls.frame = cv2.imread(str(default_horn_fixture()), cv2.IMREAD_COLOR)
         if cls.frame is None:
             raise unittest.SkipTest("fixture Horn/3Horn.png missing")

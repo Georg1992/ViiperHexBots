@@ -8,7 +8,7 @@ import unittest
 import cv2
 import numpy as np
 
-from pybot.paths import PROJECT_ROOT
+from pybot.paths import PROJECT_ROOT, RECOGNITION_FIXTURES_DIR
 from pybot.recognition.detector.detector import (
     MobDetector,
     configure_opencv_runtime,
@@ -158,7 +158,7 @@ class DetectorPerformanceTests(unittest.TestCase):
         # This is a normal animated-sprite multi-mob fixture, so the generic
         # path should build one shared full-frame palette map. Modified GRF mode
         # has a separate static fast path and is tested in test_grf_detector_mode.py.
-        horn_dir = PROJECT_ROOT / "pybot" / "recognition" / "test-fixtures" / "game-screenshots" / "Horn"
+        horn_dir = RECOGNITION_FIXTURES_DIR / "game-screenshots" / "Horn"
         frame = cv2.imread(str(horn_dir / "2Horn.png"), cv2.IMREAD_COLOR)
         self.assertIsNotNone(frame)
         assert frame is not None

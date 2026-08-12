@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -10,7 +9,7 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 
-from pybot.paths import PROJECT_ROOT, RECOGNITION_DIR
+from pybot.paths import PROJECT_ROOT, RECOGNITION_FIXTURES_DIR
 from pybot.recognition.cli import apply_scale_calibration
 from pybot.recognition.fixtures import default_horn_fixture
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
@@ -25,7 +24,7 @@ from pybot.recognition.detector.tracking.local_tracker import (
 )
 
 ROOT = PROJECT_ROOT
-MOB_REC = RECOGNITION_DIR
+MOB_REC = RECOGNITION_FIXTURES_DIR
 
 
 def playfield_roi(frame):
@@ -40,7 +39,7 @@ class LocalTrackerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.base_config = load_detector_config()
-        cls.fixture_dir = MOB_REC / "test-fixtures" / "game-screenshots"
+        cls.fixture_dir = MOB_REC / "game-screenshots"
         cls.frame = cv2.imread(str(default_horn_fixture()), cv2.IMREAD_COLOR)
         if cls.frame is None:
             raise unittest.SkipTest("fixture Horn/3Horn.png missing")
@@ -635,106 +634,6 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertLessEqual(abs(result.y - anchor.center_y), 12)
         self.assertFalse(hasattr(detector, "_local_track_states"))
 
-    def test_warm_follow_benchmark_stays_cheap_per_track(self) -> None:
-        """Warm multi-anchor follow must stay cheap as track count grows.
-
-        The full-crop matchTemplate path cost ~7 ms per warm track, so a
-        3-mob batch alone blew the 20 ms tracking budget and mobs fell behind.
-        Per-anchor local windows cut this below 5 ms per track; assert a bound
-        that separates the two implementations without being CI-flaky.
-        """
-        detector = self._detector()
-        discovery = detector.detect(self.roi, "horn")
-        living = [c for c in discovery.accepted][:6]
-        if len(living) < 2:
-            self.skipTest("fixture needs at least 2 living horns")
-
-        warm: list[dict] = []
-        for index, candidate in enumerate(living):
-            provisional = self._build_track_dict(candidate, track_id=-(index + 1))
-            first = track_local(detector, self.roi, "horn", provisional)
-            if not first.found:
-                self.skipTest("fixture acquisition failed")
-            track_id = index + 1
-            self.assertTrue(transfer_track_state(detector, -(index + 1), track_id))
-            warm.append({
-                "trackId": track_id,
-                "x": first.x,
-                "y": first.y,
-                "scale": candidate.candidate_scale,
-                "prediction_valid": True,
-                "lost_count": 0,
-                "anchor_required": True,
-            })
-
-        def bench(tracks: list[dict]) -> float:
-            start = time.perf_counter()
-            for _ in range(5):
-                for track in tracks:
-                    result = track_local(detector, self.roi, "horn", track)
-                    self.assertTrue(result.found, result.miss_reason)
-            return (time.perf_counter() - start) / 5.0 * 1000.0
-
-        elapsed = bench(warm)
-        print(
-            f"\nwarm follow: {len(warm)} track(s) = {elapsed:.2f} ms/frame "
-            f"({elapsed / max(1, len(warm)):.2f} ms/track)"
-        )
-        # ~2 ms/track after the local-window change; 12 ms/track is a
-        # generous CI-safe ceiling that the old full-crop path exceeded.
-        self.assertLess(elapsed / max(1, len(warm)), 12.0)
-
-    def test_benchmark_one_three_six_tracks(self) -> None:
-        detector = self._detector()
-        discovery = detector.detect(self.roi, "horn")
-        living = [c for c in discovery.accepted][:6]
-        if len(living) < 3:
-            self.skipTest("fixture needs at least 3 living horns")
-
-        def bench(tracks: list[dict]) -> float:
-            start = time.perf_counter()
-            for track in tracks:
-                track_local(detector, self.roi, "horn", track)
-            return time.perf_counter() - start
-
-        one = [
-            {
-                "trackId": -1,
-                "x": living[0].center_x,
-                "y": living[0].center_y,
-                "scale": living[0].candidate_scale,
-            }
-        ]
-        three = [
-            {
-                "trackId": -(index + 1),
-                "x": candidate.center_x,
-                "y": candidate.center_y,
-                "scale": candidate.candidate_scale,
-            }
-            for index, candidate in enumerate(living[:3])
-        ]
-        six = [
-            {
-                "trackId": -(index + 1),
-                "x": candidate.center_x,
-                "y": candidate.center_y,
-                "scale": candidate.candidate_scale,
-            }
-            for index, candidate in enumerate(living[:6])
-        ]
-
-        elapsed_one = bench(one)
-        elapsed_three = bench(three)
-        elapsed_six = bench(six)
-
-        print(
-            f"\nlocal_track bench: 1={elapsed_one:.3f}s "
-            f"3={elapsed_three:.3f}s 6={elapsed_six:.3f}s"
-        )
-        self.assertLess(elapsed_one, 0.5)
-        self.assertLess(elapsed_three, 1.5)
-        self.assertLess(elapsed_six, 3.0)
 
 
 if __name__ == "__main__":

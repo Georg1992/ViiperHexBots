@@ -12,6 +12,7 @@ LOGS_DIR = PROJECT_ROOT / "logs"
 SESSIONS_DIR = LOGS_DIR / "sessions"
 
 RECOGNITION_DIR = PROJECT_ROOT / "pybot" / "recognition"
-RECOGNITION_FIXTURES_DIR = RECOGNITION_DIR / "test-fixtures"
+TEST_FIXTURES_DIR = PROJECT_ROOT / "tests" / "fixtures"
+RECOGNITION_FIXTURES_DIR = TEST_FIXTURES_DIR / "recognition"
 
 CONFIG_PATH = PROJECT_ROOT / "config.ini"

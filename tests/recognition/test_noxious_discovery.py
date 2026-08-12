@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import cv2
 
-from pybot.paths import PROJECT_ROOT
+from pybot.paths import PROJECT_ROOT, RECOGNITION_FIXTURES_DIR
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
 
 
@@ -15,10 +15,7 @@ class NoxiousDiscoveryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.fixture = (
-            PROJECT_ROOT
-            / "pybot"
-            / "recognition"
-            / "test-fixtures"
+            RECOGNITION_FIXTURES_DIR
             / "game-screenshots"
             / "Noxious"
             / "1Noxious.png"

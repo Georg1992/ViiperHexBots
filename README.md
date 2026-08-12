@@ -73,8 +73,10 @@ ViiperHexBots/
     mobs/                   Source SPR/ACT per mob (input)
     generated_descriptors/  Runtime descriptors, rebuilt on launch (gitignored)
   clients/                  Per-server profiles (memory addresses, captcha)
-  scripts/                  Descriptor build, test runners, dev tools
-  tests/                    Pytest suite (runtime, recognition, app, architecture)
+  scripts/                  Descriptor build and asset-generation utilities
+  tests/                    Pytest suite, fixtures, and debug tools
+    fixtures/               Shared screenshots and recognition fixture suites
+    tools/                  Test/debug utilities
   logs/                     Session logs and debug output (generated)
   VIIPER/                   Git submodule (virtual HID driver)
 ```
@@ -95,7 +97,7 @@ Use `mob-detect` for CLI examples (`mob-detect detect --mob horn --help`). Pipel
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/debug_vis.py` | Discovery pipeline fixture visualization (`_debug_vis/`) |
+| `python -m tests.tools.debug_vis` | Discovery pipeline fixture visualization (`_debug_vis/`) |
 | `python -m pybot.recognition fixtures --mob <name>` | Run screenshot fixture suite for one mob |
 
 

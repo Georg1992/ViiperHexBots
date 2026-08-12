@@ -27,7 +27,7 @@ from pybot.recognition.ui.status_panel import (
     verify_status_panel_at,
 )
 
-FIXTURES_DIR = PROJECT_ROOT / "tests"
+FIXTURES_DIR = PROJECT_ROOT / "tests" / "fixtures" / "screenshots"
 # (filename, hp, hp_max, sp, sp_max, weight, weight_max)
 FIXTURE_CASES: tuple[tuple[str, int, int, int, int, int, int], ...] = (
     ("StatusPanel.png", 850, 3187, 1229, 1229, 587, 2630),

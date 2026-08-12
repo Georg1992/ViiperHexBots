@@ -8,6 +8,8 @@ import cv2
 import numpy as np
 
 from pybot.paths import PROJECT_ROOT
+
+SCREENSHOTS_DIR = PROJECT_ROOT / "tests" / "fixtures" / "screenshots"
 from pybot.recognition.ui.inventory import (
     INV_COLS,
     INV_ROWS,
@@ -102,7 +104,7 @@ class InventoryUiTests(unittest.TestCase):
         self.assertTrue(slot_looks_empty(panel, INV_SLOT_ORIGIN_X + INV_SLOT_PITCH, INV_SLOT_ORIGIN_Y))
 
     def test_flywing_inv_screenshot_panel_and_slots(self) -> None:
-        path = PROJECT_ROOT / "tests" / "FlyWingINV.png"
+        path = SCREENSHOTS_DIR / "FlyWingINV.png"
         frame = cv2.imread(str(path), cv2.IMREAD_COLOR)
         self.assertIsNotNone(frame)
         panel = require_inventory_panel(frame)
@@ -132,10 +134,10 @@ class InventoryUiTests(unittest.TestCase):
         from pybot.recognition.ui.inventory import is_inventory_open, is_storage_open
 
         open_frame = cv2.imread(
-            str(PROJECT_ROOT / "tests" / "FlyWingINV.png"), cv2.IMREAD_COLOR
+            str(SCREENSHOTS_DIR / "FlyWingINV.png"), cv2.IMREAD_COLOR
         )
         closed_frame = cv2.imread(
-            str(PROJECT_ROOT / "tests" / "StatusPanel.png"), cv2.IMREAD_COLOR
+            str(SCREENSHOTS_DIR / "StatusPanel.png"), cv2.IMREAD_COLOR
         )
         self.assertIsNotNone(open_frame)
         self.assertIsNotNone(closed_frame)
@@ -147,7 +149,7 @@ class InventoryUiTests(unittest.TestCase):
     def test_inventory_panel_not_confused_with_storage(self) -> None:
         """Master Storage title chrome must not win over Inventory."""
         frame = cv2.imread(
-            str(PROJECT_ROOT / "tests" / "FlyWingINV.png"), cv2.IMREAD_COLOR
+            str(SCREENSHOTS_DIR / "FlyWingINV.png"), cv2.IMREAD_COLOR
         )
         self.assertIsNotNone(frame)
         panel = require_inventory_panel(frame)

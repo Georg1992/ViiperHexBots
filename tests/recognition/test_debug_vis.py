@@ -11,7 +11,7 @@ from pybot.recognition.detector.detector import (
     DetectionResult,
     SilhouetteCheck,
 )
-from scripts.debug_vis import draw_detection_overlay
+from tests.tools.debug_vis import draw_detection_overlay
 
 
 class DebugVisualizationTests(unittest.TestCase):

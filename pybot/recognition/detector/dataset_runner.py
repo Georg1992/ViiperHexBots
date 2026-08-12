@@ -9,7 +9,7 @@ from pathlib import Path
 
 import cv2
 
-from pybot.paths import PROJECT_ROOT, RECOGNITION_DIR
+from pybot.paths import PROJECT_ROOT, RECOGNITION_FIXTURES_DIR
 from pybot.recognition.detector.debug_renderer import save_debug_bundle
 from pybot.recognition.detector.descriptors.descriptor_builder import DescriptorBuilder
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
@@ -103,7 +103,7 @@ def run_fixtures(mob_name: str, fixtures_dir: Path, *, debug: bool, rebuild_desc
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run mob detector fixture suite")
     parser.add_argument("--mob", required=True)
-    parser.add_argument("--fixtures", default=str(RECOGNITION_DIR / "test-fixtures"))
+    parser.add_argument("--fixtures", default=str(RECOGNITION_FIXTURES_DIR))
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--rebuild-descriptor", action="store_true")
     args = parser.parse_args(argv)

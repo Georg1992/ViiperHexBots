@@ -268,7 +268,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     fixtures = sub.add_parser("fixtures", help="run screenshot fixture suite with mob detector")
     fixtures.add_argument("--mob", required=True)
-    fixtures.add_argument("--fixtures", help="test-fixtures root")
+    fixtures.add_argument("--fixtures", help="centralized test fixtures root")
     fixtures.add_argument("--debug", action="store_true")
     fixtures.add_argument("--rebuild-descriptor", action="store_true")
 

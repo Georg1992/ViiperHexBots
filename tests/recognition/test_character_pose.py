@@ -14,9 +14,9 @@ from pybot.recognition.ui.character_pose import (
     measure_center_pose,
 )
 
-_TESTS = Path(__file__).resolve().parents[1]
-_SIT = [_TESTS / "sit.png", _TESTS / "sit2.png", _TESTS / "sit3.png", _TESTS / "sit4.png"]
-_STAND = [_TESTS / "stand.png", _TESTS / "Stand2.png", _TESTS / "stand3.png", _TESTS / "stand4.png"]
+_SCREENSHOTS = Path(__file__).resolve().parents[1] / "fixtures" / "screenshots"
+_SIT = [_SCREENSHOTS / "sit.png", _SCREENSHOTS / "sit2.png", _SCREENSHOTS / "sit3.png", _SCREENSHOTS / "sit4.png"]
+_STAND = [_SCREENSHOTS / "stand.png", _SCREENSHOTS / "Stand2.png", _SCREENSHOTS / "stand3.png", _SCREENSHOTS / "stand4.png"]
 
 
 class CharacterPoseTests(unittest.TestCase):

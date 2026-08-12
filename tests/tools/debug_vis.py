@@ -54,6 +54,7 @@ _PLAYER_ROI_CENTER_DY = 8
 _PLAYER_ROI_SCALE = 3
 
 OUT_DIR = Path("_debug_vis")
+TEST_SCREENSHOTS_DIR = PROJECT_ROOT / "tests" / "fixtures" / "screenshots"
 
 _SIL_SCALE = 10
 _SIL_SIZE = 16 * _SIL_SCALE
@@ -795,7 +796,7 @@ def render_pose_evaluation() -> np.ndarray:
     Returns a composite grid showing each fixture's ROI crop with
     body_height, classification, and pass/fail status.
     """
-    tests_dir = Path(__file__).resolve().parent.parent / "tests"
+    tests_dir = TEST_SCREENSHOTS_DIR
     sit_paths = [tests_dir / f"{s}.png"
                  for s in ["sit", "sit2", "sit3", "sit4"]]
     stand_paths = [tests_dir / f"{s}.png"
@@ -914,10 +915,10 @@ _STATUS_PANEL_FIXTURES: list[tuple[str, int, int, int, int, int, int]] = [
 def render_status_panel_rois(fixture_name: str) -> np.ndarray:
     """Visualize the HP / SP / Weight OCR ROIs for one status panel fixture.
 
-    Loads ``tests/{fixture_name}``, locates the Basic Info panel, and
+    Loads ``tests/fixtures/screenshots/{fixture_name}``, locates the Basic Info panel, and
     shows each ROI crop with the OCR-parsed values side by side.
     """
-    tests_dir = Path(__file__).resolve().parent.parent / "tests"
+    tests_dir = TEST_SCREENSHOTS_DIR
     fixture_path = tests_dir / fixture_name
 
     frame = cv2.imread(str(fixture_path))
