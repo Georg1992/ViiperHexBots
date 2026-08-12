@@ -109,10 +109,19 @@ class LocalTrackerTests(unittest.TestCase):
         detector = self._detector()
         anchor = self._living_anchor(detector)
         track = self._build_track_dict(anchor, trackId=-1)
-        result = track_local(detector, self.roi, "horn", track)
+        from pybot.recognition.detector.tracking import local_tracker
+
+        with patch.object(
+            local_tracker,
+            "measure_opacity_score",
+            return_value=0.77,
+        ):
+            result = track_local(detector, self.roi, "horn", track)
+
         self.assertIsInstance(result, LocalTrackResult)
         self.assertTrue(result.found)
         self.assertGreater(result.confidence, 0.0)
+        self.assertEqual(result.opacity_score, 0.77)
         # Warm tracking intentionally does not run opacity probing; it must
         # keep the attack-coordinate path lightweight.
         self.assertEqual(result.miss_reason, "")
@@ -324,6 +333,10 @@ class LocalTrackerTests(unittest.TestCase):
             local_tracker,
             "_refine_hit_to_sprite_center",
             side_effect=lambda _detector, _frame, _descriptor, cx, cy, _scale: (cx, cy),
+        ), patch.object(
+            local_tracker,
+            "measure_opacity_score",
+            return_value=0.66,
         ):
             result = local_tracker._follow_cached_template(
                 detector,
@@ -344,6 +357,7 @@ class LocalTrackerTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         assert result is not None
+        self.assertEqual(result.opacity_score, 0.66)
         self.assertLessEqual(abs(result.x - 115), 4)
         self.assertLessEqual(abs(result.y - 80), 4)
 
@@ -463,7 +477,6 @@ class LocalTrackerTests(unittest.TestCase):
     def test_large_displacement_recovery_stays_on_predicted_target(self) -> None:
         """A fast target is recovered from a large jump without neighbor theft."""
         detector = self._detector()
-        descriptor = detector.ensure_descriptor("horn")
         from pybot.recognition.detector.tracking import local_tracker
 
         rng = np.random.default_rng(123)

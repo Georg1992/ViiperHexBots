@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from pybot.mobs.catalog import ensure_mob_assets
 
@@ -77,6 +77,16 @@ class ModifiedAssetsRebuildTests(unittest.TestCase):
             ensure_mob_assets(log_fn=lambda _msg: None)
 
         builder.build_modified_sprite.assert_called_once_with("horn", force=True)
+
+    def test_empty_catalog_still_reconciles_sprite_grf(self) -> None:
+        empty_mobs = self.root / "empty-mobs"
+        with (
+            patch("pybot.mobs.catalog.MOBS_DIR", empty_mobs),
+            patch("pybot.mobs.sprite_grf.sync_sprite_grf", return_value=0) as sync_grf,
+        ):
+            ensure_mob_assets(log_fn=lambda _msg: None)
+
+        sync_grf.assert_called_once_with(PROJECT_ROOT, logger=ANY)
 
     def test_present_modified_assets_skip_rebuild(self) -> None:
         modified_dir = self.mobs_dir / "horn" / "modified_sprite"

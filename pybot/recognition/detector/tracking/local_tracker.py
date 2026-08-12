@@ -9,7 +9,7 @@ The expensive gate is deliberately not run at the old center first: that center
 is stale for moving mobs and doing so duplicated the largest part of every
 tracking tick.    Tracking is pure follow for position and reports terminal local loss;
     Discovery remains an independent validation/removal observer.
-Warm tracking only publishes fresh coordinates; discovery owns absence/death validation.
+Warm tracking publishes fresh coordinates and an opacity score; discovery remains an independent absence validator.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from pybot.recognition.detector.scoring.heatmap_detector import (
     palette_heatmap,
     sprite_palette_heatmap,
 )
+from pybot.recognition.detector.tracking.opacity_probe import measure_opacity_score
 
 if TYPE_CHECKING:
     from pybot.recognition.detector.detector import MobDetector
@@ -451,7 +452,8 @@ def _finalize_track_hit(
 
     # Provisional acquisition creates the first stable identity anchor. Warm
     # tracking re-anchors the published coordinate on every fresh frame without
-    # replacing this template. Death/absence validation is discovery-owned.
+    # replacing this template. Opacity is measured from the same current frame;
+    # discovery remains an independent absence validator.
     if track_id not in _template_store(detector):
         _remember_track_template(
             detector,
@@ -461,10 +463,18 @@ def _finalize_track_hit(
             scale=scale,
         )
 
+    opacity_score = measure_opacity_score(
+        frame_bgr,
+        descriptor,
+        bbox,
+        float(descriptor.max_sprite_palette_distance),
+        float(detector.config["minSpritePaletteMatch"]),
+    )
     return LocalTrackResult(
         track_id=track_id, found=True, x=x, y=y,
-        confidence=similarity, miss_reason="",
-        opacity_score=0.0,
+        confidence=similarity,
+        miss_reason="",
+        opacity_score=opacity_score,
     )
 
 
@@ -790,6 +800,26 @@ def _follow_cached_template(
 
     # Keep the original template stable. Replacing it on every frame causes
     # template drift; only the current-frame palette bbox may publish a center.
+    opacity_width = max(
+        _FAST_BBOX_MIN_PX,
+        int(round(descriptor.avg_width * scale)),
+    )
+    opacity_height = max(
+        _FAST_BBOX_MIN_PX,
+        int(round(descriptor.avg_height * scale)),
+    )
+    opacity_score = measure_opacity_score(
+        frame_bgr,
+        descriptor,
+        (
+            hit_x - opacity_width // 2,
+            hit_y - opacity_height // 2,
+            opacity_width,
+            opacity_height,
+        ),
+        float(descriptor.max_sprite_palette_distance),
+        float(detector.config["minSpritePaletteMatch"]),
+    )
     return LocalTrackResult(
         track_id=track_id,
         found=True,
@@ -797,7 +827,7 @@ def _follow_cached_template(
         y=hit_y + offset_y,
         confidence=float(max_val),
         miss_reason="",
-        opacity_score=0.0,
+        opacity_score=opacity_score,
     )
 
 

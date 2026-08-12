@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 import zlib
@@ -18,6 +19,25 @@ from pybot.mobs.sprite_grf import (
 
 
 class SpriteGrfRemovalTests(unittest.TestCase):
+    def test_round_trips_production_archive(self) -> None:
+        source = Path(__file__).resolve().parents[2] / "sprite.grf"
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_path = Path(tmp) / "sprite.grf"
+            shutil.copyfile(source, archive_path)
+            original = SpriteGrf(archive_path)
+            original_contents = {
+                entry._path_bytes: entry.raw_data for entry in original._entries
+            }
+
+            original.save()
+            round_tripped = SpriteGrf(archive_path)
+            round_trip_contents = {
+                entry._path_bytes: entry.raw_data
+                for entry in round_tripped._entries
+            }
+
+            self.assertEqual(round_trip_contents, original_contents)
+
     def test_removes_all_mob_entries_and_saves_remaining_archive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -58,7 +78,7 @@ class SpriteGrfRemovalTests(unittest.TestCase):
             save.assert_called_once()
             self.assertTrue(grf_path.is_file())
 
-    def test_deletes_empty_archive_after_removing_last_mob(self) -> None:
+    def test_keeps_archive_after_removing_last_mob(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             grf_path = root / "sprite.grf"
@@ -92,7 +112,7 @@ class SpriteGrfRemovalTests(unittest.TestCase):
                 removed = remove_mob_from_sprite_grf(root, "horn")
 
             self.assertEqual(removed, 2)
-            self.assertFalse(grf_path.exists())
+            self.assertTrue(grf_path.exists())
 
     def test_remove_entries_by_path_preserves_same_basename_elsewhere(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -188,7 +208,7 @@ class SpriteGrfRemovalTests(unittest.TestCase):
             )
             save.assert_called_once()
 
-    def test_sync_deletes_archive_when_removed_mob_was_last_entry(self) -> None:
+    def test_sync_keeps_archive_when_removed_mob_was_last_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             grf_path = root / "sprite.grf"
@@ -225,7 +245,39 @@ class SpriteGrfRemovalTests(unittest.TestCase):
                 changed = sync_sprite_grf(root, remove_mob_name="horn")
 
             self.assertEqual(changed, 2)
-            self.assertFalse(grf_path.exists())
+            self.assertTrue(grf_path.exists())
+
+    def test_sync_creates_empty_archive_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch("pybot.paths.MOBS_DIR", root / "mobs"):
+                changed = sync_sprite_grf(root)
+
+            self.assertEqual(changed, 0)
+            self.assertTrue((root / "sprite.grf").is_file())
+            self.assertEqual(len(SpriteGrf(root / "sprite.grf")._entries), 0)
+
+    def test_full_sync_removes_stale_mob_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = SpriteGrf(root / "sprite.grf")
+            stale = _GRF_SPRITE_DIR_BYTES + b"\\stale.spr"
+            keep = b"data\\sprite\\other\\keep.spr"
+            archive.add_file_raw(stale, b"stale")
+            archive.add_file_raw(keep, b"keep")
+            with patch(
+                "pybot.mobs.sprite_grf._zlib_compress_compat",
+                side_effect=lambda data: zlib.compress(data, 9),
+            ):
+                archive.save()
+                with patch("pybot.paths.MOBS_DIR", root / "mobs"):
+                    changed = sync_sprite_grf(root)
+
+            self.assertEqual(changed, 1)
+            loaded = SpriteGrf(root / "sprite.grf")
+            paths = {entry._path_bytes for entry in loaded._entries}
+            self.assertNotIn(stale, paths)
+            self.assertIn(keep, paths)
 
 
 if __name__ == "__main__":

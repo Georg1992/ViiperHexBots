@@ -32,6 +32,18 @@ class ClockStopEvent:
 
 
 class SkillTimerWorkerTests(unittest.TestCase):
+    @staticmethod
+    def _run_pending_until_stopped(worker, ctx) -> None:
+        """Exercise the production scheduler hook without the deleted loop."""
+        while not ctx.is_stopped():
+            worker.process_pending()
+            if ctx.is_stopped():
+                break
+            if ctx.should_run_timers() or ctx.should_run_workers():
+                ctx.stop_event.wait(0.25)
+            else:
+                ctx.wait_while_stopped_or_paused(0.25)
+
     def test_staggers_due_timers_by_500ms(self) -> None:
         timers = (
             SkillTimerRuntime(button="f1", scan_code=59, interval_ms=60_000),
@@ -63,7 +75,7 @@ class SkillTimerWorkerTests(unittest.TestCase):
             "pybot.runtime.workers.skill_timer_worker.monotonic_ms",
             side_effect=lambda: clock["ms"],
         ):
-            worker.run()
+            self._run_pending_until_stopped(worker, ctx)
 
         self.assertEqual([p[0] for p in presses], [59, 60])
         # The shared stagger window separated the two presses.
@@ -117,7 +129,7 @@ class SkillTimerWorkerTests(unittest.TestCase):
             "pybot.runtime.workers.skill_timer_worker.monotonic_ms",
             side_effect=lambda: clock["ms"],
         ):
-            worker.run()
+            self._run_pending_until_stopped(worker, ctx)
 
         self.assertEqual([p[0] for p in presses], [31])
         # The press only happened after the buff burst cleared.
@@ -155,7 +167,7 @@ class SkillTimerWorkerTests(unittest.TestCase):
             "pybot.runtime.workers.skill_timer_worker.monotonic_ms",
             side_effect=lambda: clock["ms"],
         ):
-            worker.run()
+            self._run_pending_until_stopped(worker, ctx)
 
         self.assertEqual(presses, [31])
         self.assertTrue(
@@ -208,7 +220,7 @@ class SkillTimerWorkerTests(unittest.TestCase):
                 "pybot.runtime.workers.skill_timer_worker.monotonic_ms",
                 side_effect=lambda: clock["ms"],
             ):
-                worker.run()
+                self._run_pending_until_stopped(worker, ctx)
         finally:
             was_healing = gates.healing_event.is_set()
             gates.end_heal_ops()
@@ -277,7 +289,7 @@ class SkillTimerWorkerTests(unittest.TestCase):
             "pybot.runtime.workers.skill_timer_worker.monotonic_ms",
             side_effect=lambda: clock["ms"],
         ):
-            worker.run()
+            self._run_pending_until_stopped(worker, ctx)
 
         self.assertEqual([scan for scan, _at in presses], [31])
 
@@ -338,7 +350,7 @@ class SkillTimerWorkerTests(unittest.TestCase):
             "pybot.runtime.workers.skill_timer_worker.monotonic_ms",
             side_effect=lambda: clock["ms"],
         ):
-            worker.run()
+            self._run_pending_until_stopped(worker, ctx)
 
         self.assertEqual([p[0] for p in presses], [59, 59])
         # A sit creates a new hunt generation, so startup re-arm is immediate.

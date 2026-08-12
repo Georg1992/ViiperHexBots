@@ -71,9 +71,6 @@ class StateTrackSnapshot:
     # Production positive Tracks must retain their acquired anchor. Tests and
     # standalone callers may leave this false for one-shot acquisition.
     anchor_required: bool = False
-    opacity_baseline: float = 0.0
-    opacity_baseline_samples: int = 0
-    opacity_decay_streak: int = 0
     attack_count: int = 0
     # Number of consecutive local misses at snapshot time. The local follower
     # uses this to extend a bounded motion prediction during recovery.

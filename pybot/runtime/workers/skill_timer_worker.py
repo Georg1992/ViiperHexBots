@@ -13,8 +13,6 @@ timers yield), and a single stagger window spaces every keypress.
 
 from __future__ import annotations
 
-import traceback
-
 from pybot.runtime.event_utils import event_is_set
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.input.input_backend import InputBackend, perform_if_allowed
@@ -158,45 +156,6 @@ class SkillTimerWorker:
         """Return the last successful press timestamp for scheduler seeding."""
         return self._last_press_ms.get(scan_code)
 
-    def run(self) -> None:
-        """Legacy standalone loop; production scheduling is ``GameplayLoop``.
-
-        All arming and deadline logic lives in ``process_pending``; this loop
-        only paces the poll and parks on the lifecycle gates. ``_last_press_ms``
-        is seeded here so a fresh legacy worker is immediately due, matching
-        the previous standalone behavior.
-        """
-        ctx = self._ctx
-        timers = [
-            t
-            for t in ctx.config.skill_timers
-            if t.scan_code and t.button.strip() and t.interval_ms > 0
-        ]
-        if not timers:
-            return
-
-        for timer in timers:
-            ctx.logger.behavior(
-                f"[TIMER] started key={timer.button} interval={timer.interval_ms}ms "
-                f"scanCode={timer.scan_code}"
-            )
-            self._last_press_ms[timer.scan_code] = -timer.interval_ms
-
-        while not ctx.is_stopped():
-            try:
-                self.process_pending()
-            except Exception:
-                ctx.logger.behavior(f"[TIMER] tick error:\n{traceback.format_exc()}")
-                # Bound repeated failures so a bad timer/input backend cannot
-                # spin this daemon thread and flood the logger queue.
-                if ctx.stop_event.wait(0.25):
-                    break
-            if ctx.is_stopped():
-                break
-            if ctx.should_run_timers() or ctx.should_run_workers():
-                ctx.stop_event.wait(0.25)
-            else:
-                ctx.wait_while_stopped_or_paused(0.25)
 
     def _arm_timers(self, timers) -> None:
         """Start timers for a new hunt so each configured key is due once."""

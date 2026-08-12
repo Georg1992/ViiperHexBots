@@ -138,15 +138,32 @@ def _build_modified_descriptor(
 
 
 def ensure_mob_assets(*, log_fn: Callable[[str], None] | None = None) -> None:
-    """Build or rebuild descriptors that are missing or below DESCRIPTOR_VERSION."""
+    """Build descriptors and reconcile the production sprite.grf archive."""
     _logger = log_fn or print
+
+    def _sync_grf() -> None:
+        # Run even when the mob catalog is empty so sprite.grf is always
+        # present and stale entries are removed after a mob deletion.
+        from pybot.mobs.sprite_grf import sync_sprite_grf
+
+        try:
+            added = sync_sprite_grf(PROJECT_ROOT, logger=_logger)
+            if added > 0:
+                _logger(f"[AUTO-BUILD] sprite.grf: {added} file(s) synced")
+        except Exception as exc:
+            message = f"[AUTO-BUILD] sprite.grf sync failed — {exc}"
+            _logger(message)
+            raise RuntimeError(message) from exc
+
     if not MOBS_DIR.is_dir():
         _logger(f"[AUTO-BUILD] mob assets folder missing: {MOBS_DIR}")
+        _sync_grf()
         return
 
     pairs = _scan_asset_pairs()
     if not pairs:
         _logger(f"[AUTO-BUILD] no SPR/ACT pairs found under {MOBS_DIR}")
+        _sync_grf()
         return
 
     _logger(
@@ -182,13 +199,7 @@ def ensure_mob_assets(*, log_fn: Callable[[str], None] | None = None) -> None:
     # Sync modified-sprite files into sprite.grf for GRF-modified servers.
     # NOTE: The RO viewer can only handle tables under ~150B compressed / ~130B
     # from EOF, so only modified shadow files are synced into the archive.
-    from pybot.mobs.sprite_grf import sync_sprite_grf
-    try:
-        added = sync_sprite_grf(PROJECT_ROOT, logger=_logger)
-        if added > 0:
-            _logger(f"[AUTO-BUILD] sprite.grf: {added} file(s) synced")
-    except Exception as exc:
-        _logger(f"[AUTO-BUILD] sprite.grf sync failed — {exc}")
+    _sync_grf()
 
 
 def load_mob_catalog(*, ensure_assets: bool = False) -> list[MobEntry]:

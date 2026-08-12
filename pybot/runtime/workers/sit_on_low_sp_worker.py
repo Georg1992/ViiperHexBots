@@ -303,40 +303,6 @@ class SitOnLowSpWorker:
             return False
         return False
 
-    def run(self) -> None:
-        """Legacy standalone loop; production ownership is ``GameplayLoop``.
-
-        All sit/danger decisions live in ``process_pending``; this loop only
-        parks on the lifecycle gates and paces the poll.
-        """
-        ctx = self._ctx
-        if (
-            not bool(getattr(ctx.config, "sit_on_low_sp", False))
-            or not str(getattr(ctx.config, "sit_on_low_sp_button", "") or "").strip()
-            or int(getattr(ctx.config, "sit_on_low_sp_scan_code", 0) or 0) <= 0
-        ):
-            return
-        ctx.logger.behavior(
-            f"[SIT] worker started key={ctx.config.sit_on_low_sp_button} "
-            f"scanCode={ctx.config.sit_on_low_sp_scan_code} "
-            f"low<{SIT_LOW_SP_RATIO:.0%} resume>={SIT_RESUME_SP_RATIO:.0%}"
-        )
-        while not ctx.is_stopped():
-            try:
-                if not ctx.should_run_workers():
-                    ctx.wait_while_stopped_or_paused(SIT_SP_POLL_INTERVAL_S)
-                    continue
-                if ctx.danger_escape_active.is_set():
-                    # A critical escape owns urgent input and the sit gate.
-                    # Park until it resolves; SP recovery resumes afterwards.
-                    ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
-                    continue
-                if not self.process_pending():
-                    ctx.stop_event.wait(SIT_SP_POLL_INTERVAL_S)
-            except Exception:
-                ctx.logger.behavior(f"[SIT] tick error:\n{traceback.format_exc()}")
-                if ctx.stop_event.wait(0.25):
-                    break
 
     def _recover_sp(
         self,

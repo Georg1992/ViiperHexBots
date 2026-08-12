@@ -106,38 +106,6 @@ class SelfBuffWorker:
             ctx.character_action_gate.end_buff_burst()
         return True
 
-    def run(self) -> None:
-        """Legacy standalone loop; production scheduling is ``GameplayLoop``.
-
-        All startup and periodic scheduling decisions live in
-        ``process_pending``. This loop only paces the poll so legacy callers
-        keep a bounded cadence without a second clock for the same policy.
-        """
-        ctx = self._ctx
-        buffs = tuple(
-            buff
-            for buff in ctx.config.custom_behavior.buffs
-            if buff.scan_code > 0 and buff.button.strip() and buff.delay_ms > 0
-        )
-        if not buffs:
-            return
-
-        for buff in buffs:
-            ctx.logger.behavior(
-                f"[CUSTOM] buff started key={buff.button} "
-                f"interval={buff.delay_ms}ms scanCode={buff.scan_code}"
-            )
-
-        while not ctx.is_stopped():
-            try:
-                self.process_pending()
-            except Exception:
-                self._log_error(f"[CUSTOM] buff tick error:\n{traceback.format_exc()}")
-                if ctx.stop_event.wait(0.25):
-                    return
-            if ctx.is_stopped():
-                break
-            ctx.stop_event.wait(0.25)
 
     def last_success_ms(self, buff_key: int) -> int | None:
         """Return the last successful cast timestamp for scheduler seeding."""

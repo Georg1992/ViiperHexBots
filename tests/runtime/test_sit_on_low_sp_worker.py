@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -193,24 +192,6 @@ class SitOnLowSpWorkerTests(unittest.TestCase):
         # Second stand is no-op — no flap.
         self.assertTrue(worker.stand(82))
         self.input.toggle_key.assert_called_once_with(82)
-
-    def test_happy_path_exactly_two_taps(self) -> None:
-        vitals = _ScriptedVitals(
-            [SIT_LOW_SP_RATIO - 0.01, 0.50, SIT_RESUME_SP_RATIO, SIT_RESUME_SP_RATIO]
-        )
-        worker = self._worker(vitals)
-        self.ctx.wait_unless_stopped = lambda _t: True  # type: ignore[method-assign]
-
-        def stop_after_two() -> None:
-            while self.input.toggle_key.call_count < 2 and not self.ctx.is_stopped():
-                self.ctx.stop_event.wait(0.01)
-            self.ctx.stop_event.set()
-
-        threading.Thread(target=stop_after_two, daemon=True).start()
-        worker.run()
-        presses = [c.args[0] for c in self.input.toggle_key.call_args_list if c.args[0] == 82]
-        self.assertEqual(len(presses), 2, presses)
-        self.assertFalse(worker._seated)
 
     def test_cleanup_failure_does_not_claim_standing(self) -> None:
         worker = self._worker()

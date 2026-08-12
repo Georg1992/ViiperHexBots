@@ -10,6 +10,7 @@ assets has its SPR+ACT pair in the archive.
 
 from __future__ import annotations
 
+import os
 import struct
 import subprocess
 import tempfile
@@ -209,13 +210,39 @@ class SpriteGrf:
         if magic != _GRF_MAGIC:
             raise ValueError(f"Not a GRF archive: {self._path}")
 
-        # Auto-detect header size: legacy 46-byte format has zlib 0x78 at
-        # byte 46 (first byte of compressed data), standard 47-byte has it
-        # at byte 47 (version's last byte is 0x00 for version 0x200).
-        if len(raw) > 46 and raw[46] == 0x78:
-            self._header_size = _GRF_HEADER_SIZE_LEGACY
+        # Auto-detect the header layout by validating the table header. The
+        # old heuristic looked for zlib's 0x78 marker at byte 46, but an
+        # empty archive starts with the table-size integer instead.
+        candidates = (
+            (_GRF_HEADER_SIZE_LEGACY, _GRF_HEADER_SIZE)
+            if len(raw) > 46 and raw[46] == 0x78
+            else (_GRF_HEADER_SIZE, _GRF_HEADER_SIZE_LEGACY)
+        )
+        for candidate in candidates:
+            table_off_pos = 30 if candidate == _GRF_HEADER_SIZE_LEGACY else 31
+            if len(raw) < candidate or table_off_pos + 4 > len(raw):
+                continue
+            table_hint = struct.unpack_from("<I", raw, table_off_pos)[0]
+            table_hdr_off = candidate + table_hint
+            if table_hdr_off + 8 > len(raw):
+                continue
+            first, second = struct.unpack_from("<II", raw, table_hdr_off)
+            for comp_size, uncomp_size in ((first, second), (second, first)):
+                end = table_hdr_off + 8 + comp_size
+                if end > len(raw):
+                    continue
+                try:
+                    table_data = zlib.decompress(raw[table_hdr_off + 8:end])
+                except zlib.error:
+                    continue
+                if len(table_data) == uncomp_size:
+                    self._header_size = candidate
+                    break
+            else:
+                continue
+            break
         else:
-            self._header_size = _GRF_HEADER_SIZE
+            raise ValueError("GRF table header not found")
 
         # Preserve the entire post-magic header region byte-for-byte.
         self._orig_header_tail = raw[16:self._header_size]
@@ -354,10 +381,11 @@ class SpriteGrf:
         expects.  Each entry's ``offset`` points to its compressed chunk
         within the raw container; ``comp_size`` is the compressed size;
         ``aligned_size`` is ``comp_size`` rounded up to 16 bytes.
-        """
-        if not self._entries:
-            return  # nothing to save
 
+        The archive is written to a temporary file in the same directory and
+        atomically replaced into place. This keeps the production asset valid
+        if the process is interrupted while regenerating it.
+        """
         # Build the container by preserving the original bytes at their
         # original positions, then appending new entries at the end.
         # The RO viewer is sensitive to the EXACT container layout — the
@@ -435,17 +463,40 @@ class SpriteGrf:
         # Anti-hint padding: 112 zero bytes after the compressed table
         # prevent the RO viewer's hint check from misreading the table position.
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._path, "wb") as f:
-            f.write(bytes(header))
-            f.write(bytes(container))
-            f.write(table_hdr)
-            f.write(comp_table)
-            f.write(b"\x00" * 112)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{self._path.name}.",
+            suffix=".tmp",
+            dir=str(self._path.parent),
+        )
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(bytes(header))
+                f.write(bytes(container))
+                f.write(table_hdr)
+                f.write(comp_table)
+                f.write(b"\x00" * 112)
+            os.replace(tmp_path, self._path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
 
 # ------------------------------------------------------------------
 #  Public helpers
 # ------------------------------------------------------------------
+
+
+def _empty_sprite_grf(path: Path) -> SpriteGrf:
+    """Create an uninitialized empty archive targeting *path*."""
+    grf = SpriteGrf.__new__(SpriteGrf)
+    grf._path = path
+    grf._entries = []
+    grf._data_section = b""
+    grf._header_size = _GRF_HEADER_SIZE
+    grf._orig_header_tail = b""
+    grf._raw_container = b""
+    return grf
 
 
 def remove_mob_from_sprite_grf(
@@ -460,6 +511,9 @@ def remove_mob_from_sprite_grf(
     root = project_root or Path.cwd()
     grf_path = root / "sprite.grf"
     if not grf_path.is_file():
+        # Keep the production asset present even when there is nothing to
+        # remove. A later mob import can then update this archive in place.
+        _empty_sprite_grf(grf_path).save()
         return 0
 
     grf = SpriteGrf(grf_path)
@@ -472,10 +526,7 @@ def remove_mob_from_sprite_grf(
         removed += grf.remove_entries_by_path(path_bytes)
 
     if removed:
-        if grf._entries:
-            grf.save()
-        else:
-            grf_path.unlink(missing_ok=True)
+        grf.save()
     return removed
 
 
@@ -504,15 +555,16 @@ def sync_sprite_grf(
     root = project_root or Path.cwd()
     grf_path = root / "sprite.grf"
 
+    archive_needs_write = not grf_path.is_file()
     if grf_path.is_file():
         try:
             grf = SpriteGrf(grf_path)
         except (ValueError, zlib.error, struct.error):
-            grf = SpriteGrf()
-            grf._path = grf_path
+            # Rebuild a corrupt archive from the current modified assets.
+            grf = _empty_sprite_grf(grf_path)
+            archive_needs_write = True
     else:
-        grf = SpriteGrf()
-        grf._path = grf_path
+        grf = _empty_sprite_grf(grf_path)
 
     def _log(msg: str) -> None:
         if logger and hasattr(logger, "__call__"):
@@ -532,59 +584,74 @@ def sync_sprite_grf(
             )
             changed += grf.remove_entries_by_path(path_bytes)
 
-    if not MOBS_DIR.is_dir():
-        if changed:
-            if grf._entries:
-                grf.save()
-            else:
-                grf_path.unlink(missing_ok=True)
-        return changed
-
-    for mob_dir in sorted(MOBS_DIR.iterdir()):
-        if not mob_dir.is_dir():
-            continue
-        if mob_name and mob_dir.name.lower() != mob_name.lower():
-            continue
-        modified_dir = mob_dir / "modified_sprite"
-        if not modified_dir.is_dir():
-            continue
-
-        for spr_path in sorted(modified_dir.glob("*.spr")):
-            stem = spr_path.stem.lower()  # e.g. "alligator"
-            if remove_key and stem == remove_key:
+    # Build the complete desired set during a normal sync. This makes the
+    # archive authoritative after startup and repairs stale entries left by
+    # removed or manually edited mob assets.
+    desired: dict[bytes, bytes] = {}
+    if MOBS_DIR.is_dir():
+        for mob_dir in sorted(MOBS_DIR.iterdir()):
+            if not mob_dir.is_dir():
                 continue
-            act_src = modified_dir / f"{stem}.act"
-            if not act_src.is_file():
+            if mob_name and mob_dir.name.lower() != mob_name.lower():
+                continue
+            modified_dir = mob_dir / "modified_sprite"
+            if not modified_dir.is_dir():
                 continue
 
-            for src, ext in ((spr_path, "spr"), (act_src, "act")):
-                filename = f"{stem}.{ext}"
-                new_data = src.read_bytes()
-                
-                path_bytes = _GRF_SPRITE_DIR_BYTES + b"\\" + filename.encode("utf-8")
-                matches = [
-                    entry
-                    for entry in grf._entries
-                    if entry._path_bytes == path_bytes
-                ]
-                existing_entry = matches[0] if matches else None
+            for spr_path in sorted(modified_dir.glob("*.spr")):
+                stem = spr_path.stem.lower()
+                if remove_key and stem == remove_key:
+                    continue
+                act_src = modified_dir / f"{stem}.act"
+                if not act_src.is_file():
+                    continue
+                desired[
+                    _GRF_SPRITE_DIR_BYTES + b"\\" + f"{stem}.spr".encode("utf-8")
+                ] = spr_path.read_bytes()
+                desired[
+                    _GRF_SPRITE_DIR_BYTES + b"\\" + f"{stem}.act".encode("utf-8")
+                ] = act_src.read_bytes()
 
-                if len(matches) == 1 and existing_entry.raw_data == new_data:
-                    continue  # already up to date
+    # A full sync is authoritative: remove every managed SPR/ACT entry that
+    # no longer has a corresponding modified-sprite source file. A targeted
+    # sync (mob_name=...) leaves other mobs untouched.
+    if mob_name is None:
+        managed_prefix = _GRF_SPRITE_DIR_BYTES + b"\\"
+        stale_paths = {
+            path_bytes
+            for entry in grf._entries
+            for path_bytes in (getattr(entry, "_path_bytes", None),)
+            if path_bytes is not None
+            and path_bytes.startswith(managed_prefix)
+            and path_bytes.rsplit(b"\\", 1)[-1].lower().endswith(
+                (b".spr", b".act")
+            )
+            and path_bytes not in desired
+        }
+        for path_bytes in stale_paths:
+            changed += grf.remove_entries_by_path(path_bytes)
 
-                if matches:
-                    changed += grf.remove_entries_by_path(path_bytes)
+    for path_bytes, new_data in desired.items():
+        matches = [
+            entry
+            for entry in grf._entries
+            if entry._path_bytes == path_bytes
+        ]
+        existing_entry = matches[0] if matches else None
 
-                grf.add_file_raw(path_bytes, new_data)
-                changed += 1
-                _log(f"[GRF] {'replaced' if existing_entry else 'added'} "
-                     f"{path_bytes.decode('utf-8', errors='replace')}")
+        if len(matches) == 1 and existing_entry.raw_data == new_data:
+            continue  # already up to date
 
-    if changed > 0:
-        if grf._entries:
-            grf.save()
-        else:
-            grf_path.unlink(missing_ok=True)
+        if matches:
+            changed += grf.remove_entries_by_path(path_bytes)
+
+        grf.add_file_raw(path_bytes, new_data)
+        changed += 1
+        _log(f"[GRF] {'replaced' if existing_entry else 'added'} "
+             f"{path_bytes.decode('utf-8', errors='replace')}")
+
+    if changed > 0 or archive_needs_write:
+        grf.save()
         _log(f"[GRF] sprite.grf updated — {changed} file(s) changed")
 
     return changed
