@@ -2,8 +2,8 @@
 
 Creates a full-client-area layered window over the game showing:
 - Green dots at tracked mob positions
-- A dark right-side panel with track stats.
-The dots render on a transparent overlay and never appear in
+- Track stats as transparent status text on the right.
+The overlay renders transparently over the game and never appears in
 captured game frames, so detection is not affected.
 Repositions every ~100 ms via the tkinter UI timer.
 """
@@ -49,7 +49,6 @@ user32.DefWindowProcW.restype = wintypes.LRESULT
 # Colour key for transparent game-area pixels (hot pink so it's never used by game UI)
 COLOR_KEY = 0x00FF00FF  # BGR magenta
 
-COLOR_BLACK = 0x001A1A1A
 COLOR_STATUS = 0x00FFD966
 
 # Dot colour (GDI COLORREF = BGR)
@@ -250,7 +249,7 @@ def _paint_overlay_content(hdc: int, cw: int, ch: int, content: dict) -> None:
     # Fill the entire window with COLOR_KEY (magenta).  The layered
     # window uses LWA_COLORKEY so these pixels are fully transparent
     # on screen, making the game visible through the overlay.
-    # Everything drawn AFTER this (dots, panel, text) uses other
+    # Everything drawn AFTER this (dots, border, text) uses other
     # colours so it renders at the alpha set by LWA_ALPHA.
     key_brush = gdi32.CreateSolidBrush(COLOR_KEY)
     full_rect = wintypes.RECT(0, 0, cw, ch)
@@ -286,19 +285,11 @@ def _paint_overlay_content(hdc: int, cw: int, ch: int, content: dict) -> None:
             gdi32.Ellipse(hdc, dx - 4, dy - 4, dx + 4, dy + 4)
             gdi32.SelectObject(hdc, old_b)
 
-    # ── Right-side panel background ────────────────────────────
-    panel_rect = wintypes.RECT(
-        max(cw - PANEL_W, 0), 0, cw, ch
-    )
-    brush_bg = gdi32.CreateSolidBrush(COLOR_BLACK)
-    user32.FillRect(hdc, ctypes.byref(panel_rect), brush_bg)
-    gdi32.DeleteObject(brush_bg)
-
-    # ── Status line ────────────────────────────────────────────
+    # ── Transparent right-side status line ────────────────────
     old_font = gdi32.SelectObject(hdc, font_status)
     gdi32.SetTextColor(hdc, COLOR_STATUS)
     gdi32.SetBkMode(hdc, 1)  # TRANSPARENT
-    # Left-align panel content with 6px padding
+    # Left-align status text with 6px padding
     px = cw - PANEL_W + 6 if cw > PANEL_W else 6
     status = f"T:{track_count} A:{alive_count} Atk:{total_attacks} TP:{total_teleports}"
     gdi32.TextOutW(hdc, px, 6, status, len(status))
@@ -402,7 +393,7 @@ def create(game_hwnd: int, *, search_range_cells: int = DEFAULT_SEARCH_RANGE_CEL
     # Layered-window attributes:
     #   LWA_COLORKEY (0x01) — pixels matching COLOR_KEY are fully transparent
     #   LWA_ALPHA    (0x02) — other pixels get 220/255 opacity (~86%)
-    #   Combined 0x03        — game area (magenta) invisible, panel stays semi-transparent
+    #   Combined 0x03        — game area (magenta) invisible, drawn details stay semi-transparent
     user32.SetLayeredWindowAttributes(hwnd, COLOR_KEY, 220, 0x03)
 
     # Hide this window from screen-capture APIs (mss, BitBlt, etc.)
