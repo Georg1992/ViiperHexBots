@@ -19,6 +19,9 @@ class TeleportKeySelectionTests(unittest.TestCase):
         self.ctx.config.teleport_duration_ms = 10
         self.ctx.wait_unless_stopped.return_value = True
         self.ctx.logger = MagicMock()
+        # Not exhausted: the wing key remains the urgent escape until
+        # GetFlyWings reports storage has no wings left.
+        self.ctx.fly_wings_exhausted = False
         self.input = MagicMock()
         self.tport = TeleportController(self.ctx, self.input, MagicMock())
 
@@ -94,10 +97,40 @@ class TeleportKeySelectionTests(unittest.TestCase):
         self.tport.danger_teleport(reason="critical_hunt")
         self.input.teleport_key.assert_called_once_with(16)
 
+    def test_danger_scan_code_prefers_creamy_when_wings_exhausted(self) -> None:
+        """Once wings are gone, the critical escape key is Creamy TP."""
+        self.ctx.fly_wings_exhausted = True
+        self.assertEqual(self.tport.danger_scan_code(), 17)
+        self.assertEqual(self.tport.danger_button(), "w")
+
+    def test_danger_teleport_uses_creamy_when_wings_exhausted(self) -> None:
+        """A no-op wing key must never be pressed after exhaustion."""
+        self.ctx.fly_wings_exhausted = True
+        self.tport.danger_teleport(reason="critical_hunt")
+        self.input.teleport_key.assert_called_once_with(17)
+        self.ctx.note_teleport_for_wings.assert_not_called()
+
+    def test_danger_teleport_keeps_wing_when_exhausted_but_no_creamy(self) -> None:
+        """Without a creamy binding the wing key remains the last-resort escape."""
+        self.ctx.fly_wings_exhausted = True
+        self.ctx.config.creamy_tp_scan_code = 0
+        self.ctx.config.creamy_tp_button = ""
+        self.assertEqual(self.tport.danger_button(), "q")
+        self.tport.danger_teleport(reason="critical_hunt")
+        self.input.teleport_key.assert_called_once_with(16)
+
     def test_mode_teleport_once_uses_creamy_and_does_not_count_wing(self) -> None:
         self.assertTrue(self.tport.teleport_once())
         self.input.teleport_key.assert_called_once_with(17)
         self.ctx.note_teleport_for_wings.assert_not_called()
+
+    def test_mode_teleport_with_only_wing_key_uses_and_counts_wing(self) -> None:
+        """Area-clear teleports fall back to the wing key and count it when no creamy is bound."""
+        self.ctx.config.creamy_tp_button = ""
+        self.ctx.config.creamy_tp_scan_code = 0
+        self.assertTrue(self.tport.teleport_once())
+        self.input.teleport_key.assert_called_once_with(16)
+        self.ctx.note_teleport_for_wings.assert_called_once()
 
     def test_explicit_teleport_code_is_rejected_when_binding_was_cleared(self) -> None:
         self.ctx.config.creamy_tp_button = ""

@@ -63,7 +63,7 @@ class TeleportController:
     def active_scan_code(self) -> int:
         """Creamy TP first, wing key next (mode / area-clear teleports)."""
         cfg = self._ctx.config
-        if cfg.creamy_tp_scan_code > 0 and (cfg.creamy_tp_button or "").strip():
+        if self._creamy_assigned(cfg):
             return int(cfg.creamy_tp_scan_code)
         if self._wing_key_assigned(cfg):
             return int(cfg.teleport_scan_code)
@@ -72,7 +72,7 @@ class TeleportController:
     def active_button(self) -> str:
         """Creamy TP first, wing key next (mode / area-clear teleports)."""
         cfg = self._ctx.config
-        if cfg.creamy_tp_scan_code > 0 and (cfg.creamy_tp_button or "").strip():
+        if self._creamy_assigned(cfg):
             return cfg.creamy_tp_button
         return cfg.teleport_button
 
@@ -100,22 +100,43 @@ class TeleportController:
         """True when Teleport Key (fly wing) is bound to a real scan code."""
         return bool((cfg.teleport_button or "").strip()) and int(cfg.teleport_scan_code) > 0
 
+    @staticmethod
+    def _creamy_assigned(cfg) -> bool:
+        """True when Creamy TP is bound to a real scan code."""
+        return (
+            bool((cfg.creamy_tp_button or "").strip())
+            and int(cfg.creamy_tp_scan_code) > 0
+        )
+
     def danger_scan_code(self) -> int:
         """Wing (Teleport) key when assigned; otherwise Creamy TP.
 
         Urgent/critical escapes use fly wings only if Teleport Key is set.
         If wing is unset, creamy must still fire — never a no-op escape.
+        Once GetFlyWings reports that storage has no wings left
+        (``fly_wings_exhausted``), the wing key is a no-op in-game, so the
+        critical escape switches to the Creamy TP key while one is bound.
         """
         cfg = self._ctx.config
+        wings_exhausted = getattr(self._ctx, "fly_wings_exhausted", None) is True
+        if wings_exhausted and self._creamy_assigned(cfg):
+            return int(cfg.creamy_tp_scan_code)
         if self._wing_key_assigned(cfg):
             return int(cfg.teleport_scan_code)
-        if cfg.creamy_tp_scan_code > 0 and (cfg.creamy_tp_button or "").strip():
+        if self._creamy_assigned(cfg):
             return int(cfg.creamy_tp_scan_code)
         return 0
 
     def danger_button(self) -> str:
-        """Wing (Teleport) key when assigned; otherwise Creamy TP."""
+        """Wing (Teleport) key when assigned; otherwise Creamy TP.
+
+        Mirrors :meth:`danger_scan_code`: the critical escape uses Creamy TP
+        once fly wings are exhausted and a creamy binding exists.
+        """
         cfg = self._ctx.config
+        wings_exhausted = getattr(self._ctx, "fly_wings_exhausted", None) is True
+        if wings_exhausted and self._creamy_assigned(cfg):
+            return cfg.creamy_tp_button
         if self._wing_key_assigned(cfg):
             return cfg.teleport_button
         return cfg.creamy_tp_button

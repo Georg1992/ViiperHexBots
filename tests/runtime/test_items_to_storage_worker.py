@@ -491,6 +491,67 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             self.assertFalse(self.ctx.should_restock_fly_wings())
             self.assertNotIn(("type", "150"), self.input.calls)
 
+    # ── wing-key-only config (no creamy TP) ─────────────────────────
+
+    def test_restock_cycle_with_only_wing_key_no_creamy(self) -> None:
+        """GetFlyWings runs when only the wing key is bound (no Creamy TP).
+
+        User contract: Take Fly Wings checked, Teleport Key set, Creamy TP Key
+        empty, weight dump disabled. Restock must still trigger, run, and
+        re-arm for a later session once the wings are drained by wing-key
+        teleports.
+        """
+        stack, m = _enter_worker_patches(
+            find_storage_wing=DEFAULT,
+            find_wings_in_use_grid=DEFAULT,
+            require_template=DEFAULT,
+        )
+        with stack:
+            panel = _fake_panel()
+            m["require_inventory_panel"].return_value = panel
+            m["require_template"].return_value = (10, 10)
+            m["find_wings_in_use_grid"].side_effect = [[(0, 0, 46, 42)], []]
+            m["find_storage_wing"].return_value = (200, 100)
+            m["InventoryAutomation.ensure_inventory_open"].return_value = panel
+
+            # Only the fly-wing teleport key; no Creamy TP binding anywhere.
+            self.config.teleport_button = "q"
+            self.config.teleport_scan_code = 16
+            self.config.creamy_tp_button = ""
+            self.config.creamy_tp_scan_code = 0
+            self.config.take_fly_wings = True
+            self.config.fly_wings_amount = 150
+            # Weight dump disabled: restock-only storage sessions.
+            self.config.weight_modifier = 49
+
+            self.vitals.publish_weight(10, 100)
+            self.vitals.publish_hp(1000, 1000)
+            worker = self._worker()
+
+            # Restock is due — no creamy dependency in any gate.
+            self.assertTrue(self.ctx.should_restock_fly_wings())
+            self.assertTrue(worker.storage_due())
+            self.assertEqual(worker.storage_request(), (False, True))
+
+            worker.storage_session(dump=False, restock=True)
+
+            m["InventoryAutomation.ensure_storage_open"].assert_called()
+            m["InventoryAutomation.close_menus"].assert_called()
+            self.assertIn(("type", "150"), self.input.calls)
+            self.assertEqual(self.ctx.wingcount, 150)
+            self.assertFalse(self.ctx.fly_wings_exhausted)
+
+            # Repeated-call safety: wing-key teleports drain the counter; at 0
+            # the deferred action becomes due again for a later session.
+            for _ in range(149):
+                self.ctx.note_teleport_for_wings()
+            self.assertEqual(self.ctx.wingcount, 1)
+            self.assertFalse(worker.storage_due())
+            self.ctx.note_teleport_for_wings()
+            self.assertEqual(self.ctx.wingcount, 0)
+            self.assertTrue(worker.storage_due())
+            self.assertEqual(worker.storage_request(), (False, True))
+
     # ── storage session edge cases ─────────────────────────────────
 
     def test_storage_session_closes_menus_on_ui_miss(self) -> None:
