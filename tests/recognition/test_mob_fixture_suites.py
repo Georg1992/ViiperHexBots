@@ -8,13 +8,20 @@ import cv2
 
 from pybot.paths import PROJECT_ROOT
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
-from pybot.recognition.fixtures import MOB_FIXTURE_SUITES, fixture_search_frame, MobFixtureImage, MobFixtureSuite
+from pybot.recognition.fixtures import (
+    MOB_FIXTURE_SUITES,
+    MobFixtureImage,
+    MobFixtureSuite,
+    fixture_search_frame,
+)
 
 
 class MobFixtureSuiteTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.detector = MobDetector(PROJECT_ROOT, load_detector_config())
+        config = load_detector_config()
+        cls.detector = MobDetector(PROJECT_ROOT, config)
+        cls.grf_detector = MobDetector(PROJECT_ROOT, config, use_sprite_grf=True)
 
     def test_each_suite_has_expected_fixtures(self) -> None:
         for suite in MOB_FIXTURE_SUITES:
@@ -39,6 +46,8 @@ class MobFixtureSuiteTests(unittest.TestCase):
 
     def test_fixture_accept_counts(self) -> None:
         for suite in MOB_FIXTURE_SUITES:
+            if not suite.recognition_regression:
+                continue
             with self.subTest(suite=suite.folder):
                 self._assert_suite_counts(suite)
 
@@ -51,17 +60,14 @@ class MobFixtureSuiteTests(unittest.TestCase):
         frame = cv2.imread(str(image.path), cv2.IMREAD_COLOR)
         self.assertIsNotNone(frame, f"missing or unreadable fixture: {image.path}")
 
-        frame = fixture_search_frame(frame)
-
-        result = self.detector.detect(frame, suite.mob_name)
-        accepted = len(result.accepted)
-        expected = image.expected_count
-        world = "gray" if image.gray_world else "normal"
+        detector = self.grf_detector if suite.use_sprite_grf else self.detector
+        result = detector.detect(fixture_search_frame(frame), suite.mob_name)
 
         self.assertEqual(
-            accepted,
-            expected,
-            f"{suite.folder}/{image.file_name} ({world}): expected {expected} accepted, got {accepted}",
+            len(result.accepted),
+            image.expected_count,
+            f"{suite.folder}/{image.file_name}: expected {image.expected_count} "
+            f"accepted, got {len(result.accepted)}",
         )
 
 

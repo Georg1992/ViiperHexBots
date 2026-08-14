@@ -271,8 +271,14 @@ def _encode_static_spr(spr_file: SprFile, bgra: np.ndarray) -> bytes:
         raise RuntimeError(f"canonical sprite is too large: {width}x{height}")
 
     tinted = _tinted_palette(spr_file)
+    # Use a non-overflowing dtype for squared BGR distances.  ``int16``
+    # wraps values such as (191 - 5) ** 2 past 32767, which made the
+    # nearest-colour lookup select the near-black palette entry for most
+    # bright red pixels.  The generated sprite then contained an opaque
+    # black silhouette even though its descriptor was built from the red
+    # source frame.
     candidates = np.asarray(
-        [list(color[:3]) for color in tinted[1:]], dtype=np.int16
+        [list(color[:3]) for color in tinted[1:]], dtype=np.int32
     )
 
     opaque = bgra[:, :, 3] >= 128

@@ -33,6 +33,8 @@ class MobFixtureSuite:
     expected_fixture_count: int = 8
     expected_normal_count: int = 4
     expected_gray_count: int = 4
+    use_sprite_grf: bool = False
+    recognition_regression: bool = True
 
     @property
     def image_dir(self) -> Path:
@@ -103,12 +105,30 @@ MOB_FIXTURE_SUITES: tuple[MobFixtureSuite, ...] = (
         mob_name="horn",
         pattern=re.compile(r"^(\d+)Horn(?:_Gray\d*)?\.png$", re.IGNORECASE),
     ),
-    # TharaFrog — no SPR/ACT assets yet; fixtures kept for future use.
-    # MobFixtureSuite.from_manifest(
-    #     folder="TharaFrog",
-    #     mob_name="thara_frog",
-    #     pattern=re.compile(r"^(\d+)Tharas?(?:_Gray)?\.png$", re.IGNORECASE),
-    # ),
+    MobFixtureSuite.from_manifest(
+        folder="TharaFrog",
+        mob_name="thara_frog",
+        pattern=re.compile(r"^(\d+)Tharas?(?:_Gray)?\.png$", re.IGNORECASE),
+    ),
+    # ModifiedSprite captures are rendered from sprite.grf and must use the
+    # static GRF descriptor, not the normal purple source-sprite descriptor.
+    MobFixtureSuite(
+        folder="TharaFrog",
+        mob_name="thara_frog",
+        pattern=re.compile(
+            r"^(\d+)Tharas?_Gray_ModifiedSprite\.png$", re.IGNORECASE
+        ),
+        expected_fixture_count=3,
+        expected_normal_count=0,
+        expected_gray_count=3,
+        use_sprite_grf=True,
+        # These captures were taken from the pre-fix archive, whose generated
+        # static SPR mapped most bright red pixels to an opaque near-black
+        # palette entry. Keep them for fixture-count and forensic coverage;
+        # fresh captures are required for an acceptance regression after the
+        # corrected GRF is installed.
+        recognition_regression=False,
+    ),
     MobFixtureSuite.from_manifest(
         folder="Alligator",
         mob_name="alligator",

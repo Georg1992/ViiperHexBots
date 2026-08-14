@@ -16,9 +16,32 @@ from pybot.mobs.sprite_grf import (
     remove_mob_from_sprite_grf,
     sync_sprite_grf,
 )
+from pybot.recognition.spr_reader import SprReader
 
 
 class SpriteGrfRemovalTests(unittest.TestCase):
+    def test_thara_modified_sprite_preserves_opaque_red_pixels(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        modified = root / "assets" / "mobs" / "thara_frog" / "modified_sprite"
+        frame = SprReader(modified / "thara_frog.spr").load().get_frame(0)
+        self.assertIsNotNone(frame)
+        assert frame is not None
+        opaque = frame.rgba[:, :, 3] >= 128
+        self.assertTrue(opaque.any())
+        self.assertGreater(int(frame.rgba[:, :, 2][opaque].min()), 0)
+
+    def test_thara_entries_match_generated_modified_assets(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        archive = SpriteGrf(root / "sprite.grf")
+        modified = root / "assets" / "mobs" / "thara_frog" / "modified_sprite"
+        for extension in ("spr", "act"):
+            path_bytes = _GRF_SPRITE_DIR_BYTES + b"\\thara_frog." + extension.encode()
+            matches = [
+                entry for entry in archive._entries if entry._path_bytes == path_bytes
+            ]
+            self.assertEqual(len(matches), 1, path_bytes)
+            self.assertEqual(matches[0].raw_data, (modified / f"thara_frog.{extension}").read_bytes())
+
     def test_round_trips_production_archive(self) -> None:
         source = Path(__file__).resolve().parents[2] / "sprite.grf"
         with tempfile.TemporaryDirectory() as tmp:

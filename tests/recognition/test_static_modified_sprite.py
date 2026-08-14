@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 from pybot.recognition.act_reader import (
     ActAction,
     ActFile,
@@ -101,6 +103,10 @@ class StaticModifiedSpriteTests(unittest.TestCase):
             self.assertEqual(int(frame.rgba[:, :, 1][opaque].max()), 0)
             self.assertEqual(frame.width, expected.shape[1])
             self.assertEqual(frame.height, expected.shape[0])
+            self.assertTrue(
+                np.array_equal(frame.rgba, expected),
+                "indexed static SPR must preserve the red canonical frame",
+            )
             source_frame = source_spr.get_frame(0)
             assert source_frame is not None
             self.assertGreaterEqual(frame.width, int(source_frame.width * SCALE_FACTOR))
