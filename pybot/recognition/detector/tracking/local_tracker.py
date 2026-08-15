@@ -291,6 +291,7 @@ def track_local(
         identity_cx=search_cx,
         identity_cy=search_cy,
         identity_radius_px=identity_radius,
+        allow_partial_center=track_id > 0,
     )
 
     if template_hit is None and track_id in template_store:
@@ -322,6 +323,7 @@ def track_local(
             identity_cx=search_cx,
             identity_cy=search_cy,
             identity_radius_px=identity_radius,
+            allow_partial_center=track_id > 0,
         )
         if recovered is not None:
             _track_miss_store(detector).pop(track_id, None)
@@ -643,8 +645,16 @@ def _follow_cached_template(
     identity_cx: int,
     identity_cy: int,
     identity_radius_px: int,
+    allow_partial_center: bool = False,
 ) -> LocalTrackResult | None:
-    """Follow a previously confirmed patch; return None when reacquisition is needed."""
+    """Follow a previously confirmed patch; return None when reacquisition is needed.
+
+    Initial acquisition remains strict: it must produce a current sprite center.
+    A positive, already-confirmed Track may use the identity-constrained anchor
+    consensus when the current center is occluded. The cached anchors still have
+    to agree and remain inside the motion corridor, so this is recovery evidence
+    rather than an unrestricted stale-coordinate fallback.
+    """
     template = _template_store(detector).get(track_id)
     if template is None:
         return None
@@ -770,14 +780,20 @@ def _follow_cached_template(
     hit_x = int(round(float(np.median([candidate[0] for candidate in best_cluster]))))
     hit_y = int(round(float(np.median([candidate[1] for candidate in best_cluster]))))
     max_val = max(candidate[2] for candidate in best_cluster)
-    # Every successful warm frame must be anchored by the current sprite mask.
-    # No raw template coordinate is publishable.
+    # Initial acquisition must be anchored by the current sprite mask. Once a
+    # positive Track has a stable cached identity, a partially occluded sprite
+    # may lose that mask while its independent anchors still agree on the same
+    # location. Preserve that warm follow instead of turning one occluded frame
+    # into a local miss; the identity corridor and cross-track suppression below
+    # still apply to the consensus coordinate.
     projected = _refine_hit_to_sprite_center(
         detector, frame_bgr, descriptor, hit_x, hit_y, scale,
     )
     if projected is None:
-        return None
-    hit_x, hit_y = projected
+        if not allow_partial_center:
+            return None
+    else:
+        hit_x, hit_y = projected
     if (
         (hit_x - identity_cx) ** 2 + (hit_y - identity_cy) ** 2
         > float(identity_radius * identity_radius)

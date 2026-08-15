@@ -360,6 +360,80 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertLessEqual(abs(result.x - 115), 4)
         self.assertLessEqual(abs(result.y - 80), 4)
 
+    def test_warm_follow_survives_when_center_mask_is_occluded(self) -> None:
+        """A confirmed Track may use agreeing anchors when its center is blocked."""
+        detector = self._detector()
+        descriptor = detector.ensure_descriptor("horn")
+        from pybot.recognition.detector.tracking import local_tracker
+
+        rng = np.random.default_rng(47)
+        template = rng.integers(0, 255, size=(12, 12), dtype=np.uint8)
+        frame_gray = rng.integers(0, 35, size=(180, 260), dtype=np.uint8)
+        desired = cv2.resize(template, (24, 24), interpolation=cv2.INTER_NEAREST)
+        frame_gray[68:92, 103:127] = desired
+        frame = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
+        track_id = 947
+        local_tracker._template_store(detector)[track_id] = SimpleNamespace(
+            anchors=(
+                _TrackAnchor(template, 0, 0),
+                _TrackAnchor(template, 0, 0),
+            ),
+            width=24,
+            height=24,
+            center_x=115,
+            center_y=80,
+            scale=0.9,
+        )
+
+        with patch.object(
+            local_tracker,
+            "_refine_hit_to_sprite_center",
+            return_value=None,
+        ), patch.object(
+            local_tracker,
+            "measure_opacity_score",
+            return_value=0.66,
+        ):
+            strict = local_tracker._follow_cached_template(
+                detector,
+                frame,
+                descriptor,
+                track_id=track_id,
+                cx=115,
+                cy=80,
+                scale=0.9,
+                search_radius_px=35,
+                suppress_positions=None,
+                offset_x=0,
+                offset_y=0,
+                identity_cx=115,
+                identity_cy=80,
+                identity_radius_px=35,
+            )
+            warm = local_tracker._follow_cached_template(
+                detector,
+                frame,
+                descriptor,
+                track_id=track_id,
+                cx=115,
+                cy=80,
+                scale=0.9,
+                search_radius_px=35,
+                suppress_positions=None,
+                offset_x=0,
+                offset_y=0,
+                identity_cx=115,
+                identity_cy=80,
+                identity_radius_px=35,
+                allow_partial_center=True,
+            )
+
+        self.assertIsNone(strict)
+        self.assertIsNotNone(warm)
+        assert warm is not None
+        self.assertLessEqual(abs(warm.x - 115), 4)
+        self.assertLessEqual(abs(warm.y - 80), 4)
+
     def test_acquired_multi_anchor_follow_survives_cursor_occlusion(self) -> None:
         """Real acquisition stores corner anchors that survive a cursor block."""
         detector = self._detector()
