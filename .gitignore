@@ -2,6 +2,17 @@ viiper-input.exe
 viiper-input.exe.new
 viiper-input.exe.bak
 config.ini
+sprite.grf
+# Optional mob assets stay local; only the built-in package is tracked.
+assets/mobs/*
+!assets/mobs/wild_rose/
+!assets/mobs/wild_rose/**
+!assets/mobs/DesertWolf/
+!assets/mobs/DesertWolf/**
+!assets/mobs/Horn/
+!assets/mobs/Horn/**
+!assets/mobs/Noxious/
+!assets/mobs/Noxious/**
 logs/sessions/
 logs/debug_saves/
 logs/detect_debug/

@@ -11,11 +11,26 @@ from pybot.recognition.detector.descriptors.descriptor import MobDescriptor
 from pybot.recognition.detector.descriptors.descriptor_builder import DESCRIPTOR_VERSION
 
 
+# These assets ship with the bot and cannot be removed through the UI.
+BUILTIN_MOB_ORDER = ("wild_rose", "desert_wolf", "horn", "noxious")
+BUILTIN_MOB_NAMES = frozenset(BUILTIN_MOB_ORDER)
+
+
+def is_builtin_mob(name: str) -> bool:
+    """Return whether *name* identifies a protected bundled mob."""
+    return name.strip().lower() in BUILTIN_MOB_NAMES
+
+
 @dataclass(frozen=True)
 class MobEntry:
     asset_name: str
     display_name: str
     descriptor_name: str
+
+    @property
+    def is_builtin(self) -> bool:
+        """True when this entry is one of the mobs shipped with the bot."""
+        return is_builtin_mob(self.descriptor_name)
 
 
 def mob_display_name(asset_name: str) -> str:
@@ -41,6 +56,15 @@ def _scan_asset_pairs() -> list[tuple[str, str]]:
             if act_path.is_file():
                 pairs.append((mob_dir.name, spr_stem))
                 break
+    builtin_rank = {name: index for index, name in enumerate(BUILTIN_MOB_ORDER)}
+    pairs.sort(
+        key=lambda pair: (
+            0,
+            builtin_rank[pair[1].lower()],
+        )
+        if pair[1].lower() in builtin_rank
+        else (1, pair[0].casefold(), pair[1].casefold())
+    )
     return pairs
 
 

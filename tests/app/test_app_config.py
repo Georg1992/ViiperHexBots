@@ -11,7 +11,12 @@ from pybot.app.config_store import AppConfig, list_client_profiles
 from pybot.config.clients import memory_reading_enabled
 from pybot.config.runtime import hunt_runtime_config_from_settings, resolve_mob_name
 from pybot.config.schema import AppSettings, MobCustomSettings
-from pybot.mobs.catalog import load_mob_catalog, mob_display_name
+from pybot.mobs.catalog import (
+    BUILTIN_MOB_ORDER,
+    is_builtin_mob,
+    load_mob_catalog,
+    mob_display_name,
+)
 from pybot.paths import PROJECT_ROOT
 
 
@@ -131,6 +136,12 @@ class MobCatalogTests(unittest.TestCase):
 
     def test_display_name(self) -> None:
         self.assertEqual(mob_display_name("horn"), "Horn")
+
+    def test_builtin_mobs_are_first_and_protected(self) -> None:
+        catalog = load_mob_catalog()
+        names = [entry.descriptor_name.lower() for entry in catalog]
+        self.assertEqual(names[: len(BUILTIN_MOB_ORDER)], list(BUILTIN_MOB_ORDER))
+        self.assertTrue(all(is_builtin_mob(name) for name in names[:4]))
 
     def test_resolve_mob_name_uses_catalog(self) -> None:
         parser = configparser.ConfigParser()

@@ -264,8 +264,9 @@ class MainWindow:
             self._mob_settings_buttons.append(settings_button)
             delete_button = ttk.Button(
                 frame,
-                text="Delete",
+                text="Built-in" if mob.is_builtin else "Delete",
                 width=7,
+                state=tk.DISABLED if mob.is_builtin else tk.NORMAL,
                 command=lambda asset=mob.asset_name, descriptor=mob.descriptor_name: self._delete_mob(asset, descriptor),
             )
             delete_button.grid(row=index - 1, column=2, sticky="w", padx=(6, 0))

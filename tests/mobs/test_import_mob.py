@@ -119,11 +119,11 @@ class MobImportTests(unittest.TestCase):
     def test_delete_mob_assets_removes_all_local_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            mob_dir = tmp_path / "mobs" / "DesertWolf"
-            _touch(mob_dir / "sprite" / "desert_wolf.spr")
-            _touch(mob_dir / "sprite" / "desert_wolf.act")
-            _touch(mob_dir / "modified_sprite" / "desert_wolf.spr")
-            descriptor_dir = tmp_path / "descriptors" / "desert_wolf"
+            mob_dir = tmp_path / "mobs" / "custom_mob"
+            _touch(mob_dir / "sprite" / "custom_mob.spr")
+            _touch(mob_dir / "sprite" / "custom_mob.act")
+            _touch(mob_dir / "modified_sprite" / "custom_mob.spr")
+            descriptor_dir = tmp_path / "descriptors" / "custom_mob"
             _touch(descriptor_dir / "descriptor.json")
             _touch(descriptor_dir / "modified_sprite_descriptor.json")
 
@@ -139,21 +139,21 @@ class MobImportTests(unittest.TestCase):
                     return_value=2,
                 ) as sync_grf,
             ):
-                delete_mob_assets("DesertWolf", "desert_wolf")
+                delete_mob_assets("custom_mob", "custom_mob")
 
             self.assertFalse(mob_dir.exists())
             self.assertFalse(descriptor_dir.exists())
             sync_grf.assert_called_once_with(
                 tmp_path,
-                remove_mob_name="desert_wolf",
+                remove_mob_name="custom_mob",
             )
 
     def test_delete_restores_assets_and_archive_when_sync_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            mob_dir = tmp_path / "mobs" / "horn"
+            mob_dir = tmp_path / "mobs" / "custom_mob"
             _touch(mob_dir / "sprite" / "horn.spr")
-            descriptor_dir = tmp_path / "descriptors" / "horn"
+            descriptor_dir = tmp_path / "descriptors" / "custom_mob"
             _touch(descriptor_dir / "descriptor.json")
             archive = tmp_path / "sprite.grf"
             archive.write_bytes(b"original archive")
@@ -171,11 +171,20 @@ class MobImportTests(unittest.TestCase):
                 ),
             ):
                 with self.assertRaisesRegex(RuntimeError, "cannot rebuild GRF"):
-                    delete_mob_assets("horn", "horn")
+                    delete_mob_assets("custom_mob", "custom_mob")
 
             self.assertTrue(mob_dir.is_dir())
             self.assertTrue(descriptor_dir.is_dir())
             self.assertEqual(archive.read_bytes(), b"original archive")
+
+    def test_delete_mob_assets_rejects_builtin_mob(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            mob_dir = tmp_path / "mobs" / "Horn"
+            _touch(mob_dir / "sprite" / "horn.spr")
+            with patch("pybot.mobs.import_mob.MOBS_DIR", tmp_path / "mobs"):
+                with self.assertRaisesRegex(MobImportError, "built-in mob"):
+                    delete_mob_assets("Horn", "horn")
 
     def test_delete_mob_assets_rejects_missing_mob(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

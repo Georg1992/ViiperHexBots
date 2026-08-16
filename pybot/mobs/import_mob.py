@@ -6,7 +6,12 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from pybot.mobs.catalog import MobEntry, descriptor_path, mob_display_name
+from pybot.mobs.catalog import (
+    MobEntry,
+    descriptor_path,
+    is_builtin_mob,
+    mob_display_name,
+)
 from pybot.paths import DESCRIPTORS_DIR, MOBS_DIR, PROJECT_ROOT
 from pybot.recognition.detector.descriptors.descriptor import MobDescriptor
 from pybot.recognition.detector.descriptors.descriptor_builder import DescriptorBuilder
@@ -95,6 +100,10 @@ def delete_mob_assets(asset_name: str, descriptor_name: str) -> None:
     descriptor_key = descriptor_name.strip().lower()
     if not asset_key or not descriptor_key:
         raise MobImportError("mob name cannot be empty")
+    if is_builtin_mob(descriptor_key):
+        raise MobImportError(
+            f"built-in mob '{descriptor_key}' cannot be removed"
+        )
 
     mob_dir = (MOBS_DIR / asset_key).resolve()
     mobs_root = MOBS_DIR.resolve()
