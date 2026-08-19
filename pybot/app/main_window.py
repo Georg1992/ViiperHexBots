@@ -77,9 +77,7 @@ class MainWindow:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("Hex Bot")
-        # Initial size; replaced by _fit_window_to_content() after widgets exist.
-        self.root.geometry("1040x900")
-        self.root.minsize(980, 820)
+        self.root.withdraw()
 
         # ── Data layer ──────────────────────────────────────────────
         self.config = AppConfig().load()
@@ -189,6 +187,7 @@ class MainWindow:
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_exit)
         self._fit_window_to_content()
+        self.root.deiconify()
 
         # Wire the non-log status widget and durable session sink after widgets exist.
         # Log messages intentionally have no Tk or in-game visual sink.
@@ -203,34 +202,15 @@ class MainWindow:
     # ── Pre-flight ──────────────────────────────────────────────────
 
     def _fit_window_to_content(self) -> None:
-        """Grow the window to the UI's natural size; block shrink below that."""
+        """Size the window to the UI's current requested layout."""
+        # Drop the previous floor first so the window can shrink when widgets
+        # are removed (unused keys, deleted mobs, fewer timers).
+        self.root.minsize(1, 1)
         self.root.update_idletasks()
-        children = self.root.winfo_children()
-        if children:
-            content = children[0]
-            content.update_idletasks()
-            width = content.winfo_reqwidth() + 24
-            height = content.winfo_reqheight() + 48
-        else:
-            width = self.root.winfo_reqwidth()
-            height = self.root.winfo_reqheight()
-        width = max(width, 980)
-        height = max(height, 820)
-
-        min_w, min_h = self.root.minsize()
-        width = max(width, min_w)
-        height = max(height, min_h)
+        width = self.root.winfo_reqwidth()
+        height = self.root.winfo_reqheight()
+        self.root.geometry(f"{width}x{height}")
         self.root.minsize(width, height)
-
-        cur_w = self.root.winfo_width()
-        cur_h = self.root.winfo_height()
-        if cur_w < 50 or cur_h < 50:
-            self.root.geometry(f"{width}x{height}")
-            return
-        new_w = max(cur_w, width)
-        new_h = max(cur_h, height)
-        if new_w != cur_w or new_h != cur_h:
-            self.root.geometry(f"{new_w}x{new_h}")
 
     def _rebuild_mob_radio_buttons(self) -> None:
         frame = self._mob_radio_frame
@@ -1030,6 +1010,7 @@ class MainWindow:
     def _on_add_timer_box(self) -> None:
         self._add_timer_box(SkillTimerSetting())
         self._apply_ui_settings()
+        self._fit_window_to_content()
 
     def _on_remove_timer_box(self, index: int) -> None:
         if index < 0 or index >= len(self._timer_boxes):
@@ -1052,6 +1033,7 @@ class MainWindow:
         self._relayout_timer_boxes()
         self._refresh_timer_add_button()
         self._apply_ui_settings()
+        self._fit_window_to_content()
 
     def _relayout_timer_boxes(self) -> None:
         for index, box in enumerate(self._timer_boxes):
