@@ -18,6 +18,7 @@ from pybot.config.ini_store import load_settings
 from pybot.config.schema import (
     AppSettings,
     MobCustomSettings,
+    normalize_hunt_mode,
 )
 from pybot.mobs.catalog import resolve_mob_descriptor_name
 from pybot.paths import CONFIG_PATH, SESSIONS_DIR
@@ -74,10 +75,8 @@ class HuntRuntimeConfig:
     creamy_tp_scan_code: int = 0
     skill_timers: tuple[SkillTimerRuntime, ...] = ()
     custom_behavior: CustomBehaviorRuntime = CustomBehaviorRuntime()
-    save_point_button: str = ""
     hp_button: str = ""
     hp_scan_code: int = 0
-    sp_button: str = ""
     # (button, scan_code, delay_ms) for each assigned Open Storage chain step.
     open_storage_steps: tuple[tuple[str, int, int], ...] = ()
     weight_modifier: int = STORAGE_WEIGHT_MODIFIER_MAX
@@ -88,6 +87,10 @@ class HuntRuntimeConfig:
     sit_on_low_sp_scan_code: int = 0
     use_sprite_grf: bool = False
     client_profile: str = "Generic"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "hunt_mode", normalize_hunt_mode(self.hunt_mode))
+
 
 def resolve_mob_name(
     source: configparser.ConfigParser | AppSettings,
@@ -202,7 +205,9 @@ def hunt_runtime_config_from_settings(
         config_path=settings.config_path,
         hwnd=hwnd,
         mob_name=resolved_mob_name,
-        hunt_mode=settings.hunt_mode if hunt_mode is None else hunt_mode,
+        hunt_mode=normalize_hunt_mode(
+            settings.hunt_mode if hunt_mode is None else hunt_mode
+        ),
         skill_delay_ms=max(MIN_SKILL_DELAY_MS, settings.skill_delay),
         skill_button=settings.skill_button,
         skill_scan_code=key_name_to_scan_code(settings.skill_button),
@@ -218,10 +223,8 @@ def hunt_runtime_config_from_settings(
         control_file=resolved_control,
         skill_timers=tuple(skill_timers),
         custom_behavior=custom_behavior,
-        save_point_button=settings.save_point_button,
         hp_button=settings.hp_button,
         hp_scan_code=key_name_to_scan_code(settings.hp_button),
-        sp_button=settings.sp_button,
         open_storage_steps=_open_storage_steps_from_settings(settings),
         weight_modifier=min(
             STORAGE_WEIGHT_MODIFIER_MAX,

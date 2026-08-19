@@ -60,9 +60,11 @@ from pybot.app.storage_chain_dialog import (
 from pybot.app.mob_behavior_dialog import MobBehaviorDialog
 from pybot.config.schema import (
     MAX_SKILL_TIMERS,
+    SUPPORTED_HUNT_MODES,
     KeyChainStep,
     MobCustomSettings,
     SkillTimerSetting,
+    normalize_hunt_mode,
 )
 from pybot.mobs.catalog import load_mob_catalog
 from pybot.runtime.input.scan_codes import keysym_to_key_name
@@ -642,7 +644,7 @@ class MainWindow:
         self.hunt_mode_combo = ttk.Combobox(
             mode_row,
             textvariable=self.hunt_mode_var,
-            values=("teleport", "hybrid", "walk"),
+            values=SUPPORTED_HUNT_MODES,
             state="readonly",
             width=12,
         )
@@ -732,32 +734,16 @@ class MainWindow:
             1,
             width=7,
         )
-        self.save_point_button = self._key_entry(
-            keys_main,
-            "To SavePoint Key:",
-            self.config.save_point_button,
-            2,
-            0,
-            capture_key=True,
-        )
         hp_cell = ttk.Frame(keys_main)
-        hp_cell.grid(row=3, column=0, sticky="w", pady=2)
+        hp_cell.grid(row=2, column=0, sticky="w", pady=2)
         ttk.Label(hp_cell, text="HP Item Key:").pack(side=tk.LEFT)
         self.hp_button = ttk.Entry(hp_cell, width=6)
         self.hp_button.insert(0, self.config.hp_button)
         self.hp_button.pack(side=tk.LEFT, padx=(4, 0))
         self._bind_key_capture(self.hp_button)
         self._bind_setting_entry(self.hp_button)
-        self.sp_button = self._key_entry(
-            keys_main,
-            "SP Item Key:",
-            self.config.sp_button,
-            4,
-            0,
-            capture_key=True,
-        )
         sit_cell = ttk.Frame(keys_main)
-        sit_cell.grid(row=5, column=0, sticky="w", pady=2)
+        sit_cell.grid(row=3, column=0, sticky="w", pady=2)
         ttk.Label(sit_cell, text="Sit On Low Sp Key:").pack(side=tk.LEFT)
         self.sit_on_low_sp_button = ttk.Entry(sit_cell, width=6)
         self.sit_on_low_sp_button.insert(
@@ -776,7 +762,7 @@ class MainWindow:
         self.sit_on_low_sp_toggle.pack(side=tk.LEFT, padx=(4, 0))
         self._refresh_sit_toggle()
         storage_cell = ttk.Frame(keys_main)
-        storage_cell.grid(row=6, column=0, columnspan=2, sticky="w", pady=2)
+        storage_cell.grid(row=4, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Label(storage_cell, text="Open Storage:").pack(side=tk.LEFT)
         self.open_storage_cog = ttk.Button(
             storage_cell,
@@ -791,7 +777,7 @@ class MainWindow:
         )
         self.open_storage_summary.pack(side=tk.LEFT, padx=(6, 0))
         fly_cell = ttk.Frame(keys_main)
-        fly_cell.grid(row=7, column=0, sticky="w", pady=2)
+        fly_cell.grid(row=5, column=0, sticky="w", pady=2)
         self.fly_wings_var = tk.BooleanVar(value=self.config.take_fly_wings)
         fly_check = ttk.Checkbutton(
             fly_cell,
@@ -806,7 +792,7 @@ class MainWindow:
         self.fly_wings_amount.pack(side=tk.LEFT, padx=(4, 0))
         self._bind_setting_entry(self.fly_wings_amount)
         weight_cell = ttk.Frame(keys_main)
-        weight_cell.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        weight_cell.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         ttk.Label(weight_cell, text="Items to storage weight:").pack(side=tk.LEFT)
         # 49 = Off (AHK); 50–85 = active threshold %.
         initial_weight = max(
@@ -1222,7 +1208,7 @@ class MainWindow:
         self.config.client_profile = self.client_combo.get()
         self._sync_memory_reading_from_profile()
         self.config.selected_monster = self.mob_var.get()
-        self.config.hunt_mode = self.hunt_mode_var.get()
+        self.config.hunt_mode = normalize_hunt_mode(self.hunt_mode_var.get())
         self.config.search_range = int(float(self.search_range.get()))
         self.config.take_fly_wings = self.fly_wings_var.get()
         self.config.skill_button = self.skill_button.get().strip()
@@ -1236,12 +1222,10 @@ class MainWindow:
         self.config.teleport_delay = (
             int(raw_tp) if raw_tp else DEFAULT_TELEPORT_DELAY_MS
         )
-        self.config.save_point_button = self.save_point_button.get().strip()
         # open_storage_chain is edited via the cog dialog
         self.config.weight_modifier = int(float(self.storage_weight.get()))
         self.config.skill_timers = self._collect_skill_timers_from_ui()
         self.config.hp_button = self.hp_button.get().strip()
-        self.config.sp_button = self.sp_button.get().strip()
         self.config.sit_on_low_sp_button = self.sit_on_low_sp_button.get().strip()
         self.config.sit_on_low_sp = self.sit_on_low_sp_var.get()
         self.config.use_sprite_grf = self.use_sprite_grf_var.get()
@@ -1454,10 +1438,8 @@ class MainWindow:
             self.teleport_button,
             self.creamy_tp_button,
             self.teleport_delay,
-            self.save_point_button,
             self.open_storage_cog,
             self.hp_button,
-            self.sp_button,
             self.sit_on_low_sp_button,
             self.sit_on_low_sp_toggle,
             self.fly_wings_amount,

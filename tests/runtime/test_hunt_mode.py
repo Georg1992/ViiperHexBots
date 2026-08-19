@@ -12,6 +12,7 @@ from pybot.paths import PROJECT_ROOT
 from pybot.config.runtime import HuntRuntimeConfig
 from pybot.runtime.control import RuntimeControl
 from pybot.runtime.hunt_mode import create_hunt_mode
+from pybot.runtime.hunt_mode_strategies import WalkStrategy
 from pybot.runtime.hunt_policy import HuntPolicy
 from pybot.runtime.hunt_tracks import HuntTracks, monotonic_ms
 from pybot.runtime.input.input_backend import ShadowInputBackend
@@ -401,8 +402,9 @@ class HuntModeTests(unittest.TestCase):
         self.assertTrue(vitals.publish_sp_if_current(50, 100, epoch))
         self.assertTrue(self.mode.on_no_attackable_targets())
 
-    def test_hybrid_placeholder_does_not_teleport(self) -> None:
+    def test_legacy_hybrid_mode_uses_walk(self) -> None:
         self.config = make_config(hunt_mode="hybrid")
+        self.assertEqual(self.config.hunt_mode, "walk")
         self.ctx = HuntRuntimeContext(
             config=self.config,
             logger=self.logger,
@@ -418,6 +420,7 @@ class HuntModeTests(unittest.TestCase):
             self.ctx, ShadowInputBackend(),
             teleport_controller=_make_tport(self.ctx, ShadowInputBackend()),
         )
+        self.assertIsInstance(self.mode._strategy, WalkStrategy)
         self.mode.note_discovery_scan_completed(
             living_count=0,
             added_count=0,

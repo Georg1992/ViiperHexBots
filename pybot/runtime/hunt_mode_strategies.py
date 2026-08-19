@@ -1,7 +1,4 @@
-"""Hunt mode strategies — Teleport, Hybrid placeholder, and Walk.
-
-Hybrid remains a configured compatibility mode. It deliberately waits rather
-than guessing at an unapproved hybrid movement policy.
+"""Hunt mode strategies — Teleport and Walk.
 
 Each strategy encapsulates the no-target behaviour for a hunt mode,
 extracted from HuntModeController to satisfy the Open/Closed Principle.
@@ -328,18 +325,6 @@ class TeleportStrategy(HuntModeStrategy):
                 lifecycle=ctx,
             )
         )
-
-
-class HybridStrategy(HuntModeStrategy):
-    """Compatibility placeholder: wait without teleporting.
-
-    Keeping this explicit prevents a configured hybrid session from silently
-    acquiring teleport behavior before its movement policy is designed.
-    """
-
-    def _handle_no_targets_impl(self) -> bool:
-        self._log_no_target("wait", "hybrid_not_implemented")
-        return False
 
 
 class WalkStrategy(HuntModeStrategy):

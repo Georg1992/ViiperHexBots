@@ -24,6 +24,7 @@ from pybot.config.schema import (
     KeyChainStep,
     MobCustomSettings,
     SkillTimerSetting,
+    normalize_hunt_mode,
 )
 from pybot.paths import CONFIG_PATH
 
@@ -190,13 +191,6 @@ def load_settings(path: Path | None = None) -> AppSettings:
     config_path = path or CONFIG_PATH
     parser = _read_ini(config_path)
 
-    warper_x = parser.get("Warper", "X", fallback="")
-    if warper_x == "ERROR":
-        warper_x = ""
-    warper_y = parser.get("Warper", "Y", fallback="")
-    if warper_y == "ERROR":
-        warper_y = ""
-
     return AppSettings(
         config_path=config_path,
         last_session_title=parser.get("LastSession", "GameTitle", fallback=""),
@@ -213,7 +207,9 @@ def load_settings(path: Path | None = None) -> AppSettings:
         search_range=parser.getint(
             "Settings", "SearchRange", fallback=DEFAULT_SEARCH_RANGE_CELLS
         ),
-        hunt_mode=parser.get("Settings", "HuntMode", fallback="teleport"),
+        hunt_mode=normalize_hunt_mode(
+            parser.get("Settings", "HuntMode", fallback="teleport")
+        ),
         weight_modifier=min(
             STORAGE_WEIGHT_MODIFIER_MAX,
             parser.getint(
@@ -224,12 +220,8 @@ def load_settings(path: Path | None = None) -> AppSettings:
         fly_wings_amount=parser.getint(
             "Settings", "FlyWingsAmount", fallback=DEFAULT_FLY_WINGS_AMOUNT
         ),
-        detect_captcha=parser.getint("Settings", "DetectCaptcha", fallback=0) == 1,
         hunt_log_overlay=parser.getint("Settings", "HuntLogOverlay", fallback=1) == 1,
         hunt_validation_log=parser.getint("Settings", "HuntValidationLog", fallback=1) == 1,
-        warper_x=warper_x,
-        warper_y=warper_y,
-        warper_location=parser.getint("Warper", "warperLocation", fallback=0),
         skill_button=parser.get("Keybindings", "SkillButton", fallback="e"),
         skill_delay=parser.getint(
             "Keybindings", "SkillDelay", fallback=DEFAULT_SKILL_DELAY_MS
@@ -239,9 +231,7 @@ def load_settings(path: Path | None = None) -> AppSettings:
         teleport_delay=parser.getint(
             "Keybindings", "TeleportDelay", fallback=DEFAULT_TELEPORT_DELAY_MS
         ),
-        save_point_button=parser.get("Keybindings", "SavePointButton", fallback=""),
         hp_button=parser.get("Keybindings", "HPButton", fallback=""),
-        sp_button=parser.get("Keybindings", "SPButton", fallback=""),
         open_storage_chain=_load_open_storage_chain(parser),
         skill_timers=_load_skill_timers(parser),
         sit_on_low_sp=parser.getint("Keybindings", "SitOnLowSp", fallback=0) == 1,
@@ -286,27 +276,20 @@ def save_settings(settings: AppSettings) -> None:
 
     _ensure_section(parser, "Settings")
     parser["Settings"]["SearchRange"] = str(settings.search_range)
-    parser["Settings"]["HuntMode"] = settings.hunt_mode
+    parser["Settings"]["HuntMode"] = normalize_hunt_mode(settings.hunt_mode)
     parser["Settings"]["WeightModifier"] = str(
         min(STORAGE_WEIGHT_MODIFIER_MAX, int(settings.weight_modifier))
     )
     parser["Settings"]["TakeFlyWings"] = "1" if settings.take_fly_wings else "0"
     parser["Settings"]["FlyWingsAmount"] = str(settings.fly_wings_amount)
-    parser["Settings"]["DetectCaptcha"] = "1" if settings.detect_captcha else "0"
     parser["Settings"]["HuntLogOverlay"] = "1" if settings.hunt_log_overlay else "0"
     parser["Settings"]["HuntValidationLog"] = "1" if settings.hunt_validation_log else "0"
     parser["Settings"]["UseSpriteGrf"] = "1" if settings.use_sprite_grf else "0"
     parser["Settings"].pop("DeathDetectionEnabled", None)
+    parser["Settings"].pop("DetectCaptcha", None)
 
-    _ensure_section(parser, "Warper")
-    if settings.warper_coords_set:
-        parser["Warper"]["X"] = settings.warper_x
-        parser["Warper"]["Y"] = settings.warper_y
-        parser["Warper"]["warperLocation"] = str(settings.warper_location)
-    else:
-        parser["Warper"].pop("X", None)
-        parser["Warper"].pop("Y", None)
-        parser["Warper"].pop("warperLocation", None)
+    if parser.has_section("Warper"):
+        parser.remove_section("Warper")
 
     _ensure_section(parser, "Keybindings")
     parser["Keybindings"]["SkillButton"] = settings.skill_button
@@ -314,11 +297,11 @@ def save_settings(settings: AppSettings) -> None:
     parser["Keybindings"]["TeleportButton"] = settings.teleport_button
     parser["Keybindings"]["CreamyTpButton"] = settings.creamy_tp_button
     parser["Keybindings"]["TeleportDelay"] = str(settings.teleport_delay)
-    parser["Keybindings"]["SavePointButton"] = settings.save_point_button
     parser["Keybindings"]["HPButton"] = settings.hp_button
     # HealSkill was removed; self-healing is configured per mob.
     parser["Keybindings"].pop("HealSkill", None)
-    parser["Keybindings"]["SPButton"] = settings.sp_button
+    parser["Keybindings"].pop("SavePointButton", None)
+    parser["Keybindings"].pop("SPButton", None)
     parser["Keybindings"]["OpenStorageChain"] = _save_open_storage_chain(
         settings.open_storage_chain
     )

@@ -18,6 +18,21 @@ from pybot.paths import CONFIG_PATH
 
 MAX_SKILL_TIMERS = 6
 MAX_OPEN_STORAGE_STEPS = 7
+SUPPORTED_HUNT_MODES = ("teleport", "walk")
+
+
+def normalize_hunt_mode(mode: str) -> str:
+    """Return a supported hunt mode.
+
+    Legacy INI value ``hybrid`` was a wait stub. Walk is the supported
+    no-teleport mode, so hybrid configs hunt the same way as walk.
+    """
+    value = str(mode or "teleport").strip().lower()
+    if value == "hybrid":
+        return "walk"
+    if value in SUPPORTED_HUNT_MODES:
+        return value
+    raise ValueError(f"unknown hunt mode: {mode!r}")
 
 
 @dataclass
@@ -74,22 +89,15 @@ class AppSettings:
     weight_modifier: int = DEFAULT_WEIGHT_MODIFIER
     take_fly_wings: bool = False
     fly_wings_amount: int = DEFAULT_FLY_WINGS_AMOUNT
-    detect_captcha: bool = False
     hunt_log_overlay: bool = True
     hunt_validation_log: bool = True
-
-    warper_x: str = ""
-    warper_y: str = ""
-    warper_location: int = 0
 
     skill_button: str = "e"
     skill_delay: int = DEFAULT_SKILL_DELAY_MS
     teleport_button: str = ""
     creamy_tp_button: str = ""
     teleport_delay: int = DEFAULT_TELEPORT_DELAY_MS
-    save_point_button: str = ""
     hp_button: str = ""
-    sp_button: str = ""
     open_storage_chain: list[KeyChainStep] = field(default_factory=list)
     skill_timers: list[SkillTimerSetting] = field(default_factory=list)
     mob_custom_settings: dict[str, MobCustomSettings] = field(default_factory=dict)
@@ -98,6 +106,5 @@ class AppSettings:
 
     use_sprite_grf: bool = False
 
-    @property
-    def warper_coords_set(self) -> bool:
-        return bool(self.warper_x and self.warper_y)
+    def __post_init__(self) -> None:
+        self.hunt_mode = normalize_hunt_mode(self.hunt_mode)

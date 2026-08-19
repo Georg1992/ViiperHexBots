@@ -101,6 +101,45 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual(parser["Keybindings"]["HPButton"], "f2")
             self.assertNotIn("HealSkill", parser["Keybindings"])
 
+    def test_legacy_hybrid_ini_loads_and_saves_as_walk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.ini"
+            path.write_text("[Settings]\nHuntMode=hybrid\n", encoding="utf-8")
+
+            config = AppConfig(config_path=path).load()
+            self.assertEqual(config.hunt_mode, "walk")
+            config.save()
+
+            parser = configparser.ConfigParser()
+            parser.read(path, encoding="utf-8")
+            self.assertEqual(parser["Settings"]["HuntMode"], "walk")
+
+    def test_unused_ahk_settings_are_dropped_on_save(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.ini"
+            path.write_text(
+                "[Settings]\nDetectCaptcha=1\n"
+                "[Warper]\nX=10\nY=20\nwarperLocation=1\n"
+                "[Keybindings]\nSavePointButton=f8\nSPButton=f7\nHPButton=f1\n",
+                encoding="utf-8",
+            )
+
+            config = AppConfig(config_path=path).load()
+            self.assertEqual(config.hp_button, "f1")
+            config.save()
+
+            parser = configparser.ConfigParser()
+            parser.read(path, encoding="utf-8")
+            self.assertNotIn("DetectCaptcha", parser["Settings"])
+            self.assertFalse(parser.has_section("Warper"))
+            self.assertNotIn("SavePointButton", parser["Keybindings"])
+            self.assertNotIn("SPButton", parser["Keybindings"])
+            self.assertEqual(parser["Keybindings"]["HPButton"], "f1")
+
+    def test_unknown_hunt_mode_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown hunt mode"):
+            AppSettings(hunt_mode="fly")
+
     def test_client_profiles_exist(self) -> None:
         profiles = list_client_profiles(PROJECT_ROOT)
         self.assertIn("Generic", profiles)
