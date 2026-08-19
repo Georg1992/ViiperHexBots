@@ -306,6 +306,15 @@ class TeleportStrategy(HuntModeStrategy):
             self._log_no_target("wait", "no_teleport_key", context)
             return False
 
+        # Sit recovery cannot start from a missing SP sample. Check the ratio
+        # here, before the key, so a low or unread reading cannot chain hunt
+        # teleports. Danger and sit-placement paths keep their own keys.
+        blocked = self._teleport.hunt_teleport_blocked_reason()
+        if blocked is not None:
+            self._log_no_target_blocked(blocked)
+            self._log_no_target("wait", blocked, context)
+            return False
+
         self._log_no_target("teleport", "area_clear", context)
 
         def commit_mode_teleport() -> bool:

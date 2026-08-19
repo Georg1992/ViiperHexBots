@@ -182,6 +182,51 @@ class TeleportKeySelectionTests(unittest.TestCase):
         self.input.teleport_key.assert_not_called()
         self.ctx.discovery_suspend.set.assert_not_called()
 
+    def _enable_sit_recovery(self, vitals: PlayerVitals | None) -> TeleportController:
+        self.ctx.config.sit_on_low_sp = True
+        self.ctx.config.sit_on_low_sp_button = "insert"
+        self.ctx.config.sit_on_low_sp_scan_code = 82
+        self.ctx.tracks.can_claim_clear_for_teleport.return_value = True
+        return TeleportController(
+            self.ctx,
+            self.input,
+            MagicMock(),
+            vitals=vitals,
+        )
+
+    def test_mode_teleport_refuses_when_sp_is_low(self) -> None:
+        vitals = PlayerVitals()
+        vitals.publish_sp(4, 100)
+        tport = self._enable_sit_recovery(vitals)
+        self.assertEqual(tport.hunt_teleport_blocked_reason(), "low_sp")
+        self.assertFalse(tport.mode_teleport())
+        self.input.teleport_key.assert_not_called()
+
+    def test_mode_teleport_refuses_when_sp_is_unread(self) -> None:
+        tport = self._enable_sit_recovery(PlayerVitals())
+        self.assertEqual(tport.hunt_teleport_blocked_reason(), "sp_unknown")
+        self.assertFalse(tport.mode_teleport())
+        self.input.teleport_key.assert_not_called()
+
+    def test_mode_teleport_proceeds_when_sp_is_healthy(self) -> None:
+        vitals = PlayerVitals()
+        vitals.publish_sp(50, 100)
+        tport = self._enable_sit_recovery(vitals)
+        self.assertIsNone(tport.hunt_teleport_blocked_reason())
+        self.assertTrue(tport.mode_teleport())
+        self.input.teleport_key.assert_called_once()
+
+    def test_danger_and_sit_placement_still_teleport_when_sp_is_low(self) -> None:
+        vitals = PlayerVitals()
+        vitals.publish_sp(1, 100)
+        tport = self._enable_sit_recovery(vitals)
+        self.assertTrue(tport.danger_teleport(reason="critical_hunt"))
+        self.input.teleport_key.assert_called_once_with(16)
+        self.input.teleport_key.reset_mock()
+        vitals.publish_sp(1, 100)
+        self.assertTrue(tport.teleport_once_for_sit(log_tag="SIT"))
+        self.input.teleport_key.assert_called_once_with(17)
+
 
 if __name__ == "__main__":
     unittest.main()

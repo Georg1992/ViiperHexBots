@@ -7,6 +7,8 @@ Responsibilities
 * **Execution** — press teleport key, wait for settle, track wings/overlay.
 * **Danger teleport** — the sit worker's urgent escape primitive.
 * **Mode teleport** — discovery-gated teleport with suspend/release (for TeleportStrategy).
+  Hunt-mode teleports wait when Sit On Low Sp is enabled and SP is unread or
+  below the sit threshold, so recovery can start instead of chaining keys.
 
 Usage
 -----
@@ -21,6 +23,7 @@ import time
 
 from pybot.runtime.constants import (
     HP_POST_TELEPORT_HEAL_S,
+    SIT_LOW_SP_RATIO,
     SIT_SP_POLL_INTERVAL_S,
 )
 from pybot.runtime.event_utils import event_is_set
@@ -126,6 +129,31 @@ class TeleportController:
         if self._creamy_assigned(cfg):
             return int(cfg.creamy_tp_scan_code)
         return 0
+
+    def hunt_teleport_blocked_reason(self) -> str | None:
+        """Return why a hunt-mode teleport must wait, or ``None`` to proceed.
+
+        Sit-on-low-SP recovery only starts from a readable sample below
+        ``SIT_LOW_SP_RATIO``. Hunt teleports clear that sample for the landing
+        epoch, so chaining area-clear teleports before a fresh reading would
+        skip recovery and keep pressing the teleport key. Danger and sit
+        placement teleports do not use this gate.
+        """
+        cfg = self._ctx.config
+        if getattr(cfg, "sit_on_low_sp", False) is not True:
+            return None
+        if not str(getattr(cfg, "sit_on_low_sp_button", "") or "").strip():
+            return None
+        if int(getattr(cfg, "sit_on_low_sp_scan_code", 0) or 0) <= 0:
+            return None
+        if self._vitals is None:
+            return "sp_unknown"
+        sp, sp_max = self._vitals.sp_pair()
+        if sp is None or sp_max is None or sp_max <= 0:
+            return "sp_unknown"
+        if (sp / sp_max) < SIT_LOW_SP_RATIO:
+            return "low_sp"
+        return None
 
     def danger_button(self) -> str:
         """Wing (Teleport) key when assigned; otherwise Creamy TP.
@@ -361,6 +389,11 @@ class TeleportController:
             ctx.logger.behavior(
                 "[MODE] teleport skipped — critical escape in flight"
             )
+            return False
+
+        blocked = self.hunt_teleport_blocked_reason()
+        if blocked is not None:
+            ctx.logger.behavior(f"[MODE] teleport skipped — {blocked}")
             return False
 
         # Suspend discovery so the 1s cadence cannot scan during teleport

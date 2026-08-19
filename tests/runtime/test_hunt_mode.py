@@ -6,6 +6,7 @@ import threading
 import unittest
 from unittest.mock import MagicMock
 
+from pybot.game_state import PlayerVitals
 from pybot.runtime.capture.hunt_capture import HuntWindowCapture
 from pybot.paths import PROJECT_ROOT
 from pybot.config.runtime import HuntRuntimeConfig
@@ -21,10 +22,10 @@ from pybot.runtime.detection.detector_session import DetectorSession
 from pybot.runtime.teleport import TeleportController
 
 
-def _make_tport(ctx, input_backend):
+def _make_tport(ctx, input_backend, vitals=None):
     """Create a TeleportController for tests with a mocked hunt_mode."""
     from unittest.mock import MagicMock
-    tport = TeleportController(ctx, input_backend, MagicMock())
+    tport = TeleportController(ctx, input_backend, MagicMock(), vitals=vitals)
     # Only mock the scan code lookup — teleport_once uses the real ctx.
     tport.active_scan_code = MagicMock(return_value=16)  # type: ignore[method-assign]
     return tport
@@ -338,6 +339,67 @@ class HuntModeTests(unittest.TestCase):
         teleported = self.mode.on_no_attackable_targets()
         # Track is still alive after attack (no pending state), so no teleport
         self.assertFalse(teleported)
+
+    def _rebuild_with_sit(self, vitals: PlayerVitals) -> None:
+        self.config = make_config(
+            sit_on_low_sp=True,
+            sit_on_low_sp_button="insert",
+            sit_on_low_sp_scan_code=82,
+        )
+        self.ctx = HuntRuntimeContext(
+            config=self.config,
+            logger=self.logger,
+            tracks=self.tracks,
+            policy=HuntPolicy(),
+            capture=MagicMock(spec=HuntWindowCapture),
+            detector=self.detector,
+            tracker=self.detector,
+            validation=HuntValidationLogger(self.logger, self.tracks, enabled=False),
+            control=RuntimeControl(None),
+        )
+        self.mode = create_hunt_mode(
+            self.ctx,
+            ShadowInputBackend(),
+            teleport_controller=_make_tport(
+                self.ctx, ShadowInputBackend(), vitals=vitals
+            ),
+        )
+
+    def test_does_not_teleport_when_sit_enabled_and_sp_is_low(self) -> None:
+        vitals = PlayerVitals()
+        vitals.publish_sp(4, 100)
+        self._rebuild_with_sit(vitals)
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=self.tracks.area_epoch,
+        )
+        self.assertFalse(self.mode.on_no_attackable_targets())
+        self.assertEqual(self.tracks.area_epoch, 0)
+
+    def test_does_not_chain_teleports_while_sp_unread_after_landing(self) -> None:
+        """A hunt teleport clears SP; the next area-clear must wait for a sample."""
+        vitals = PlayerVitals()
+        vitals.publish_sp(50, 100)
+        self._rebuild_with_sit(vitals)
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=self.tracks.area_epoch,
+        )
+        self.assertTrue(self.mode.on_no_attackable_targets())
+        self.assertIsNone(vitals.sp)
+        self.mode.note_discovery_scan_completed(
+            living_count=0,
+            added_count=0,
+            area_epoch=self.tracks.area_epoch,
+        )
+        self.assertFalse(self.mode.on_no_attackable_targets())
+        epoch = vitals.observation_epoch
+        self.assertTrue(vitals.publish_sp_if_current(4, 100, epoch))
+        self.assertFalse(self.mode.on_no_attackable_targets())
+        self.assertTrue(vitals.publish_sp_if_current(50, 100, epoch))
+        self.assertTrue(self.mode.on_no_attackable_targets())
 
     def test_hybrid_placeholder_does_not_teleport(self) -> None:
         self.config = make_config(hunt_mode="hybrid")
