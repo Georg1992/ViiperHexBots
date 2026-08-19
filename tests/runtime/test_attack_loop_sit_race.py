@@ -10,9 +10,20 @@ from pybot.game_state import PlayerVitals
 from pybot.runtime.workers.attack_loop import AttackLoop
 
 
+def _perform_if_current(_track_id, _epoch, action):
+    result = action()
+    return result is not False
+
+
+def _attack_ctx() -> MagicMock:
+    ctx = MagicMock()
+    ctx.tracks.perform_if_current.side_effect = _perform_if_current
+    return ctx
+
+
 class AttackLoopSitRaceTests(unittest.TestCase):
     def test_debuff_prepares_target_before_attack_input(self) -> None:
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",
@@ -49,7 +60,6 @@ class AttackLoopSitRaceTests(unittest.TestCase):
 
         mob_behavior = MagicMock()
         mob_behavior.prepare_target.side_effect = prepare_target
-        mob_behavior.before_attack.side_effect = lambda *_args, **_kwargs: events.append("before")
         mob_behavior.kite_after_attack.side_effect = lambda *_args, **_kwargs: events.append("kite")
         input_backend = MagicMock()
         input_backend.skill_click_at.side_effect = lambda *_args: events.append("attack") or True
@@ -70,12 +80,12 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         # combat gate closed after input.
         self.assertEqual(
             events,
-            ["debuff", "marked", "before", "attack", "kite", "delay"],
+            ["debuff", "marked", "attack", "kite", "delay"],
         )
         ctx.tracks.mark_debuff_applied.assert_called_once_with(1)
 
     def test_unassigned_attack_key_does_not_prepare_or_attack(self) -> None:
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="",
@@ -91,7 +101,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         input_backend.skill_click_at.assert_not_called()
 
     def test_unassigned_custom_heal_does_not_hold_post_teleport_combat_gate(self) -> None:
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",
@@ -108,7 +118,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
 
     def test_post_teleport_non_full_hp_has_heal_priority_over_combat(self) -> None:
         """Any missing HP after teleport gets the tick before combat."""
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",
@@ -151,7 +161,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
 
     def test_normal_hunt_non_full_hp_does_not_veto_combat(self) -> None:
         """The full-HP gate applies only during the post-teleport window."""
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",
@@ -183,7 +193,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
 
     def test_post_teleport_unknown_hp_does_not_start_combat(self) -> None:
         """Unknown post-teleport HP must fail closed before combat."""
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",
@@ -216,7 +226,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
 
     def test_post_teleport_blocked_heal_retries_teleport(self) -> None:
         """A blocked post-teleport heal starts a fresh teleport retry."""
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",
@@ -262,7 +272,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
 
     def test_blocked_skill_teleports_then_retries_once_after_settle(self) -> None:
         """A successful retry teleport permits exactly one next skill attempt."""
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",
@@ -306,7 +316,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
 
     def test_unchanged_hp_after_verification_window_teleports(self) -> None:
         """A cast with no HP progress is blocked, not retried in place."""
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",
@@ -367,7 +377,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
 
     def test_blocked_skill_does_not_retry_in_place_when_teleport_fails(self) -> None:
         """A failed teleport retry suppresses repeated skill casts in place."""
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",
@@ -408,7 +418,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
 
     def test_successful_heal_does_not_immediately_retry_teleport(self) -> None:
         """Heal verification/cooldown must not trigger a second teleport."""
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",
@@ -446,7 +456,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         self.assertEqual(input_backend.skill_click_at.call_count, 1)
 
     def test_post_teleport_cooldown_wait_does_not_retry_teleport(self) -> None:
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",
@@ -483,7 +493,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         teleport.retry_post_teleport_heal.assert_not_called()
 
     def test_post_teleport_without_skill_does_not_block_combat(self) -> None:
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",
@@ -509,7 +519,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
 
     def test_post_teleport_non_full_hp_without_heal_vetoes_combat(self) -> None:
         """Post-teleport HP must be full before combat, even if heal is blocked."""
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",
@@ -545,7 +555,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx.stop_event.wait.assert_called_once()
 
     def test_run_does_not_heal_during_normal_target_and_idle_paths(self) -> None:
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",
@@ -581,7 +591,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         loop._attack_one.assert_called_once_with(1, unittest.mock.ANY)
 
     def test_run_blocks_custom_healing_when_unsafe_and_outside_window(self) -> None:
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",
@@ -615,7 +625,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
     def test_run_heals_during_post_teleport_window_even_while_unsafe(self) -> None:
         """The custom heal fires right after a danger teleport even when recent
         damage keeps the normal safe-heal gate closed (low-HP cascade)."""
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",
@@ -655,7 +665,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
 
     def test_attack_drops_target_removed_during_skill_delay(self) -> None:
         """A discovery removal must prevent stale post-delay bookkeeping."""
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",
@@ -673,11 +683,10 @@ class AttackLoopSitRaceTests(unittest.TestCase):
             discovery_stationary=False, moving=False,
             idle_attack_count=0, attack_count=0, area_epoch=0,
         )
-        # Initial snapshot, preparation admission + freshest debuff re-read,
-        # skill admission, the freshest-position click re-read, then removal
+        # Initial snapshot, prepare re-read, click re-read, then removal
         # during the skill delay. This exercises the post-delay guard.
         ctx.tracks.snapshot_for_track.side_effect = [
-            snapshot, snapshot, snapshot, snapshot, snapshot, snapshot, None,
+            snapshot, snapshot, snapshot, None,
         ]
         ctx.tracks.positions_snapshot.return_value = [(10, 20)]
         ctx.logger = MagicMock()
@@ -696,7 +705,7 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         self.assertTrue(any("stale target dropped" in str(call) for call in ctx.logger.behavior.call_args_list))
 
     def test_attack_kites_before_sit_blocks_combat_during_skill_delay(self) -> None:
-        ctx = MagicMock()
+        ctx = _attack_ctx()
         ctx.config = SimpleNamespace(
             skill_scan_code=16,
             skill_button="e",

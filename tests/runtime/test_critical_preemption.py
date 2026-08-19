@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 from pybot.game_state import PlayerVitals
 from pybot.runtime.danger_detector import DangerController, DangerDetector, DangerLevel
 from pybot.runtime.runtime_context import HuntRuntimeContext
-from pybot.runtime.workers.attack_loop import GameplayLoop
+from pybot.runtime.workers.gameplay_loop import GameplayLoop
 
 
 class CriticalPreemptionTests(unittest.TestCase):

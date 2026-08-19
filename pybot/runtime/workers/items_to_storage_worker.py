@@ -10,10 +10,6 @@ never re-OCR or re-read process memory.
 
 from __future__ import annotations
 
-# Keep the historical timing imports/module patch points for storage tests and
-# custom integrations; production waits use _wait below.
-import threading
-import time
 import traceback
 
 from pybot.game_state import PlayerVitals
@@ -76,20 +72,7 @@ class ItemsToStorageWorker:
         from pybot.runtime.danger_detector import DangerLevel
         if danger is not None and danger.danger_level() is DangerLevel.CRITICAL:
             raise InventoryUiError("critical danger preempted storage session")
-        wait = getattr(self._input, "wait_interruptible", None)
-        # Real input backends expose the interruptible wait. Lightweight
-        # custom doubles without it still retain the original UI-settle delay.
-        if callable(wait):
-            completed = wait(seconds)
-        else:
-            stop_event = getattr(self._ctx, "stop_event", None)
-            if isinstance(stop_event, threading.Event):
-                completed = not stop_event.wait(seconds)
-            else:
-                # Keep lightweight/test doubles patchable and preserve their
-                # historical timing without treating MagicMock as stopped.
-                time.sleep(seconds)
-                completed = True
+        completed = self._input.wait_interruptible(seconds)
         stopped = self._ctx.is_stopped()
         if completed is False or stopped is True:
             raise InventoryUiError("storage input wait cancelled")
@@ -126,9 +109,7 @@ class ItemsToStorageWorker:
     def _latest_discovery_is_fresh_and_empty(self) -> bool:
         """Require a recent zero-mob discovery result for storage."""
         if self._hunt_mode is None:
-            # Narrow compatibility fixtures without a hunt-mode observer use
-            # the track snapshot only; production always supplies the mode.
-            return True
+            return False
         age_ms = int(getattr(self._hunt_mode, "discovery_scan_age_ms", -1))
         if age_ms < 0 or age_ms > max(1000, int(
             self._ctx.config.discovery_interval_ms * 2

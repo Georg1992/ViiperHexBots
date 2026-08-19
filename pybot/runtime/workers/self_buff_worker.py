@@ -51,14 +51,8 @@ class SelfBuffWorker:
             return False
         return True
 
-    def process_pending(self, *, startup_only: bool = False) -> bool:
-        """Advance startup buffs; periodic casts may be scheduler-owned.
-
-        ``startup_only`` is used by the serialized gameplay owner so periodic
-        deadlines are handled by ``DeferredActionScheduler`` rather than by a
-        second implicit clock in this worker. The default preserves the legacy
-        compatibility behavior for direct callers.
-        """
+    def process_pending(self) -> bool:
+        """Advance startup buffs. Periodic casts are scheduler-owned."""
         ctx = self._ctx
         buffs = tuple(
             buff for buff in ctx.config.custom_behavior.buffs
@@ -82,29 +76,7 @@ class SelfBuffWorker:
                     mark_timers(expected_generation=generation)
             self._completed_generation = generation
             return True
-        if startup_only:
-            return False
-        if not ctx.should_run_combat():
-            return False
-        now = monotonic_ms()
-        due = [
-            buff for buff in buffs
-            if now - self._last_cast_ms.get(id(buff), -buff.delay_ms) >= buff.delay_ms
-        ]
-        if not due:
-            return False
-        # Claim buff priority before the first cast so a timer due at the same
-        # instant yields until every due buff has fired. This is the same
-        # contract the legacy ``run`` loop used; it lives here so there is
-        # exactly one periodic scheduling policy.
-        ctx.character_action_gate.begin_buff_burst()
-        try:
-            for buff in due:
-                if not self._character_action_allowed() or not self._cast_buff(buff):
-                    return False
-        finally:
-            ctx.character_action_gate.end_buff_burst()
-        return True
+        return False
 
 
     def last_success_ms(self, buff_key: int) -> int | None:

@@ -22,7 +22,6 @@ from pybot.runtime.constants import (
     WORKER_POLL_INTERVAL_S,
 )
 from pybot.runtime.combat_observer import CombatObserver
-from pybot.runtime.deferred_actions import DeferredActionScheduler
 from pybot.runtime.event_utils import event_is_set
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.hunt_mode import HuntModeController
@@ -393,52 +392,17 @@ class AttackLoop:
         # Enter the existing session/input ownership boundary first. The
         # track store then validates identity under its own lock, preserving
         # the runtime lock order used by teleport/reset paths.
-        lifecycle_admit = getattr(type(self._ctx), "perform_input_if_allowed", None)
-        if callable(lifecycle_admit):
-            return bool(
-                self._ctx.perform_input_if_allowed(
-                    lambda: self._ctx.should_run_combat(),
-                    lambda: self._ctx.tracks.perform_if_current(
-                        target_id,
-                        expected_epoch,
-                        action,
-                    ),
-                )
-            )
-        admit = getattr(type(self._ctx.tracks), "perform_if_current", None)
-        if callable(admit):
-            return bool(
-                self._ctx.tracks.perform_if_current(
-                    target_id,
-                    expected_epoch,
-                    action,
-                )
-            )
-        # Lightweight compatibility stores do not expose the atomic helper;
-        # retain their existing gate path for tests/older integrations.
         return bool(
             perform_if_allowed(
                 self._input,
-                lambda: (
-                    self._ctx.should_run_combat()
-                    and self._target_is_current_compat(target_id, expected_epoch)
+                lambda: self._ctx.should_run_combat(),
+                lambda: self._ctx.tracks.perform_if_current(
+                    target_id,
+                    expected_epoch,
+                    action,
                 ),
-                action,
                 lifecycle=self._ctx,
             )
-        )
-
-    def _target_is_current_compat(
-        self,
-        target_id: int,
-        expected_epoch: int | None,
-    ) -> bool:
-        current = self._ctx.tracks.snapshot_for_track(target_id, monotonic_ms())
-        if current is None:
-            return False
-        return (
-            expected_epoch is None
-            or getattr(current, "area_epoch", None) == expected_epoch
         )
 
     def _attackable_policy_tracks(self, tracks, now_tick: int):
@@ -592,35 +556,15 @@ class AttackLoop:
         if not prepared:
             return
 
-        # Custom behavior runs before the attack. Healing is handled by the
-        # outer loop before this method; this hook only prepares the target.
-        # Its input methods are atomic, so the cursor cannot be interleaved with
-        # another worker's self-cast or storage action.
-        try:
-            all_mobs = ctx.tracks.positions_snapshot()
-            self._perform_target_input(
-                target_id,
-                snap_epoch,
-                lambda: self._mob_behavior.before_attack(
-                    char_x, char_y, self._input, all_mobs=all_mobs,
-                ),
-            )
-        except Exception:
-            ctx.logger.behavior(
-                f"[ATTACK] custom pre-attack error id={target_id}:\n"
-                f"{traceback.format_exc()}"
-            )
-
         # Idle death: cheap cache samples around the configured skill delay.
         # Pacing is exactly skill_delay_ms (plus click) — no OCR / capture here.
         pre_sp, pre_obs_ms, pre_chg_ms = self._vitals.sp_sample()
         try:
             # Atomic target move + skill key + click. This prevents a periodic
             # self-buff or heal worker from stealing the cursor between move
-            # and attack input. Click at the freshest stored position: debuff,
-            # pre-attack hooks and SP sampling run between the snapshot above
-            # and this click, and a re-read under the store lock lands the
-            # cursor on the sprite instead of where the mob was a moment ago.
+            # and attack input. Click at the freshest stored position so the
+            # cursor lands on the sprite instead of where the mob was a moment
+            # ago.
             def _click_freshest_target() -> bool:
                 click_now = monotonic_ms()
                 fresh = ctx.tracks.snapshot_for_track(target_id, click_now)
@@ -776,255 +720,3 @@ class AttackLoop:
             f"[ATTACK] id={target_id} @{click_x},{click_y} "
             f"mob_attacks={snap.attack_count + 1}"
         )
-
-
-class GameplayLoop:
-    """Single owner for gameplay decisions and character input."""
-
-    def __init__(self, ctx, *, attack, sit=None, storage=None,
-                 hp_restore=None, buffs=None, timers=None, teleport=None,
-                 input_backend=None) -> None:
-        self._ctx = ctx
-        self._attack = attack
-        self._sit = sit
-        self._storage = storage
-        self._hp_restore = hp_restore
-        self._buffs = buffs
-        self._timers = timers
-        self._teleport = teleport
-        self._input_backend = input_backend
-        self._scheduler = DeferredActionScheduler()
-        self._scheduler_generation: int | None = None
-        self._startup_seed_generation: int | None = None
-        self._register_deferred_actions()
-
-    def _register_deferred_actions(self) -> None:
-        """Register periodic actions without creating more control threads."""
-        if self._hp_restore is not None:
-            self._scheduler.register(
-                "hp_restore",
-                interval_ms=1000,
-                priority=20,
-                # Let process_pending observe and report a blocked admission;
-                # suppressing it in ready() would hide the blocked state from
-                # the deterministic gameplay owner.
-                ready=lambda: bool(self._hp_restore.needs_restore()),
-                due_when=self._hp_restore.needs_restore,
-                execute=self._hp_restore.process_pending,
-                due_on_generation=False,
-            )
-        if self._buffs is not None:
-            for buff in getattr(self._ctx.config.custom_behavior, "buffs", ()):
-                if buff.scan_code > 0 and buff.button.strip() and buff.delay_ms > 0:
-                    self._scheduler.register(
-                        f"buff:{buff.scan_code}",
-                        interval_ms=buff.delay_ms,
-                        priority=30,
-                        ready=lambda: bool(self._ctx.should_run_character_actions()),
-                        execute=lambda code=buff.scan_code: self._buffs.execute_buff(code),
-                    )
-        if self._timers is not None:
-            for timer in getattr(self._ctx.config, "skill_timers", ()):
-                if timer.scan_code and timer.button.strip() and timer.interval_ms > 0:
-                    self._scheduler.register(
-                        f"timer:{timer.scan_code}",
-                        interval_ms=timer.interval_ms,
-                        priority=40,
-                        ready=lambda: bool(self._ctx.should_run_timers()),
-                        execute=lambda code=timer.scan_code: self._timers.execute_timer(code),
-                    )
-        if self._storage is not None:
-            self._scheduler.register(
-                "storage",
-                interval_ms=1000,
-                priority=50,
-                ready=lambda: bool(self._storage.can_execute_now()),
-                due_when=self._storage.storage_due,
-                execute=self._storage.process_pending,
-            )
-
-    def _prepare_deferred_actions(self, now_ms: int) -> None:
-        """Reconcile generation/startup success with periodic deadlines."""
-        generation = int(getattr(self._ctx, "hunt_generation", 0))
-        if self._scheduler_generation == generation:
-            return
-        self._scheduler.sync_generation(generation, now_ms=now_ms)
-        # Startup timestamps are collected after the startup callbacks have
-        # actually completed. They are intentionally seeded once per
-        # generation; periodic executions must never be copied back into the
-        # scheduler on later ticks.
-        self._scheduler_generation = generation
-        self._startup_seed_generation = None
-
-    def _seed_startup_successes(self) -> None:
-        """Seed periodic schedules from successful startup casts exactly once."""
-        generation = int(getattr(self._ctx, "hunt_generation", 0))
-        if self._startup_seed_generation == generation:
-            return
-        if (
-            event_is_set(getattr(self._ctx, "startup_buffs_done", None)) is False
-            or event_is_set(getattr(self._ctx, "startup_timers_done", None)) is False
-        ):
-            return
-        found = False
-        if self._buffs is not None:
-            for buff in getattr(self._ctx.config.custom_behavior, "buffs", ()):
-                if buff.scan_code > 0 and buff.button.strip() and buff.delay_ms > 0:
-                    at = self._buffs.last_success_ms(buff.scan_code)
-                    if at is not None:
-                        action = self._scheduler.get(f"buff:{buff.scan_code}")
-                        if action.last_executed_ms != at:
-                            self._scheduler.seed_executed(f"buff:{buff.scan_code}", at_ms=at)
-                        found = True
-        if self._timers is not None:
-            for timer in getattr(self._ctx.config, "skill_timers", ()):
-                if timer.scan_code and timer.button.strip() and timer.interval_ms > 0:
-                    at = self._timers.last_success_ms(timer.scan_code)
-                    if at is not None:
-                        self._scheduler.seed_executed(f"timer:{timer.scan_code}", at_ms=at)
-                        found = True
-        if found or (self._buffs is None and self._timers is None):
-            self._startup_seed_generation = generation
-
-
-    def run(self) -> None:
-        self._ctx.logger.behavior("[GAMEPLAY] loop started")
-        # All character input, including urgent danger escape, is sequenced
-        # here. HP observation only publishes facts; this owner performs the
-        # complete danger transaction.
-        while not self._ctx.is_stopped():
-            try:
-                if self._process_critical_danger():
-                    continue
-                if self._ctx.danger_escape_active.is_set():
-                    # An urgent transition is already in progress. Park without
-                    # busy-spinning so observation workers keep CPU time.
-                    self._wait_for_gameplay_delay(WORKER_POLL_INTERVAL_S)
-                    continue
-                if self._sit is not None and self._sit.process_pending():
-                    continue
-
-                now_ms = monotonic_ms()
-                # Startup casts are a real execution phase. They run before
-                # periodic due actions and their successful timestamps seed the
-                # deferred deadlines below. A failed/unsafe startup stays
-                # retryable and never resets a timer merely because it expired.
-                if self._buffs is not None:
-                    self._buffs.process_pending(startup_only=True)
-                if self._danger_is_active():
-                    continue
-                if self._timers is not None:
-                    self._timers.process_pending(startup_only=True)
-                if self._danger_is_active():
-                    continue
-                # Do not let the periodic scheduler observe generation-due
-                # actions until startup has completed. Startup callbacks already
-                # performed the first buff/timer presses; running the scheduler
-                # before both milestones are published would replay a completed
-                # buff while later startup timers are still being pressed.
-                startup_buffs_done = event_is_set(
-                    getattr(self._ctx, "startup_buffs_done", None)
-                )
-                startup_timers_done = event_is_set(
-                    getattr(self._ctx, "startup_timers_done", None)
-                )
-                if startup_buffs_done is False or startup_timers_done is False:
-                    # Startup actions have not completed. The periodic
-                    # scheduler must stay parked (buffs/timers would replay),
-                    # but a recovered hunt (danger escape, sit landing) keeps
-                    # combat live before the first clear scan: the landing
-                    # area may be populated, and attack must run to clear it
-                    # instead of standing still until an empty scan releases
-                    # the startup milestones. ``should_run_combat`` already
-                    # admits the pre-clear window via the startup sequence.
-                    if self._ctx.should_run_combat():
-                        self._attack.process_pending()
-                    self._wait_for_gameplay_delay(ATTACK_IDLE_SPIN_S)
-                    continue
-                # Startup callbacks may have succeeded on this same generation;
-                # seed their real success timestamps before observing deadlines.
-                self._prepare_deferred_actions(now_ms)
-                self._seed_startup_successes()
-
-                if self._hp_restore is not None and self._hp_restore.needs_restore():
-                    self._scheduler.mark_pending("hp_restore")
-                # The scheduler observes monotonic deadlines and drains all
-                # safe actions in priority order. Failed actions remain pending;
-                # only successful callbacks restart their own deadline.
-                hp_action = None
-                hp_before = None
-                if self._hp_restore is not None:
-                    hp_action = self._scheduler.get("hp_restore")
-                    hp_before = hp_action.last_executed_ms
-                self._scheduler.run_pending(now_ms=monotonic_ms())
-                # A successful HP-item press gets this gameplay tick to itself;
-                # do not immediately send an offensive key on the same stale
-                # low-HP snapshot. The next tick rechecks the vitals.
-                if (
-                    hp_action is not None
-                    and hp_action.last_executed_ms is not None
-                    and hp_action.last_executed_ms != hp_before
-                ):
-                    continue
-                # Item healing is maintenance, not a combat gate. Critical
-                # danger remains a real gate and is handled independently.
-                # AttackLoop owns only the skill-heal recovery state above.
-                if self._scheduler.requires_retry(
-                    max_priority=40,
-                    ignore_keys={"hp_restore"},
-                ):
-                    # A due buff/timer may be intentionally unsafe during a
-                    # teleport settle. Keep its deadline pending and give the
-                    # independent UI/danger workers time to run; do not spin
-                    # the gameplay owner at 100% CPU while waiting for landing.
-                    self._wait_for_gameplay_delay(WORKER_POLL_INTERVAL_S)
-                    continue
-                self._attack.process_pending()
-                danger_wake = getattr(self._ctx, "danger_wake", None)
-                if danger_wake is not None and danger_wake.is_set():
-                    danger_wake.clear()
-            except Exception:
-                # The gameplay owner is the runtime's last safety boundary.
-                # One malformed action must be logged and retried, not kill
-                # the only thread that sequences all character input.
-                self._ctx.logger.behavior(
-                    f"[GAMEPLAY] step error:\n{traceback.format_exc()}"
-                )
-                self._wait_for_gameplay_delay(WORKER_POLL_INTERVAL_S)
-
-    def _wait_for_gameplay_delay(self, timeout_s: float) -> None:
-        """Keep gameplay waits interruptible by danger and fresh tracks."""
-        danger_wake = getattr(self._ctx, "danger_wake", None)
-        attack_wake = getattr(self._ctx, "attack_wake", None)
-        deadline = time.monotonic() + max(0.0, timeout_s)
-        while event_is_set(self._ctx.stop_event) is not True:
-            if event_is_set(danger_wake) is True:
-                danger_wake.clear()
-                return
-            if event_is_set(attack_wake) is True:
-                attack_wake.clear()
-                return
-            remaining = deadline - time.monotonic()
-            if remaining <= 0.0:
-                return
-            stop_event = self._ctx.stop_event
-            stop_event.wait(min(0.05, remaining))
-            if not isinstance(stop_event, threading.Event):
-                return
-
-    def _danger_is_active(self) -> bool:
-        """Read the pure observer fact; no request event is consulted."""
-        detector = getattr(self._ctx, "danger_detector", None)
-        level = detector.danger_level() if detector is not None else None
-        return isinstance(level, DangerLevel) and level is not DangerLevel.SAFE
-
-    def _process_critical_danger(self) -> bool:
-        """Run one clean danger transaction on the gameplay owner."""
-        controller = getattr(self._ctx, "danger_controller", None)
-        if controller is not None:
-            return bool(controller.process(seated=False))
-
-        # The production composition always installs DangerController. There
-        # is intentionally no request-event fallback: partial contexts must not
-        # resurrect the removed danger choreography.
-        return False

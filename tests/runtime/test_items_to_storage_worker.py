@@ -44,7 +44,6 @@ _PATCH_TARGETS = {
 def _default_worker_patch_targets():
     """Return a fresh dict of {target: mock_or_DEFAULT} for storage tests."""
     return {
-        "time.sleep": MagicMock(return_value=None),
         "key_name_to_scan_code": MagicMock(return_value=0x1C),
         "InventoryAutomation.close_menus": MagicMock(),
         "InventoryAutomation.ensure_storage_open": MagicMock(),

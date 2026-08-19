@@ -6,7 +6,6 @@ Extracted from ItemsToStorageWorker so the worker owns only orchestration
 
 from __future__ import annotations
 
-import threading
 import time
 
 from pybot.recognition.ui.inventory import (
@@ -52,21 +51,7 @@ class InventoryAutomation:
 
     def _wait(self, seconds: float) -> None:
         """Wait for UI settling, aborting promptly on stop/focus cancellation."""
-        wait = getattr(self._input, "wait_interruptible", None)
-        # InputBackend implementations own the real cancellation event. A
-        # lightweight custom backend without that optional helper still gets
-        # the original UI-settle delay via an ordinary interruptible wait.
-        if callable(wait):
-            completed = wait(seconds)
-        else:
-            stop_event = getattr(self._ctx, "stop_event", None)
-            if isinstance(stop_event, threading.Event):
-                completed = not stop_event.wait(seconds)
-            else:
-                # Keep lightweight/test doubles patchable and preserve their
-                # historical timing without treating MagicMock as stopped.
-                time.sleep(seconds)
-                completed = True
+        completed = self._input.wait_interruptible(seconds)
         stopped = self._ctx.is_stopped()
         if completed is False or stopped is True:
             raise InventoryUiError("input wait cancelled")

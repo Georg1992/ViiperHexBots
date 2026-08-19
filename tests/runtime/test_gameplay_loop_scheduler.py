@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from pybot.runtime.runtime_context import HuntRuntimeContext
-from pybot.runtime.workers.attack_loop import GameplayLoop
+from pybot.runtime.workers.gameplay_loop import GameplayLoop
 
 
 class _StartupBuff:
@@ -49,8 +49,7 @@ class GameplayLoopSchedulerTests(unittest.TestCase):
                 self.startup_calls = 0
                 self.periodic_calls = 0
 
-            def process_pending(self, *, startup_only: bool = False) -> bool:
-                self.assertTrue(startup_only)
+            def process_pending(self) -> bool:
                 self.startup_calls += 1
                 ctx.mark_startup_buffs_done()
                 return True
@@ -78,8 +77,7 @@ class GameplayLoopSchedulerTests(unittest.TestCase):
                 self.startup_calls = 0
                 self.periodic_calls = 0
 
-            def process_pending(self, *, startup_only: bool = False) -> bool:
-                self.assertTrue(startup_only)
+            def process_pending(self) -> bool:
                 self.startup_calls += 1
                 # Leave the timer milestone incomplete for one loop iteration.
                 if self.startup_calls >= 2:
@@ -160,7 +158,7 @@ class GameplayLoopRecoveredHuntTests(unittest.TestCase):
         attack_calls: list[int] = []
 
         class Buffs:
-            def process_pending(self, *, startup_only: bool = False) -> bool:
+            def process_pending(self) -> bool:
                 # Startup buffs wait for the first empty scan; never complete
                 # here so the milestones stay pending throughout the test.
                 return False
@@ -172,7 +170,7 @@ class GameplayLoopRecoveredHuntTests(unittest.TestCase):
                 return None
 
         class Timers:
-            def process_pending(self, *, startup_only: bool = False) -> bool:
+            def process_pending(self) -> bool:
                 return False
 
             def execute_timer(self, _scan_code: int) -> bool:
@@ -227,7 +225,7 @@ class GameplayLoopRecoveredHuntTests(unittest.TestCase):
         buff_ticks = {"n": 0}
 
         class Buffs:
-            def process_pending(self, *, startup_only: bool = False) -> bool:
+            def process_pending(self) -> bool:
                 # Milestones stay pending; end the loop after a few ticks so
                 # the test proves attack was never admitted during startup.
                 buff_ticks["n"] += 1
@@ -242,7 +240,7 @@ class GameplayLoopRecoveredHuntTests(unittest.TestCase):
                 return None
 
         class Timers:
-            def process_pending(self, *, startup_only: bool = False) -> bool:
+            def process_pending(self) -> bool:
                 return False
 
             def execute_timer(self, _scan_code: int) -> bool:

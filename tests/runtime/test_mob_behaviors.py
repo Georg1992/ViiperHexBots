@@ -159,9 +159,6 @@ class MobBehaviorTests(unittest.TestCase):
             behavior.kite_after_attack(
                 100, 100, backend, all_mobs=[(120, 100)]
             )
-            behavior.before_attack(
-                100, 100, backend, all_mobs=[(120, 100)]
-            )
 
         backend.skill_click_at.assert_not_called()
 

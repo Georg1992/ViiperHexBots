@@ -106,17 +106,6 @@ class MobBehavior:
         del target_id, target_x, target_y, input_backend, target_debuffed, mark_debuffed
         return True
 
-    def before_attack(
-        self,
-        char_x: int,
-        char_y: int,
-        input_backend: InputBackend,
-        *,
-        all_mobs: list[tuple[int, int]],
-    ) -> bool:
-        """Run configured pre-attack actions; default is a no-op."""
-        return False
-
     def kite_after_attack(
         self,
         char_x: int,
@@ -172,19 +161,6 @@ class ConfiguredMobBehavior(MobBehavior):
         ):
             return False
         return mark_debuffed()
-
-    def before_attack(
-        self,
-        char_x: int,
-        char_y: int,
-        input_backend: InputBackend,
-        *,
-        all_mobs: list[tuple[int, int]],
-    ) -> bool:
-        # Character healing is handled by the hunt-loop recovery step; this
-        # hook only handles target-independent behavior before an attack.
-        del char_x, char_y, input_backend, all_mobs
-        return False
 
     def kite_after_attack(
         self,

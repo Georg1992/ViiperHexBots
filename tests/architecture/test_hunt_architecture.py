@@ -57,6 +57,12 @@ class HuntArchitectureTests(unittest.TestCase):
         self.assertNotIn("discovery_filter", attack)
         self.assertNotIn("detector_session", attack)
 
+        gameplay = (PYBOT_RUNTIME / "workers" / "gameplay_loop.py").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        self.assertNotIn("discovery_filter", gameplay)
+        self.assertNotIn("detector_session", gameplay)
+
     def test_hunt_runtime_orchestrates_detection(self) -> None:
         runtime = (PYBOT_RUNTIME / "hunt_runtime.py").read_text(
             encoding="utf-8", errors="replace"
@@ -66,6 +72,7 @@ class HuntArchitectureTests(unittest.TestCase):
         self.assertIn("CoordTrackingWorker", runtime)
         self.assertIn("DiscoveryWorker", runtime)
         self.assertIn("AttackLoop", runtime)
+        self.assertIn("GameplayLoop", runtime)
 
 
 if __name__ == "__main__":

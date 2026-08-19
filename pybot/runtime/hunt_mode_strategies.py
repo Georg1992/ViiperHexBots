@@ -17,7 +17,7 @@ from contextlib import nullcontext
 
 from pybot.runtime.constants import LOG_REPEAT_INTERVAL_MS
 from pybot.runtime.hunt_tracks import monotonic_ms
-from pybot.runtime.input.input_backend import InputBackend
+from pybot.runtime.input.input_backend import InputBackend, perform_if_allowed
 from pybot.runtime.workers.worker_contexts import HuntModeControllerContext
 
 
@@ -292,10 +292,7 @@ class TeleportStrategy(HuntModeStrategy):
         # combat gate. Re-check immediately before teleporting so a startup
         # timer/buff milestone or a concurrent safety transition cannot be
         # bypassed by that stale no-target decision.
-        transition_allowed = getattr(
-            ctx, "should_run_mode_transitions", ctx.should_run_combat
-        )
-        if not transition_allowed():
+        if not ctx.should_run_mode_transitions():
             self._log_no_target_blocked("startup_or_lifecycle_changed")
             self._log_no_target(
                 "skip", "startup_or_lifecycle_changed", context
@@ -323,15 +320,14 @@ class TeleportStrategy(HuntModeStrategy):
             # slip a second teleport past the transition boundary.
             return bool(self._teleport.mode_teleport())
 
-        admit = getattr(type(ctx), "perform_input_if_allowed", None)
-        if callable(admit):
-            return bool(
-                ctx.perform_input_if_allowed(
-                    transition_allowed,
-                    commit_mode_teleport,
-                )
+        return bool(
+            perform_if_allowed(
+                self._input,
+                ctx.should_run_mode_transitions,
+                commit_mode_teleport,
+                lifecycle=ctx,
             )
-        return commit_mode_teleport()
+        )
 
 
 class HybridStrategy(HuntModeStrategy):

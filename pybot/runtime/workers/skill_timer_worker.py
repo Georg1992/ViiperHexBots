@@ -91,13 +91,8 @@ class SkillTimerWorker:
                 mark(expected_generation=generation)
         return True
 
-    def process_pending(self, *, startup_only: bool = False) -> bool:
-        """Advance startup timers; periodic casts are scheduler-owned.
-
-        Direct legacy callers retain the old combined behavior. The gameplay
-        owner passes ``startup_only=True`` so periodic deadlines are latched by
-        the deferred scheduler instead of being silently consumed here.
-        """
+    def process_pending(self) -> bool:
+        """Advance startup timers. Periodic casts are scheduler-owned."""
         ctx = self._ctx
         timers = [t for t in ctx.config.skill_timers if t.scan_code and t.button.strip() and t.interval_ms > 0]
         if not timers or ctx.is_stopped() or not ctx.should_run_timers():
@@ -114,43 +109,12 @@ class SkillTimerWorker:
             self._startup_pressed.clear()
             self._startup_cycle_generation = generation
             self._armed = False
-        if startup_only:
-            # Startup execution is deliberately one key at a time. Periodic
-            # expiry is owned exclusively by DeferredActionScheduler.
-            if self._critical_pending():
-                return False
-            missing = [timer for timer in timers if timer.scan_code not in self._startup_pressed]
-            if not missing:
-                return True
-            return self.execute_timer(missing[0].scan_code)
-        if not self._armed:
-            self._arm_timers(timers)
-            self._armed = True
-        now = monotonic_ms()
-        for timer in timers:
-            if now - self._last_press_ms.get(timer.scan_code, 0) < timer.interval_ms:
-                continue
-            if not self._wait_stagger_gap():
-                return False
-            pressed = perform_if_allowed(
-                self._input, ctx.should_run_timers,
-                lambda code=timer.scan_code: self._input.teleport_key(code),
-                lifecycle=ctx,
-            )
-            if pressed is False:
-                continue
-            pressed_at = monotonic_ms()
-            self._last_press_ms[timer.scan_code] = pressed_at
-            self._startup_pressed.add(timer.scan_code)
-            ctx.character_action_gate.note_action(pressed_at)
-            ctx.logger.behavior(
-                f"[TIMER] key executed key={timer.button} scanCode={timer.scan_code}"
-            )
-        if {t.scan_code for t in timers}.issubset(self._startup_pressed):
-            mark = getattr(ctx, "mark_startup_timers_done", None)
-            if callable(mark):
-                mark(expected_generation=generation)
-        return True
+        if self._critical_pending():
+            return False
+        missing = [timer for timer in timers if timer.scan_code not in self._startup_pressed]
+        if not missing:
+            return True
+        return self.execute_timer(missing[0].scan_code)
 
     def last_success_ms(self, scan_code: int) -> int | None:
         """Return the last successful press timestamp for scheduler seeding."""

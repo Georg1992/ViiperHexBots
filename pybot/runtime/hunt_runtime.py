@@ -29,7 +29,8 @@ from pybot.recognition.detector.detector import (
     load_detector_config,
 )
 from pybot.runtime.detection.detector_session import DetectorSession
-from pybot.runtime.workers.attack_loop import AttackLoop, GameplayLoop
+from pybot.runtime.workers.attack_loop import AttackLoop
+from pybot.runtime.workers.gameplay_loop import GameplayLoop
 from pybot.runtime.workers.coord_tracking_worker import CoordTrackingWorker
 from pybot.runtime.mob_behaviors import get_configured_mob_behavior
 from pybot.runtime.danger_detector import DangerDetector

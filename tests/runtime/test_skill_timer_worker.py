@@ -220,7 +220,10 @@ class SkillTimerWorkerTests(unittest.TestCase):
                 "pybot.runtime.workers.skill_timer_worker.monotonic_ms",
                 side_effect=lambda: clock["ms"],
             ):
-                self._run_pending_until_stopped(worker, ctx)
+                worker.process_pending()
+                self.assertEqual(presses, [59])
+                self.assertTrue(gates.healing_event.is_set())
+                worker.execute_timer(59)
         finally:
             was_healing = gates.healing_event.is_set()
             gates.end_heal_ops()

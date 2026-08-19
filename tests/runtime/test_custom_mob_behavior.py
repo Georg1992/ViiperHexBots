@@ -99,12 +99,6 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
                 backend,
                 all_mobs=[(120, 100)],
             )
-            behavior.before_attack(
-                100,
-                100,
-                backend,
-                all_mobs=[(120, 100)],
-            )
 
         self.assertEqual(
             backend.method_calls,
@@ -295,7 +289,6 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
         backend.move_and_double_click.return_value = True
         behavior = get_configured_mob_behavior(settings)
 
-        behavior.before_attack(100, 100, backend, all_mobs=[(120, 100)])
         behavior.kite_after_attack(100, 100, backend, all_mobs=[(120, 100)])
 
         backend.move_and_double_click.assert_not_called()
