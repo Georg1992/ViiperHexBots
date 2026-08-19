@@ -23,18 +23,15 @@ from pybot.runtime.startup_sequence import HuntStartupSequence
 class CharacterActionGate:
     """Shared 500ms stagger + buff priority across buff casts and timer presses.
 
-    SelfBuffWorker and SkillTimerWorker run on independent threads with no
-    shared scheduling. When a buff and a timer come due in the same instant
-    (for example three 240s configs syncing up), this gate makes them
-    cooperate: a single stagger window spaces every character keypress, and
-    a ``buff burst`` signal makes timers yield while buffs are casting so
-    buffs fire first.
+    ``GameplayLoop`` owns when buffs and timers fire. This gate only serializes
+    the keypresses those callbacks request: one stagger window spaces every
+    character action, and a ``buff burst`` flag makes timers yield while buffs
+    are casting so buffs fire first.
 
-    Priority is best-effort: the buff worker raises its burst flag before
-    claiming the slot, and timer claims are refused while it is up, so a
-    simultaneous due-time race is overwhelmingly won by the buff. There is
-    still a microsecond window where a timer claim beats the flag raise;
-    both workers then simply space out by the shared stagger window.
+    Priority is best-effort: ``execute_buff`` raises the burst flag before
+    claiming the slot, and timer claims are refused while it is up. A
+    simultaneous due-time race can still let a timer claim win the flag raise;
+    both then space out by the shared stagger window.
     """
 
     def __init__(self, stagger_ms: int = SKILL_TIMER_STAGGER_MS) -> None:

@@ -35,7 +35,6 @@ _PATCH_TARGETS = {
     "find_storage_wing": f"{_WORKER}.find_storage_wing",
     "find_wings_in_use_grid": f"{_WORKER}.find_wings_in_use_grid",
     "slot_looks_empty": f"{_WORKER}.slot_looks_empty",
-    "slot_contains_template": f"{_WORKER}._slot_contains_template",
     "require_template": f"{_AUTOMATION}.require_template",
     "is_inventory_open": f"{_AUTOMATION}.is_inventory_open",
     "is_storage_open": f"{_AUTOMATION}.is_storage_open",
@@ -383,7 +382,6 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         stack, m = _enter_worker_patches(
             slot_looks_empty=DEFAULT,
             require_template=DEFAULT,
-            slot_contains_template=DEFAULT,
             find_template=DEFAULT,
         )
         with stack:
@@ -395,7 +393,6 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             m["slot_looks_empty"].side_effect = (
                 [False, True, False, True, False, True]
             )
-            m["slot_contains_template"].return_value = False
             m["find_template"].side_effect = lambda _f, name, **_kw: {
                 "use": (10, 10), "eqp": (30, 10), "etc": (40, 10),
             }.get(name)
@@ -416,13 +413,11 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
         stack, m = _enter_worker_patches(
             slot_looks_empty=DEFAULT,
             require_template=DEFAULT,
-            slot_contains_template=DEFAULT,
         )
         with stack:
             m["require_inventory_panel"].return_value = _fake_panel()
             m["require_template"].return_value = (10, 10)
             m["slot_looks_empty"].side_effect = [True, True, False, True]
-            m["slot_contains_template"].return_value = False
 
             self.vitals.publish_weight(90, 100)
             self.vitals.publish_hp(1000, 1000)
@@ -611,7 +606,6 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             slot_looks_empty=DEFAULT,
             find_storage_wing=DEFAULT,
             find_wings_in_use_grid=DEFAULT,
-            slot_contains_template=DEFAULT,
             require_template=DEFAULT,
             find_template=DEFAULT,
         )
@@ -621,7 +615,6 @@ class ItemsToStorageWorkerTests(unittest.TestCase):
             m["find_template"].return_value = None
             m["find_wings_in_use_grid"].side_effect = [[], []]
             m["find_storage_wing"].return_value = (200, 100)
-            m["slot_contains_template"].return_value = False
             m["slot_looks_empty"].side_effect = (
                 [False, True, False, True, False, True]
             )

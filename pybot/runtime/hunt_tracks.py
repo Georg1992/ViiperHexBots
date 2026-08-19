@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -921,7 +920,12 @@ class HuntTracks:
             return len(self._tracks), alive
 
     def tracks_for_policy(self, now_tick: int | None = None) -> list[MobTrack]:
+        """Return isolated copies of alive tracks for attack selection.
+
+        Attack reads this list outside the store lock, so each track must be
+        a snapshot. ``MobTrack`` fields are primitives, so ``replace`` is
+        enough; a deep copy was leftover from when nested mutables existed.
+        """
+        del now_tick
         with self._lock:
-            return copy.deepcopy(
-                [t for t in self._tracks if is_alive(t)]
-            )
+            return [replace(track) for track in self._tracks if is_alive(track)]

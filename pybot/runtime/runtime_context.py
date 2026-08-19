@@ -241,10 +241,7 @@ class HuntRuntimeContext:
 
     def should_run_combat(self) -> bool:
         """True when lifecycle gates and per-hunt startup both permit combat."""
-        return (
-            self.gates.should_run_combat()
-            and self.gates.startup.is_combat_ready()
-        )
+        return self.gates.should_run_combat()
 
     def perform_input_if_allowed(self, allowed, action) -> bool:
         """Admit one short input action against session transitions."""

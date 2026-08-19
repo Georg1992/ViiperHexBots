@@ -18,20 +18,18 @@ import traceback
 
 from pybot.game_state import PlayerVitals
 from pybot.recognition.ui.inventory import (
+    INV_COLS,
+    INV_ROWS,
     InventoryUiError,
     find_storage_wing,
     find_template,
     find_wings_in_use_grid,
-    is_inventory_open,  # noqa: F401 - retained compatibility patch point
     require_inventory_panel,
-    slot_contains_template as _slot_contains_template,  # noqa: F401 - compatibility
     slot_looks_empty,
 )
 from pybot.recognition.ui.inventory_automation import InventoryAutomation
 from pybot.runtime.constants import (
     FLY_WING_WEIGHT,
-    STORAGE_INV_COLS,
-    STORAGE_INV_ROWS,
     STORAGE_UI_SETTLE_S,
     STORAGE_WEIGHT_MODIFIER_MAX,
     STORAGE_WEIGHT_MODIFIER_MIN,
@@ -42,10 +40,7 @@ from pybot.runtime.input.scan_codes import key_name_to_scan_code
 from pybot.runtime.teleport import TeleportController
 from pybot.runtime.workers.worker_contexts import ItemsToStorageWorkerContext
 
-# These names remain module-level compatibility patch points for storage tests
-# and external integrations, even though InventoryAutomation owns production UI
-# calls. Listing them explicitly also documents why static analyzers see no use.
-__all__ = ["ItemsToStorageWorker", "is_inventory_open", "_slot_contains_template"]
+__all__ = ["ItemsToStorageWorker"]
 
 
 class ItemsToStorageWorker:
@@ -238,7 +233,7 @@ class ItemsToStorageWorker:
         log = self._ctx.logger.behavior
         ox, oy = self._ui.client_origin()
         deposited = 0
-        max_passes = STORAGE_INV_COLS * STORAGE_INV_ROWS
+        max_passes = INV_COLS * INV_ROWS
         for pass_i in range(max_passes):
             wings = self._scan_use_grid_wings()
             log(
@@ -272,7 +267,7 @@ class ItemsToStorageWorker:
         """
         log = self._ctx.logger.behavior
         ox, oy = self._ui.client_origin()
-        guard = STORAGE_INV_COLS * STORAGE_INV_ROWS
+        guard = INV_COLS * INV_ROWS
 
         # Determine the first slot's center and aim position
         frame_init = self._ui.capture_client()
@@ -375,7 +370,7 @@ class ItemsToStorageWorker:
         self._wait(0.8)
         log(
             f"[STORAGE] GetFlyWings scan Use grid "
-            f"{STORAGE_INV_COLS}x{STORAGE_INV_ROWS} for wings"
+            f"{INV_COLS}x{INV_ROWS} for wings"
         )
         self._deposit_wings_from_use_grid()
 

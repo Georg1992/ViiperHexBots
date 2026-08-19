@@ -134,6 +134,19 @@ class MemoryStatsFeedTests(unittest.TestCase):
         self.assertIsNone(vitals.sp)
         self.assertEqual(feed._on_sp.calls, [])
 
+    def test_failed_memory_read_from_old_epoch_does_not_clear_fresh_sp(self) -> None:
+        """A late failed poll from the previous area must not wipe landing SP."""
+        vitals = PlayerVitals()
+        feed = _memory_feed()
+        feed._vitals = vitals
+        old_epoch = vitals.observation_epoch
+        epoch = vitals.begin_observation_epoch()
+        self.assertTrue(vitals.complete_observation_epoch(epoch))
+        self.assertTrue(vitals.publish_sp_if_current(350, 1454, epoch))
+        feed.apply_result((123, SimpleNamespace(ok=False), old_epoch))
+        self.assertEqual(vitals.sp_pair(), (350, 1454))
+        self.assertEqual(feed._on_sp.calls, [])
+
     def test_ignores_result_for_another_window(self) -> None:
         feed = _memory_feed()
         snap = SimpleNamespace(ok=True, char_name="Hero", sp=1, sp_max=2,

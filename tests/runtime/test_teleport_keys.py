@@ -159,6 +159,23 @@ class TeleportKeySelectionTests(unittest.TestCase):
         )
         self.assertEqual(vitals.sp_pair(), (350, 1454))
 
+    def test_interrupted_settle_reopens_observation_epoch(self) -> None:
+        """Stop during settle must not leave app-scoped vitals quarantined."""
+        vitals = PlayerVitals()
+        vitals.publish_sp(574, 1454)
+        self.ctx.wait_unless_stopped.return_value = False
+        tport = TeleportController(
+            self.ctx,
+            self.input,
+            MagicMock(),
+            vitals=vitals,
+        )
+
+        self.assertFalse(tport.teleport_once(scan_code=17))
+        epoch = vitals.observation_epoch
+        self.assertTrue(vitals.publish_sp_if_current(350, 1454, epoch))
+        self.assertEqual(vitals.sp_pair(), (350, 1454))
+
     def test_teleport_once_clears_tracks_after_settle(self) -> None:
         """Every successful teleport must drop prior-area tracks."""
         self.ctx.danger_detector = MagicMock()

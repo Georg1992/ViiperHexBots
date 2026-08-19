@@ -105,10 +105,15 @@ class MemoryStatsFeed(PeriodicTaskRunner):
         ):
             return
         if not snap.ok:
+            publish_sp = getattr(self._vitals, "publish_sp_if_current", None)
+            if observation_epoch is not None and callable(publish_sp):
+                if not publish_sp(None, None, observation_epoch):
+                    return
+            else:
+                self._vitals.clear_sp()
             self._on_name("—")
             self._on_sp("—")
             self._on_weight("—")
-            self._vitals.clear_sp()
             return
         publish_sp = getattr(self._vitals, "publish_sp_if_current", None)
         publish_weight = getattr(self._vitals, "publish_weight_if_current", None)

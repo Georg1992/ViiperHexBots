@@ -225,9 +225,5 @@ class DeferredActionScheduler:
     def get(self, key: str) -> DeferredAction:
         return self._actions[key]
 
-    def statuses(self, *, now_ms: int) -> tuple[DeferredAction, ...]:
-        """Snapshot all states for diagnostics/tests without changing state."""
-        return tuple(self._actions.values())
-
     def __iter__(self) -> Iterable[DeferredAction]:
         return iter(self._actions.values())

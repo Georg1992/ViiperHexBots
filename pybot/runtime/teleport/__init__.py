@@ -218,23 +218,23 @@ class TeleportController:
             self._ctx.note_teleport_for_wings()
         self._ctx.overlay.increment_teleports()
         settled = self._wait_for_settle(cfg.teleport_duration_ms / 1000.0)
+        # PlayerVitals is app-scoped and reused across hunt sessions. Leave
+        # the epoch quarantined only while landing frames can still publish;
+        # Stop during settle must reopen it or later HP/SP reads stay dead.
+        # Reset the danger baseline while HP is still quarantined so the
+        # first post-landing sample is a new baseline, not a phantom drop
+        # against the previous area's HP.
+        danger = self._ctx.danger_detector
+        if danger is not None:
+            danger.reset_after_teleport(teleport_started)
+        if self._vitals is not None:
+            complete_epoch = getattr(
+                self._vitals, "complete_observation_epoch", None
+            )
+            if callable(complete_epoch):
+                complete_epoch(transition_epoch)
         if settled:
-            # Open the same epoch only after the configured landing settle.
-            # Reads remain permanently alive during settle, but only samples
-            # captured after this boundary may become actionable.
-            if self._vitals is not None:
-                complete_epoch = getattr(
-                    self._vitals, "complete_observation_epoch", None
-                )
-                if callable(complete_epoch):
-                    complete_epoch(transition_epoch)
-            # Every successful teleport starts a new area. Clear only damage
-            # observed before this teleport. Damage recorded during settle
-            # remains a fresh danger signal.
             self._ctx.mark_post_teleport_heal(HP_POST_TELEPORT_HEAL_S)
-            danger = self._ctx.danger_detector
-            if danger is not None:
-                danger.reset_after_teleport(teleport_started)
         return settled
 
     def retry_post_teleport_heal(self) -> bool:

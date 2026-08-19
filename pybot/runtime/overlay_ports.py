@@ -10,8 +10,6 @@ class HuntOverlay(Protocol):
 
     def set_track_positions(self, positions: list[tuple[int, int]]) -> None: ...
 
-    def set_unreachable_positions(self, positions: list[tuple[int, int]]) -> None: ...
-
     def set_search_roi(self, x: int, y: int, w: int, h: int) -> None: ...
 
     def increment_attacks(self) -> None: ...
@@ -24,9 +22,6 @@ class NullOverlay:
         return None
 
     def set_track_positions(self, positions: list[tuple[int, int]]) -> None:
-        return None
-
-    def set_unreachable_positions(self, positions: list[tuple[int, int]]) -> None:
         return None
 
     def set_search_roi(self, x: int, y: int, w: int, h: int) -> None:

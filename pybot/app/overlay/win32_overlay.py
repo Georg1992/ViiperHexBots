@@ -53,7 +53,6 @@ COLOR_STATUS = 0x00FFD966
 
 # Dot colour (GDI COLORREF = BGR)
 COLOR_DOT_LIVING = 0x0000FF00      # green — tracked mob
-COLOR_DOT_UNREACHABLE = 0x000000FF  # red — unreachable (idle attacks exhausted)
 
 # Search region border colour
 COLOR_ROI = 0x00FFE066  # light amber — visible but unobtrusive
@@ -100,12 +99,10 @@ class _OverlayState:
     total_attacks: int = 0
     total_teleports: int = 0
     track_positions: list[tuple[int, int]] = field(default_factory=list)
-    unreachable_positions: list[tuple[int, int]] = field(default_factory=list)
     client_left: int = 0  # screen X of game client origin
     client_top: int = 0   # screen Y of game client origin
     client_w: int = 0     # game client width (for panel calc)
     brush_living: int = 0
-    brush_unreachable: int = 0
     brush_roi: int = 0
     roi_x: int = 0
     roi_y: int = 0
@@ -214,9 +211,7 @@ def _snapshot_paint_state() -> tuple[int, int, int, dict] | None:
             "roi_h": _state.roi_h,
             "brush_roi": _state.brush_roi,
             "brush_living": _state.brush_living,
-            "brush_unreachable": _state.brush_unreachable,
             "track_positions": list(_state.track_positions),
-            "unreachable_positions": list(_state.unreachable_positions),
             "track_count": _state.track_count,
             "alive_count": _state.alive_count,
             "total_attacks": _state.total_attacks,
@@ -236,9 +231,7 @@ def _paint_overlay_content(hdc: int, cw: int, ch: int, content: dict) -> None:
     roi_h = content["roi_h"]
     brush_roi = content["brush_roi"]
     brush_living = content["brush_living"]
-    brush_unreachable = content["brush_unreachable"]
     track_positions = content["track_positions"]
-    unreachable_positions = content["unreachable_positions"]
     track_count = content["track_count"]
     alive_count = content["alive_count"]
     total_attacks = content["total_attacks"]
@@ -271,17 +264,6 @@ def _paint_overlay_content(hdc: int, cw: int, ch: int, content: dict) -> None:
             if dx >= cw - PANEL_W:
                 continue
             old_b = gdi32.SelectObject(hdc, brush_living)
-            gdi32.Ellipse(hdc, dx - 4, dy - 4, dx + 4, dy + 4)
-            gdi32.SelectObject(hdc, old_b)
-
-    # ── Draw unreachable track dots (red) ──────────────────────
-    if unreachable_positions and client_w > 0 and brush_unreachable:
-        for tx, ty in unreachable_positions:
-            dx = tx - client_left
-            dy = ty - client_top
-            if dx >= cw - PANEL_W:
-                continue
-            old_b = gdi32.SelectObject(hdc, brush_unreachable)
             gdi32.Ellipse(hdc, dx - 4, dy - 4, dx + 4, dy + 4)
             gdi32.SelectObject(hdc, old_b)
 
@@ -327,11 +309,10 @@ def _reposition() -> bool:
 WINDOW_CLASS = "HuntOverlayClass"
 
 
-def _create_brushes() -> tuple[int, int, int]:
+def _create_brushes() -> tuple[int, int]:
     """Create solid GDI brushes for dots and ROI border."""
     return (
         gdi32.CreateSolidBrush(COLOR_DOT_LIVING),
-        gdi32.CreateSolidBrush(COLOR_DOT_UNREACHABLE),
         gdi32.CreateSolidBrush(COLOR_ROI),
     )
 
@@ -383,7 +364,6 @@ def create(game_hwnd: int, *, search_range_cells: int = DEFAULT_SEARCH_RANGE_CEL
     _state.font_status = _create_font("Consolas", 14)
     (
         _state.brush_living,
-        _state.brush_unreachable,
         _state.brush_roi,
     ) = _create_brushes()
     if not _state.font_status:
@@ -421,7 +401,7 @@ def last_error() -> str:
 
 
 def _destroy_brushes() -> None:
-    for attr in ("brush_living", "brush_unreachable", "brush_roi"):
+    for attr in ("brush_living", "brush_roi"):
         brush = getattr(_state, attr, 0)
         if brush:
             gdi32.DeleteObject(brush)
@@ -439,7 +419,6 @@ def destroy() -> None:
         _state.visible = False
         _state.paint_dirty = False
         _state.track_positions.clear()
-        _state.unreachable_positions.clear()
         _state.font_status = 0
     if hwnd and user32.IsWindow(hwnd):
         user32.KillTimer(hwnd, 1)
@@ -489,17 +468,6 @@ def set_track_positions(
         if _state.track_positions == positions:
             return
         _state.track_positions = positions
-    _mark_dirty()
-
-
-def set_unreachable_positions(
-    positions: list[tuple[int, int]],
-) -> None:
-    """Update unreachable mob positions for red-dot rendering."""
-    with _state._lock:
-        if _state.unreachable_positions == positions:
-            return
-        _state.unreachable_positions = positions
     _mark_dirty()
 
 
@@ -556,7 +524,6 @@ def reset_stats() -> None:
         _state.total_attacks = 0
         _state.total_teleports = 0
         _state.track_positions.clear()
-        _state.unreachable_positions.clear()
     _mark_dirty()
 
 
@@ -611,9 +578,6 @@ class Win32HuntOverlay:
 
     def set_track_positions(self, positions: list[tuple[int, int]]) -> None:
         set_track_positions(positions)
-
-    def set_unreachable_positions(self, positions: list[tuple[int, int]]) -> None:
-        set_unreachable_positions(positions)
 
     def set_search_roi(self, x: int, y: int, w: int, h: int) -> None:
         set_search_roi(x, y, w, h)

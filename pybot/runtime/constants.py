@@ -53,7 +53,6 @@ SIT_SP_PROGRESS_LOG_S = 5.0
 # session ends and the runtime loop takes over again. Each failure already
 # teleports to a fresh area, so this only bounds pathological repeat teleports.
 SIT_MAX_SPOT_RELOCATIONS = 3
-SIT_IDLE_BEFORE_SIT_S = 1.0
 # After stand keypress, let the client settle before startup actions,
 # discovery, and tracking resume. This also keeps a post-stand buff from
 # sharing the first fresh frame with detector work.
@@ -74,8 +73,6 @@ HP_RESTORE_POLL_S = 1.0
 HP_RESTORE_COOLDOWN_S = 1.8
 # No HP drop for this long before custom self-heal may run.
 HP_HEAL_DAMAGE_QUIET_S = 1.0
-# Critical danger must escape at the detector's cadence, not the sit poll.
-CRITICAL_DANGER_POLL_INTERVAL_S = WORKER_POLL_INTERVAL_S
 # Bounded wait for a preempted session (e.g. storage closing its UI panels)
 # before the critical escape presses the teleport key.
 CRITICAL_PREEMPT_RELEASE_TIMEOUT_S = 3.0
@@ -92,13 +89,8 @@ SKILL_TIMER_STAGGER_MS = 500
 STARTUP_BUFF_GAP_S = 1.0
 # Let the cursor settle on the character before a startup self-buff cast.
 STARTUP_BUFF_CURSOR_DELAY_S = 0.2
-# Storage / fly-wings deferred action. Storage is enabled at 50%+, with
-# 85% as the maximum supported threshold.
-STORAGE_WEIGHT_POLL_INTERVAL_S = 0.25
 # RO fly wing unit weight — used to decide ItemsToStorage before GetFlyWings.
 FLY_WING_WEIGHT = 5
-# AHK ItemsToStorage OK-dialog Enter (extended scan code).
-STORAGE_ENTER_SCAN_CODE = 284
 # Always wait this long after Alt+mouse click (deposit).
 ALT_MOUSE_CLICK_DELAY_S = 0.1
 # Gap between the two clicks of a kiting double-click so the client
@@ -106,19 +98,8 @@ ALT_MOUSE_CLICK_DELAY_S = 0.1
 KITE_DOUBLE_CLICK_GAP_S = 0.08
 # Settle after moving onto a Use-tab fly wing before Alt+RMB deposit.
 STORAGE_WING_AIM_SETTLE_S = 0.25
-# Use-tab grid from assets/UI/InventoryPanel.png (8×6, 32px pitch).
-STORAGE_INV_COLS = 8
-STORAGE_INV_ROWS = 6
-# Wait for inventory panel after Alt+E before clicking tabs/slots.
-STORAGE_INV_OPEN_TIMEOUT_S = 2.0
-STORAGE_INV_OPEN_POLL_S = 0.1
-# Shared open/closed menu validation timeout (inventory + storage).
-STORAGE_MENU_TIMEOUT_S = 2.0
-STORAGE_MENU_POLL_S = 0.1
 # After inventory/storage open, close, or tab switch — UI needs time to draw.
 STORAGE_UI_SETTLE_S = 0.1
-# After moving the cursor off UI before a screen capture.
-STORAGE_CURSOR_CLEAR_S = 0.05
 __all__ = [
     "HUNT_DISCOVERY_INTERVAL_MS",
     "HUNT_OBJECT_RADIUS",
@@ -142,11 +123,9 @@ __all__ = [
     "SIT_SP_FEED_BLIND_RELOCATE_S",
     "SIT_SP_PROGRESS_LOG_S",
     "SIT_MAX_SPOT_RELOCATIONS",
-    "SIT_IDLE_BEFORE_SIT_S",
     "SIT_STAND_RESUME_DELAY_S",
     "SIT_KEY_SETTLE_S",
     "SIT_POST_TELEPORT_SETTLE_S",
-    "CRITICAL_DANGER_POLL_INTERVAL_S",
     "CRITICAL_PREEMPT_RELEASE_TIMEOUT_S",
     "HP_RESTORE_RATIO",
     "HP_RESTORE_POLL_S",
@@ -157,20 +136,11 @@ __all__ = [
     "SKILL_TIMER_STAGGER_MS",
     "STARTUP_BUFF_GAP_S",
     "STARTUP_BUFF_CURSOR_DELAY_S",
-    "STORAGE_WEIGHT_POLL_INTERVAL_S",
     "STORAGE_WEIGHT_MODIFIER_MIN",
     "STORAGE_WEIGHT_MODIFIER_MAX",
     "FLY_WING_WEIGHT",
-    "STORAGE_ENTER_SCAN_CODE",
     "ALT_MOUSE_CLICK_DELAY_S",
     "KITE_DOUBLE_CLICK_GAP_S",
     "STORAGE_WING_AIM_SETTLE_S",
-    "STORAGE_INV_COLS",
-    "STORAGE_INV_ROWS",
-    "STORAGE_INV_OPEN_TIMEOUT_S",
-    "STORAGE_INV_OPEN_POLL_S",
-    "STORAGE_MENU_TIMEOUT_S",
-    "STORAGE_MENU_POLL_S",
     "STORAGE_UI_SETTLE_S",
-    "STORAGE_CURSOR_CLEAR_S",
 ]
