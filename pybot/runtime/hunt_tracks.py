@@ -341,8 +341,9 @@ class HuntTracks:
            discovery's silhouette repeatedly fails to extract is never removed
            while tracking still follows it. Misses inside the melee occlusion
            disk around the character (ROI center) additionally do not count
-           while ``lost_count == 0``. Once tracking has also lost it, misses
-           count normally so corpses under the character are removed.
+           while ``lost_count == 0`` and the track is not overlap-holding.
+           Once tracking has also lost it, or is only holding last center,
+           misses count normally so corpses under the character are removed.
         3. Earlier misses → ``discovery_miss_count`` += 1 (stays alive).
 
         Confirmed death (opacity / idle-dead) uses ``_remove_dead_tracks_locked``
@@ -521,14 +522,17 @@ class HuntTracks:
 
         Near the character (ROI center), discovery silhouette often fails
         because the player sprite merges into the extract. When local
-        tracking still has the mob (``lost_count == 0``), that is occlusion
-        — do not count the miss. Once tracking has also lost it, count
-        normally so corpses under the character are still removed.
+        tracking still has the mob (``lost_count == 0``) and is not
+        overlap-holding, that is occlusion — do not count the miss. Once
+        tracking has also lost it, or is only holding last center because
+        a neighbor owned the hit, count normally so corpses under the
+        character and leftover crowded identities are still removed.
 
         Tracking confirmation additionally holds the counter everywhere: a
         fresh-frame hit resets ``discovery_miss_count`` (see
         ``apply_track_observation``), so discovery misses alone can never
-        remove a mob local tracking still follows.
+        remove a mob local tracking still follows. An overlap hold is not
+        that confirmation.
         """
         remove_ids: set[int] = set()
         first_miss_ids: list[int] = []
@@ -544,12 +548,16 @@ class HuntTracks:
             # heatmap still supports this Track's capture-time position.
             # Overlapping/moving sprites commonly fail the shape gate while
             # remaining visually present in the local heat signal.
-            if track_id in supported_by_heat:
+            # Overlap-hold is identity sticky, not presence. Neighbor heat
+            # and the player sprite commonly cover a leftover last-center;
+            # counting the miss is what lets a dead crowded track die.
+            if track_id in supported_by_heat and not track.overlap_holding:
                 continue
             if (
                 char_x is not None
                 and char_y is not None
                 and track.lost_count == 0
+                and not track.overlap_holding
                 and _within_melee_guard(track.x, track.y, char_x, char_y)
             ):
                 continue
@@ -591,15 +599,32 @@ class HuntTracks:
 
                 if result.found:
                     if bool(getattr(result, "overlap_hold", False)):
-                        # Close/merged sprites: keep identity and last center,
-                        # but this is not a visual confirmation. A real hit
-                        # still resets discovery misses via
-                        # apply_track_observation; a hold must not, or two
-                        # leftover tracks can zero each other's miss streak
-                        # forever and the area never goes clear.
-                        track.lost_count = 0
+                        # Close/merged sprites: keep identity and last center.
+                        # This is not a visual confirmation — do not reset
+                        # lost_count or discovery misses — but the last bbox
+                        # can still fade, so opacity death must still run.
+                        track.overlap_holding = True
+                        track.moving = False
                         track.last_found_tick = tick
+                        baseline = track.opacity_baseline
+                        streak = track.opacity_decay_streak
+                        if apply_opacity_observation(
+                            track,
+                            opacity_score=result.opacity_score,
+                            config=config,
+                        ):
+                            opacity_deaths.append(
+                                OpacityDeathEvent(
+                                    track_id=result.track_id,
+                                    x=track.x,
+                                    y=track.y,
+                                    baseline=baseline,
+                                    opacity_score=float(result.opacity_score),
+                                    streak=streak + 1,
+                                )
+                            )
                         continue
+                    track.overlap_holding = False
                     move_px, stop_px = movement_thresholds(config)
                     apply_movement_observation(
                         track,
@@ -642,6 +667,7 @@ class HuntTracks:
                     continue
 
                 # Tracking miss — keep last known position, advance lost count.
+                track.overlap_holding = False
                 apply_track_observation(
                     track,
                     found=False,

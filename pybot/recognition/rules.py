@@ -102,6 +102,10 @@ class MobTrack:
     # tracking hit resets the counter, so removal effectively requires that
     # BOTH discovery misses the mob AND local tracking failed to confirm it.
     discovery_miss_count: int = 0
+    # True while local tracking is holding last center because a neighbor
+    # owned the visible hit. This is not a visual confirmation: melee and
+    # heatmap miss-holds must not treat it as "tracking still has the mob".
+    overlap_holding: bool = False
     # True after the configured per-mob debuff was successfully cast once.
     debuff_applied: bool = False
 

@@ -337,6 +337,8 @@ def track_local(
             _track_miss_store(detector).pop(track_id, None)
             return recovered
         crowded = _overlap_hold_if_crowded(
+            detector=detector,
+            frame_bgr=frame_bgr,
             track_id=track_id,
             x=screen_cx,
             y=screen_cy,
@@ -363,6 +365,8 @@ def track_local(
         _track_miss_store(detector).pop(track_id, None)
         return template_hit
     crowded = _overlap_hold_if_crowded(
+        detector=detector,
+        frame_bgr=frame_bgr,
         track_id=track_id,
         x=screen_cx,
         y=screen_cy,
@@ -488,12 +492,43 @@ def in_neighbor_suppress_disk(
     return any((x - sx) ** 2 + (y - sy) ** 2 <= radius_sq for sx, sy in suppress_positions)
 
 
+def _opacity_at_center(
+    detector: MobDetector,
+    frame_bgr: np.ndarray,
+    descriptor: MobDescriptor,
+    center_x: int,
+    center_y: int,
+    scale: float,
+) -> float:
+    opacity_width = max(
+        _FAST_BBOX_MIN_PX,
+        int(round(descriptor.avg_width * scale)),
+    )
+    opacity_height = max(
+        _FAST_BBOX_MIN_PX,
+        int(round(descriptor.avg_height * scale)),
+    )
+    return measure_opacity_score(
+        frame_bgr,
+        descriptor,
+        (
+            center_x - opacity_width // 2,
+            center_y - opacity_height // 2,
+            opacity_width,
+            opacity_height,
+        ),
+        float(descriptor.max_sprite_palette_distance),
+        float(detector.config["minSpritePaletteMatch"]),
+    )
+
+
 def _overlap_hold_result(
     *,
     track_id: int,
     x: int,
     y: int,
     confidence: float = 0.0,
+    opacity_score: float = 0.0,
 ) -> LocalTrackResult:
     return LocalTrackResult(
         track_id=track_id,
@@ -502,12 +537,15 @@ def _overlap_hold_result(
         y=y,
         confidence=confidence,
         miss_reason="",
+        opacity_score=opacity_score,
         overlap_hold=True,
     )
 
 
 def _overlap_hold_if_crowded(
     *,
+    detector: MobDetector,
+    frame_bgr: np.ndarray,
     track_id: int,
     x: int,
     y: int,
@@ -522,7 +560,14 @@ def _overlap_hold_if_crowded(
     radius = _cross_track_suppress_radius_px(descriptor, scale)
     if not in_neighbor_suppress_disk(roi_x, roi_y, suppress_positions, radius):
         return None
-    return _overlap_hold_result(track_id=track_id, x=x, y=y)
+    return _overlap_hold_result(
+        track_id=track_id,
+        x=x,
+        y=y,
+        opacity_score=_opacity_at_center(
+            detector, frame_bgr, descriptor, roi_x, roi_y, scale,
+        ),
+    )
 
 
 def _miss_result(
@@ -930,29 +975,15 @@ def _follow_cached_template(
                 x=stay_x + offset_x,
                 y=stay_y + offset_y,
                 confidence=float(max_val),
+                opacity_score=_opacity_at_center(
+                    detector, frame_bgr, descriptor, stay_x, stay_y, scale,
+                ),
             )
 
     # Keep the original template stable. Replacing it on every frame causes
     # template drift; only the current-frame palette bbox may publish a center.
-    opacity_width = max(
-        _FAST_BBOX_MIN_PX,
-        int(round(descriptor.avg_width * scale)),
-    )
-    opacity_height = max(
-        _FAST_BBOX_MIN_PX,
-        int(round(descriptor.avg_height * scale)),
-    )
-    opacity_score = measure_opacity_score(
-        frame_bgr,
-        descriptor,
-        (
-            hit_x - opacity_width // 2,
-            hit_y - opacity_height // 2,
-            opacity_width,
-            opacity_height,
-        ),
-        float(descriptor.max_sprite_palette_distance),
-        float(detector.config["minSpritePaletteMatch"]),
+    opacity_score = _opacity_at_center(
+        detector, frame_bgr, descriptor, hit_x, hit_y, scale,
     )
     return LocalTrackResult(
         track_id=track_id,

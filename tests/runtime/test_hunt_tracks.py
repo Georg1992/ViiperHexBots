@@ -41,6 +41,25 @@ def _miss(track_id: int) -> SimpleNamespace:
     )
 
 
+def _hold(
+    track_id: int,
+    x: int,
+    y: int,
+    *,
+    opacity_score: float = 0.0,
+    confidence: float = 0.7,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        track_id=track_id,
+        found=True,
+        x=x,
+        y=y,
+        confidence=confidence,
+        opacity_score=opacity_score,
+        overlap_hold=True,
+    )
+
+
 def det(
     x: int,
     y: int,
@@ -138,23 +157,14 @@ class HuntTracksRulesTests(unittest.TestCase):
         track.lost_count = 2
         track.discovery_miss_count = 2
         self.tracks.apply_tracking(
-            [
-                SimpleNamespace(
-                    track_id=track_id,
-                    found=True,
-                    x=900,
-                    y=600,
-                    confidence=0.7,
-                    opacity_score=0.0,
-                    overlap_hold=True,
-                )
-            ],
+            [_hold(track_id, 900, 600)],
             now_tick=self.now + 600,
         )
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
         self.assertEqual((track.x, track.y), (874, 578))
-        self.assertEqual(track.lost_count, 0)
+        self.assertEqual(track.lost_count, 2)
+        self.assertTrue(track.overlap_holding)
         self.assertEqual(track.discovery_miss_count, 2)
 
     def test_overlap_hold_does_not_block_discovery_clearing_empty_ghosts(self) -> None:
@@ -163,17 +173,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         assert track is not None
         track.discovery_miss_count = 2
         self.tracks.apply_tracking(
-            [
-                SimpleNamespace(
-                    track_id=track_id,
-                    found=True,
-                    x=874,
-                    y=578,
-                    confidence=0.7,
-                    opacity_score=0.0,
-                    overlap_hold=True,
-                )
-            ],
+            [_hold(track_id, 874, 578)],
             now_tick=self.now + 1,
         )
         summary = self.tracks.process_discovery_scan(
@@ -390,6 +390,65 @@ class HuntTracksRulesTests(unittest.TestCase):
             [], mob_name="horn", now_tick=self.now + 150, hunt_roi=roi,
         )
         self.assertIsNone(self.tracks.get_track_by_id(near_id))
+
+    def test_overlap_hold_near_character_still_counts_discovery_misses(self) -> None:
+        """A crowded hold is not tracking lock; melee occlusion must not freeze it."""
+        from pybot.runtime.capture.window_roi import HuntRoi
+
+        roi = HuntRoi(x=0, y=0, w=2000, h=2000)
+        near_id = self._create(roi.center_x + 40, roi.center_y + 40)
+        near = self.tracks.get_track_by_id(near_id)
+        assert near is not None
+        near.lost_count = 0
+        self.tracks.apply_tracking(
+            [_hold(near_id, near.x, near.y, opacity_score=0.55)],
+            now_tick=self.now + 1,
+        )
+        near = self.tracks.get_track_by_id(near_id)
+        assert near is not None
+        self.assertTrue(near.overlap_holding)
+        self.assertEqual(near.lost_count, 0)
+
+        for offset in (50, 100):
+            self.tracks.process_discovery_scan(
+                [],
+                mob_name="horn",
+                now_tick=self.now + offset,
+                hunt_roi=roi,
+            )
+            self.assertIsNotNone(self.tracks.get_track_by_id(near_id))
+
+        self.tracks.process_discovery_scan(
+            [],
+            mob_name="horn",
+            now_tick=self.now + 150,
+            hunt_roi=roi,
+        )
+        self.assertIsNone(self.tracks.get_track_by_id(near_id))
+
+    def test_overlap_hold_ignores_neighbor_heat_for_discovery_misses(self) -> None:
+        """Leftover crowded tracks must not live on a neighbor's heatmap."""
+        track_id = self._create(874, 578)
+        self.tracks.apply_tracking(
+            [_hold(track_id, 874, 578, opacity_score=0.55)],
+            now_tick=self.now + 1,
+        )
+        for offset in (50, 100):
+            summary = self.tracks.process_discovery_scan(
+                [],
+                mob_name="horn",
+                now_tick=self.now + offset,
+                heat_supported_track_ids={track_id},
+            )
+            self.assertEqual(summary.removed_count, 0)
+        summary = self.tracks.process_discovery_scan(
+            [],
+            mob_name="horn",
+            now_tick=self.now + 150,
+            heat_supported_track_ids={track_id},
+        )
+        self.assertEqual(summary.removed_ids, [track_id])
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
     def test_tracking_hit_resets_discovery_miss_streak(self) -> None:
         """Tracker hit resets discovery_miss_count — confirmed mobs survive.
@@ -1031,6 +1090,34 @@ class HuntTracksRulesTests(unittest.TestCase):
         )
         self.assertEqual(summary.added_count, 0)
         self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 0)
+
+    def test_overlap_hold_still_confirms_opacity_death(self) -> None:
+        track_id = self._create(500, 500)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.last_discovery_x = 500
+        track.last_discovery_y = 500
+        for i in range(4):
+            self.tracks.apply_tracking(
+                [_hit(track_id, 500, 500, opacity_score=0.60)],
+                now_tick=self.now + (i + 1) * 16,
+            )
+        for i, score in enumerate((0.20, 0.18)):
+            missed, dead = self.tracks.apply_tracking(
+                [_hold(track_id, 500, 500, opacity_score=score)],
+                now_tick=self.now + 100 + i * 16,
+            )
+            self.assertEqual(missed, [])
+            self.assertEqual(dead, [])
+            track = self.tracks.get_track_by_id(track_id)
+            assert track is not None
+            self.assertEqual((track.x, track.y), (500, 500))
+        missed, dead = self.tracks.apply_tracking(
+            [_hold(track_id, 500, 500, opacity_score=0.15)],
+            now_tick=self.now + 200,
+        )
+        self.assertEqual([e.track_id for e in dead], [track_id])
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
     def test_death_site_expires_after_cooldown(self) -> None:
         track_id = self._create(500, 500)
