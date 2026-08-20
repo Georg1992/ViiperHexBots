@@ -591,17 +591,14 @@ class HuntTracks:
 
                 if result.found:
                     if bool(getattr(result, "overlap_hold", False)):
-                        # Sprites overlapped or merged. Keep this identity on
-                        # its last center instead of snapping onto a neighbor
-                        # or counting a local loss.
-                        apply_track_observation(
-                            track,
-                            found=True,
-                            x=track.x,
-                            y=track.y,
-                            confidence=result.confidence,
-                            now_tick=tick,
-                        )
+                        # Close/merged sprites: keep identity and last center,
+                        # but this is not a visual confirmation. A real hit
+                        # still resets discovery misses via
+                        # apply_track_observation; a hold must not, or two
+                        # leftover tracks can zero each other's miss streak
+                        # forever and the area never goes clear.
+                        track.lost_count = 0
+                        track.last_found_tick = tick
                         continue
                     move_px, stop_px = movement_thresholds(config)
                     apply_movement_observation(

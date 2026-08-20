@@ -133,6 +133,10 @@ class HuntTracksRulesTests(unittest.TestCase):
 
     def test_overlap_hold_keeps_identity_without_lost_count(self) -> None:
         track_id = self._create(874, 578)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.lost_count = 2
+        track.discovery_miss_count = 2
         self.tracks.apply_tracking(
             [
                 SimpleNamespace(
@@ -151,7 +155,34 @@ class HuntTracksRulesTests(unittest.TestCase):
         assert track is not None
         self.assertEqual((track.x, track.y), (874, 578))
         self.assertEqual(track.lost_count, 0)
-        self.assertEqual(track.discovery_miss_count, 0)
+        self.assertEqual(track.discovery_miss_count, 2)
+
+    def test_overlap_hold_does_not_block_discovery_clearing_empty_ghosts(self) -> None:
+        track_id = self._create(874, 578)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.discovery_miss_count = 2
+        self.tracks.apply_tracking(
+            [
+                SimpleNamespace(
+                    track_id=track_id,
+                    found=True,
+                    x=874,
+                    y=578,
+                    confidence=0.7,
+                    opacity_score=0.0,
+                    overlap_hold=True,
+                )
+            ],
+            now_tick=self.now + 1,
+        )
+        summary = self.tracks.process_discovery_scan(
+            [],
+            mob_name="horn",
+            now_tick=self.now + 2,
+        )
+        self.assertIn(track_id, summary.removed_ids)
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
     def test_moving_track_reconciles_beyond_static_dedup_radius(self) -> None:
         """A fast local-follow update must not fragment the discovery track."""
