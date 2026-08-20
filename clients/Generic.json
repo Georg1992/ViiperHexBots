@@ -2,11 +2,5 @@
   "name": "Generic",
   "processName": "",
   "windowTitleHint": "",
-  "memory": null,
-  "captcha": null,
-  "zoom": {
-    "wheelDelta": 1,
-    "steps": 10,
-    "delayMs": 60
-  }
+  "memory": null
 }

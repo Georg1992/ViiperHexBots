@@ -1,8 +1,7 @@
 """Sit when SP is low; pause hunting until SP recovers.
 
-Sit/stand is a **toggle key**. Pose OCR (falcon, animation, crop) is too
-unreliable to drive retries — each wrong read caused another tap and the
-character flapped sit↔stand.
+Sit/stand is a **toggle key**. Each extra tap inverts pose, so the worker
+tracks seated state itself instead of reading the sprite.
 
 RO gameplay fact: **a seated character stands up automatically the moment
 it takes any damage.** That is why every damage-escape path resets

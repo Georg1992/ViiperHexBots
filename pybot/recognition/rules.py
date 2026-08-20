@@ -14,9 +14,14 @@ Ownership:
   proposes centers; ``score_at`` (silhouette gate) accepts a hit.  On
   found=True it updates position, velocity, and opacity baseline / decay.
   Sustained opacity drop while stationary removes the track (in-place
-  death fade).  Discovery matches also update ``discovery_stationary``
+  death fade), or decrements ``occupancy`` when several identities share
+  one blob.  Discovery matches also update ``discovery_stationary``
   from consecutive discovery blob centers (coordinates unchanged within
   the stop threshold).  On miss it keeps the last known position while Tracking enters local recovery.
+  Overlap-hold from local tracking is not a second ID: the held track
+  merges into the nearest unique hit (or nearest alive within the
+  same-object radius) and occupancy remembers how many identities
+  collided.  A later split peels one occupancy onto the new track.
 - **Attack** supplies skill clicks and idle SP samples (``was_idle``).
   Confirmed idle-dead / unreachable decisions live in
   ``HuntTracks.evaluate_idle_attack`` (death uses discovery blob stationary,
@@ -106,6 +111,10 @@ class MobTrack:
     # owned the visible hit. This is not a visual confirmation: melee and
     # heatmap miss-holds must not treat it as "tracking still has the mob".
     overlap_holding: bool = False
+    # Known identities on this one visible blob. Vision cannot count a
+    # stacked sprite; occupancy grows on overlap-merge and shrinks on
+    # split or in-place death while the pile is still visible.
+    occupancy: int = 1
     # True after the configured per-mob debuff was successfully cast once.
     debuff_applied: bool = False
 

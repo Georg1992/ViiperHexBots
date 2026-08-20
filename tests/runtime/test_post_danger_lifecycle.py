@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 from pybot.config.runtime import HuntRuntimeConfig
 from pybot.paths import PROJECT_ROOT
+from pybot.recognition.detector.detector import load_detector_config
 from pybot.runtime.control import RuntimeControl
 from pybot.runtime.hunt_mode import create_hunt_mode
 from pybot.runtime.hunt_policy import HuntPolicy
@@ -152,7 +153,8 @@ class PostDangerLifecycleTests(unittest.TestCase):
             x=0, y=0, w=200, h=200,
         )
         self.ctx.capture.capture_roi.return_value = SimpleNamespace(size=1)
-        self.ctx.detector.discover_frame.side_effect = lambda _frame, _roi: (
+        self.ctx.detector.detector_config.return_value = load_detector_config()
+        self.ctx.detector.discover_frame.side_effect = lambda *_args, **_kwargs: (
             SimpleNamespace(ok=True, raw_count=1, duration_ms=1, detections=[])
         )
         worker = DiscoveryWorker(self.ctx, self.mode)
@@ -160,7 +162,7 @@ class PostDangerLifecycleTests(unittest.TestCase):
         entered_detector = threading.Event()
         release_detector = threading.Event()
 
-        def blocked_scan(_frame, _roi):
+        def blocked_scan(*_args, **_kwargs):
             entered_detector.set()
             release_detector.wait(timeout=1.0)
             return SimpleNamespace(ok=True, raw_count=1, duration_ms=1, detections=[])

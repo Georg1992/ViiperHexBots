@@ -228,7 +228,7 @@ class SitOnLowSpWorkerContext(
     """Hunt runtime subset consumed by SitOnLowSpWorker.
 
     Capture/detect for area-clear live on ``TeleportController``'s ctx, not
-    here. Pose OCR is unused — sit/stand is press-once with a seated flag.
+    here. Sit/stand is press-once with a seated flag.
     """
 
     @property

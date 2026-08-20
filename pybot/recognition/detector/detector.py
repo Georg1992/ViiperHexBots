@@ -7,7 +7,6 @@ No RegionScorer, no structural pixels, and no heavyweight global center search.
 
 from __future__ import annotations
 
-import inspect
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -59,6 +58,7 @@ REQUIRED_CONFIG_KEYS = {
     "localTrackMaxSearchRadiusPx",
     "discoveryClusterRadiusPx",
     "trackDedupRadiusPx",
+    "trackDedupMovingRadiusPx",
     "debugOutputDir",
     # track-removal keys (movement + discovery blob stationary + opacity death)
     "movementMoveThresholdPx",
@@ -312,21 +312,16 @@ class MobDetector:
         self.local_track_moving_search_radius_px = int(
             self.config["localTrackMovingSearchRadiusPx"]
         )
-        # Keep programmatic/older runtime configs compatible with the new
-        # optional tracking tuning knobs; the checked-in detector config still
-        # validates and documents the defaults.
         self.local_track_sprite_radius_multiplier = float(
-            self.config.get("localTrackSpriteRadiusMultiplier", 1.5)
+            self.config["localTrackSpriteRadiusMultiplier"]
         )
         self.local_track_max_search_radius_px = int(
-            self.config.get("localTrackMaxSearchRadiusPx", 600)
+            self.config["localTrackMaxSearchRadiusPx"]
         )
         # GRF mode widens the descriptor aspect band: a static red sprite's
         # palette CC is often clipped (head/feet shade outside the match radius),
         # which shifts the extract aspect beyond the build-time tight band.
-        self.grf_aspect_band_scale = float(
-            self.config.get("grfAspectBandScale", 1.3)
-        )
+        self.grf_aspect_band_scale = float(self.config["grfAspectBandScale"])
 
     def descriptor_path(self, mob_name: str) -> Path:
         stem = mob_name.lower()
@@ -418,36 +413,12 @@ class MobDetector:
             downscale = 1
 
         build_heatmap = self.heatmap_detector.build_sprite_heatmap
-        # Keep older detector doubles/extensions usable without catching an
-        # internal TypeError from the actual heatmap implementation. Signature
-        # dispatch is resolved before the call, so production failures remain
-        # visible and static GRF mode cannot silently fall back to the slow path.
-        try:
-            heatmap_parameters = inspect.signature(build_heatmap).parameters
-            supports_fast_static = (
-                "fast_static" in heatmap_parameters
-                or any(
-                    parameter.kind is inspect.Parameter.VAR_KEYWORD
-                    for parameter in heatmap_parameters.values()
-                )
-            )
-        except (TypeError, ValueError):
-            # Some extension callables do not expose a signature; the current
-            # built-in implementation supports the keyword, so use it there.
-            supports_fast_static = True
-        if supports_fast_static:
-            sprite_heatmap = build_heatmap(
-                frame_bgr,
-                descriptor,
-                downscale=downscale,
-                fast_static=static_sprite_fast_path,
-            )
-        else:
-            sprite_heatmap = build_heatmap(
-                frame_bgr,
-                descriptor,
-                downscale=downscale,
-            )
+        sprite_heatmap = build_heatmap(
+            frame_bgr,
+            descriptor,
+            downscale=downscale,
+            fast_static=static_sprite_fast_path,
+        )
         heatmap_end = time.perf_counter()
 
         # --- blobs ----------------------------------------------------

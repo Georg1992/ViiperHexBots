@@ -17,6 +17,7 @@ from pybot.runtime.constants import (
     WORKER_POLL_INTERVAL_S,
 )
 from pybot.runtime.hunt_tracks import monotonic_ms
+from pybot.recognition.detector.tracking.local_tracker import _LOCAL_TRACK_LOST_MISSES
 from pybot.runtime.detection.detector_session import StateTrackSnapshot
 from pybot.runtime.diagnostics import format_thread_dump, game_process_cpu_snapshot
 from pybot.runtime.workers.worker_contexts import CoordTrackingWorkerContext
@@ -82,9 +83,7 @@ class CoordTrackingWorker:
             self._logged_first_tick_epoch = area_epoch
         candidates = ctx.tracks.get_and_clear_new_candidates()
         if not alive_tracks and not candidates:
-            prune = getattr(ctx.tracker, "prune_track_states", None)
-            if callable(prune):
-                prune({track.id for track in ctx.tracks.snapshot_alive()})
+            ctx.tracker.prune_track_states({track.id for track in ctx.tracks.snapshot_alive()})
             self._update_overlay(now_ms)
             return
 
@@ -115,7 +114,7 @@ class CoordTrackingWorker:
                 # Keep the last reliable direction through the bounded local
                 # recovery ladder. Disabling prediction on the first miss made
                 # a fast mob disappear from the next local search window.
-                prediction_valid=track.lost_count < 8,
+                prediction_valid=track.lost_count < _LOCAL_TRACK_LOST_MISSES,
                 lost_count=track.lost_count,
                 anchor_required=True,
             )
@@ -181,9 +180,7 @@ class CoordTrackingWorker:
             if missed and not ctx.discovery_suspend.is_set():
                 ctx.discovery_wake.set()
             del missed
-        prune = getattr(ctx.tracker, "prune_track_states", None)
-        if callable(prune):
-            prune({track.id for track in ctx.tracks.snapshot_alive()})
+        ctx.tracker.prune_track_states({track.id for track in ctx.tracks.snapshot_alive()})
         self._update_overlay(now_ms)
 
     def _process_discovery_candidates(
@@ -195,19 +192,20 @@ class CoordTrackingWorker:
         area_epoch: int,
     ) -> int:
         """Acquire candidates on the current frame and commit live Tracks."""
+        del now_ms
         ctx = self._ctx
-        existing = ctx.tracks.positions_snapshot(now_ms)
+        existing = ctx.tracks.occupancy_positions()
         config = ctx.tracker.detector_config()
-        dedup_radius = int(config["trackDedupRadiusPx"])
         cluster_radius = int(config["discoveryClusterRadiusPx"])
-        dedup_sq = dedup_radius * dedup_radius
         cluster_sq = cluster_radius * cluster_radius
         pending = []
         snapshots = []
         for index, candidate in enumerate(candidates):
             if candidate.candidate_scale <= 0:
                 continue
-            if any((candidate.x - x) ** 2 + (candidate.y - y) ** 2 <= dedup_sq for x, y in existing):
+            if ctx.tracks.blocks_new_track_at(
+                candidate.x, candidate.y, existing=existing,
+            ):
                 continue
             provisional_id = -(index + 1)
             pending.append((provisional_id, candidate))
@@ -234,7 +232,7 @@ class CoordTrackingWorker:
                 ctx.tracker.discard_track_state(result.track_id)
                 continue
             x, y = result.x, result.y
-            if any((x - px) ** 2 + (y - py) ** 2 <= dedup_sq for px, py in existing):
+            if ctx.tracks.blocks_new_track_at(x, y, existing=existing):
                 ctx.tracker.discard_track_state(result.track_id)
                 continue
             if any((x - px) ** 2 + (y - py) ** 2 <= cluster_sq for px, py in committed_positions):
@@ -328,5 +326,8 @@ class CoordTrackingWorker:
     def _update_overlay(self, now_ms: int) -> None:
         del now_ms
         track_count, alive = self._ctx.tracks.overlay_track_state()
-        self._ctx.overlay.set_track_stats(track_count=track_count, alive_count=len(alive))
+        self._ctx.overlay.set_track_stats(
+            track_count=track_count,
+            alive_count=sum(track.occupancy for track in alive),
+        )
         self._ctx.overlay.set_track_positions([(track.x, track.y) for track in alive])

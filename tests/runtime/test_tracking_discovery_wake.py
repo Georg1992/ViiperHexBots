@@ -126,6 +126,7 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         )
         ctx.capture.capture_roi.return_value = MagicMock(size=1)
         ctx.tracks = self.tracks
+        ctx.detector.detector_config.return_value = load_detector_config()
         ctx.detector.discover_frame.return_value = SimpleNamespace(
             ok=True,
             fail_reason="",
@@ -154,8 +155,8 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         self.assertTrue(self.tracks.has_pending_discovery_candidates())
         hunt_mode.note_discovery_scan_completed.assert_called_once()
 
-    def test_discovery_accepts_legacy_detector_signature(self) -> None:
-        """Old two-argument detector doubles still complete a discovery pass."""
+    def test_discovery_passes_heat_track_positions(self) -> None:
+        """Discovery always probes heat at live track positions on the same frame."""
         from pybot.runtime.workers.discovery_worker import DiscoveryWorker
 
         self.ctx.stop_event = threading.Event()
@@ -171,17 +172,15 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
             x=0, y=0, w=200, h=200, center_x=100, center_y=100,
         )
         self.ctx.capture.capture_roi.return_value = MagicMock(size=1)
-        self.ctx.detector.detector_config.return_value = {}
-        self.ctx.detector.discover_frame.side_effect = (
-            lambda _frame, _roi: SimpleNamespace(
-                ok=True,
-                fail_reason="",
-                raw_count=0,
-                accepted_count=0,
-                duration_ms=1,
-                timing={},
-                detections=[],
-            )
+        self.ctx.detector.detector_config.return_value = load_detector_config()
+        self.ctx.detector.discover_frame.return_value = SimpleNamespace(
+            ok=True,
+            fail_reason="",
+            raw_count=0,
+            accepted_count=0,
+            duration_ms=1,
+            timing={},
+            detections=[],
         )
         self.ctx.overlay = MagicMock()
         self.ctx.validation = MagicMock()
@@ -189,7 +188,8 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         worker = DiscoveryWorker(self.ctx, MagicMock())
         worker._scan()
         self.assertEqual(self.tracks.get_track_count(), 0)
-        self.assertTrue(self.ctx.detector.discover_frame.called)
+        kwargs = self.ctx.detector.discover_frame.call_args.kwargs
+        self.assertIn("heat_track_positions", kwargs)
 
     def test_created_track_wakes_attack_after_state_commit(self) -> None:
         """Tracking signals attack only after the live track is fully committed."""
@@ -274,6 +274,112 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
             {(track.x, track.y) for track in created},
             {(100, 100), (160, 100)},
         )
+
+    def test_stacked_track_peels_when_split_candidate_arrives(self) -> None:
+        """Occupancy > 1 allows a nearby split blob to become its own track."""
+        from pybot.recognition.rules import DiscoveryDetection
+
+        self.ctx.config.mob_name = "horn"
+        self.ctx.config.use_sprite_grf = True
+        self.ctx.tracker.detector_config.return_value = load_detector_config()
+        stacked = self.tracks.create_track(
+            "horn", 100, 100, 0.8, 0.9, now_tick=1,
+            discovery_bbox=(80, 80, 30, 30),
+        )
+        assert stacked is not None
+        stacked.occupancy = 2
+        self.tracks.process_discovery_scan(
+            [
+                DiscoveryDetection(
+                    x=100, y=100, confidence=0.8,
+                    candidate_scale=0.9, living=True,
+                    bbox=(80, 80, 30, 30),
+                ),
+                DiscoveryDetection(
+                    x=160, y=100, confidence=0.79,
+                    candidate_scale=0.9, living=True,
+                    bbox=(145, 85, 30, 30),
+                ),
+            ],
+            mob_name="horn",
+            now_tick=2,
+        )
+        self.ctx.tracker.transfer_track_state.return_value = True
+
+        def acquire(_frame, _roi, snapshots, *, on_result=None):
+            results = []
+            for snapshot in snapshots:
+                result = SimpleNamespace(
+                    track_id=snapshot.track_id,
+                    found=True,
+                    x=snapshot.x,
+                    y=snapshot.y,
+                    confidence=0.9,
+                    opacity_score=0.0,
+                )
+                results.append(result)
+                if on_result is not None:
+                    on_result(result)
+            return SimpleNamespace(ok=True, results=results)
+
+        self.ctx.tracker.track_locals_frame.side_effect = acquire
+        self.worker._tick()
+
+        stacked_track = self.tracks.get_track_by_id(stacked.id)
+        assert stacked_track is not None
+        self.assertEqual(stacked_track.occupancy, 1)
+        alive = self.tracks.snapshot_alive(3)
+        self.assertEqual(len(alive), 2)
+        self.assertEqual(sum(track.occupancy for track in alive), 2)
+
+    def test_unique_track_still_blocks_nearby_candidate(self) -> None:
+        """Occupancy 1 keeps the same-object radius; no duplicate ID."""
+        from pybot.recognition.rules import DiscoveryDetection
+
+        self.ctx.config.mob_name = "horn"
+        self.ctx.config.use_sprite_grf = True
+        self.ctx.tracker.detector_config.return_value = load_detector_config()
+        existing = self.tracks.create_track(
+            "horn", 100, 100, 0.8, 0.9, now_tick=1,
+            discovery_bbox=(80, 80, 30, 30),
+        )
+        assert existing is not None
+        self.tracks.process_discovery_scan(
+            [
+                DiscoveryDetection(
+                    x=100, y=100, confidence=0.8,
+                    candidate_scale=0.9, living=True,
+                    bbox=(80, 80, 30, 30),
+                ),
+                DiscoveryDetection(
+                    x=160, y=100, confidence=0.79,
+                    candidate_scale=0.9, living=True,
+                    bbox=(145, 85, 30, 30),
+                ),
+            ],
+            mob_name="horn",
+            now_tick=2,
+        )
+        self.ctx.tracker.transfer_track_state.return_value = True
+        self.ctx.tracker.track_locals_frame.side_effect = (
+            lambda _frame, _roi, snapshots, **_kwargs: SimpleNamespace(
+                ok=True,
+                results=[
+                    SimpleNamespace(
+                        track_id=snapshot.track_id,
+                        found=True,
+                        x=snapshot.x,
+                        y=snapshot.y,
+                        confidence=0.9,
+                        opacity_score=0.0,
+                    )
+                    for snapshot in snapshots
+                ],
+            )
+        )
+        self.worker._tick()
+        self.assertEqual(self.tracks.get_track_count(), 1)
+        self.assertIsNotNone(self.tracks.get_track_by_id(existing.id))
 
     def test_created_track_is_followed_in_same_tick(self) -> None:
         """The first committed track is followed without a second tick."""

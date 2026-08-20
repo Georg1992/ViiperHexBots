@@ -167,6 +167,132 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertTrue(track.overlap_holding)
         self.assertEqual(track.discovery_miss_count, 2)
 
+    def test_overlap_hold_merges_into_unique_hit(self) -> None:
+        """A shared blob is one track; occupancy remembers the collided IDs."""
+        kept = self._create(874, 578)
+        held = self.tracks.create_track(
+            "horn", 880, 580, 0.71, 0.9, now_tick=self.now,
+        ).id
+        self.tracks.apply_tracking(
+            [_hit(kept, 874, 578), _hold(held, 880, 580)],
+            now_tick=self.now + 600,
+        )
+        self.assertIsNone(self.tracks.get_track_by_id(held))
+        track = self.tracks.get_track_by_id(kept)
+        assert track is not None
+        self.assertEqual(track.occupancy, 2)
+        self.assertFalse(track.overlap_holding)
+        area = self.tracks.get_area_clear_candidate()
+        self.assertEqual(area.alive_count, 2)
+        self.assertEqual(self.tracks.get_track_count(), 1)
+
+    def test_overlap_holds_merge_higher_id_into_lower(self) -> None:
+        first = self._create(874, 578)
+        second = self.tracks.create_track(
+            "horn", 880, 580, 0.71, 0.9, now_tick=self.now,
+        ).id
+        self.tracks.apply_tracking(
+            [_hold(first, 874, 578), _hold(second, 880, 580)],
+            now_tick=self.now + 600,
+        )
+        self.assertIsNone(self.tracks.get_track_by_id(second))
+        track = self.tracks.get_track_by_id(first)
+        assert track is not None
+        self.assertEqual(track.occupancy, 2)
+        self.assertFalse(track.overlap_holding)
+
+    def test_create_track_peels_occupancy_from_nearby_stack(self) -> None:
+        stacked = self._create(874, 578)
+        track = self.tracks.get_track_by_id(stacked)
+        assert track is not None
+        track.occupancy = 2
+        split = self.tracks.create_track(
+            "horn", 900, 578, 0.71, 0.9, now_tick=self.now,
+        ).id
+        stacked_track = self.tracks.get_track_by_id(stacked)
+        split_track = self.tracks.get_track_by_id(split)
+        assert stacked_track is not None
+        assert split_track is not None
+        self.assertEqual(stacked_track.occupancy, 1)
+        self.assertEqual(split_track.occupancy, 1)
+        self.assertEqual(self.tracks.get_area_clear_candidate().alive_count, 2)
+
+    def test_opacity_death_decrements_stacked_occupancy(self) -> None:
+        track_id = self._create(500, 500)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.last_discovery_x = 500
+        track.last_discovery_y = 500
+        track.occupancy = 2
+        for i in range(4):
+            self.tracks.apply_tracking(
+                [_hit(track_id, 500, 500, opacity_score=0.60)],
+                now_tick=self.now + (i + 1) * 16,
+            )
+        for i, score in enumerate((0.20, 0.18, 0.15)):
+            missed, dead = self.tracks.apply_tracking(
+                [_hit(track_id, 500, 500, opacity_score=score)],
+                now_tick=self.now + 100 + i * 16,
+            )
+            self.assertEqual(missed, [])
+            self.assertEqual(dead, [])
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertEqual(track.occupancy, 1)
+        self.assertEqual(track.opacity_decay_streak, 0)
+        self.assertEqual(self.tracks.get_area_clear_candidate().alive_count, 1)
+
+    def test_idle_dead_decrements_stacked_occupancy(self) -> None:
+        track_id = self._create(500, 500)
+        self.tracks.evaluate_idle_attack(
+            track_id, was_idle=False, mob_x=500, mob_y=500, char_x=0, char_y=0,
+        )
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.discovery_stationary = True
+        track.occupancy = 2
+        self.tracks.evaluate_idle_attack(
+            track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+        )
+        action, count = self.tracks.evaluate_idle_attack(
+            track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+        )
+        self.assertEqual(action, "none")
+        self.assertEqual(count, 0)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertEqual(track.occupancy, 1)
+        self.assertEqual(track.idle_attack_count, 0)
+
+    def test_unreachable_idle_removes_whole_stack(self) -> None:
+        track_id = self._create(500, 500)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.occupancy = 2
+        for _ in range(4):
+            action, _count = self.tracks.evaluate_idle_attack(
+                track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+            )
+            self.assertEqual(action, "none")
+        action, count = self.tracks.evaluate_idle_attack(
+            track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+        )
+        self.assertEqual(action, "unreachable")
+        self.assertEqual(count, 5)
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
+
+    def test_discovery_miss_removes_whole_stack(self) -> None:
+        track_id = self._create(874, 578)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.occupancy = 2
+        for offset in (50, 100, 150):
+            self.tracks.process_discovery_scan(
+                [], mob_name="horn", now_tick=self.now + offset,
+            )
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
+        self.assertEqual(self.tracks.get_area_clear_candidate().alive_count, 0)
+
     def test_overlap_hold_does_not_block_discovery_clearing_empty_ghosts(self) -> None:
         track_id = self._create(874, 578)
         track = self.tracks.get_track_by_id(track_id)

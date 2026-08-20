@@ -7,9 +7,9 @@ Deterministic follow around the predicted position:
 
 The expensive gate is deliberately not run at the old center first: that center
 is stale for moving mobs and doing so duplicated the largest part of every
-tracking tick.    Tracking is pure follow for position and reports terminal local loss;
-    Discovery remains an independent validation/removal observer.
-Warm tracking publishes fresh coordinates and an opacity score; discovery remains an independent absence validator.
+tracking tick. Tracking is pure follow for position and reports terminal local
+loss. Discovery remains an independent validation/removal observer.
+Warm tracking publishes fresh coordinates and an opacity score.
 """
 
 from __future__ import annotations
@@ -95,6 +95,7 @@ _ANCHOR_MAX_COUNT = 4
 _ANCHOR_CONSENSUS_RADIUS_PX = 8
 _ANCHOR_MIN_COUNT = 2
 _CENTER_HOLE_MAX_GAP_PX = 8
+_CENTER_HOLE_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 
 # Warm tracking searches each anchor only inside a small disk around its
 # expected position (predicted sprite center + cached anchor offset). The
@@ -236,7 +237,7 @@ def track_local(
         # the original intent of ``localTrackSearchRadiusPx`` (120) and it
         # keeps a multi-candidate acquisition batch cheap.
         acquisition_radius = max(
-            int(getattr(detector, "local_track_search_radius_px", radius)),
+            int(detector.local_track_search_radius_px),
             radius // 2,
         )
         peak = _find_local_peak(
@@ -280,35 +281,8 @@ def track_local(
         _track_miss_store(detector).pop(track_id, None)
         return result
 
-    template_hit = _follow_cached_template(
-        detector,
-        frame_bgr,
-        descriptor,
-        track_id=track_id,
-        cx=search_cx,
-        cy=search_cy,
-        scale=scale,
-        search_radius_px=radius,
-        suppress_positions=suppress_positions,
-        offset_x=offset_x,
-        offset_y=offset_y,
-        identity_cx=search_cx,
-        identity_cy=search_cy,
-        identity_radius_px=identity_radius,
-        allow_partial_center=track_id > 0,
-        hold_x=cx,
-        hold_y=cy,
-    )
-
-    if template_hit is None and track_id in template_store:
-        # The warm anchor missed. Search farther for the SAME cached template;
-        # do not fall back to a generic peak, because that can swap onto a
-        # nearby identical mob.
-        recovery_radius = min(
-            int(getattr(detector, "local_track_max_search_radius_px", radius)),
-            max(radius + 1, radius * _LOCAL_RECOVERY_RADIUS_MULTIPLIER),
-        )
-        recovered = _follow_cached_template(
+    def follow_at(search_radius: int) -> LocalTrackResult | None:
+        return _follow_cached_template(
             detector,
             frame_bgr,
             descriptor,
@@ -316,16 +290,10 @@ def track_local(
             cx=search_cx,
             cy=search_cy,
             scale=scale,
-            search_radius_px=recovery_radius,
+            search_radius_px=search_radius,
             suppress_positions=suppress_positions,
             offset_x=offset_x,
             offset_y=offset_y,
-            # Re-center the identity corridor on the bounded motion
-            # prediction, not on the stale pre-miss coordinate. The search may
-            # expand to recovery_radius, but the accepted template hit must
-            # remain near the predicted position; this retains fast mobs while
-            # preventing an identical neighbor at the far edge of the expanded
-            # crop from winning merely because its grayscale match is stronger.
             identity_cx=search_cx,
             identity_cy=search_cy,
             identity_radius_px=identity_radius,
@@ -333,10 +301,22 @@ def track_local(
             hold_x=cx,
             hold_y=cy,
         )
+
+    template_hit = follow_at(radius)
+
+    if template_hit is None and track_id in template_store:
+        # The warm anchor missed. Search farther for the SAME cached template;
+        # do not fall back to a generic peak, because that can swap onto a
+        # nearby identical mob.
+        recovery_radius = min(
+            int(detector.local_track_max_search_radius_px),
+            max(radius + 1, radius * _LOCAL_RECOVERY_RADIUS_MULTIPLIER),
+        )
+        recovered = follow_at(recovery_radius)
         if recovered is not None:
             _track_miss_store(detector).pop(track_id, None)
             return recovered
-        crowded = _overlap_hold_if_crowded(
+        return _overlap_hold_or_miss(
             detector=detector,
             frame_bgr=frame_bgr,
             track_id=track_id,
@@ -347,24 +327,12 @@ def track_local(
             descriptor=descriptor,
             scale=scale,
             suppress_positions=suppress_positions,
-        )
-        if crowded is not None:
-            _track_miss_store(detector).pop(track_id, None)
-            return crowded
-        misses = _track_miss_store(detector)
-        count = int(misses.get(track_id, 0)) + 1
-        misses[track_id] = count
-        return _miss_result(
-            track_id=track_id,
-            x=screen_cx,
-            y=screen_cy,
             reason="template_miss",
-            tracking_lost=count >= _LOCAL_TRACK_LOST_MISSES,
         )
     if template_hit is not None:
         _track_miss_store(detector).pop(track_id, None)
         return template_hit
-    crowded = _overlap_hold_if_crowded(
+    return _overlap_hold_or_miss(
         detector=detector,
         frame_bgr=frame_bgr,
         track_id=track_id,
@@ -375,19 +343,7 @@ def track_local(
         descriptor=descriptor,
         scale=scale,
         suppress_positions=suppress_positions,
-    )
-    if crowded is not None:
-        _track_miss_store(detector).pop(track_id, None)
-        return crowded
-    misses = _track_miss_store(detector)
-    count = int(misses.get(track_id, 0)) + 1
-    misses[track_id] = count
-    return _miss_result(
-        track_id=track_id,
-        x=screen_cx,
-        y=screen_cy,
         reason="anchor_missing",
-        tracking_lost=count >= _LOCAL_TRACK_LOST_MISSES,
     )
 
 
@@ -567,6 +523,47 @@ def _overlap_hold_if_crowded(
         opacity_score=_opacity_at_center(
             detector, frame_bgr, descriptor, roi_x, roi_y, scale,
         ),
+    )
+
+
+def _overlap_hold_or_miss(
+    *,
+    detector: MobDetector,
+    frame_bgr: np.ndarray,
+    track_id: int,
+    x: int,
+    y: int,
+    roi_x: int,
+    roi_y: int,
+    descriptor: MobDescriptor,
+    scale: float,
+    suppress_positions: list[tuple[int, int]] | None,
+    reason: str,
+) -> LocalTrackResult:
+    crowded = _overlap_hold_if_crowded(
+        detector=detector,
+        frame_bgr=frame_bgr,
+        track_id=track_id,
+        x=x,
+        y=y,
+        roi_x=roi_x,
+        roi_y=roi_y,
+        descriptor=descriptor,
+        scale=scale,
+        suppress_positions=suppress_positions,
+    )
+    if crowded is not None:
+        _track_miss_store(detector).pop(track_id, None)
+        return crowded
+    misses = _track_miss_store(detector)
+    count = int(misses.get(track_id, 0)) + 1
+    misses[track_id] = count
+    return _miss_result(
+        track_id=track_id,
+        x=x,
+        y=y,
+        reason=reason,
+        tracking_lost=count >= _LOCAL_TRACK_LOST_MISSES,
     )
 
 
@@ -1065,7 +1062,7 @@ def _find_local_peak(
     dist_sq = (xx - anchor_x) ** 2 + (yy - anchor_y) ** 2
     radius_work = max(1, int(round(search_radius_px / pyramid)))
     mask = dist_sq <= (radius_work * radius_work)
-    work = np.where(mask, local_final, 0.0).copy()
+    work = np.where(mask, local_final, 0.0)
     min_heat = detector.heatmap_detector.min_center_heat * _LOCAL_FOLLOW_MIN_HEAT_FRAC
     peak_val = float(work.max())
     if peak_val < min_heat:
@@ -1147,7 +1144,7 @@ def _refine_hit_to_sprite_center(
     # window; never search for or merge a neighboring component.
     bridge = cv2.dilate(
         owner.astype(np.uint8),
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        _CENTER_HOLE_KERNEL,
         iterations=1,
     )
     n_labels, labels, _stats, _centroids = cv2.connectedComponentsWithStats(

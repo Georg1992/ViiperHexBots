@@ -16,11 +16,13 @@ One discovery pass (same frame):
 - Factor 1: Tracks outside the hunt ROI → removed immediately (bookkeeping).
 - Factor 2: Tracks missed for 3+ consecutive discovery scans → removed.
   Misses inside the character melee disk (ROI center) do not count while
-  local tracking still has the mob (``lost_count == 0``) — player sprite
-  occludes discovery silhouette there. Once tracking has also lost it,
-  misses count so corpses under the character are removed. If the track
-  was already opacity-fading, a death site is recorded so corpse heat
-  cannot be rediscovered; otherwise bookkeeping only.
+  local tracking still has the mob (``lost_count == 0``) and is not
+  overlap-holding — player sprite occludes discovery silhouette there.
+  Once tracking has also lost it, or is only holding last center because
+  a neighbor owned the hit, misses count so corpses under the character
+  are removed. If the track was already opacity-fading, a death site is
+  recorded so corpse heat cannot be rediscovered; otherwise bookkeeping
+  only.
 - Earlier misses: ``discovery_miss_count`` increments; track stays alive
   until the remove threshold.
 
@@ -153,18 +155,9 @@ class DiscoveryWorker:
             return
 
         heat_track_positions: list[tuple[int, ...]] = []
-        # Tracking tuning belongs to the detector session, not the runtime
-        # behavior config. Keep the fallback for lightweight test doubles and
-        # older detector implementations that do not expose detector_config().
-        detector_config_getter = getattr(ctx.detector, "detector_config", None)
-        detector_config = (
-            detector_config_getter() if callable(detector_config_getter) else {}
-        )
-        if not isinstance(detector_config, dict):
-            detector_config = {}
         max_prediction = max(
             1,
-            int(detector_config.get("localTrackMaxSearchRadiusPx", 600)),
+            int(ctx.detector.detector_config()["localTrackMaxSearchRadiusPx"]),
         )
         for entry in existing_track_positions:
             track_id = int(entry[0])
@@ -193,10 +186,6 @@ class DiscoveryWorker:
                 )
             )
 
-        # Keep older detector doubles/mocks usable while the production
-        # DetectorSession receives optional heat-presence metadata. A TypeError
-        # here means only that the alternate implementation has the old method
-        # signature; the normal two-argument call remains the safe fallback.
         # While the scan runs, sample all thread stacks + per-thread CPU so a
         # multi-second detect can be attributed with numbers: one bot thread
         # hogging, or every bot thread starved while the game process burns CPU.
@@ -204,20 +193,13 @@ class DiscoveryWorker:
         # The game client's process is identified through the captured window.
         window_id = getattr(ctx.capture, "hwnd", None)
         game_cpu_before = game_process_cpu_snapshot(window_id)
-        try:
-            scan, slow_samples = sample_threads_while(
-                lambda: ctx.detector.discover_frame(
-                    frame,
-                    roi,
-                    heat_track_positions=heat_track_positions,
-                )
+        scan, slow_samples = sample_threads_while(
+            lambda: ctx.detector.discover_frame(
+                frame,
+                roi,
+                heat_track_positions=heat_track_positions,
             )
-        except TypeError as exc:
-            if "heat_track_positions" not in str(exc):
-                raise
-            scan, slow_samples = sample_threads_while(
-                lambda: ctx.detector.discover_frame(frame, roi)
-            )
+        )
         game_cpu_after = game_process_cpu_snapshot(window_id)
         if game_cpu_before is not None and game_cpu_after is not None:
             game_cpu_ms = int((game_cpu_after[1] - game_cpu_before[1]) * 1000)

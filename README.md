@@ -1,8 +1,8 @@
 # ViiperHexBots
 
-Fork of [HexBots](https://github.com/Georg1992/HexBots) that sends keyboard and mouse input through [VIIPER](https://github.com/Alia5/VIIPER) virtual HID devices instead of AutoHotInterception.
+Ragnarok Online hunt bot. Fork of [HexBots](https://github.com/Georg1992/HexBots) that sends keyboard and mouse input through [VIIPER](https://github.com/Alia5/VIIPER) virtual HID devices instead of AutoHotInterception.
 
-The bot captures the game window, detects mobs via a SPR/ACT descriptor pipeline, tracks them across frames, and attacks targets automatically.
+The bot captures the game window, finds the selected mob with a SPR/ACT descriptor pipeline, tracks identities across frames, and attacks. Hunt mode is teleport or walk. The same runtime sits on low SP, restores HP, dumps to kafra when overweight, restocks fly wings, and fly-wings out of damage. Optional per-server memory reads supply SP and weight. A Win32 overlay shows track count and occupancy.
 
 ## Prerequisites
 
@@ -66,18 +66,19 @@ ViiperHexBots/
     app/                    Desktop GUI (tkinter)
     runtime/                Hunt engine (workers, tracks, capture, input)
     recognition/            SPR/ACT descriptor + heatmap detection pipeline
+    game_state/             Player vitals and optional process memory
     mobs/                   Mob catalog and descriptor build helpers
     config/                 Unified settings schema and INI store
     viiper/                 Pure Python VIIPER TCP client
   assets/
     mobs/                   Source SPR/ACT per mob (input)
     generated_descriptors/  Runtime descriptors, rebuilt on launch (gitignored)
-  clients/                  Per-server profiles (memory addresses, captcha)
-  scripts/                  Descriptor build and asset-generation utilities
+  clients/                  Per-server profiles (memory addresses)
+  scripts/                  Sprite asset helper (`make_mobs_big_red.py`)
   tests/                    Pytest suite, fixtures, and debug tools
     fixtures/               Shared screenshots and recognition fixture suites
     tools/                  Test/debug utilities
-  logs/                     Session logs and debug output (generated)
+  logs/                     Session logs (generated)
   VIIPER/                   Git submodule (virtual HID driver)
 ```
 
@@ -99,17 +100,16 @@ Use `mob-detect` for CLI examples (`mob-detect detect --mob horn --help`). Pipel
 |--------|---------|
 | `python -m tests.tools.debug_vis` | Discovery pipeline fixture visualization (`_debug_vis/`) |
 | `python -m pybot.recognition fixtures --mob <name>` | Run screenshot fixture suite for one mob |
-
+| `python -m pybot.recognition detect --mob <name> --image <path> --debug` | Write detector debug dumps |
 
 ## Logs
 
-Each app launch writes to `logs/sessions/<session-id>/`. Only the latest 3 session folders are kept.
+Each hunt writes to `logs/sessions/<session-id>/`. Only the latest 3 session folders are kept.
 
-- `behavior.log` — user-facing bot timeline (shown in the GUI log box)
-- `system.log` — internal diagnostics (detector timings, runtime context)
-- `summary.json` — bot-run stats (scans, attacks, scale calibration)
+- `behavior.log` — hunt timeline (attacks, deaths, teleports, sit/storage)
+- `system.log` — app/session diagnostics (GUI start/stop, VIIPER, imports)
 
-Debug frame dumps from dev tools go to `logs/debug_saves/` and `logs/detect_debug/` (gitignored).
+Detector `--debug` dumps go to `pybot/recognition/debug/detector/` (gitignored). Fixture visualization writes `_debug_vis/`.
 
 ## Differences from HexBots
 
@@ -117,6 +117,7 @@ Debug frame dumps from dev tools go to `logs/debug_saves/` and `logs/detect_debu
 - Requires usbip-win2 instead
 - Virtual HID devices instead of routing through physical keyboard/mouse
 - Pure Python VIIPER TCP client (no Go input bridge)
+- Hunt engine, recognition, and GUI are Python (not AutoHotkey)
 
 ## Upstream
 

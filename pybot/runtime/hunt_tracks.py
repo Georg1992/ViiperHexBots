@@ -75,6 +75,7 @@ class MobTrackSnapshot:
     was_accessible: bool = False
     discovery_stationary: bool = False
     moving: bool = False
+    occupancy: int = 1
     debuff_applied: bool = False
     area_epoch: int = 0
 
@@ -156,7 +157,7 @@ class HuntTracks:
         """
         del now_tick
         with self._lock:
-            alive = sum(1 for track in self._tracks if is_alive(track))
+            alive = self._alive_occupancy_locked()
             pending = len(self._discovery_candidates)
             if alive > 0:
                 return AreaClearStatus(
@@ -581,6 +582,11 @@ class HuntTracks:
         - *missed_ids*: tracks not found by the local tracker.
         - *opacity_deaths*: tracks removed by opacity-decay death detection.
 
+        Overlap-hold is not a second identity. After unique hits and misses
+        land, each held track merges into the nearest unique hit (else the
+        nearest alive track) within the same-object radius. Isolated holds
+        keep last center so a lone crowded blob can still fade.
+
         Tracking owns all position writes — discovery only publishes
         candidates; tracking creates tracks on fresh frames.
         """
@@ -592,6 +598,9 @@ class HuntTracks:
             opacity_deaths: list[OpacityDeathEvent] = []
             terminal_tracking_loss: set[int] = set()
             config = self._detector_config()
+            result_by_id = {result.track_id: result for result in results}
+            unique_found_ids: set[int] = set()
+            hold_ids: list[int] = []
             for result in results:
                 track = self._get_track_by_id_locked(result.track_id)
                 if track is None:
@@ -599,30 +608,7 @@ class HuntTracks:
 
                 if result.found:
                     if bool(getattr(result, "overlap_hold", False)):
-                        # Close/merged sprites: keep identity and last center.
-                        # This is not a visual confirmation — do not reset
-                        # lost_count or discovery misses — but the last bbox
-                        # can still fade, so opacity death must still run.
-                        track.overlap_holding = True
-                        track.moving = False
-                        track.last_found_tick = tick
-                        baseline = track.opacity_baseline
-                        streak = track.opacity_decay_streak
-                        if apply_opacity_observation(
-                            track,
-                            opacity_score=result.opacity_score,
-                            config=config,
-                        ):
-                            opacity_deaths.append(
-                                OpacityDeathEvent(
-                                    track_id=result.track_id,
-                                    x=track.x,
-                                    y=track.y,
-                                    baseline=baseline,
-                                    opacity_score=float(result.opacity_score),
-                                    streak=streak + 1,
-                                )
-                            )
+                        hold_ids.append(result.track_id)
                         continue
                     track.overlap_holding = False
                     move_px, stop_px = movement_thresholds(config)
@@ -633,29 +619,6 @@ class HuntTracks:
                         move_threshold_px=move_px,
                         stop_threshold_px=stop_px,
                     )
-                    baseline = track.opacity_baseline
-                    streak = track.opacity_decay_streak
-                    if apply_opacity_observation(
-                        track,
-                        opacity_score=result.opacity_score,
-                        config=config,
-                    ):
-                        # Corpse is at the found coords this frame — record
-                        # death site there, not the previous track position.
-                        track.x = result.x
-                        track.y = result.y
-                        opacity_deaths.append(
-                            OpacityDeathEvent(
-                                track_id=result.track_id,
-                                x=result.x,
-                                y=result.y,
-                                baseline=baseline,
-                                opacity_score=float(result.opacity_score),
-                                streak=streak + 1,
-                            )
-                        )
-                        continue
-
                     apply_track_observation(
                         track,
                         found=True,
@@ -664,6 +627,7 @@ class HuntTracks:
                         confidence=result.confidence,
                         now_tick=tick,
                     )
+                    unique_found_ids.add(result.track_id)
                     continue
 
                 # Tracking miss — keep last known position, advance lost count.
@@ -680,6 +644,48 @@ class HuntTracks:
                 missed_ids.append(result.track_id)
                 if bool(getattr(result, "tracking_lost", False)):
                     terminal_tracking_loss.add(result.track_id)
+
+            skip_isolated_holds = self._merge_overlap_holds_locked(
+                hold_ids,
+                unique_found_ids=unique_found_ids,
+                config=config,
+            )
+
+            for track_id in unique_found_ids:
+                track = self._get_track_by_id_locked(track_id)
+                result = result_by_id.get(track_id)
+                if track is None or result is None:
+                    continue
+                death = self._opacity_event_or_consume_locked(
+                    track,
+                    result,
+                    tick,
+                    config,
+                    update_xy=True,
+                )
+                if death is not None:
+                    opacity_deaths.append(death)
+
+            for track_id in hold_ids:
+                if track_id in skip_isolated_holds:
+                    continue
+                track = self._get_track_by_id_locked(track_id)
+                result = result_by_id.get(track_id)
+                if track is None or result is None:
+                    continue
+                # Isolated hold: last center is not a visual confirmation.
+                track.overlap_holding = True
+                track.moving = False
+                track.last_found_tick = tick
+                death = self._opacity_event_or_consume_locked(
+                    track,
+                    result,
+                    tick,
+                    config,
+                    update_xy=False,
+                )
+                if death is not None:
+                    opacity_deaths.append(death)
 
             if opacity_deaths:
                 self._remove_dead_tracks_locked(
@@ -757,6 +763,9 @@ class HuntTracks:
                     track.idle_attack_count += 1
                     if track.idle_attack_count >= IDLE_DEAD_ATTACK_COUNT:
                         tick = now_tick if now_tick is not None else monotonic_ms()
+                        if track.occupancy > 1:
+                            self._consume_occupant_locked(track, tick)
+                            return "none", 0
                         self._remove_dead_tracks_locked({track_id}, tick)
                         return "dead", track.idle_attack_count
 
@@ -783,6 +792,55 @@ class HuntTracks:
                 return False
             self._remove_tracks_locked({track_id})
             return True
+
+    def occupancy_positions(self) -> list[tuple[int, int, int]]:
+        """Alive-track centers with occupancy, sampled for one ingest."""
+        with self._lock:
+            return [
+                (track.x, track.y, track.occupancy)
+                for track in self._tracks
+                if is_alive(track)
+            ]
+
+    def blocks_new_track_at(
+        self,
+        x: int,
+        y: int,
+        *,
+        existing: list[tuple[int, int, int]] | None = None,
+    ) -> bool:
+        """True when a unique occupancy-1 track already owns this center.
+
+        A stacked track (occupancy > 1) does not block: the new center is a
+        split, and ``create_track`` peels one occupant onto the new ID.
+
+        *existing* is the occupancy snapshot from the start of an ingest so
+        two distinct candidates in the same scan are not blocked by each
+        other at the wider same-object radius.
+        """
+        radius = int(self._detector_config()["trackDedupRadiusPx"])
+        radius_sq = radius * radius
+        if existing is None:
+            with self._lock:
+                entries = [
+                    (track.x, track.y, track.occupancy)
+                    for track in self._tracks
+                    if is_alive(track)
+                ]
+        else:
+            entries = existing
+        nearest_occ: int | None = None
+        best_d = radius_sq + 1
+        for px, py, occupancy in entries:
+            dist_sq = (x - px) * (x - px) + (y - py) * (y - py)
+            if dist_sq > radius_sq:
+                continue
+            if dist_sq < best_d:
+                nearest_occ = occupancy
+                best_d = dist_sq
+        if nearest_occ is None:
+            return False
+        return nearest_occ <= 1
 
     def create_track(
         self,
@@ -842,6 +900,132 @@ class HuntTracks:
                 known.append((prior.x, prior.y))
         self._discovery_candidates = merged
 
+    def _alive_occupancy_locked(self) -> int:
+        return sum(track.occupancy for track in self._tracks if is_alive(track))
+
+    def _nearest_alive_locked(
+        self,
+        x: int,
+        y: int,
+        radius_sq: int,
+        *,
+        ids: set[int] | None = None,
+    ) -> MobTrack | None:
+        best: MobTrack | None = None
+        best_d = radius_sq + 1
+        for track in self._tracks:
+            if not is_alive(track):
+                continue
+            if ids is not None and track.id not in ids:
+                continue
+            dx = track.x - x
+            dy = track.y - y
+            dist_sq = (dx * dx) + (dy * dy)
+            if dist_sq > radius_sq:
+                continue
+            if dist_sq < best_d or (
+                dist_sq == best_d and best is not None and track.id < best.id
+            ):
+                best = track
+                best_d = dist_sq
+        return best
+
+    def _peel_stacked_occupancy_locked(self, x: int, y: int) -> None:
+        radius = int(self._detector_config()["trackDedupRadiusPx"])
+        nearest = self._nearest_alive_locked(x, y, radius * radius)
+        if nearest is not None and nearest.occupancy > 1:
+            nearest.occupancy -= 1
+
+    def _consume_occupant_locked(self, track: MobTrack, now_tick: int) -> None:
+        """One identity in a still-visible pile died; keep the shared track."""
+        self._death_site_store.record(track.x, track.y, now_tick)
+        track.occupancy -= 1
+        track.opacity_baseline = 0.0
+        track.opacity_baseline_samples = 0
+        track.opacity_decay_streak = 0
+        track.idle_attack_count = 0
+
+    def _opacity_event_or_consume_locked(
+        self,
+        track: MobTrack,
+        result,
+        tick: int,
+        config: dict,
+        *,
+        update_xy: bool,
+    ) -> OpacityDeathEvent | None:
+        baseline = track.opacity_baseline
+        streak = track.opacity_decay_streak
+        if not apply_opacity_observation(
+            track,
+            opacity_score=result.opacity_score,
+            config=config,
+        ):
+            return None
+        if update_xy:
+            track.x = result.x
+            track.y = result.y
+        if track.occupancy > 1:
+            self._consume_occupant_locked(track, tick)
+            return None
+        return OpacityDeathEvent(
+            track_id=track.id,
+            x=track.x,
+            y=track.y,
+            baseline=baseline,
+            opacity_score=float(result.opacity_score),
+            streak=streak + 1,
+        )
+
+    def _merge_overlap_holds_locked(
+        self,
+        hold_ids: list[int],
+        *,
+        unique_found_ids: set[int],
+        config: dict,
+    ) -> set[int]:
+        """Merge held IDs into a unique hit or nearest alive neighbor.
+
+        Returns hold IDs that must not take the isolated-hold path (absorbed
+        identities and merge survivors).
+        """
+        if not hold_ids:
+            return set()
+        radius = int(config["trackDedupRadiusPx"])
+        radius_sq = radius * radius
+        skip_isolated: set[int] = set()
+        absorbed: set[int] = set()
+        remaining_holds = set(hold_ids)
+        for track_id in sorted(remaining_holds, reverse=True):
+            if track_id in absorbed:
+                continue
+            held = self._get_track_by_id_locked(track_id)
+            if held is None:
+                continue
+            unique_ids = unique_found_ids - absorbed
+            target = self._nearest_alive_locked(
+                held.x, held.y, radius_sq, ids=unique_ids,
+            )
+            if target is None:
+                others = {
+                    track.id
+                    for track in self._tracks
+                    if is_alive(track) and track.id != held.id and track.id not in absorbed
+                }
+                target = self._nearest_alive_locked(
+                    held.x, held.y, radius_sq, ids=others,
+                )
+            if target is None:
+                continue
+            target.occupancy += held.occupancy
+            target.overlap_holding = False
+            absorbed.add(held.id)
+            skip_isolated.add(held.id)
+            skip_isolated.add(target.id)
+        if absorbed:
+            self._remove_tracks_locked(absorbed)
+        return skip_isolated
+
     def _create_track_locked(
         self,
         mob_name: str,
@@ -872,6 +1056,7 @@ class HuntTracks:
         track.discovery_blob_seen = bool(
             track.last_discovery_bbox[2] > 0 and track.last_discovery_bbox[3] > 0
         )
+        self._peel_stacked_occupancy_locked(x, y)
         self._next_id += 1
         self._tracks.append(track)
         return track
@@ -946,6 +1131,7 @@ class HuntTracks:
             was_accessible=track.was_accessible,
             discovery_stationary=track.discovery_stationary,
             moving=track.moving,
+            occupancy=track.occupancy,
         )
 
     def overlay_track_state(

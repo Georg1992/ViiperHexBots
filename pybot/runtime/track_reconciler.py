@@ -52,7 +52,7 @@ class TrackReconciler:
         config = detector_config or load_detector_config()
         cluster_radius = int(config["discoveryClusterRadiusPx"])
         dedup_radius = int(config["trackDedupRadiusPx"])
-        moving_radius = int(config.get("trackDedupMovingRadiusPx", 260))
+        moving_radius = int(config["trackDedupMovingRadiusPx"])
         radius_sq = dedup_radius * dedup_radius
 
         clustered = cluster_living_detections(

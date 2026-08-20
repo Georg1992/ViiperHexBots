@@ -9,11 +9,5 @@
     "currentWeightAddress": "0x011FBAA0",
     "totalWeightAddress": "0x011FBA9C",
     "currentLocationAddress": "0x011E8184"
-  },
-  "captcha": null,
-  "zoom": {
-    "wheelDelta": 1,
-    "steps": 10,
-    "delayMs": 60
   }
 }
