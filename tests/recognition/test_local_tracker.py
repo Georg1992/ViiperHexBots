@@ -18,6 +18,8 @@ from pybot.recognition.detector.tracking.local_tracker import (
     _local_follow_scales,
     _refine_hit_to_sprite_center,
     clear_track_states,
+    in_neighbor_suppress_disk,
+    neighbor_owns_hit,
     track_local,
     transfer_track_state,
     _TrackAnchor,
@@ -708,6 +710,87 @@ class LocalTrackerTests(unittest.TestCase):
         self.assertLessEqual(abs(result.y - anchor.center_y), 12)
         self.assertFalse(hasattr(detector, "_local_track_states"))
 
+    def test_neighbor_owns_hit_when_closer_or_tied(self) -> None:
+        self.assertTrue(
+            neighbor_owns_hit(100, 100, 70, 100, [(130, 100)], suppress_radius=40)
+        )
+        self.assertFalse(
+            neighbor_owns_hit(100, 100, 90, 100, [(130, 100)], suppress_radius=40)
+        )
+        self.assertTrue(
+            neighbor_owns_hit(100, 100, 80, 100, [(120, 100)], suppress_radius=40)
+        )
+        self.assertFalse(
+            neighbor_owns_hit(100, 100, 90, 100, [(200, 100)], suppress_radius=40)
+        )
+        self.assertTrue(
+            in_neighbor_suppress_disk(120, 90, [(125, 90)], suppress_radius=16)
+        )
+        self.assertFalse(
+            in_neighbor_suppress_disk(120, 90, [(400, 90)], suppress_radius=16)
+        )
+
+    def test_close_neighbor_hold_does_not_count_as_local_loss(self) -> None:
+        """A crowded miss keeps the last center instead of dropping the Track."""
+        detector = self._detector()
+        from pybot.recognition.detector.tracking import local_tracker
+
+        track_id = 77
+        local_tracker._template_store(detector)[track_id] = SimpleNamespace(
+            anchors=(_TrackAnchor(np.ones((4, 4), dtype=np.uint8), 0, 0),),
+            width=8,
+            height=8,
+        )
+        local_tracker._track_miss_store(detector)[track_id] = 7
+        with patch.object(local_tracker, "_follow_cached_template", return_value=None):
+            result = track_local(
+                detector,
+                self.roi,
+                "horn",
+                {
+                    "trackId": track_id,
+                    "x": 120,
+                    "y": 90,
+                    "scale": 0.9,
+                    "anchor_required": True,
+                },
+                suppress_positions=[(125, 90)],
+            )
+
+        self.assertTrue(result.found, result.miss_reason)
+        self.assertTrue(result.overlap_hold)
+        self.assertEqual((result.x, result.y), (120, 90))
+        self.assertFalse(result.tracking_lost)
+        self.assertNotIn(track_id, local_tracker._track_miss_store(detector))
+
+    def test_isolated_template_miss_still_counts_toward_loss(self) -> None:
+        detector = self._detector()
+        from pybot.recognition.detector.tracking import local_tracker
+
+        track_id = 78
+        local_tracker._template_store(detector)[track_id] = SimpleNamespace(
+            anchors=(_TrackAnchor(np.ones((4, 4), dtype=np.uint8), 0, 0),),
+            width=8,
+            height=8,
+        )
+        with patch.object(local_tracker, "_follow_cached_template", return_value=None):
+            result = track_local(
+                detector,
+                self.roi,
+                "horn",
+                {
+                    "trackId": track_id,
+                    "x": 120,
+                    "y": 90,
+                    "scale": 0.9,
+                    "anchor_required": True,
+                },
+                suppress_positions=[(400, 90)],
+            )
+
+        self.assertFalse(result.found)
+        self.assertEqual(result.miss_reason, "template_miss")
+        self.assertEqual(local_tracker._track_miss_store(detector)[track_id], 1)
 
 
 if __name__ == "__main__":

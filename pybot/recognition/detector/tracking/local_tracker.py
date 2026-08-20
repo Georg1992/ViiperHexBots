@@ -124,6 +124,9 @@ class LocalTrackResult:
     miss_reason: str
     opacity_score: float = 0.0
     tracking_lost: bool = False
+    # True when this Track stayed on its last center because a neighbor
+    # owned the only visible hit (close sprites or a visual merge).
+    overlap_hold: bool = False
 
 
 def track_local(
@@ -143,9 +146,10 @@ def track_local(
     Positive IDs require a transferred cached template and perform only the
     temporal follow. Zero is invalid and returns a miss.
 
-    ``suppress_positions``: ROI-relative (x, y) of other tracks whose heat
-    signature should be suppressed in the peak search. Prevents track A from
-    locking onto mob B when two mobs are close together.
+    ``suppress_positions``: ROI-relative (x, y) of other tracks. A hit closer
+    to a neighbor stays on this Track's last center instead of stealing that
+    mob; a miss while a neighbor sits in the suppress disk is the same hold,
+    not a local loss.
     """
     track_id = int(track["trackId"])
     if track_id == 0:
@@ -292,6 +296,8 @@ def track_local(
         identity_cy=search_cy,
         identity_radius_px=identity_radius,
         allow_partial_center=track_id > 0,
+        hold_x=cx,
+        hold_y=cy,
     )
 
     if template_hit is None and track_id in template_store:
@@ -324,10 +330,25 @@ def track_local(
             identity_cy=search_cy,
             identity_radius_px=identity_radius,
             allow_partial_center=track_id > 0,
+            hold_x=cx,
+            hold_y=cy,
         )
         if recovered is not None:
             _track_miss_store(detector).pop(track_id, None)
             return recovered
+        crowded = _overlap_hold_if_crowded(
+            track_id=track_id,
+            x=screen_cx,
+            y=screen_cy,
+            roi_x=cx,
+            roi_y=cy,
+            descriptor=descriptor,
+            scale=scale,
+            suppress_positions=suppress_positions,
+        )
+        if crowded is not None:
+            _track_miss_store(detector).pop(track_id, None)
+            return crowded
         misses = _track_miss_store(detector)
         count = int(misses.get(track_id, 0)) + 1
         misses[track_id] = count
@@ -341,6 +362,19 @@ def track_local(
     if template_hit is not None:
         _track_miss_store(detector).pop(track_id, None)
         return template_hit
+    crowded = _overlap_hold_if_crowded(
+        track_id=track_id,
+        x=screen_cx,
+        y=screen_cy,
+        roi_x=cx,
+        roi_y=cy,
+        descriptor=descriptor,
+        scale=scale,
+        suppress_positions=suppress_positions,
+    )
+    if crowded is not None:
+        _track_miss_store(detector).pop(track_id, None)
+        return crowded
     misses = _track_miss_store(detector)
     count = int(misses.get(track_id, 0)) + 1
     misses[track_id] = count
@@ -411,6 +445,84 @@ def _identity_corridor_radius(
     corridor = max(float(_IDENTITY_CORRIDOR_FLOOR_PX), motion_error)
     corridor = min(float(_IDENTITY_CORRIDOR_MAX_PX), corridor)
     return min(max(1, int(search_radius)), max(1, int(round(corridor))))
+
+
+def _cross_track_suppress_radius_px(descriptor: MobDescriptor, scale: float) -> int:
+    sprite_extent = max(
+        float(descriptor.avg_width), float(descriptor.avg_height),
+    ) * max(float(scale), 0.0)
+    return min(
+        _LOCAL_SUPPRESS_RADIUS_MAX_PX,
+        max(
+            _LOCAL_SUPPRESS_RADIUS_FLOOR_PX,
+            int(round(sprite_extent * 0.75)),
+        ),
+    )
+
+
+def neighbor_owns_hit(
+    hit_x: int,
+    hit_y: int,
+    self_x: int,
+    self_y: int,
+    suppress_positions: list[tuple[int, int]],
+    suppress_radius: int,
+) -> bool:
+    """True when a neighbor's last center is as close or closer to the hit."""
+    radius_sq = suppress_radius * suppress_radius
+    self_dist_sq = (hit_x - self_x) ** 2 + (hit_y - self_y) ** 2
+    for sx, sy in suppress_positions:
+        neighbor_dist_sq = (hit_x - sx) ** 2 + (hit_y - sy) ** 2
+        if neighbor_dist_sq <= radius_sq and neighbor_dist_sq <= self_dist_sq:
+            return True
+    return False
+
+
+def in_neighbor_suppress_disk(
+    x: int,
+    y: int,
+    suppress_positions: list[tuple[int, int]],
+    suppress_radius: int,
+) -> bool:
+    radius_sq = suppress_radius * suppress_radius
+    return any((x - sx) ** 2 + (y - sy) ** 2 <= radius_sq for sx, sy in suppress_positions)
+
+
+def _overlap_hold_result(
+    *,
+    track_id: int,
+    x: int,
+    y: int,
+    confidence: float = 0.0,
+) -> LocalTrackResult:
+    return LocalTrackResult(
+        track_id=track_id,
+        found=True,
+        x=x,
+        y=y,
+        confidence=confidence,
+        miss_reason="",
+        overlap_hold=True,
+    )
+
+
+def _overlap_hold_if_crowded(
+    *,
+    track_id: int,
+    x: int,
+    y: int,
+    roi_x: int,
+    roi_y: int,
+    descriptor: MobDescriptor,
+    scale: float,
+    suppress_positions: list[tuple[int, int]] | None,
+) -> LocalTrackResult | None:
+    if not suppress_positions:
+        return None
+    radius = _cross_track_suppress_radius_px(descriptor, scale)
+    if not in_neighbor_suppress_disk(roi_x, roi_y, suppress_positions, radius):
+        return None
+    return _overlap_hold_result(track_id=track_id, x=x, y=y)
 
 
 def _miss_result(
@@ -646,6 +758,8 @@ def _follow_cached_template(
     identity_cy: int,
     identity_radius_px: int,
     allow_partial_center: bool = False,
+    hold_x: int | None = None,
+    hold_y: int | None = None,
 ) -> LocalTrackResult | None:
     """Follow a previously confirmed patch; return None when reacquisition is needed.
 
@@ -800,19 +914,23 @@ def _follow_cached_template(
     ):
         return None
     if suppress_positions:
-        sprite_extent = max(
-            float(descriptor.avg_width), float(descriptor.avg_height),
-        ) * max(float(scale), 0.0)
-        suppress_radius = min(
-            _LOCAL_SUPPRESS_RADIUS_MAX_PX,
-            max(
-                _LOCAL_SUPPRESS_RADIUS_FLOOR_PX,
-                int(round(sprite_extent * 0.75)),
-            ),
-        )
-        if any((hit_x - sx) ** 2 + (hit_y - sy) ** 2 <= suppress_radius ** 2
-               for sx, sy in suppress_positions):
-            return None
+        suppress_radius = _cross_track_suppress_radius_px(descriptor, scale)
+        if neighbor_owns_hit(
+            hit_x,
+            hit_y,
+            identity_cx,
+            identity_cy,
+            suppress_positions,
+            suppress_radius,
+        ):
+            stay_x = identity_cx if hold_x is None else hold_x
+            stay_y = identity_cy if hold_y is None else hold_y
+            return _overlap_hold_result(
+                track_id=track_id,
+                x=stay_x + offset_x,
+                y=stay_y + offset_y,
+                confidence=float(max_val),
+            )
 
     # Keep the original template stable. Replacing it on every frame causes
     # template drift; only the current-frame palette bbox may publish a center.

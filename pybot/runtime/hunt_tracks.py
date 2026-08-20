@@ -590,6 +590,19 @@ class HuntTracks:
                     continue
 
                 if result.found:
+                    if bool(getattr(result, "overlap_hold", False)):
+                        # Sprites overlapped or merged. Keep this identity on
+                        # its last center instead of snapping onto a neighbor
+                        # or counting a local loss.
+                        apply_track_observation(
+                            track,
+                            found=True,
+                            x=track.x,
+                            y=track.y,
+                            confidence=result.confidence,
+                            now_tick=tick,
+                        )
+                        continue
                     move_px, stop_px = movement_thresholds(config)
                     apply_movement_observation(
                         track,
