@@ -37,15 +37,6 @@ def monotonic_ms() -> int:
     return int(time.monotonic() * 1000)
 
 
-def _within_melee_guard(mx: int, my: int, char_x: int, char_y: int) -> bool:
-    """True when a mob is within the character melee occlusion disk."""
-    dx = mx - char_x
-    dy = my - char_y
-    return (dx * dx + dy * dy) <= (
-        MELEE_IDLE_GUARD_RADIUS_PX * MELEE_IDLE_GUARD_RADIUS_PX
-    )
-
-
 @dataclass(frozen=True)
 class OpacityDeathEvent:
     """One track removed by opacity-decay death detection."""
@@ -331,24 +322,19 @@ class HuntTracks:
         Does NOT create tracks — publishing new candidates so tracking can
         create them on a fresh frame with exact coordinates.
 
-        After matching detections against known tracks, evaluates all
-        removal factors on unmatched tracks:
-        1. Outside hunt ROI → removed immediately (no death site).
-        2. Three missed discovery scans → removed. If the track was already
-           opacity-fading, records a death site; otherwise bookkeeping only.
-           Misses only accumulate while local tracking does NOT confirm the
-           mob on fresh frames: a tracking hit resets ``discovery_miss_count``
-           (see ``apply_track_observation``), so a large kiting sprite that
-           discovery's silhouette repeatedly fails to extract is never removed
-           while tracking still follows it. Misses inside the melee occlusion
-           disk around the character (ROI center) additionally do not count
-           while ``lost_count == 0`` and the track is not overlap-holding.
-           Once tracking has also lost it, or is only holding last center,
-           misses count normally so corpses under the character are removed.
-        3. Earlier misses → ``discovery_miss_count`` += 1 (stays alive).
+        After matching detections against known tracks, unmatched tracks
+        are classified as disappeared only when they are no longer tracked:
+
+        1. Outside hunt ROI → left the hunt area (removed, no death site).
+        2. Local tracking already lost the sprite (``lost_count > 0``) and
+           three consecutive scans still have no blob → gone (killed / left).
+           A tracking hit resets ``discovery_miss_count``, so a living
+           tracked mob is never removed by silhouette failure.  Heat still
+           present at the capture position is not absence.
+        3. ``lost_count == 0`` → still tracked; discovery miss is ignored.
 
         Confirmed death (opacity / idle-dead) uses ``_remove_dead_tracks_locked``
-        elsewhere and records death sites.
+        elsewhere and records death sites. Teleport uses ``area_reset``.
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
@@ -435,13 +421,11 @@ class HuntTracks:
             )
             remove_ids.update(out_of_range)
 
-            # Factor 2: Tracks missed by discovery 3+ scans in a row
-            # Only the remaining in-range tracks are evaluated — out-of-range
-            # tracks were already handled by Factor 1.
+            # Factor 2: Tracking already lost the sprite, and discovery still
+            # does not see it. Still-tracked identities (lost_count == 0) stay.
             remaining_ids = unmatched_ids - out_of_range
             miss_remove, _first_miss = self._evaluate_discovery_miss_removal(
                 remaining_ids,
-                hunt_roi=hunt_roi,
                 heat_supported_track_ids=heat_supported_track_ids,
             )
             remove_ids.update(miss_remove)
@@ -505,62 +489,30 @@ class HuntTracks:
         self,
         unmatched_ids: set[int],
         *,
-        hunt_roi: HuntRoi | None = None,
         heat_supported_track_ids: frozenset[int] | set[int] | None = None,
     ) -> tuple[set[int], list[int]]:
-        """Factor 2: Remove tracks missed by 3+ consecutive discovery scans.
+        """Remove tracks that have disappeared, not tracks that failed silhouette.
 
-        Only receives in-range tracks (out-of-range handled by Factor 1).
+        A detection that matched this id is tracked. An unmatched scan is
+        disappearance only when local tracking has already lost the sprite
+        (``lost_count > 0``) and heat is gone. Three such scans remove it
+        (killed / left). ``lost_count == 0`` means tracking still has it —
+        including an isolated overlap-hold on the shared blob.
 
-        Side-effect: increments ``discovery_miss_count`` (except occlusion
-        holds described below).
-
-        Returns ``(remove_ids, first_miss_ids)`` where:
-        - ``remove_ids``: tracks with miss_count >= 3.
-        - ``first_miss_ids``: tracks on their first miss (still alive).
-
-        Caller records a death site when the removed track was opacity-fading.
-
-        Near the character (ROI center), discovery silhouette often fails
-        because the player sprite merges into the extract. When local
-        tracking still has the mob (``lost_count == 0``) and is not
-        overlap-holding, that is occlusion — do not count the miss. Once
-        tracking has also lost it, or is only holding last center because
-        a neighbor owned the hit, count normally so corpses under the
-        character and leftover crowded identities are still removed.
-
-        Tracking confirmation additionally holds the counter everywhere: a
-        fresh-frame hit resets ``discovery_miss_count`` (see
-        ``apply_track_observation``), so discovery misses alone can never
-        remove a mob local tracking still follows. An overlap hold is not
-        that confirmation.
+        Teleport uses ``area_reset``. Opacity / idle-dead record kills
+        separately.
         """
         remove_ids: set[int] = set()
         first_miss_ids: list[int] = []
-        char_x = hunt_roi.center_x if hunt_roi is not None else None
-        char_y = hunt_roi.center_y if hunt_roi is not None else None
         supported_by_heat = heat_supported_track_ids or frozenset()
         for track_id in unmatched_ids:
             track = self._get_track_by_id_locked(track_id)
             if track is None:
                 continue
             clear_discovery_blob_observation(track)
-            # Discovery silhouette failure is not absence when the raw
-            # heatmap still supports this Track's capture-time position.
-            # Overlapping/moving sprites commonly fail the shape gate while
-            # remaining visually present in the local heat signal.
-            # Overlap-hold is identity sticky, not presence. Neighbor heat
-            # and the player sprite commonly cover a leftover last-center;
-            # counting the miss is what lets a dead crowded track die.
-            if track_id in supported_by_heat and not track.overlap_holding:
+            if track.lost_count == 0:
                 continue
-            if (
-                char_x is not None
-                and char_y is not None
-                and track.lost_count == 0
-                and not track.overlap_holding
-                and _within_melee_guard(track.x, track.y, char_x, char_y)
-            ):
+            if track_id in supported_by_heat:
                 continue
             track.discovery_miss_count += 1
             if track.discovery_miss_count >= DISCOVERY_MISS_REMOVE_COUNT:

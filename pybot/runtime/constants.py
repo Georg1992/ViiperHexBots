@@ -29,7 +29,7 @@ ATTACK_IDLE_SPIN_S = WORKER_POLL_INTERVAL_S / 2.0
 # Idle SP confirmation: post observation must be this fresh at sample time,
 # otherwise an early mid-wait republish of pre-cost SP can look like idle.
 SP_IDLE_MAX_OBSERVATION_AGE_MS = 1000
-# Discovery scans without a match before track removal.
+# Discovery scans without a match, after tracking already lost the sprite.
 DISCOVERY_MISS_REMOVE_COUNT = 3
 # Idle-attack death / unreachable policy.
 IDLE_DEAD_ATTACK_COUNT = 2

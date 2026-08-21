@@ -13,18 +13,13 @@ One discovery pass (same frame):
    tracking (which creates tracks on its next fresh frame at exact coords).
 
         Removal factors run in ``HuntTracks.process_discovery_scan()``:
-- Factor 1: Tracks outside the hunt ROI → removed immediately (bookkeeping).
-- Factor 2: Tracks missed for 3+ consecutive discovery scans → removed.
-  Misses inside the character melee disk (ROI center) do not count while
-  local tracking still has the mob (``lost_count == 0``) and is not
-  overlap-holding — player sprite occludes discovery silhouette there.
-  Once tracking has also lost it, or is only holding last center because
-  a neighbor owned the hit, misses count so corpses under the character
-  are removed. If the track was already opacity-fading, a death site is
-  recorded so corpse heat cannot be rediscovered; otherwise bookkeeping
-  only.
-- Earlier misses: ``discovery_miss_count`` increments; track stays alive
-  until the remove threshold.
+- Matched detections are **tracked** (existing HuntTracks id). Unmatched
+  detections are **not tracked** and become candidates.
+- Factor 1: Tracks outside the hunt ROI → left the hunt area.
+- Factor 2: Tracking already lost the sprite and three scans still see
+  no blob → disappeared (killed / gone). A still-tracked mob
+  (``lost_count == 0``) is never deleted for a silhouette miss.
+- Teleport clears via ``area_reset``. Opacity / idle-dead record kills.
 
 Discovery never creates tracks directly — tracking owns track creation and
 all position writes. Discovery only matches detections (resetting
@@ -60,7 +55,7 @@ from pybot.runtime.workers.worker_contexts import DiscoveryWorkerContext
 
 
 class DiscoveryWorker:
-    """Scans for living mobs, creates/matches tracks, marks absent for tracking."""
+    """Scans living blobs, matches tracked ids, publishes unmatched candidates."""
 
     def __init__(self, ctx: DiscoveryWorkerContext, hunt_mode) -> None:
         self._ctx = ctx

@@ -3,10 +3,16 @@
 Used by tests to lock the pipeline contract.
 
 Ownership:
-- **Discovery** scans the hunt ROI for living mobs each cycle, publishes
-  new-mob candidates, matches detections to existing tracks (resetting
-  discovery_miss_count), and removes tracks that are out-of-range or missed
-  for 3 consecutive scans.  Discovery never creates tracks directly.
+- **Discovery** scans the hunt ROI and classifies every living blob as
+  either **tracked** (1-to-1 match to an existing HuntTracks id) or
+  **not tracked** (new-mob candidate for tracking to create).  It never
+  creates tracks and never writes positions.  A tracked mob is not
+  deleted because silhouette matching failed.  Discovery removes a
+  track only when it has disappeared from the hunt area: it left the
+  ROI, or tracking already lost it and three consecutive scans still
+  see no blob (the sprite is gone — killed, not merely occluded).
+  Teleport clears the area with ``area_reset``.  Confirmed kills
+  (opacity fade / idle-dead) are tracking/attack, not discovery.
 - **Tracking** owns track creation and position.  On each tick it ingests
   discovery candidates, runs a local-follow search on the *current fresh
   frame* to get exact coordinates, creates tracks at those coordinates,
@@ -102,14 +108,15 @@ class MobTrack:
     moving: bool = False
     vel_x: float = 0.0
     vel_y: float = 0.0
-    # Consecutive discovery scans that failed to see this track (unmatched).
-    # At >= DISCOVERY_MISS_REMOVE_COUNT the track is removed. A confirmed
-    # tracking hit resets the counter, so removal effectively requires that
-    # BOTH discovery misses the mob AND local tracking failed to confirm it.
+    # Consecutive discovery scans with no blob after tracking already lost
+    # the sprite (``lost_count > 0``). Still-tracked identities
+    # (``lost_count == 0``) do not increment this. At
+    # >= DISCOVERY_MISS_REMOVE_COUNT the track is removed as disappeared.
+    # A tracking hit resets both ``lost_count`` and this counter.
     discovery_miss_count: int = 0
     # True while local tracking is holding last center because a neighbor
-    # owned the visible hit. This is not a visual confirmation: melee and
-    # heatmap miss-holds must not treat it as "tracking still has the mob".
+    # owned the visible hit. Isolated hold is not a visual confirmation
+    # for opacity; discovery still treats ``lost_count == 0`` as tracked.
     overlap_holding: bool = False
     # Known identities on this one visible blob. Vision cannot count a
     # stacked sprite; occupancy grows on overlap-merge and shrinks on

@@ -1,6 +1,6 @@
 # ViiperHexBots
 
-Ragnarok Online hunt bot. Fork of [HexBots](https://github.com/Georg1992/HexBots) that sends keyboard and mouse input through [VIIPER](https://github.com/Alia5/VIIPER) virtual HID devices instead of AutoHotInterception.
+Ragnarok Online hunt bot. Keyboard and mouse input go through [VIIPER](https://github.com/Alia5/VIIPER) virtual HID devices.
 
 The bot captures the game window, finds the selected mob with a SPR/ACT descriptor pipeline, tracks identities across frames, and attacks. Hunt mode is teleport or walk. The same runtime sits on low SP, restores HP, dumps to kafra when overweight, restocks fly wings, and fly-wings out of damage. Optional per-server memory reads supply SP and weight. A Win32 overlay shows track count and occupancy.
 
@@ -110,15 +110,3 @@ Each hunt writes to `logs/sessions/<session-id>/`. Only the latest 3 session fol
 - `system.log` — app/session diagnostics (GUI start/stop, VIIPER, imports)
 
 Detector `--debug` dumps go to `pybot/recognition/debug/detector/` (gitignored). Fixture visualization writes `_debug_vis/`.
-
-## Differences from HexBots
-
-- No AutoHotInterception DLLs or Interception driver
-- Requires usbip-win2 instead
-- Virtual HID devices instead of routing through physical keyboard/mouse
-- Pure Python VIIPER TCP client (no Go input bridge)
-- Hunt engine, recognition, and GUI are Python (not AutoHotkey)
-
-## Upstream
-
-Based on [Georg1992/HexBots](https://github.com/Georg1992/HexBots).
