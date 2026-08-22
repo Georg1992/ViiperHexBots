@@ -785,7 +785,7 @@ def render_modified_sprite_fixtures(config: dict) -> int:
     """Render fixtures captured with the static modified SPR/ACT assets.
 
     These captures must use the GRF detector session: it selects
-    ``modified_sprite_descriptor.json`` and the relaxed static-sprite gate.
+    ``modified_sprite_descriptor.json`` and the stricter GRF silhouette floors.
     Keep this path separate from ``MOB_FIXTURE_SUITES`` because those suites
     exercise the normal animated descriptors.
     """

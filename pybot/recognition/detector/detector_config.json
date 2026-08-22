@@ -6,6 +6,8 @@
   "gateRefUniqueIoU": 0.50,
   "minSilhouetteRecall": 0.45,
   "minSilhouettePrecision": 0.71,
+  "grfMinSilhouetteRecall": 0.70,
+  "grfMinSilhouettePrecision": 0.88,
   "grfAspectBandScale": 1.3,
   "minRequiredPaletteGroups": 2,
   "minSecondPaletteGroupShare": 0.09,

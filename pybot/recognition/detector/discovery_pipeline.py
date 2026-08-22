@@ -252,10 +252,10 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             "horizontal MORPH_CLOSE bridge (silhouetteHorizontalBridgeCells)",
             "pre-shrink extract: same min-area + aspect band as heat (fail-closed; GRF may widen aspect band via grfAspectBandScale)",
             "if extract_area_ratio >= 2: shrink to descriptor window on body centroid",
-            "if soft/hard >= 2 and cand0 recall >= mode recall: deform best ref into heat within 2 silhouette cells",
+            "if soft/hard >= 2 and cand0 recall >= mode recall: deform best ref into heat within 2 silhouette cells (GRF skips deform)",
             "tight bridged crop resized to descriptor size",
             "candidate_silhouette vs descriptor masks",
-            "dual gate recall AND precision (same strict thresholds in every rendering mode)",
+            "dual gate recall AND precision (GRF uses stricter floors than animated sprites)",
             "reject solid-fill hard occupancy (>=95% of gate grid)",
             "new peaks: extract body_strong >= 0.5 * descriptor.min_body_cluster_strong",
             "noisy extract flags (bloated / soft-hard) on SilhouetteCheck",
@@ -310,6 +310,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             SourceCheck(
                 _maybe_deform,
                 (
+                    "use_sprite_grf",
                     "_occupancy_soft_hard_ratio",
                     "_CONTENT_NOISE_SOFT_HARD_RATIO",
                     "silhouette_gate_thresholds",

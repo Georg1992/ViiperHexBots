@@ -40,6 +40,8 @@ REQUIRED_CONFIG_KEYS = {
     "gateRefUniqueIoU",
     "minSilhouetteRecall",
     "minSilhouettePrecision",
+    "grfMinSilhouetteRecall",
+    "grfMinSilhouettePrecision",
     "grfAspectBandScale",
     "minRequiredPaletteGroups",
     "minSecondPaletteGroupShare",
@@ -1029,7 +1031,18 @@ class MobDetector:
         return refs
 
     def silhouette_gate_thresholds(self) -> tuple[float, float]:
-        """Return the strict silhouette thresholds for every rendering mode."""
+        """Return silhouette floors for the active rendering mode.
+
+        Animated sprites keep the generic recall/precision floors. Modified
+        sprite.grf assets share one red palette, so shape is the only
+        discriminator — GRF mode uses stricter floors so a same-color
+        impostor (alligator while hunting frilldora) cannot pass.
+        """
+        if self.use_sprite_grf:
+            return (
+                float(self.config["grfMinSilhouetteRecall"]),
+                float(self.config["grfMinSilhouettePrecision"]),
+            )
         return (
             float(self.config["minSilhouetteRecall"]),
             float(self.config["minSilhouettePrecision"]),
@@ -1379,7 +1392,14 @@ class MobDetector:
         silhouette_distance: float,
         gate_mask,
     ) -> np.ndarray:
-        """If soft/hard is noisy but recall is already ok, deform best ref into heat."""
+        """If soft/hard is noisy but recall is already ok, deform best ref into heat.
+
+        GRF mode skips deform: the sprite is one deterministic frame, and
+        warping the hunt ref into a same-color impostor crop would raise
+        precision enough for a wrong mob to pass.
+        """
+        if self.use_sprite_grf:
+            return candidate
         soft_hard_ratio = _occupancy_soft_hard_ratio(candidate)
         if soft_hard_ratio < _CONTENT_NOISE_SOFT_HARD_RATIO:
             return candidate
