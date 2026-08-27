@@ -12,7 +12,7 @@ from pybot.config.schema import AppSettings, MobCustomSettings
 from pybot.game_state import PlayerVitals
 from pybot.config.runtime import SelfBuffRuntime, CustomBehaviorRuntime
 from pybot.runtime.gate_controller import CharacterActionGate
-from pybot.runtime.constants import CELL_SIZE_PX
+from pybot.runtime.constants import CELL_SIZE_PX, SKILL_ACTION_COOLDOWN_S
 from pybot.runtime.mob_behaviors import (
     ConfiguredMobBehavior,
     get_configured_mob_behavior,
@@ -295,6 +295,58 @@ class ConfiguredMobBehaviorTests(unittest.TestCase):
 
 
 class SelfBuffWorkerTests(unittest.TestCase):
+    def test_waits_one_second_before_each_buff_cast(self) -> None:
+        stop = threading.Event()
+        clock = {"ms": 1_000_000}
+        casts: list[tuple[int, int]] = []
+
+        class StopEvent:
+            def is_set(self) -> bool:
+                return stop.is_set()
+
+            def wait(self, timeout: float) -> bool:
+                clock["ms"] += int(round(timeout * 1000))
+                return stop.is_set()
+
+        def skill_click_at(scan_code: int, _cx: int, _cy: int, **_kwargs) -> bool:
+            casts.append((scan_code, clock["ms"]))
+            return True
+
+        ctx = SimpleNamespace(
+            config=SimpleNamespace(
+                skill_timers=(),
+                custom_behavior=CustomBehaviorRuntime(
+                    buffs=(
+                        SelfBuffRuntime("f1", 59, 12_000),
+                        SelfBuffRuntime("f2", 60, 12_000),
+                    )
+                ),
+            ),
+            logger=SimpleNamespace(behavior=MagicMock()),
+            stop_event=StopEvent(),
+            is_stopped=stop.is_set,
+            hunt_generation=1,
+            should_run_startup_actions=lambda: True,
+            should_run_character_actions=lambda: True,
+            wait_while_combat_blocked=lambda _timeout: True,
+            character_screen_pos=lambda: (300, 350),
+            character_action_gate=CharacterActionGate(),
+            mark_startup_buffs_done=lambda **_kwargs: True,
+            mark_startup_timers_done=lambda **_kwargs: True,
+        )
+        worker = SelfBuffWorker(ctx, SimpleNamespace(skill_click_at=skill_click_at))
+
+        with patch(
+            "pybot.runtime.workers.self_buff_worker.monotonic_ms",
+            side_effect=lambda: clock["ms"],
+        ):
+            self.assertTrue(worker.process_pending())
+
+        cooldown_ms = int(SKILL_ACTION_COOLDOWN_S * 1000)
+        self.assertEqual([scan for scan, _at in casts], [59, 60])
+        self.assertGreaterEqual(casts[0][1] - 1_000_000, cooldown_ms)
+        self.assertGreaterEqual(casts[1][1] - casts[0][1], cooldown_ms)
+
     def test_pre_clear_window_paces_poll_instead_of_spinning(self) -> None:
         """A recovered-hunt pre-clear window must poll, not spin on the GIL.
 

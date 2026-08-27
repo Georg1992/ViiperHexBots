@@ -6,8 +6,8 @@ import traceback
 
 from pybot.runtime.constants import (
     LOG_REPEAT_INTERVAL_MS,
+    SKILL_ACTION_COOLDOWN_S,
     STARTUP_BUFF_CURSOR_DELAY_S,
-    STARTUP_BUFF_GAP_S,
 )
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.input.input_backend import InputBackend, perform_if_allowed
@@ -18,9 +18,10 @@ class SelfBuffWorker:
     """Cast configured buffs on the character on each hunt cycle.
 
     Assigned character buffs cast first at each hunt start, in UI order,
-    with a one-second gap between casts. Normal skill timers are released only
-    after the full buff sequence completes. Each buff's periodic interval
-    starts at its successful cast, and sitting starts a fresh hunt cycle.
+    with a one-second cooldown before every cast. Normal skill timers are
+    released only after the full buff sequence completes. Each buff's periodic
+    interval starts at its successful cast, and sitting starts a fresh hunt
+    cycle.
 
     Buff casts share the :class:`~pybot.runtime.gate_controller.CharacterActionGate`
     with skill timers: a buff burst claims the shared keypress slot first so
@@ -108,7 +109,7 @@ class SelfBuffWorker:
         the generation is still the same, preventing stale startup events from
         unlocking a later hunt.
         """
-        for index, buff in enumerate(buffs):
+        for buff in buffs:
             while not self._ctx.is_stopped():
                 if self._critical_pending():
                     return False
@@ -141,10 +142,6 @@ class SelfBuffWorker:
             else:
                 return False
 
-            if index + 1 < len(buffs) and not self._wait_startup_gap(
-                expected_generation=expected_generation,
-            ):
-                return False
             if self._current_generation() != expected_generation:
                 return False
         return self._current_generation() == expected_generation
@@ -169,35 +166,33 @@ class SelfBuffWorker:
             return bool(checker())
         return bool(self._ctx.should_run_combat())
 
-    def _wait_startup_gap(self, *, expected_generation: int) -> bool:
-        """Wait one full second while remaining in the active hunt."""
+    def _wait_action_cooldown(self, *, startup: bool = False) -> bool:
+        """Wait one second before a buff cast while the hunt stays runnable."""
+        expected_generation = self._current_generation() if startup else None
         deadline: int | None = None
+        allowed = self._startup_action_allowed if startup else self._character_action_allowed
         while not self._ctx.is_stopped():
             if self._critical_pending():
                 return False
-            if self._current_generation() != expected_generation:
+            if expected_generation is not None and self._current_generation() != expected_generation:
                 return False
-            if not self._startup_action_allowed():
-                # Ordinary combat blocking postpones the next buff. An urgent
-                # critical request is different: abort this startup step so
-                # GameplayLoop can consume the request immediately.
+            if not allowed():
                 if self._critical_pending():
                     return False
                 deadline = None
                 self._ctx.wait_while_combat_blocked(0.25)
-                # Same re-check as _run_startup_sequence: combat may be
+                # Same re-check as the startup sequence: combat may be
                 # admitted before the area is confirmed clear; never spin.
-                if not self._startup_action_allowed() and self._ctx.stop_event.wait(0.05):
+                if not allowed() and self._ctx.stop_event.wait(0.05):
                     return False
                 continue
             if deadline is None:
-                deadline = monotonic_ms() + int(STARTUP_BUFF_GAP_S * 1000)
+                deadline = monotonic_ms() + int(SKILL_ACTION_COOLDOWN_S * 1000)
             remaining_ms = deadline - monotonic_ms()
             if remaining_ms <= 0:
-                return (
-                    self._current_generation() == expected_generation
-                    and self._startup_action_allowed()
-                )
+                if expected_generation is not None and self._current_generation() != expected_generation:
+                    return False
+                return allowed()
             if self._ctx.stop_event.wait(min(0.05, remaining_ms / 1000.0)):
                 return False
         return False
@@ -205,11 +200,14 @@ class SelfBuffWorker:
     def _wait_stagger_gap(self, *, startup: bool = False) -> bool:
         """Wait for the shared character-action slot before a buff cast.
 
-        Startup buffs and periodic buffs use the same gate as skill timers. The
-        only difference is their lifecycle admission predicate: startup buffs
-        may run before combat is released, while periodic buffs require normal
-        combat safety.
+        Every buff waits ``SKILL_ACTION_COOLDOWN_S`` first. Startup buffs and
+        periodic buffs then use the same gate as skill timers. The only
+        remaining difference is their lifecycle admission predicate: startup
+        buffs may run before combat is released, while periodic buffs require
+        normal combat safety.
         """
+        if not self._wait_action_cooldown(startup=startup):
+            return False
         gate = self._ctx.character_action_gate
         allowed = self._startup_action_allowed if startup else self._character_action_allowed
         while not self._ctx.is_stopped():

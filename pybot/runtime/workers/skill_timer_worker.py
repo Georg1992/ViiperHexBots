@@ -7,12 +7,14 @@ re-arms startup casts with ``SKILL_TIMER_STAGGER_MS`` staggering.
 Storage sessions do not pause timers (combat only), so keys are not re-armed.
 
 Timer presses share the :class:`~pybot.runtime.gate_controller.CharacterActionGate`
-with character buff casts: buffs claim the slot first (a buff burst makes
-timers yield), and a single stagger window spaces every keypress.
+with character buff casts: each press waits one second first, buffs claim the
+slot first (a buff burst makes timers yield), and a single stagger window
+spaces every keypress.
 """
 
 from __future__ import annotations
 
+from pybot.runtime.constants import SKILL_ACTION_COOLDOWN_S
 from pybot.runtime.event_utils import event_is_set
 from pybot.runtime.hunt_tracks import monotonic_ms
 from pybot.runtime.input.input_backend import InputBackend, perform_if_allowed
@@ -134,14 +136,35 @@ class SkillTimerWorker:
         from pybot.runtime.danger_detector import DangerLevel
         return danger.danger_level() is DangerLevel.CRITICAL
 
+    def _wait_action_cooldown(self) -> bool:
+        """Wait one second before a timer press while the hunt stays runnable."""
+        deadline: int | None = None
+        ctx = self._ctx
+        while not ctx.is_stopped():
+            if self._critical_pending():
+                return False
+            if not ctx.should_run_timers():
+                return False
+            if deadline is None:
+                deadline = monotonic_ms() + int(SKILL_ACTION_COOLDOWN_S * 1000)
+            remaining_ms = deadline - monotonic_ms()
+            if remaining_ms <= 0:
+                return ctx.should_run_timers()
+            if ctx.stop_event.wait(min(0.05, remaining_ms / 1000.0)):
+                return False
+        return False
+
     def _wait_stagger_gap(self) -> bool:
         """Ensure the shared buff/timer keypress slot is open before a press.
 
-        Buffs win priority: while a buff burst is pending, timer presses
-        yield even if the stagger window has elapsed. Otherwise waits out
-        the shared ``SKILL_TIMER_STAGGER_MS`` window since the last buff cast
-        or timer press. Returns False if hunt stopped/paused/sitting first.
+        Every timer waits ``SKILL_ACTION_COOLDOWN_S`` first. Buffs win
+        priority: while a buff burst is pending, timer presses yield even if
+        the stagger window has elapsed. Otherwise waits out the shared
+        ``SKILL_TIMER_STAGGER_MS`` window since the last buff cast or timer
+        press. Returns False if hunt stopped/paused/sitting first.
         """
+        if not self._wait_action_cooldown():
+            return False
         ctx = self._ctx
         gate = ctx.character_action_gate
         while not ctx.is_stopped():

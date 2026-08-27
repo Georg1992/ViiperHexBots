@@ -85,8 +85,9 @@ HEAL_VERIFY_DELAY_MS = 1000
 
 # Minimum gap between distinct skill-timer key presses when several are due.
 SKILL_TIMER_STAGGER_MS = 500
-# New-hunt character buffs are deliberately spaced by one second.
-STARTUP_BUFF_GAP_S = 1.0
+# Wait this long before every buff cast or timer keypress, including the
+# first action of a hunt and each later periodic execution.
+SKILL_ACTION_COOLDOWN_S = 1.0
 # Let the cursor settle on the character before a startup self-buff cast.
 STARTUP_BUFF_CURSOR_DELAY_S = 0.2
 # RO fly wing unit weight — used to decide ItemsToStorage before GetFlyWings.
@@ -134,7 +135,7 @@ __all__ = [
     "HP_POST_TELEPORT_HEAL_S",
     "HEAL_VERIFY_DELAY_MS",
     "SKILL_TIMER_STAGGER_MS",
-    "STARTUP_BUFF_GAP_S",
+    "SKILL_ACTION_COOLDOWN_S",
     "STARTUP_BUFF_CURSOR_DELAY_S",
     "STORAGE_WEIGHT_MODIFIER_MIN",
     "STORAGE_WEIGHT_MODIFIER_MAX",

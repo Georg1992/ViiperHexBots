@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from pybot.config.runtime import SkillTimerRuntime
-from pybot.runtime.constants import SKILL_TIMER_STAGGER_MS
+from pybot.runtime.constants import SKILL_ACTION_COOLDOWN_S, SKILL_TIMER_STAGGER_MS
 from pybot.runtime.gate_controller import CharacterActionGate
 from pybot.runtime.workers.skill_timer_worker import SkillTimerWorker
 
@@ -43,6 +43,44 @@ class SkillTimerWorkerTests(unittest.TestCase):
                 ctx.stop_event.wait(0.25)
             else:
                 ctx.wait_while_stopped_or_paused(0.25)
+
+    def test_waits_one_second_before_each_timer_press(self) -> None:
+        timers = (
+            SkillTimerRuntime(button="f1", scan_code=59, interval_ms=60_000),
+            SkillTimerRuntime(button="f2", scan_code=60, interval_ms=60_000),
+        )
+        stop = threading.Event()
+        presses: list[tuple[int, int]] = []
+        clock = {"ms": 1_000_000}
+
+        def teleport_key(scan_code: int) -> None:
+            presses.append((scan_code, clock["ms"]))
+            if len(presses) >= 2:
+                stop.set()
+
+        ctx = SimpleNamespace(
+            config=SimpleNamespace(skill_timers=timers),
+            logger=SimpleNamespace(behavior=MagicMock()),
+            stop_event=ClockStopEvent(stop, clock),
+            resume_gate=threading.Event(),
+            is_stopped=stop.is_set,
+            should_run_workers=lambda: not stop.is_set(),
+            should_run_timers=lambda: not stop.is_set(),
+            wait_while_stopped_or_paused=lambda _t: not stop.is_set(),
+            character_action_gate=CharacterActionGate(),
+        )
+        worker = SkillTimerWorker(ctx, SimpleNamespace(teleport_key=teleport_key))
+
+        with patch(
+            "pybot.runtime.workers.skill_timer_worker.monotonic_ms",
+            side_effect=lambda: clock["ms"],
+        ):
+            self._run_pending_until_stopped(worker, ctx)
+
+        cooldown_ms = int(SKILL_ACTION_COOLDOWN_S * 1000)
+        self.assertEqual([p[0] for p in presses], [59, 60])
+        self.assertGreaterEqual(presses[0][1] - 1_000_000, cooldown_ms)
+        self.assertGreaterEqual(presses[1][1] - presses[0][1], cooldown_ms)
 
     def test_staggers_due_timers_by_500ms(self) -> None:
         timers = (
@@ -103,8 +141,8 @@ class SkillTimerWorkerTests(unittest.TestCase):
         def stop_wait(timeout_s: float) -> bool:
             clock["ms"] += int(round(timeout_s * 1000))
             ticks["n"] += 1
-            # Buff worker finishes its burst after a few poll slices.
-            if ticks["n"] >= 3:
+            # Keep the burst through the 1s pre-press cooldown, then release.
+            if ticks["n"] >= 25:
                 gate.end_buff_burst()
             return stop.is_set()
 
@@ -133,7 +171,7 @@ class SkillTimerWorkerTests(unittest.TestCase):
 
         self.assertEqual([p[0] for p in presses], [31])
         # The press only happened after the buff burst cleared.
-        self.assertGreaterEqual(ticks["n"], 3)
+        self.assertGreaterEqual(ticks["n"], 25)
 
     def test_long_timer_is_due_immediately_even_with_low_monotonic_uptime(self) -> None:
         timers = (
@@ -153,7 +191,7 @@ class SkillTimerWorkerTests(unittest.TestCase):
         ctx = SimpleNamespace(
             config=SimpleNamespace(skill_timers=timers),
             logger=SimpleNamespace(behavior=MagicMock()),
-            stop_event=stop,
+            stop_event=ClockStopEvent(stop, clock),
             resume_gate=threading.Event(),
             is_stopped=stop.is_set,
             should_run_workers=lambda: not stop.is_set(),
