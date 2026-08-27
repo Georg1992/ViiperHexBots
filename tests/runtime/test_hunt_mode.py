@@ -204,7 +204,7 @@ class HuntModeTests(unittest.TestCase):
         self.assertTrue(self.mode.discovery_confirmed_clear)
         self.assertTrue(self.mode.on_no_attackable_targets())
 
-    def test_blocks_teleport_while_discovery_candidates_pending(self) -> None:
+    def test_blocks_teleport_while_discovered_tracks_are_alive(self) -> None:
         from pybot.recognition.rules import DiscoveryDetection
 
         self.mode.note_discovery_scan_completed(
@@ -222,20 +222,11 @@ class HuntModeTests(unittest.TestCase):
             mob_name="anubis",
             now_tick=1,
         )
-        self.assertTrue(self.tracks.has_pending_discovery_candidates())
-        self.assertFalse(self.mode.discovery_confirmed_clear)
+        self.assertEqual(self.tracks.get_track_count(), 1)
         self.ctx.discovery_wake.clear()
         self.assertFalse(self.mode.on_no_attackable_targets())
-        # Tracking owns candidate ingestion; do not wake discovery repeatedly
-        # while waiting for tracking to consume the pending candidate.
-        self.assertFalse(self.ctx.discovery_wake.is_set())
 
-        # Tracking consumes the candidate; after the next empty discovery scan
-        # confirms the same area, the mode may teleport normally.
-        candidates = self.tracks.get_and_clear_new_candidates()
-        self.assertEqual(len(candidates), 1)
-        # The tracking worker would create/resolve the candidate here; for
-        # this strategy regression, consuming it is the ownership boundary.
+        self.tracks.reset()
         self.mode.note_discovery_scan_completed(
             living_count=0,
             added_count=0,

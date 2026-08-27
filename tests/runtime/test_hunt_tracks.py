@@ -344,7 +344,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 0)
 
     def test_new_close_detection_is_not_swallowed_by_matched_track(self) -> None:
-        """A new nearby sprite remains a candidate beside a matched track."""
+        """A unique occupancy-1 track keeps the same-object radius."""
         track_id = self.tracks.create_track(
             "horn", 100, 100, 0.71, 0.9,
             now_tick=self.now,
@@ -356,9 +356,8 @@ class HuntTracksRulesTests(unittest.TestCase):
             now_tick=self.now + 100,
         )
         self.assertEqual(summary.matched_count, 1)
-        self.assertEqual(summary.added_count, 1)
-        candidate = self.tracks.get_and_clear_new_candidates()
-        self.assertEqual([(item.x, item.y) for item in candidate], [(160, 100)])
+        self.assertEqual(summary.added_count, 0)
+        self.assertEqual(self.tracks.get_track_count(), 1)
         self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
 
     def test_stationary_track_does_not_match_far_detection(self) -> None:
@@ -889,30 +888,24 @@ class HuntTracksRulesTests(unittest.TestCase):
             thread.join()
         self.assertEqual(errors, [])
 
-    def test_discovery_publishes_candidates(self) -> None:
-        """Discovery publishes candidates; tracking ingests and creates."""
+    def test_discovery_creates_tracks_immediately(self) -> None:
+        """Unmatched living detections become tracks in the discovery scan."""
         self._create(874, 578)
-        # Process a scan with one new detection far from existing track
         summary = self.tracks.process_discovery_scan(
             [det(874, 578, 0.75, 0.9), det(500, 300, 0.8, 0.85)],
             mob_name="horn",
             now_tick=self.now + 500,
         )
-        # One matched, one new candidate
         self.assertEqual(summary.matched_count, 1)
         self.assertEqual(summary.added_count, 1)
-
-        # Candidate should be available for tracking to ingest
-        candidates = self.tracks.get_and_clear_new_candidates()
-        self.assertEqual(len(candidates), 1)
-        self.assertEqual(candidates[0].x, 500)
-        self.assertEqual(candidates[0].y, 300)
-
-        # Second call returns empty (already cleared)
+        self.assertEqual(self.tracks.get_track_count(), 2)
+        created = [track for track in self.tracks.snapshot_alive(self.now + 500) if track.x == 500]
+        self.assertEqual(len(created), 1)
+        self.assertEqual((created[0].x, created[0].y), (500, 300))
         self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 0)
 
-    def test_discovery_merges_unconsumed_candidates(self) -> None:
-        """A second scan must not drop candidates tracking has not ingested."""
+    def test_discovery_creates_each_unmatched_blob(self) -> None:
+        """A later scan still creates a second far-away track."""
         self.tracks.process_discovery_scan(
             [det(100, 100)],
             mob_name="horn",
@@ -923,20 +916,19 @@ class HuntTracksRulesTests(unittest.TestCase):
             mob_name="horn",
             now_tick=self.now + 50,
         )
-        candidates = self.tracks.get_and_clear_new_candidates()
-        self.assertEqual(len(candidates), 2)
-        positions = {(c.x, c.y) for c in candidates}
-        self.assertEqual(positions, {(100, 100), (400, 400)})
+        alive = self.tracks.snapshot_alive(self.now + 50)
+        self.assertEqual(len(alive), 2)
+        self.assertEqual({(track.x, track.y) for track in alive}, {(100, 100), (400, 400)})
 
     def test_requeue_discovery_candidates_restores_queue(self) -> None:
-        self.tracks.process_discovery_scan(
-            [det(100, 100)],
-            mob_name="horn",
-            now_tick=self.now,
-        )
-        taken = self.tracks.get_and_clear_new_candidates()
-        self.assertEqual(len(taken), 1)
-        self.tracks.requeue_discovery_candidates(taken)
+        from pybot.recognition.rules import DiscoveryDetection
+
+        pending = [
+            DiscoveryDetection(
+                x=100, y=100, confidence=0.8, candidate_scale=0.9, living=True,
+            )
+        ]
+        self.tracks.requeue_discovery_candidates(pending)
         restored = self.tracks.get_and_clear_new_candidates()
         self.assertEqual(len(restored), 1)
         self.assertEqual((restored[0].x, restored[0].y), (100, 100))
@@ -1282,7 +1274,9 @@ class HuntTracksRulesTests(unittest.TestCase):
             now_tick=self.now + 20 + cooldown + 100,
         )
         self.assertEqual(summary.added_count, 1)
-        self.assertEqual(len(self.tracks.get_and_clear_new_candidates()), 1)
+        alive = self.tracks.snapshot_alive(self.now + 20 + cooldown + 100)
+        self.assertEqual(len(alive), 1)
+        self.assertEqual((alive[0].x, alive[0].y), (500, 500))
 
     def test_accessible_without_blob_stationary_resets_idle_streak(self) -> None:
         track_id = self._create(500, 500)

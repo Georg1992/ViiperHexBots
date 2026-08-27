@@ -1,4 +1,4 @@
-"""Discovery loop — own thread, detects living mobs and publishes candidates.
+"""Discovery loop — own thread, detects living mobs and creates tracks.
 
 Schedule: every ``discovery_interval_ms`` (default 250ms), and immediately
 when ``discovery_wake`` is set after a teleport settle delay or when
@@ -9,21 +9,20 @@ for the post-delay or session-end wake.
 
 One discovery pass (same frame):
 1. Silhouette scan for living mobs (living refs only).
-2. Match detections to existing tracks; publish new-mob candidates for
-   tracking (which creates tracks on its next fresh frame at exact coords).
+2. Match detections to existing tracks; create tracks for unmatched blobs
+   and wake tracking so local follow starts on the next frame.
 
         Removal factors run in ``HuntTracks.process_discovery_scan()``:
 - Matched detections are **tracked** (existing HuntTracks id). Unmatched
-  detections are **not tracked** and become candidates.
+  detections become tracks immediately.
 - Factor 1: Tracks outside the hunt ROI → left the hunt area.
 - Factor 2: Tracking already lost the sprite and three scans still see
   no blob → disappeared (killed / gone). A still-tracked mob
   (``lost_count == 0``) is never deleted for a silhouette miss.
 - Teleport clears via ``area_reset``. Opacity / idle-dead record kills.
 
-Discovery never creates tracks directly — tracking owns track creation and
-all position writes. Discovery only matches detections (resetting
-miss_count) and publishes new-candidate positions for tracking to ingest.
+Discovery creates tracks at verified silhouette centers and never writes
+later positions. Tracking owns all subsequent coordinate updates.
 
 Teleport clear requires zero living scan candidates, not merely zero alive
 tracks after ghost matching. Capture-time position snapshots keep dedup and
@@ -55,7 +54,7 @@ from pybot.runtime.workers.worker_contexts import DiscoveryWorkerContext
 
 
 class DiscoveryWorker:
-    """Scans living blobs, matches tracked ids, publishes unmatched candidates."""
+    """Scans living blobs, matches tracked ids, creates unmatched tracks."""
 
     def __init__(self, ctx: DiscoveryWorkerContext, hunt_mode) -> None:
         self._ctx = ctx
@@ -281,8 +280,7 @@ class DiscoveryWorker:
         # area_epoch gates create/remove under the tracks lock so a teleport
         # between detect and reconcile cannot spawn or clear into the new area.
         # process_discovery_scan matches detections, marks absence, handles
-        # removal factors, and publishes new candidates for tracking to create
-        # on its next fresh frame at exact coordinates.
+        # removal factors, and creates tracks for unmatched living blobs.
         # Commit track mutations and all derived state under the same boundary
         # as area reset. This establishes one lock order: transition boundary
         # first, then HuntTracks' internal lock. It prevents a discovery scan
@@ -316,11 +314,13 @@ class DiscoveryWorker:
                     ),
                 )
                 if summary.added_count > 0:
-                    # Discovery has published candidates; wake the coordinator
-                    # immediately instead of waiting for its 20 ms cadence.
+                    # Tracks exist now; start local follow and combat immediately.
                     tracking_wake = getattr(ctx, "tracking_wake", None)
                     if tracking_wake is not None:
                         tracking_wake.set()
+                    attack_wake = getattr(ctx, "attack_wake", None)
+                    if attack_wake is not None:
+                        attack_wake.set()
 
                 # A scan that began on the old screen must fail closed before
                 # it can publish any observable state.

@@ -18,7 +18,6 @@ from pybot.runtime.input.input_backend import ShadowInputBackend
 from pybot.runtime.logging import HuntLogger
 from pybot.runtime.runtime_context import HuntRuntimeContext
 from pybot.runtime.validation_log import HuntValidationLogger
-from pybot.runtime.detection.detector_session import StateTrackSnapshot
 
 from tests.runtime.fixtures import (
     FakeCapture,
@@ -80,33 +79,8 @@ class ShadowPipelineTests(unittest.TestCase):
         )
 
         self.assertGreater(summary.added_count, 0)
-        # No tracks created yet — tracking owns that
-        self.assertEqual(tracks.get_track_count(), 0)
-
-        # Tracking ingests candidates and creates tracks on fresh frame
-        candidates = tracks.get_and_clear_new_candidates()
-        self.assertGreater(len(candidates), 0)
-
-        for candidate in candidates:
-            if candidate.candidate_scale <= 0:
-                continue
-            snap = StateTrackSnapshot(
-                track_id=-1,
-                x=candidate.x,
-                y=candidate.y,
-                scale=candidate.candidate_scale,
-            )
-            batch = detector.track_locals_frame(self.roi_frame, self.roi, [snap])
-            if batch.ok and batch.results and batch.results[0].found:
-                r = batch.results[0]
-                track = tracks.create_track(
-                    "horn", r.x, r.y, candidate.confidence, candidate.candidate_scale,
-                    now_tick=now,
-                )
-                if track is not None:
-                    detector.transfer_track_state(r.track_id, track.id)
-
         self.assertGreater(tracks.get_track_count(), 0)
+
         track = tracks.get_track_by_id(1)
         assert track is not None
         self.assertGreater(track.updated_tick, 0)

@@ -104,6 +104,29 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         ctx.tracking_wake.wait.assert_called_once()
         ctx.tracking_wake.clear.assert_called_once_with()
 
+    def test_tracking_quiet_cadence_does_not_double_sleep(self) -> None:
+        """A timed-out tracking wait is the full 20 ms cadence, not 40 ms."""
+        ctx = MagicMock()
+        ctx.stop_event = MagicMock()
+        ctx.stop_event.is_set.side_effect = lambda: calls["count"] >= 2
+        ctx.stop_event.wait.return_value = False
+        ctx.should_run_tracking.return_value = True
+        ctx.tracking_wake = MagicMock()
+        ctx.tracking_wake.is_set.return_value = False
+        ctx.tracking_wake.wait.return_value = False
+        worker = CoordTrackingWorker(ctx)
+        calls = {"count": 0}
+
+        def tick() -> None:
+            calls["count"] += 1
+
+        worker._tick = MagicMock(side_effect=tick)
+        worker.run()
+
+        self.assertEqual(calls["count"], 2)
+        ctx.tracking_wake.wait.assert_called_once()
+        ctx.stop_event.wait.assert_not_called()
+
     def test_discovery_candidate_wakes_tracking_immediately(self) -> None:
         """A positive discovery scan wakes the coordinator before its cadence."""
         from pybot.runtime.workers.discovery_worker import DiscoveryWorker
@@ -146,13 +169,15 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         ctx.overlay = MagicMock()
         ctx.validation = MagicMock()
         ctx.mark_startup_area_clear = MagicMock()
+        ctx.attack_wake = threading.Event()
         hunt_mode = MagicMock()
         worker = DiscoveryWorker(ctx, hunt_mode)
 
         worker._scan()
 
         self.assertTrue(ctx.tracking_wake.is_set())
-        self.assertTrue(self.tracks.has_pending_discovery_candidates())
+        self.assertTrue(ctx.attack_wake.is_set())
+        self.assertEqual(self.tracks.get_track_count(), 1)
         hunt_mode.note_discovery_scan_completed.assert_called_once()
 
     def test_discovery_passes_heat_track_positions(self) -> None:
@@ -192,7 +217,7 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         self.assertIn("heat_track_positions", kwargs)
 
     def test_created_track_wakes_attack_after_state_commit(self) -> None:
-        """Tracking signals attack only after the live track is fully committed."""
+        """Discovery commits the live track and tracking follows it immediately."""
         from pybot.recognition.rules import DiscoveryDetection
 
         self.ctx.config.mob_name = "horn"
@@ -205,22 +230,23 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
             mob_name="horn",
             now_tick=1,
         )
+        created = self.tracks.snapshot_alive(1)
+        self.assertEqual(len(created), 1)
+        self.assertEqual((created[0].x, created[0].y), (100, 100))
         self.ctx.tracker.track_locals_frame.return_value = SimpleNamespace(
             ok=True,
             results=[SimpleNamespace(
-                track_id=-1, found=True, x=101, y=102,
+                track_id=created[0].id, found=True, x=101, y=102,
                 confidence=0.9,
+                opacity_score=0.0,
             )],
         )
-        self.ctx.tracker.transfer_track_state.return_value = True
 
         self.worker._tick()
 
-        self.assertTrue(self.ctx.attack_wake.is_set())
-        created = self.tracks.snapshot_alive(2)
-        self.assertEqual(len(created), 1)
-        self.assertEqual((created[0].x, created[0].y), (101, 102))
-        self.ctx.tracker.transfer_track_state.assert_called_once()
+        followed = self.tracks.snapshot_alive(2)
+        self.assertEqual(len(followed), 1)
+        self.assertEqual((followed[0].x, followed[0].y), (101, 102))
 
     def test_nearby_distinct_candidates_each_create_a_track(self) -> None:
         """Candidate dedup keeps the discovery cluster boundary.
@@ -426,11 +452,10 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         self.ctx.tracker.track_locals_frame.side_effect = follow
         self.worker._tick()
 
-        self.assertEqual(calls, [-1, 1])
+        self.assertEqual(calls, [1])
         created = self.tracks.snapshot_alive(2)
         self.assertEqual(len(created), 1)
         self.assertEqual((created[0].x, created[0].y), (106, 107))
-        self.assertTrue(self.ctx.attack_wake.is_set())
 
     def test_attack_wake_interrupts_idle_attack_poll(self) -> None:
         """A producer wake interrupts the idle wait immediately."""

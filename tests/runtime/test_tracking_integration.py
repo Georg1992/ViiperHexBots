@@ -54,36 +54,6 @@ def make_context(
     )
 
 
-def create_tracks_from_candidates(tracks, detector, frame, roi, candidates, now_tick):
-    """Exercise the production provisional-acquire → real-ID handoff."""
-    from pybot.runtime.detection.detector_session import StateTrackSnapshot
-
-    for index, candidate in enumerate(candidates):
-        if candidate.candidate_scale <= 0:
-            continue
-        provisional_id = -(index + 1)
-        snapshot = StateTrackSnapshot(
-            track_id=provisional_id,
-            x=candidate.x,
-            y=candidate.y,
-            scale=candidate.candidate_scale,
-        )
-        batch = detector.track_locals_frame(frame, roi, [snapshot])
-        if not batch.ok or not batch.results or not batch.results[0].found:
-            continue
-        result = batch.results[0]
-        track = tracks.create_track(
-            "horn",
-            result.x,
-            result.y,
-            candidate.confidence,
-            candidate.candidate_scale,
-            now_tick=now_tick,
-        )
-        if track is not None:
-            detector.transfer_track_state(result.track_id, track.id)
-
-
 class TrackingIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -93,13 +63,12 @@ class TrackingIntegrationTests(unittest.TestCase):
         cls.roi_frame = playfield_roi(frame)
         cls.roi = HuntRoi(x=0, y=0, w=cls.roi_frame.shape[1], h=cls.roi_frame.shape[0])
 
-    def test_discovery_publishes_candidates_then_tracking_creates_tracks(self) -> None:
-        """Discovery publishes candidates; tracking creates tracks on fresh frame."""
+    def test_discovery_creates_tracks_immediately(self) -> None:
+        """Discovery commits unmatched blobs as tracks on the scan that found them."""
         config = make_config()
         detector = FixtureDetector(self.roi_frame)
         ctx = make_context(config, roi=self.roi, detector=detector)
 
-        # Discover from frame
         scan = detector.discover(self.roi)
         self.assertTrue(scan.ok)
         self.assertGreater(scan.accepted_count, 0)
@@ -109,24 +78,14 @@ class TrackingIntegrationTests(unittest.TestCase):
             for d in scan.detections
         ]
 
-        # Process discovery scan — matches/publishes candidates, does NOT create tracks
         summary = ctx.tracks.process_discovery_scan(
             detections,
             mob_name="horn",
             now_tick=monotonic_ms(),
         )
         self.assertGreater(summary.added_count, 0)
-        # No tracks yet — tracking creates them
-        self.assertEqual(ctx.tracks.get_track_count(), 0)
-
-        # Tracking ingests candidates and creates tracks
-        candidates = ctx.tracks.get_and_clear_new_candidates()
-        self.assertGreater(len(candidates), 0)
-        create_tracks_from_candidates(
-            ctx.tracks, detector, self.roi_frame, self.roi, candidates, monotonic_ms(),
-        )
-
         self.assertGreater(ctx.tracks.get_track_count(), 0)
+        self.assertEqual(len(ctx.tracks.get_and_clear_new_candidates()), 0)
 
     def test_shadow_attack_on_discovered_track(self) -> None:
         config = make_config(skill_delay_ms=0)
@@ -141,12 +100,8 @@ class TrackingIntegrationTests(unittest.TestCase):
             DiscoveryDetection(x=d.x, y=d.y, confidence=d.confidence, candidate_scale=d.candidate_scale, living=True)
             for d in scan.detections
         ]
-        # Process discovery to get candidates, then create tracks
         ctx.tracks.process_discovery_scan(detections, mob_name="horn", now_tick=monotonic_ms())
-        candidates = ctx.tracks.get_and_clear_new_candidates()
-        create_tracks_from_candidates(
-            ctx.tracks, detector, self.roi_frame, self.roi, candidates, monotonic_ms(),
-        )
+        self.assertGreater(ctx.tracks.get_track_count(), 0)
 
         now = monotonic_ms()
         target_id = ctx.policy.select_target(ctx.tracks.tracks_for_policy(now), now)
@@ -179,10 +134,6 @@ class TrackingIntegrationTests(unittest.TestCase):
             for d in scan.detections
         ]
         ctx.tracks.process_discovery_scan(detections, mob_name="horn", now_tick=monotonic_ms())
-        candidates = ctx.tracks.get_and_clear_new_candidates()
-        create_tracks_from_candidates(
-            ctx.tracks, detector, self.roi_frame, self.roi, candidates, monotonic_ms(),
-        )
 
         track = ctx.tracks.get_track_by_id(1)
         assert track is not None
@@ -217,10 +168,7 @@ class TrackingIntegrationTests(unittest.TestCase):
             for d in scan.detections
         ]
         ctx.tracks.process_discovery_scan(detections, mob_name="horn", now_tick=monotonic_ms())
-        candidates = ctx.tracks.get_and_clear_new_candidates()
-        create_tracks_from_candidates(
-            ctx.tracks, detector, self.roi_frame, self.roi, candidates, monotonic_ms(),
-        )
+        self.assertGreater(ctx.tracks.get_track_count(), 0)
 
         from pybot.runtime.detection.detector_session import StateTrackSnapshot
 

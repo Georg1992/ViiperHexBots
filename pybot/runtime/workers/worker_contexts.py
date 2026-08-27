@@ -101,6 +101,9 @@ class DiscoveryWorkerContext(
     @property
     def tracking_wake(self) -> object: ...
 
+    @property
+    def attack_wake(self) -> object: ...
+
     def should_run_discovery(self) -> bool: ...
 
 

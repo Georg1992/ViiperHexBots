@@ -74,9 +74,6 @@ class HuntModeStrategy(ABC):
 
         Uses scan detections (pre-dedup), not post-reconcile alive tracks, so
         corpse heat matched only to death ghosts still blocks teleport.
-        Pending discovery candidates (not yet ingested into tracks) also
-        block clear — otherwise mode TP can wipe them before COORD creates
-        tracks and the bot teleports past live mobs.
         """
         # Never acquire the strategy lock before reading the track epoch; see
         # ``discovery_since_reset`` for the lock-order contract.

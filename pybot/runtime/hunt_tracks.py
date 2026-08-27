@@ -142,9 +142,8 @@ class HuntTracks:
         """Return whether the area has no alive tracks or pending candidates.
 
         Read-only: must not clear pending discovery candidates. Attack's
-        no-target path polls this while discovery may have published
-        candidates that tracking has not ingested yet — those must block
-        area-clear teleport so mobs are not skipped mid-ingest.
+        no-target path polls this while any leftover ingest queue still
+        holds detections that have not become tracks.
         """
         del now_tick
         with self._lock:
@@ -161,7 +160,7 @@ class HuntTracks:
             return AreaClearStatus(clear=True, reason="", alive_count=0)
 
     def has_pending_discovery_candidates(self) -> bool:
-        """True when discovery published mobs that tracking has not ingested."""
+        """True when leftover detections have not yet become tracks."""
         with self._lock:
             return bool(self._discovery_candidates)
 
@@ -317,10 +316,10 @@ class HuntTracks:
         hunt_roi: HuntRoi | None = None,
         heat_supported_track_ids: frozenset[int] | set[int] | None = None,
     ) -> ReconcileSummary:
-        """Discovery step: match detections, mark absence, evaluate removal factors.
+        """Discovery step: match detections, create new tracks, mark absence.
 
-        Does NOT create tracks — publishing new candidates so tracking can
-        create them on a fresh frame with exact coordinates.
+        Unmatched living detections become tracks immediately at the verified
+        silhouette center. Tracking then follows those IDs on its next frame.
 
         After matching detections against known tracks, unmatched tracks
         are classified as disappeared only when they are no longer tracked:
@@ -404,9 +403,11 @@ class HuntTracks:
                     continue
                 kept_candidates.append(detection)
 
-            # Merge with any unconsumed candidates so a back-to-back discovery
-            # scan cannot drop detections tracking has not ingested yet.
-            self._merge_candidates_locked(kept_candidates)
+            created_ids = self._create_tracks_from_detections_locked(
+                kept_candidates,
+                mob_name=mob_name,
+                now_tick=tick,
+            )
 
             unmatched_ids = set(result.removed_ids)
 
@@ -446,19 +447,63 @@ class HuntTracks:
 
             alive_after = sum(1 for t in self._tracks if is_alive(t))
             summary = ReconcileSummary(
-                tracks_before=alive_after + len(remove_ids),
+                tracks_before=alive_after + len(remove_ids) - len(created_ids),
                 tracks_after=alive_after,
                 alive_after=alive_after,
-                created_ids=[],
+                created_ids=created_ids,
                 removed_ids=sorted(remove_ids),
                 removed_out_of_range_ids=sorted(out_of_range),
                 removed_discovery_miss_ids=sorted(miss_remove),
                 matched_count=result.matched_count + death_absorbed,
-                added_count=len(kept_candidates),
+                added_count=len(created_ids),
                 removed_count=len(remove_ids),
                 death_sites_active=self._death_site_store.active_count(tick),
             )
             return summary
+
+    def _create_tracks_from_detections_locked(
+        self,
+        detections: list[DiscoveryDetection],
+        *,
+        mob_name: str,
+        now_tick: int,
+    ) -> list[int]:
+        """Commit unmatched living detections as tracks at discovery centers."""
+        if not detections:
+            return []
+        config = self._detector_config()
+        cluster_radius = int(config["discoveryClusterRadiusPx"])
+        cluster_sq = cluster_radius * cluster_radius
+        occupancy = [
+            (track.x, track.y, track.occupancy)
+            for track in self._tracks
+            if is_alive(track)
+        ]
+        created_ids: list[int] = []
+        created_positions: list[tuple[int, int]] = []
+        for detection in detections:
+            if detection.candidate_scale <= 0:
+                continue
+            x, y = int(detection.x), int(detection.y)
+            if self.blocks_new_track_at(x, y, existing=occupancy):
+                continue
+            if any(
+                (x - px) * (x - px) + (y - py) * (y - py) <= cluster_sq
+                for px, py in created_positions
+            ):
+                continue
+            track = self._create_track_locked(
+                mob_name,
+                x,
+                y,
+                float(detection.confidence),
+                float(detection.candidate_scale),
+                now_tick,
+                discovery_bbox=detection.bbox,
+            )
+            created_ids.append(track.id)
+            created_positions.append((x, y))
+        return created_ids
 
     # ── Removal-factor evaluators ────────────────────────────────────────
     # Each method evaluates ONE removal factor and returns a set of track
@@ -744,15 +789,6 @@ class HuntTracks:
                 return False
             self._remove_tracks_locked({track_id})
             return True
-
-    def occupancy_positions(self) -> list[tuple[int, int, int]]:
-        """Alive-track centers with occupancy, sampled for one ingest."""
-        with self._lock:
-            return [
-                (track.x, track.y, track.occupancy)
-                for track in self._tracks
-                if is_alive(track)
-            ]
 
     def blocks_new_track_at(
         self,

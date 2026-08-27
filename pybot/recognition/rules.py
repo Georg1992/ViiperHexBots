@@ -5,20 +5,20 @@ Used by tests to lock the pipeline contract.
 Ownership:
 - **Discovery** scans the hunt ROI and classifies every living blob as
   either **tracked** (1-to-1 match to an existing HuntTracks id) or
-  **not tracked** (new-mob candidate for tracking to create).  It never
-  creates tracks and never writes positions.  A tracked mob is not
-  deleted because silhouette matching failed.  Discovery removes a
-  track only when it has disappeared from the hunt area: it left the
-  ROI, or tracking already lost it and three consecutive scans still
-  see no blob (the sprite is gone — killed, not merely occluded).
-  Teleport clears the area with ``area_reset``.  Confirmed kills
-  (opacity fade / idle-dead) are tracking/attack, not discovery.
-- **Tracking** owns track creation and position.  On each tick it ingests
-  discovery candidates, runs a local-follow search on the *current fresh
-  frame* to get exact coordinates, creates tracks at those coordinates,
-  then follows every alive track via heatmap local follow.  Peak search
-  proposes centers; ``score_at`` (silhouette gate) accepts a hit.  On
-  found=True it updates position, velocity, and opacity baseline / decay.
+  **new**.  Unmatched living blobs become tracks immediately at the
+  silhouette center.  A tracked mob is not deleted because silhouette
+  matching failed.  Discovery removes a track only when it has
+  disappeared from the hunt area: it left the ROI, or tracking already
+  lost it and three consecutive scans still see no blob (the sprite is
+  gone — killed, not merely occluded).  Teleport clears the area with
+  ``area_reset``.  Confirmed kills (opacity fade / idle-dead) are
+  tracking/attack, not discovery.
+- **Tracking** owns later positions.  On each tick it follows every
+  alive track via heatmap local follow.  The first follow of a new
+  track seeds the warm identity template from the discovery center.
+  Peak search proposes centers; ``score_at`` (silhouette gate) accepts
+  a hit.  On found=True it updates position, velocity, and opacity
+  baseline / decay.
   Sustained opacity drop while stationary removes the track (in-place
   death fade), or decrements ``occupancy`` when several identities share
   one blob.  Discovery matches also update ``discovery_stationary``

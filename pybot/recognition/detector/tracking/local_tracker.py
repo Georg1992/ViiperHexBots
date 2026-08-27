@@ -143,9 +143,9 @@ def track_local(
 ) -> LocalTrackResult:
     """Follow one known track near its last known center.
 
-    Negative IDs are provisional and perform one-shot local acquisition.
-    Positive IDs require a transferred cached template and perform only the
-    temporal follow. Zero is invalid and returns a miss.
+    A track with no cached template is seeded once from the current center.
+    After that, follow stays on that template. Zero is invalid and returns
+    a miss.
 
     ``suppress_positions``: ROI-relative (x, y) of other tracks. A hit closer
     to a neighbor stays on this Track's last center instead of stealing that
@@ -182,7 +182,6 @@ def track_local(
     # callers can explicitly disable this with ``prediction_valid=False``;
     # ``lost_count`` carries the bounded recovery horizon.
     prediction_valid = track.get("prediction_valid", True) is not False
-    anchor_required = bool(track.get("anchor_required", False))
     lost_count = max(0, int(track.get("lost_count", 0)))
     velocity_x = float(track.get("velX", 0.0)) if prediction_valid else 0.0
     velocity_y = float(track.get("velY", 0.0)) if prediction_valid else 0.0
@@ -225,17 +224,15 @@ def track_local(
         search_radius=radius,
     )
 
-    # Provisional IDs use the local heatmap once; the resulting hit becomes
-    # the stable positive-track anchor after commit. A positive Track that has
-    # lost its anchor must not silently reacquire a nearby identical mob through
-    # the generic detector path.
+    # Seed the warm anchor from the current center when none exists yet.
+    # Discovery-created tracks arrive with a verified silhouette center and
+    # no template; the first follow learns the identity here. A track that
+    # already has an anchor keeps following that template and never swaps
+    # onto a nearby identical mob through a generic peak search.
     template_store = _template_store(detector)
-    if track_id < 0 or (track_id not in template_store and not anchor_required):
-        # Acquisition is a one-shot seed refinement from an already-precise
-        # discovery center, so it uses the smaller configured acquisition
-        # radius, not the wide kiting radius used by warm follow. This was
-        # the original intent of ``localTrackSearchRadiusPx`` (120) and it
-        # keeps a multi-candidate acquisition batch cheap.
+    if track_id not in template_store:
+        # Acquisition is a one-shot seed from the discovery center. It uses
+        # the smaller configured radius, not the wide kiting follow window.
         acquisition_radius = max(
             int(detector.local_track_search_radius_px),
             radius // 2,
