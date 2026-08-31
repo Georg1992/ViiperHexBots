@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import struct
 import tempfile
 import unittest
 import zlib
@@ -11,12 +12,21 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from pybot.mobs.sprite_grf import (
+    _GRF_HEADER_SIZE_LEGACY,
     _GRF_SPRITE_DIR_BYTES,
     SpriteGrf,
     remove_mob_from_sprite_grf,
     sync_sprite_grf,
 )
 from pybot.recognition.spr_reader import SprReader
+
+
+def _header_entry_count(path: Path) -> int:
+    """Real file count stored in a 0x200 GRF header (field minus 7)."""
+    raw = path.read_bytes()
+    # Production archives use the 46-byte header: count sits at offset 38.
+    count_field = struct.unpack_from("<I", raw, 16 + 22)[0]
+    return count_field - 7
 
 
 class SpriteGrfRemovalTests(unittest.TestCase):
@@ -151,6 +161,33 @@ class SpriteGrfRemovalTests(unittest.TestCase):
 
             self.assertEqual(removed, 1)
             self.assertEqual(grf._entries[0]._path_bytes, unrelated)
+
+    def test_save_updates_header_file_count_when_appending(self) -> None:
+        source = Path(__file__).resolve().parents[2] / "sprite.grf"
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_path = Path(tmp) / "sprite.grf"
+            shutil.copyfile(source, archive_path)
+            original = SpriteGrf(archive_path)
+            self.assertEqual(original._header_size, _GRF_HEADER_SIZE_LEGACY)
+            self.assertEqual(_header_entry_count(archive_path), len(original._entries))
+
+            original.add_file_raw(
+                _GRF_SPRITE_DIR_BYTES + b"\\newmob.spr",
+                b"new spr",
+            )
+            original.add_file_raw(
+                _GRF_SPRITE_DIR_BYTES + b"\\newmob.act",
+                b"new act",
+            )
+            with patch(
+                "pybot.mobs.sprite_grf._zlib_compress_compat",
+                side_effect=lambda data: zlib.compress(data, 9),
+            ):
+                original.save()
+
+            loaded = SpriteGrf(archive_path)
+            self.assertEqual(len(loaded._entries), len(original._entries))
+            self.assertEqual(_header_entry_count(archive_path), len(loaded._entries))
 
     def test_sync_updates_archive_from_modified_assets_immediately(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

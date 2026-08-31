@@ -210,12 +210,10 @@ def import_mob_from_paths(
 
         stem = install_mob_assets(spr, act, overwrite=False)
         build_mob_descriptor(stem)
-        try:
-            build_modified_sprite_descriptor(stem)
-        except Exception as exc:
-            # Best-effort: normal descriptor is already built.
-            print(
-                f"[IMPORT] modified-sprite descriptor skipped for '{stem}': {exc}"
+        modified = build_modified_sprite_descriptor(stem)
+        if modified is None:
+            raise RuntimeError(
+                f"modified-sprite assets were not created for '{stem}'"
             )
 
         # Keep the archive in sync immediately; waiting for the next

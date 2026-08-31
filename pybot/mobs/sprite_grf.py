@@ -437,12 +437,20 @@ class SpriteGrf:
         rel_table_offset = len(container)
         
         if self._orig_header_tail:
-            # Modify the existing header tail to update the table offset.
-            # In legacy GRFs (46-byte header), the tail is 30 bytes and offset is at 14:18.
-            # In standard GRFs (47-byte header), the tail is 31 bytes and offset is at 15:19.
+            # Modify the existing header tail to update the table offset and
+            # file count. The client reads only header_count-7 table entries,
+            # so a stale count hides files that were appended after import.
+            # In legacy GRFs (46-byte header), the tail is 30 bytes: offset at
+            # 14:18, seed at 18:22, count at 22:26.
+            # In standard GRFs (47-byte header), the tail is 31 bytes: offset at
+            # 15:19, seed at 19:23, count at 23:27.
             tail = bytearray(self._orig_header_tail)
             off_start = 14 if len(tail) == 30 else 15
-            tail[off_start:off_start+4] = struct.pack("<I", rel_table_offset)
+            tail[off_start:off_start + 4] = struct.pack("<I", rel_table_offset)
+            count_start = off_start + 8
+            tail[count_start:count_start + 4] = struct.pack(
+                "<I", len(self._entries) + 7
+            )
             header += bytes(tail)
         else:
             # New GRF: write the real offset, and use the legacy 46-byte header format.

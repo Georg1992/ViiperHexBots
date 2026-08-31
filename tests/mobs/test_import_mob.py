@@ -219,6 +219,7 @@ class MobImportTests(unittest.TestCase):
                 return mock_descriptor
 
             mock_builder.build.side_effect = _fake_build
+            mock_builder.build_modified_sprite.return_value = mock_descriptor
 
             with (
                 patch("pybot.mobs.import_mob.MOBS_DIR", mobs),
@@ -234,7 +235,40 @@ class MobImportTests(unittest.TestCase):
             self.assertEqual(entry.asset_name, "horn")
             self.assertTrue((mobs / "horn" / "sprite" / "horn.spr").is_file())
             mock_builder.build.assert_called_once_with("horn", force=True)
+            mock_builder.build_modified_sprite.assert_called_once_with(
+                "horn", force=True
+            )
             sync_grf.assert_called_once_with(tmp_path)
+
+    def test_import_fails_when_modified_sprite_is_not_created(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            spr = _touch(tmp_path / "src" / "horn.spr")
+            act = _touch(tmp_path / "src" / "horn.act")
+            mobs = tmp_path / "mobs"
+            desc = tmp_path / "descriptors" / "horn" / "descriptor.json"
+            builder = MagicMock()
+
+            def build(stem: str, force: bool = False):
+                desc.parent.mkdir(parents=True, exist_ok=True)
+                desc.write_text("{}")
+                return MagicMock()
+
+            builder.build.side_effect = build
+            builder.build_modified_sprite.return_value = None
+            with (
+                patch("pybot.mobs.import_mob.MOBS_DIR", mobs),
+                patch("pybot.mobs.import_mob.DESCRIPTORS_DIR", tmp_path / "descriptors"),
+                patch("pybot.mobs.import_mob.PROJECT_ROOT", tmp_path),
+                patch("pybot.mobs.import_mob.DescriptorBuilder", return_value=builder),
+                patch("pybot.mobs.import_mob.descriptor_path", return_value=desc),
+                patch("pybot.mobs.sprite_grf.sync_sprite_grf") as sync_grf,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "modified-sprite assets"):
+                    import_mob_from_paths([spr, act])
+
+            self.assertFalse((mobs / "horn").exists())
+            sync_grf.assert_not_called()
 
 
 if __name__ == "__main__":
