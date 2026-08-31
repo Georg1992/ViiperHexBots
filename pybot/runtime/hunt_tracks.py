@@ -333,7 +333,9 @@ class HuntTracks:
         3. ``lost_count == 0`` → still tracked; discovery miss is ignored.
 
         Confirmed death (opacity / idle-dead) uses ``_remove_dead_tracks_locked``
-        elsewhere and records death sites. Teleport uses ``area_reset``.
+        elsewhere and records death sites. In sprite.grf mode those animation
+        deaths do not run; disappearance is this heatmap miss path only.
+        Teleport uses ``area_reset``.
         """
         tick = now_tick if now_tick is not None else monotonic_ms()
         with self._lock:
@@ -545,7 +547,8 @@ class HuntTracks:
         including an isolated overlap-hold on the shared blob.
 
         Teleport uses ``area_reset``. Opacity / idle-dead record kills
-        separately.
+        separately, except in sprite.grf mode where this heatmap miss is
+        the only disappearance path.
         """
         remove_ids: set[int] = set()
         first_miss_ids: list[int] = []
@@ -572,12 +575,16 @@ class HuntTracks:
         *,
         now_tick: int | None = None,
         area_epoch: int | None = None,
+        use_sprite_grf: bool = False,
     ) -> tuple[list[int], list[OpacityDeathEvent]]:
         """Refresh coordinates from LocalTracker results.
 
         Returns ``(missed_ids, opacity_deaths)``.
         - *missed_ids*: tracks not found by the local tracker.
         - *opacity_deaths*: tracks removed by opacity-decay death detection.
+
+        ``use_sprite_grf``: no death animation, so opacity fade and terminal
+        local-loss do not delete. Discovery's heatmap miss owns disappearance.
 
         Overlap-hold is not a second identity. After unique hits and misses
         land, each held track merges into the nearest unique hit (else the
@@ -653,6 +660,8 @@ class HuntTracks:
                 result = result_by_id.get(track_id)
                 if track is None or result is None:
                     continue
+                if use_sprite_grf:
+                    continue
                 death = self._opacity_event_or_consume_locked(
                     track,
                     result,
@@ -674,6 +683,8 @@ class HuntTracks:
                 track.overlap_holding = True
                 track.moving = False
                 track.last_found_tick = tick
+                if use_sprite_grf:
+                    continue
                 death = self._opacity_event_or_consume_locked(
                     track,
                     result,
@@ -689,9 +700,10 @@ class HuntTracks:
                     {event.track_id for event in opacity_deaths},
                     tick,
                 )
-            if terminal_tracking_loss:
+            if terminal_tracking_loss and not use_sprite_grf:
                 # Local tracking has exhausted its bounded recovery ladder;
                 # the Track, not a later Discovery scan, owns this loss.
+                # sprite.grf: Discovery heatmap miss is the disappearance path.
                 self._remove_tracks_locked(terminal_tracking_loss)
 
             return missed_ids, opacity_deaths
@@ -706,6 +718,7 @@ class HuntTracks:
         char_x: int,
         char_y: int,
         now_tick: int | None = None,
+        confirm_idle_dead: bool = True,
     ) -> tuple[str, int]:
         """Check idle-attack death / unreachable conditions.
 
@@ -720,6 +733,8 @@ class HuntTracks:
         **Dead** — mob was hittable (SP consumed at least once), discovery
         heat blob is stationary (unchanged across scans), and the next 2
         attacks were idle → track removed + death site.
+        ``confirm_idle_dead=False`` (sprite.grf) skips this removal; Discovery
+        heatmap miss owns disappearance.
 
         **Unreachable** — 5 consecutive idle attacks on any track → track
         removed + death site (same removal as dead). Catches never-hittable
@@ -759,6 +774,8 @@ class HuntTracks:
 
                     track.idle_attack_count += 1
                     if track.idle_attack_count >= IDLE_DEAD_ATTACK_COUNT:
+                        if not confirm_idle_dead:
+                            return "none", track.idle_attack_count
                         tick = now_tick if now_tick is not None else monotonic_ms()
                         if track.occupancy > 1:
                             self._consume_occupant_locked(track, tick)

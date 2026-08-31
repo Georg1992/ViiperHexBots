@@ -681,6 +681,7 @@ class AttackLoop:
             char_x=idle_char_x,
             char_y=idle_char_y,
             now_tick=now_tick,
+            confirm_idle_dead=not ctx.config.use_sprite_grf,
         )
         if not ctx.config.use_sprite_grf and action == "dead":
             ctx.logger.behavior(

@@ -269,6 +269,28 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(track.occupancy, 1)
         self.assertEqual(track.idle_attack_count, 0)
 
+    def test_sprite_grf_does_not_remove_on_idle_dead(self) -> None:
+        """sprite.grf: idle-dead is skipped; heatmap miss owns disappearance."""
+        track_id = self._create(500, 500)
+        self.tracks.evaluate_idle_attack(
+            track_id, was_idle=False, mob_x=500, mob_y=500, char_x=0, char_y=0,
+        )
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.discovery_stationary = True
+        for _ in range(2):
+            action, _count = self.tracks.evaluate_idle_attack(
+                track_id,
+                was_idle=True,
+                mob_x=500,
+                mob_y=500,
+                char_x=0,
+                char_y=0,
+                confirm_idle_dead=False,
+            )
+            self.assertEqual(action, "none")
+        self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
+
     def test_unreachable_idle_removes_whole_stack(self) -> None:
         track_id = self._create(500, 500)
         track = self.tracks.get_track_by_id(track_id)
@@ -1018,6 +1040,51 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(missed, [])
         self.assertEqual([e.track_id for e in dead], [track_id])
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
+
+    def test_sprite_grf_does_not_remove_on_opacity_decay(self) -> None:
+        """sprite.grf has no death animation; opacity must not delete."""
+        track_id = self._create(874, 578)
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.last_discovery_x = 874
+        track.last_discovery_y = 578
+        for i in range(4):
+            self.tracks.apply_tracking(
+                [_hit(track_id, 874, 578, opacity_score=0.60)],
+                now_tick=self.now + (i + 1) * 16,
+                use_sprite_grf=True,
+            )
+        for i, score in enumerate((0.20, 0.18, 0.15), start=1):
+            missed, dead = self.tracks.apply_tracking(
+                [_hit(track_id, 874, 578, opacity_score=score)],
+                now_tick=self.now + 100 * i,
+                use_sprite_grf=True,
+            )
+            self.assertEqual(missed, [])
+            self.assertEqual(dead, [])
+        self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
+
+    def test_sprite_grf_does_not_remove_on_terminal_tracking_loss(self) -> None:
+        """sprite.grf keeps the track; Discovery heatmap miss owns removal."""
+        track_id = self._create(874, 578)
+        missed, dead = self.tracks.apply_tracking(
+            [
+                SimpleNamespace(
+                    track_id=track_id,
+                    found=False,
+                    x=874,
+                    y=578,
+                    confidence=0.0,
+                    opacity_score=0.0,
+                    tracking_lost=True,
+                )
+            ],
+            now_tick=self.now + 1,
+            use_sprite_grf=True,
+        )
+        self.assertEqual(missed, [track_id])
+        self.assertEqual(dead, [])
+        self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
 
     def test_opacity_decay_ignored_while_moving(self) -> None:
         track_id = self._create(874, 578)

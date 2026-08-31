@@ -156,6 +156,7 @@ class CoordTrackingWorker:
                     batch.results,
                     now_tick=completed_ms,
                     area_epoch=area_epoch,
+                    use_sprite_grf=ctx.config.use_sprite_grf,
                 )
                 for event in deaths:
                     ctx.tracker.discard_track_state(event.track_id)
