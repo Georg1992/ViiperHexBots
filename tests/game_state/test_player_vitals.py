@@ -77,11 +77,13 @@ class PlayerVitalsTests(unittest.TestCase):
         vitals.begin_observation_epoch()
         self.assertIsNone(vitals.sp)
         self.assertFalse(vitals.publish_sp_if_current(574, 1454, old_epoch))
+        self.assertFalse(vitals.is_observation_current(old_epoch))
         self.assertIsNone(vitals.sp)
 
         current_epoch = vitals.observation_epoch
         # Teleport keeps the producer alive but quarantines transition-frame
         # reads until the landing boundary is complete.
+        self.assertFalse(vitals.is_observation_current(current_epoch))
         self.assertFalse(vitals.publish_snapshot_if_current(
             90, 100, 350, 1454, 20, 100, current_epoch,
         ))

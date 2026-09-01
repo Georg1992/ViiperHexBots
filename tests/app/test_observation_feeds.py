@@ -10,8 +10,7 @@ from types import SimpleNamespace
 from pybot.game_state import PlayerVitals
 from unittest.mock import MagicMock, patch
 
-from pybot.app.memory_stats_feed import MEMORY_POLL_MS, MemoryStatsFeed
-from pybot.app.periodic_task_runner import PeriodicTaskRunner
+from pybot.app.memory_stats_feed import MemoryReadResult, MemoryStatsFeed
 from pybot.app.status_panel_feed import StatusPanelFeed
 
 
@@ -45,10 +44,22 @@ class _Recorder:
         self.calls.append(args)
 
 
+def _ok_snap(**overrides) -> SimpleNamespace:
+    values = dict(
+        ok=True,
+        char_name="Hero",
+        sp=80,
+        sp_max=100,
+        weight=40,
+        weight_max=50,
+    )
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def _memory_feed(**overrides) -> MemoryStatsFeed:
     labels = {name: _Recorder() for name in ("name", "sp", "weight")}
     feed = MemoryStatsFeed(
-        root=object(),
         config=SimpleNamespace(
             use_memory_reading=True,
             client_profile="Generic",
@@ -68,52 +79,122 @@ def _memory_feed(**overrides) -> MemoryStatsFeed:
 
 
 class MemoryStatsFeedTests(unittest.TestCase):
-    def test_skips_when_memory_reading_disabled(self) -> None:
+    def test_inactive_when_memory_reading_disabled(self) -> None:
         feed = _memory_feed(use_memory_reading=False)
         with patch("pybot.app.memory_stats_feed.load_client_profile") as load:
-            delay = feed.should_submit()
-        self.assertIsNone(delay)
+            result = feed._read_snapshot()
+        self.assertEqual(result.state, "inactive")
         load.assert_not_called()
-        self.assertEqual(feed._on_name.calls, [("—",)])
+        feed._record_reader_result(result, feed._lifecycle_epoch)
+        self.assertIsNone(feed._vitals.sp)
+        self.assertEqual(feed._vitals.clear_count, 0)
 
     @patch("pybot.app.memory_stats_feed.window_exists", return_value=True)
     @patch(
         "pybot.app.memory_stats_feed.load_client_profile",
         return_value=SimpleNamespace(memory=SimpleNamespace(has_any=True)),
     )
-    def test_submits_when_profile_and_window_ok(self, _load, _window) -> None:
+    def test_reads_when_profile_and_window_ok(self, _load, _window) -> None:
         feed = _memory_feed()
-        self.assertEqual(feed.should_submit(), MEMORY_POLL_MS)
+        feed._poller.read.return_value = _ok_snap()
+        result = feed._read_snapshot()
+        self.assertEqual(result.state, "values")
+        self.assertEqual(result.hwnd, 123)
+        feed._poller.read.assert_called_once()
 
     @patch(
         "pybot.app.memory_stats_feed.load_client_profile",
         return_value=SimpleNamespace(memory=SimpleNamespace(has_any=False)),
     )
-    def test_clears_labels_without_profile_addresses(self, _load) -> None:
+    def test_inactive_without_profile_addresses_does_not_clear_sp(self, _load) -> None:
         feed = _memory_feed()
-        feed._vitals.clear_sp()
-        self.assertIsNone(feed.should_submit())
+        feed._vitals.publish_sp(70, 100)
+        result = feed._read_snapshot()
+        self.assertEqual(result.state, "inactive")
+        feed._record_reader_result(result, feed._lifecycle_epoch)
+        self.assertEqual(feed._vitals.sp, (70, 100))
+        self.assertEqual(feed._vitals.clear_count, 0)
+        feed._project_result(result)
         self.assertEqual(feed._on_name.calls, [("—",)])
         self.assertEqual(feed._on_sp.calls, [("—",)])
         self.assertEqual(feed._on_weight.calls, [("—",)])
-        self.assertEqual(feed._vitals.clear_count, 2)
 
     def test_applies_snapshot_to_labels_and_vitals(self) -> None:
         feed = _memory_feed()
-        snap = SimpleNamespace(
-            ok=True,
-            char_name="Hero",
-            sp=80,
-            sp_max=100,
-            weight=40,
-            weight_max=50,
-        )
-        feed.apply_result((123, snap, None))
+        result = MemoryReadResult(hwnd=123, state="values", snap=_ok_snap())
+        feed._record_reader_result(result, feed._lifecycle_epoch)
+        feed._project_result(result)
         self.assertEqual(feed._on_name.calls, [("Hero",)])
         self.assertEqual(feed._on_sp.calls, [("80/100",)])
         self.assertEqual(feed._on_weight.calls, [("40/50",)])
         self.assertEqual(feed._vitals.sp, (80, 100))
         self.assertEqual(feed._vitals.weight, (40, 50))
+
+    def test_autonomous_reader_publishes_without_tk_callback(self) -> None:
+        """Memory/vitals continue even when Tk has not drained presentation."""
+        feed = _memory_feed()
+        vitals = PlayerVitals()
+        feed._vitals = vitals
+        read_started = threading.Event()
+        callbacks: list = []
+        snap = _ok_snap(sp=70, sp_max=100, weight=30, weight_max=50)
+
+        def read_snapshot():
+            read_started.set()
+            return MemoryReadResult(hwnd=123, state="values", snap=snap)
+
+        feed._read_snapshot = read_snapshot
+        feed._post_to_tk = callbacks.append
+        try:
+            feed.start()
+            self.assertTrue(read_started.wait(timeout=1.0))
+            self.assertTrue(self._wait_until(lambda: vitals.sp == 70))
+            self.assertEqual(vitals.sp_pair(), (70, 100))
+            self.assertEqual(feed._on_sp.calls, [])
+            self.assertEqual(len(callbacks), 1)
+        finally:
+            feed.close()
+            self.assertTrue(self._wait_until(lambda: feed.idle))
+
+    def test_reader_exception_permanently_faults_reader(self) -> None:
+        feed = _memory_feed()
+        reads = 0
+        read_started = threading.Event()
+
+        def read_snapshot():
+            nonlocal reads
+            reads += 1
+            read_started.set()
+            raise RuntimeError("native read exploded")
+
+        feed._read_snapshot = read_snapshot
+        try:
+            feed.start()
+            self.assertTrue(read_started.wait(timeout=1.0))
+            self.assertTrue(self._wait_until(lambda: feed.idle))
+            self.assertTrue(feed.faulted)
+            self.assertTrue(feed._stopped)
+            feed.start()
+            self.assertEqual(reads, 1)
+        finally:
+            feed.close()
+
+    def test_failed_frames_retain_last_published_values(self) -> None:
+        """Misses do not clear storage or switch to another source."""
+        feed = _memory_feed()
+        good = MemoryReadResult(
+            hwnd=123, state="values", snap=_ok_snap(sp=70, sp_max=100)
+        )
+        feed._record_reader_result(good, feed._lifecycle_epoch)
+        for state in ("inactive", "failed"):
+            feed._record_reader_result(
+                MemoryReadResult(
+                    hwnd=123, state=state, snap=SimpleNamespace(ok=False)
+                ),
+                feed._lifecycle_epoch,
+            )
+        self.assertEqual(feed._vitals.sp, (70, 100))
+        self.assertEqual(feed._vitals.clear_count, 0)
 
     def test_inflight_memory_result_from_before_teleport_cannot_publish(self) -> None:
         """A completed pre-TP memory read cannot restore stale SP."""
@@ -122,15 +203,13 @@ class MemoryStatsFeedTests(unittest.TestCase):
         feed._vitals = vitals
         old_epoch = vitals.observation_epoch
         vitals.begin_observation_epoch()
-        snap = SimpleNamespace(
-            ok=True,
-            char_name="Hero",
-            sp=574,
-            sp_max=1454,
-            weight=40,
-            weight_max=50,
+        feed._record_reader_result(
+            MemoryReadResult(
+                hwnd=123, state="values", snap=_ok_snap(sp=574, sp_max=1454)
+            ),
+            feed._lifecycle_epoch,
+            observation_epoch=old_epoch,
         )
-        feed.apply_result((123, snap, old_epoch))
         self.assertIsNone(vitals.sp)
         self.assertEqual(feed._on_sp.calls, [])
 
@@ -143,17 +222,35 @@ class MemoryStatsFeedTests(unittest.TestCase):
         epoch = vitals.begin_observation_epoch()
         self.assertTrue(vitals.complete_observation_epoch(epoch))
         self.assertTrue(vitals.publish_sp_if_current(350, 1454, epoch))
-        feed.apply_result((123, SimpleNamespace(ok=False), old_epoch))
+        feed._record_reader_result(
+            MemoryReadResult(
+                hwnd=123, state="failed", snap=SimpleNamespace(ok=False)
+            ),
+            feed._lifecycle_epoch,
+            observation_epoch=old_epoch,
+        )
         self.assertEqual(vitals.sp_pair(), (350, 1454))
         self.assertEqual(feed._on_sp.calls, [])
 
     def test_ignores_result_for_another_window(self) -> None:
         feed = _memory_feed()
-        snap = SimpleNamespace(ok=True, char_name="Hero", sp=1, sp_max=2,
-                               weight=3, weight_max=4)
-        feed.apply_result((999, snap, None))
+        feed._record_reader_result(
+            MemoryReadResult(
+                hwnd=999, state="values", snap=_ok_snap(sp=1, sp_max=2)
+            ),
+            feed._lifecycle_epoch,
+        )
         self.assertEqual(feed._on_name.calls, [])
         self.assertEqual(feed._vitals.sp, None)
+
+    @staticmethod
+    def _wait_until(predicate, timeout: float = 1.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return predicate()
 
 
 def _status_feed(**overrides) -> StatusPanelFeed:
@@ -448,235 +545,6 @@ class StatusPanelFeedTests(unittest.TestCase):
             time.sleep(0.01)
         return predicate()
 
-
-class _SyncWork:
-    """Work queue that executes accepted jobs inline (deterministic tests)."""
-
-    def submit(self, task) -> bool:
-        task()
-        return True
-
-    def close(self) -> None:
-        pass
-
-    def discard_pending(self) -> None:
-        pass
-
-    @property
-    def idle(self) -> bool:
-        return True
-
-
-class _NeverRunsWork:
-    """Work queue that accepts jobs but never executes them (stall tests)."""
-
-    def submit(self, task) -> bool:
-        return True
-
-    def close(self) -> None:
-        pass
-
-    def discard_pending(self) -> None:
-        pass
-
-    @property
-    def idle(self) -> bool:
-        return True
-
-
-class _CountingFeed(PeriodicTaskRunner):
-    """Minimal feed that records submit/job/apply calls."""
-
-    def __init__(self, *, submitted: list, applied: list) -> None:
-        super().__init__(
-            root=object(),
-            name="test",
-            timeout_s=0.05,
-            default_delay_ms=100,
-            post_to_tk=lambda cb: cb(),
-            log=lambda _msg: None,
-        )
-        self._submitted = submitted
-        self._applied = applied
-
-    def should_submit(self) -> int | None:
-        return 100
-
-    def build_job(self, generation: int):
-        self._submitted.append(generation)
-
-        def _job() -> None:
-            self.publish(generation, "ok")
-
-        return _job
-
-    def apply_result(self, result) -> None:
-        self._applied.append(result)
-
-
-class PeriodicTaskRunnerTests(unittest.TestCase):
-    def test_request_submits_and_applies_result(self) -> None:
-        submitted: list = []
-        applied: list = []
-        feed = _CountingFeed(submitted=submitted, applied=applied)
-        feed._work.close()
-        feed._work = _SyncWork()
-        self.assertEqual(feed.request(), 100)
-        self.assertEqual(feed._submitted, [1])
-        # The inline worker delivered and applied the result already.
-        self.assertFalse(feed._pending)
-        self.assertEqual(applied, ["ok"])
-
-    def test_stop_drops_late_result(self) -> None:
-        submitted: list = []
-        applied: list = []
-        feed = _CountingFeed(submitted=submitted, applied=applied)
-        feed._work.close()
-        feed._work = _NeverRunsWork()
-        feed.request()
-        feed.stop()
-        feed.publish(1, "late")
-        feed.consume_results()
-        self.assertEqual(applied, [])
-        self.assertTrue(feed._stopped)
-
-    def test_reset_drops_stale_result(self) -> None:
-        submitted: list = []
-        applied: list = []
-        feed = _CountingFeed(submitted=submitted, applied=applied)
-        feed._work.close()
-        feed._work = _NeverRunsWork()
-        feed.request()  # in-flight read, generation 1
-        feed.reset()    # window changed: generation 2, pending cleared
-        # The stale worker finally delivers its generation-1 result.
-        feed.publish(1, "ok")
-        feed.consume_results()
-        self.assertEqual(applied, [])
-        # Reset invalidates the old result but keeps the runner pending until
-        # the original worker actually exits.
-        self.assertTrue(feed._pending)
-        feed._worker_finished(1)
-        self.assertFalse(feed._pending)
-
-    def test_stale_result_cannot_evict_newer_result(self) -> None:
-        submitted: list = []
-        applied: list = []
-        feed = _CountingFeed(submitted=submitted, applied=applied)
-        feed._work.close()
-        feed._work = _NeverRunsWork()
-        feed.request()  # generation 1
-        feed.reset()    # invalidate the first native read
-        feed._worker_finished(1)
-        feed.request()  # generation 3, now pending
-
-        # The old native read may finish before the current one. It must not
-        # occupy the single result slot or leave generation 3 pending.
-        feed.publish(1, "stale")
-        feed.publish(3, "current")
-        feed.consume_results()
-
-        self.assertEqual(applied, ["current"])
-        self.assertFalse(feed._pending)
-
-    def test_pending_request_becomes_terminal_fault_at_timeout(self) -> None:
-        submitted: list = []
-        applied: list = []
-        feed = _CountingFeed(submitted=submitted, applied=applied)
-        feed._work.close()
-        feed._work = _NeverRunsWork()
-        feed.request()
-        # No job completes; after the timeout the feed must fail closed
-        # instead of queuing a retry behind the blocked operation.
-        feed._started_at = time.monotonic() - 1.0
-        feed.request()
-        self.assertFalse(feed._pending)
-        self.assertTrue(feed.faulted)
-        submitted_count = len(submitted)
-        self.assertGreaterEqual(feed.request(), 100)
-        self.assertEqual(len(submitted), submitted_count)
-        feed.close()
-
-    def test_result_at_read_deadline_is_consumed_before_terminal_fault(self) -> None:
-        submitted: list = []
-        applied: list = []
-        feed = _CountingFeed(submitted=submitted, applied=applied)
-        feed._work.close()
-        feed._work = _NeverRunsWork()
-        feed.request()  # generation 1
-        # Model the bounded read publishing its timeout result at the same
-        # instant the watchdog would otherwise inspect the pending request.
-        feed._started_at = time.monotonic() - feed._timeout_s
-        feed.publish(1, "read_timeout")
-        feed.request()
-        self.assertEqual(applied, ["read_timeout"])
-        self.assertFalse(feed.faulted)
-        # Consuming a completed result clears the old request and immediately
-        # permits exactly one subsequent read on the normal cadence.
-        self.assertTrue(feed._pending)
-        self.assertEqual(feed._submitted, [1, 2])
-        feed.close()
-
-    def test_result_from_abandoned_stall_is_ignored(self) -> None:
-        submitted: list = []
-        applied: list = []
-        feed = _CountingFeed(submitted=submitted, applied=applied)
-        feed._work.close()
-        feed._work = _NeverRunsWork()
-        feed.request()  # generation 1, then abandon it
-        feed._started_at = time.monotonic() - 1.0
-        feed.request()
-        feed.publish(1, "late")
-        feed.consume_results()
-        self.assertEqual(applied, [])
-
-    def test_terminal_fault_does_not_strand_blocked_worker(self) -> None:
-        """A timed-out worker exits cleanly once its native call returns."""
-        started = threading.Event()
-        release = threading.Event()
-        completed = threading.Event()
-
-        class _BlockingFeed(PeriodicTaskRunner):
-            def __init__(self) -> None:
-                super().__init__(
-                    root=object(),
-                    name="test-terminal-worker",
-                    timeout_s=0.01,
-                    default_delay_ms=100,
-                    post_to_tk=lambda cb: cb(),
-                    log=lambda _msg: None,
-                )
-
-            def should_submit(self) -> int | None:
-                return 100
-
-            def build_job(self, generation: int):
-                def _job() -> None:
-                    started.set()
-                    release.wait()
-                    completed.set()
-
-                return _job
-
-            def apply_result(self, result) -> None:
-                raise AssertionError("blocked test must not publish a result")
-
-        feed = _BlockingFeed()
-        work = feed._work
-        self.assertIsNotNone(work)
-        assert work is not None
-        try:
-            feed.request()
-            self.assertTrue(started.wait(timeout=1.0))
-            feed._started_at = time.monotonic() - 1.0
-            feed.request()
-            self.assertTrue(feed.faulted)
-            self.assertTrue(work._thread.is_alive())
-        finally:
-            release.set()
-            feed.close()
-            work._thread.join(timeout=2.0)
-        self.assertTrue(completed.is_set())
-        self.assertFalse(work._thread.is_alive())
 
 
 if __name__ == "__main__":

@@ -120,7 +120,6 @@ class MainWindow:
         # Background observation feeds (process-memory reads and status-panel
         # OCR) run off the Tk thread; results arrive via posted callbacks.
         self._memory_feed = MemoryStatsFeed(
-            root=self.root,
             config=self.config,
             vitals=self.vitals,
             log=self.log_pipe.log,
@@ -1133,18 +1132,14 @@ class MainWindow:
         self.config.last_session_title = entry.title
         self.config.last_session_process = entry.process
         self.window_info.configure(text=entry.display_text)
-        # A new window invalidates any in-flight read; restart both feeds so
-        # the next submit targets the freshly selected window.
-        self._memory_feed.reset()
-        self._memory_feed.request_now()
+        # Feeds read window_id from config on each poll; in-flight results
+        # for the previous hwnd are rejected at the producer boundary.
         if self._settings_apply_enabled:
             self._save_config_async()
 
     def on_client_changed(self, *_event) -> None:
         self.config.client_profile = self.client_combo.get()
         self._sync_memory_reading_from_profile()
-        self._memory_feed.reset()
-        self._memory_feed.request_now()
         memory = "on" if self.config.use_memory_reading else "off"
         if self.config.use_memory_reading:
             source = "memory (HP from status panel)"

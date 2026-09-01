@@ -136,6 +136,32 @@ def _read_uint32(handle: int, absolute_addr: int) -> int:
     return int(value.value)
 
 
+def _optional_u32(handle: int, module_base: int, offset: int) -> int | None:
+    """Read one optional uint32; unreadable optional offsets stay absent."""
+    if not offset:
+        return None
+    try:
+        return _read_uint32(handle, module_base + offset)
+    except OSError:
+        return None
+
+
+def _optional_weight(handle: int, module_base: int, offset: int) -> int | None:
+    # RO weight in memory is scaled by 10 (e.g. 5.5 UI weight -> 55).
+    val = _optional_u32(handle, module_base, offset)
+    return val // 10 if val is not None else None
+
+
+def _optional_name(handle: int, module_base: int, offset: int) -> str | None:
+    if not offset:
+        return None
+    try:
+        name = _read_cstring(handle, module_base + offset)
+    except OSError:
+        return None
+    return name or None
+
+
 def _read_cstring(handle: int, absolute_addr: int, *, max_bytes: int = CHAR_NAME_MAX_BYTES) -> str:
     _ensure_win32()
     buf = (ctypes.c_char * max_bytes)()
@@ -172,32 +198,21 @@ def read_snapshot(
     if not handle:
         return MemorySnapshot(error="OpenProcess failed")
     try:
-        def optional_u32(offset: int) -> int | None:
-            if not offset:
-                return None
-            return _read_uint32(handle, module_base + offset)
-
-        def optional_weight(offset: int) -> int | None:
-            val = optional_u32(offset)
-            # RO weight in memory is scaled by 10 (e.g. 5.5 UI weight -> 55).
-            return val // 10 if val is not None else None
-
-        def optional_name(offset: int) -> str | None:
-            if not offset:
-                return None
-            name = _read_cstring(handle, module_base + offset)
-            return name or None
-
+        # SP is the required combat sample. Name/weight are display/storage
+        # extras: an unmapped optional offset must not discard a valid SP pair.
+        try:
+            sp = _read_uint32(handle, module_base + addresses.current_sp)
+            sp_max = _read_uint32(handle, module_base + addresses.max_sp)
+        except OSError as exc:
+            return MemorySnapshot(error=str(exc))
         return MemorySnapshot(
-            char_name=optional_name(addresses.char_name),
-            sp=optional_u32(addresses.current_sp),
-            sp_max=optional_u32(addresses.max_sp),
-            weight=optional_weight(addresses.current_weight),
-            weight_max=optional_weight(addresses.max_weight),
+            char_name=_optional_name(handle, module_base, addresses.char_name),
+            sp=sp,
+            sp_max=sp_max,
+            weight=_optional_weight(handle, module_base, addresses.current_weight),
+            weight_max=_optional_weight(handle, module_base, addresses.max_weight),
             ok=True,
         )
-    except OSError as exc:
-        return MemorySnapshot(error=str(exc))
     finally:
         kernel32.CloseHandle(handle)
 

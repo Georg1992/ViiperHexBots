@@ -78,6 +78,11 @@ class PlayerVitals:
             and self._observation_epoch_ready
         )
 
+    def is_observation_current(self, epoch: int | None) -> bool:
+        """True when *epoch* may still publish or paint for this landing."""
+        with self._lock:
+            return self._epoch_is_current(epoch)
+
     # ── HP ────────────────────────────────────────────────────────
 
     def publish_snapshot_if_current(
