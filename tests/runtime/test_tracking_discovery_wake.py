@@ -180,6 +180,75 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         self.assertEqual(self.tracks.get_track_count(), 1)
         hunt_mode.note_discovery_scan_completed.assert_called_once()
 
+    def test_discovery_reacquire_wakes_tracking_and_drops_stale_template(self) -> None:
+        """A miss that discovery relocates resumes follow at the blob center."""
+        from pybot.runtime.workers.discovery_worker import DiscoveryWorker
+
+        track = self.tracks.create_track(
+            "horn", 100, 100, 0.8, 0.9, now_tick=1,
+        )
+        self.tracks.apply_tracking(
+            [SimpleNamespace(
+                track_id=track.id,
+                found=False,
+                x=100,
+                y=100,
+                confidence=0.0,
+            )],
+            now_tick=2,
+        )
+        ctx = MagicMock()
+        ctx.stop_event = threading.Event()
+        ctx.config.discovery_interval_ms = 250
+        ctx.config.mob_name = "horn"
+        ctx.config.use_sprite_grf = True
+        ctx.should_run_discovery.return_value = True
+        ctx.discovery_wake = threading.Event()
+        ctx.tracking_wake = threading.Event()
+        ctx.area_transition_lock = threading.RLock()
+        ctx.observation_publication_lock = threading.Lock()
+        ctx.hunt_generation = 0
+        ctx.capture.is_valid.return_value = True
+        ctx.capture.get_hunt_roi.return_value = SimpleNamespace(
+            x=0, y=0, w=200, h=200,
+            center_x=100, center_y=100,
+        )
+        ctx.capture.capture_roi.return_value = MagicMock(size=1)
+        ctx.tracks = self.tracks
+        ctx.detector.detector_config.return_value = load_detector_config()
+        ctx.detector.discover_frame.return_value = SimpleNamespace(
+            ok=True,
+            fail_reason="",
+            raw_count=1,
+            accepted_count=1,
+            duration_ms=1,
+            timing={},
+            detections=[SimpleNamespace(
+                x=120,
+                y=110,
+                confidence=0.9,
+                candidate_scale=0.9,
+                bbox=(110, 100, 20, 20),
+                living=True,
+            )],
+        )
+        ctx.overlay = MagicMock()
+        ctx.validation = MagicMock()
+        ctx.mark_startup_area_clear = MagicMock()
+        ctx.attack_wake = threading.Event()
+        hunt_mode = MagicMock()
+        worker = DiscoveryWorker(ctx, hunt_mode)
+
+        worker._scan()
+
+        relocated = self.tracks.get_track_by_id(track.id)
+        assert relocated is not None
+        self.assertEqual((relocated.x, relocated.y), (120, 110))
+        self.assertEqual(relocated.lost_count, 0)
+        self.assertTrue(ctx.tracking_wake.is_set())
+        self.assertTrue(ctx.attack_wake.is_set())
+        ctx.tracker.discard_track_state.assert_called_once_with(track.id)
+
     def test_discovery_passes_heat_track_positions(self) -> None:
         """Discovery always probes heat at live track positions on the same frame."""
         from pybot.runtime.workers.discovery_worker import DiscoveryWorker
@@ -474,40 +543,18 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         self.assertFalse(attack.process_pending())
         self.assertFalse(ctx.attack_wake.is_set())
 
-    def test_all_stale_tracks_are_excluded_but_remain_alive(self) -> None:
-        """Stale combat input never deletes Tracks needed for local recovery."""
+    def test_attack_targets_every_alive_track(self) -> None:
+        """Attack always offers existing tracks to policy, including held coords."""
         ctx = MagicMock()
         ctx.stop_event = threading.Event()
         ctx.attack_wake = threading.Event()
         ctx.should_run_combat.return_value = True
         ctx.in_post_teleport_heal_window.return_value = False
         now = 10_000
-        stale = SimpleNamespace(id=1, last_found_tick=now - 1_000, area_epoch=0)
-        ctx.tracks.tracks_for_policy.return_value = [stale]
-        ctx.policy.select_target.return_value = 0
-        ctx.hunt_mode = MagicMock()
-        attack = AttackLoop(ctx, ctx.hunt_mode, MagicMock())
-
-        with unittest.mock.patch(
-            "pybot.runtime.workers.attack_loop.monotonic_ms", return_value=now,
-        ):
-            self.assertFalse(attack.process_pending())
-
-        ctx.policy.select_target.assert_called_with([], now)
-        ctx.hunt_mode.on_no_attackable_targets.assert_called_once_with()
-
-    def test_stale_track_is_not_selected_for_attack(self) -> None:
-        """Held coordinates do not monopolize attack selection."""
-        ctx = MagicMock()
-        ctx.stop_event = threading.Event()
-        ctx.attack_wake = threading.Event()
-        ctx.should_run_combat.return_value = True
-        ctx.in_post_teleport_heal_window.return_value = False
-        now = 10_000
-        stale = SimpleNamespace(id=1, last_found_tick=now - 1_000, area_epoch=0)
+        held = SimpleNamespace(id=1, last_found_tick=now - 1_000, area_epoch=0)
         fresh = SimpleNamespace(id=2, last_found_tick=now, area_epoch=0)
-        ctx.tracks.tracks_for_policy.return_value = [stale, fresh]
-        ctx.policy.select_target.return_value = 2
+        ctx.tracks.tracks_for_policy.return_value = [held, fresh]
+        ctx.policy.select_target.return_value = 1
         ctx.hunt_mode = MagicMock()
         attack = AttackLoop(ctx, ctx.hunt_mode, MagicMock())
 
@@ -517,8 +564,8 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
             attack._attack_one = MagicMock()  # type: ignore[method-assign]
             self.assertTrue(attack.process_pending())
 
-        ctx.policy.select_target.assert_called_once_with([fresh], now)
-        attack._attack_one.assert_called_once_with(2, now, expected_epoch=0)
+        ctx.policy.select_target.assert_called_once_with([held, fresh], now)
+        attack._attack_one.assert_called_once_with(1, now, expected_epoch=0)
         ctx.hunt_mode.on_no_attackable_targets.assert_not_called()
 
     def test_danger_wake_interrupts_gameplay_idle_wait(self) -> None:
@@ -641,6 +688,30 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
         kept = self.tracks.get_track_by_id(track.id)
         assert kept is not None
         self.assertEqual(kept.lost_count, 1)
+
+    def test_overlap_hold_wakes_discovery(self) -> None:
+        """An isolated hold is not a unique follow; discovery must confirm it."""
+        track = self.tracks.create_track(
+            "horn", 100, 100, 0.8, 0.9, now_tick=1
+        )
+        self.ctx.tracker.track_locals_frame.return_value = SimpleNamespace(
+            results=[
+                SimpleNamespace(
+                    track_id=track.id,
+                    found=True,
+                    x=100,
+                    y=100,
+                    confidence=0.7,
+                    overlap_hold=True,
+                    opacity_score=0.0,
+                )
+            ]
+        )
+        self.worker._tick()
+        self.assertTrue(self.ctx.discovery_wake.is_set())
+        kept = self.tracks.get_track_by_id(track.id)
+        assert kept is not None
+        self.assertTrue(kept.overlap_holding)
 
 
 if __name__ == "__main__":

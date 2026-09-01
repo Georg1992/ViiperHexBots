@@ -220,7 +220,7 @@ class HuntModeTests(unittest.TestCase):
                 )
             ],
             mob_name="anubis",
-            now_tick=1,
+            now_tick=monotonic_ms(),
         )
         self.assertEqual(self.tracks.get_track_count(), 1)
         self.ctx.discovery_wake.clear()

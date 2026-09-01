@@ -75,6 +75,7 @@ class ReconcileSummary:
     added_count: int = 0
     removed_count: int = 0
     death_sites_active: int = 0
+    recovered_ids: list[int] | None = None
 
 
 @dataclass
@@ -108,15 +109,12 @@ class MobTrack:
     moving: bool = False
     vel_x: float = 0.0
     vel_y: float = 0.0
-    # Consecutive discovery scans with no blob after tracking already lost
-    # the sprite (``lost_count > 0``). Still-tracked identities
-    # (``lost_count == 0``) do not increment this. At
-    # >= DISCOVERY_MISS_REMOVE_COUNT the track is removed as disappeared.
-    # A tracking hit resets both ``lost_count`` and this counter.
+    # Consecutive discovery scans with no silhouette match and no heat at
+    # this identity. At >= DISCOVERY_MISS_REMOVE_COUNT the track is removed.
     discovery_miss_count: int = 0
     # True while local tracking is holding last center because a neighbor
     # owned the visible hit. Isolated hold is not a visual confirmation
-    # for opacity; discovery still treats ``lost_count == 0`` as tracked.
+    # for opacity or for discovery heat.
     overlap_holding: bool = False
     # Known identities on this one visible blob. Vision cannot count a
     # stacked sprite; occupancy grows on overlap-merge and shrinks on
@@ -242,10 +240,9 @@ def apply_discovery_match(
     """Record that discovery saw this track in its latest scan.
 
     Resets the discovery-miss streak so the track is not removed by the
-    miss-count absence rule. Does NOT write track position — tracking owns that.
-
-    Sets ``discovery_stationary`` when the discovery blob center did not
-    move (within ``movementStopThresholdPx``) vs the previous match.
+    miss-count absence rule. Live unique-follow coordinates stay with
+    tracking. A missed or overlap-held identity is relocated by
+    ``HuntTracks`` from this detection so local follow can resume.
     """
     track.discovery_miss_count = 0
     if detection.candidate_scale > 0:
@@ -308,14 +305,6 @@ def apply_track_observation(
         track.updated_tick = now_tick
         track.last_found_tick = now_tick
         track.lost_count = 0
-        # A confirmed fresh-frame hit proves the mob is still here, so the
-        # discovery-miss streak must not grow past the removal threshold.
-        # Discovery's silhouette extraction can miss a large kiting sprite or
-        # a mob occluded by the player for many consecutive scans; local
-        # tracking is the fresher, more reliable observer while it keeps
-        # finding the mob. Once tracking also loses it (found=False), misses
-        # count normally so gone/dead mobs are still removed.
-        track.discovery_miss_count = 0
         if confidence > 0:
             track.confidence = confidence
         return

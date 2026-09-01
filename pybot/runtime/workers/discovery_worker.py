@@ -16,13 +16,16 @@ One discovery pass (same frame):
 - Matched detections are **tracked** (existing HuntTracks id). Unmatched
   detections become tracks immediately.
 - Factor 1: Tracks outside the hunt ROI → left the hunt area.
-- Factor 2: Tracking already lost the sprite and three scans still see
-  no blob → disappeared (killed / gone). A still-tracked mob
-  (``lost_count == 0``) is never deleted for a silhouette miss.
+- Factor 2: No silhouette and no heat at the track for three scans →
+  disappeared (killed / gone). Local tracking does not keep a track
+  that heat does not confirm.
 - Teleport clears via ``area_reset``. Opacity / idle-dead record kills.
 
-Discovery creates tracks at verified silhouette centers and never writes
-later positions. Tracking owns all subsequent coordinate updates.
+Discovery creates tracks at verified silhouette centers. Tracking owns
+follow-up coordinates while it has a unique hit. A tracking miss asks
+discovery whether the identity is still there; a match relocates the
+track to that blob so local follow resumes. No silhouette and no heat
+for three scans removes it.
 
 Teleport clear requires zero living scan candidates, not merely zero alive
 tracks after ghost matching. Capture-time position snapshots keep dedup and
@@ -313,14 +316,20 @@ class DiscoveryWorker:
                         scan, "heat_supported_track_ids", frozenset()
                     ),
                 )
-                if summary.added_count > 0:
-                    # Tracks exist now; start local follow and combat immediately.
+                if summary.added_count > 0 or summary.recovered_ids:
+                    # New tracks and relocated misses both need local follow
+                    # on the next frame, at the verified discovery center.
                     tracking_wake = getattr(ctx, "tracking_wake", None)
                     if tracking_wake is not None:
                         tracking_wake.set()
                     attack_wake = getattr(ctx, "attack_wake", None)
                     if attack_wake is not None:
                         attack_wake.set()
+                    tracker = getattr(ctx, "tracker", None)
+                    discard = getattr(tracker, "discard_track_state", None)
+                    if callable(discard):
+                        for track_id in summary.recovered_ids or ():
+                            discard(track_id)
 
                 # A scan that began on the old screen must fail closed before
                 # it can publish any observable state.

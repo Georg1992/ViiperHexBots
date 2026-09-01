@@ -165,11 +165,14 @@ class CoordTrackingWorker:
             else:
                 missed, deaths = [], []
             self._warn_if_slow_tracking(batch, snapshots, game_cpu_diag=game_cpu_diag)
-            # A miss is retained locally and will enter the Track's internal
-            # recovery ladder on the next fresh frame. Discovery is independent
-            # validation, not the recovery mechanism. It may still be notified
-            # for independent absence accounting, but never supplies recovery.
-            if missed and not ctx.discovery_suspend.is_set():
+            # A miss (or isolated overlap-hold) asks discovery whether the
+            # identity is still on screen. If discovery relocates it, the
+            # next tracking tick follows from that verified center.
+            isolated_hold = any(
+                bool(getattr(result, "overlap_hold", False))
+                for result in batch.results
+            )
+            if (missed or isolated_hold) and not ctx.discovery_suspend.is_set():
                 ctx.discovery_wake.set()
             del missed
         ctx.tracker.prune_track_states({track.id for track in ctx.tracks.snapshot_alive()})

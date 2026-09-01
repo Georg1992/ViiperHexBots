@@ -23,7 +23,7 @@ class HuntModeStrategy(ABC):
 
     Concrete strategies implement ``_handle_no_targets_impl()`` with
     mode-specific behaviour.  The base class handles the common guard
-    logic (pause/stop checks, attackable tracks).
+    logic (pause/stop checks, alive tracks).
     """
 
     def __init__(
@@ -169,8 +169,7 @@ class HuntModeStrategy(ABC):
                 self._log_no_target("skip", "bot_not_running")
                 return False
 
-            now = monotonic_ms()
-            if ctx.tracks.has_alive_tracks(now):
+            if ctx.tracks.has_alive_tracks():
                 self._log_no_target("wait", "alive_tracks")
                 return False
 
@@ -188,8 +187,7 @@ class HuntModeStrategy(ABC):
 
     def _build_no_target_context(self) -> dict[str, object]:
         ctx = self._ctx
-        now = monotonic_ms()
-        area = ctx.tracks.get_area_clear_candidate(now)
+        area = ctx.tracks.get_area_clear_candidate()
         return {
             "alive_count": area.alive_count,
             "area_clear": area.clear,

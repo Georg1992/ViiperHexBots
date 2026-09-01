@@ -115,9 +115,9 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(self.policy.select_target(tracks, self.now), 1)
 
     def test_discovery_matches_existing_track_resetting_miss_count(self) -> None:
-        # A detection near an existing track is recognised as the same object
-        # (no duplicate), resets discovery_miss_count, and does NOT move x/y.
-        # Tracking owns all position writes.
+        # A detection near an existing live follow is the same object
+        # (no duplicate) and does not move x/y. Tracking still owns that
+        # coordinate until it misses.
         track_id = self._create(874, 578)
         summary = self.tracks.process_discovery_scan(
             [det(900, 610, 0.71, 0.9)],
@@ -135,6 +135,45 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(track.y, 578)
         # Discovery miss count reset by match
         self.assertEqual(track.discovery_miss_count, 0)
+
+    def test_discovery_reacquires_lost_track_at_blob_center(self) -> None:
+        """A tracking miss asks discovery; a match hands the blob back."""
+        track_id = self._create(874, 578)
+        self._tracking_lost(track_id, now_tick=self.now + 1)
+        summary = self.tracks.process_discovery_scan(
+            [det(900, 610, 0.71, 0.9)],
+            mob_name="horn",
+            now_tick=self.now + 500,
+        )
+        self.assertEqual(summary.added_count, 0)
+        self.assertEqual(summary.matched_count, 1)
+        self.assertEqual(summary.recovered_ids, [track_id])
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertEqual((track.x, track.y), (900, 610))
+        self.assertEqual(track.lost_count, 0)
+        self.assertFalse(track.overlap_holding)
+
+    def test_discovery_reacquires_overlap_hold_at_blob_center(self) -> None:
+        track_id = self._create(874, 578)
+        self.tracks.apply_tracking(
+            [_hold(track_id, 874, 578)],
+            now_tick=self.now + 1,
+        )
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertTrue(track.overlap_holding)
+        summary = self.tracks.process_discovery_scan(
+            [det(900, 610, 0.71, 0.9)],
+            mob_name="horn",
+            now_tick=self.now + 500,
+        )
+        self.assertEqual(summary.recovered_ids, [track_id])
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        self.assertEqual((track.x, track.y), (900, 610))
+        self.assertEqual(track.lost_count, 0)
+        self.assertFalse(track.overlap_holding)
 
     def test_tracking_miss_advances_lost_count_normally(self) -> None:
         """Miss advances lost count — no soft prior to snap to."""
@@ -480,17 +519,6 @@ class HuntTracksRulesTests(unittest.TestCase):
 
     def test_three_discovery_misses_removes_track(self) -> None:
         track_id = self._create(874, 578)
-        # Still tracked: empty silhouette scans are not disappearance.
-        for offset in (20, 30, 40):
-            summary = self.tracks.process_discovery_scan(
-                [], mob_name="horn", now_tick=self.now + offset,
-            )
-            self.assertEqual(summary.removed_count, 0)
-            track = self.tracks.get_track_by_id(track_id)
-            assert track is not None
-            self.assertEqual(track.discovery_miss_count, 0)
-        self._tracking_lost(track_id, now_tick=self.now + 45)
-        # Misses 1–2 → track survives
         for i, offset in enumerate((50, 100), start=1):
             summary = self.tracks.process_discovery_scan(
                 [], mob_name="horn", now_tick=self.now + offset,
@@ -499,7 +527,6 @@ class HuntTracksRulesTests(unittest.TestCase):
             track = self.tracks.get_track_by_id(track_id)
             assert track is not None
             self.assertEqual(track.discovery_miss_count, i)
-        # Third miss → removed
         summary = self.tracks.process_discovery_scan(
             [], mob_name="horn", now_tick=self.now + 150,
         )
@@ -507,8 +534,8 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(summary.removed_ids, [track_id])
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
-    def test_discovery_miss_near_character_held_while_tracking(self) -> None:
-        """Still-tracked identities are not deleted; tracking-lost ones 3-miss out."""
+    def test_discovery_miss_near_character_removed_without_heat(self) -> None:
+        """Heat, not local tracking, keeps a track near the character."""
         from pybot.runtime.capture.window_roi import HuntRoi
         from pybot.runtime.constants import MELEE_IDLE_GUARD_RADIUS_PX
 
@@ -532,9 +559,7 @@ class HuntTracksRulesTests(unittest.TestCase):
                 hunt_roi=roi,
             )
 
-        near = self.tracks.get_track_by_id(near_id)
-        assert near is not None
-        self.assertEqual(near.discovery_miss_count, 0)
+        self.assertIsNone(self.tracks.get_track_by_id(near_id))
         self.assertIsNone(self.tracks.get_track_by_id(far_id))
 
     def test_discovery_miss_near_character_removes_when_tracking_lost(self) -> None:
@@ -558,8 +583,8 @@ class HuntTracksRulesTests(unittest.TestCase):
         )
         self.assertIsNone(self.tracks.get_track_by_id(near_id))
 
-    def test_overlap_hold_near_character_stays_while_tracked(self) -> None:
-        """Isolated overlap-hold with lost_count==0 is still a tracked identity."""
+    def test_overlap_hold_without_heat_is_removed(self) -> None:
+        """An isolated overlap-hold is not heat confirmation."""
         from pybot.runtime.capture.window_roi import HuntRoi
 
         roi = HuntRoi(x=0, y=0, w=2000, h=2000)
@@ -582,12 +607,10 @@ class HuntTracksRulesTests(unittest.TestCase):
                 now_tick=self.now + offset,
                 hunt_roi=roi,
             )
-            held = self.tracks.get_track_by_id(near_id)
-            assert held is not None
-            self.assertEqual(held.discovery_miss_count, 0)
+        self.assertIsNone(self.tracks.get_track_by_id(near_id))
 
-    def test_overlap_hold_stays_while_tracked_despite_neighbor_heat(self) -> None:
-        """Still-tracked overlap-hold is not deleted because silhouette failed."""
+    def test_overlap_hold_stays_when_heat_confirms(self) -> None:
+        """Heat at the held center keeps the identity when silhouette fails."""
         track_id = self._create(874, 578)
         self.tracks.apply_tracking(
             [_hold(track_id, 874, 578, opacity_score=0.55)],
@@ -605,14 +628,8 @@ class HuntTracksRulesTests(unittest.TestCase):
         assert track is not None
         self.assertEqual(track.discovery_miss_count, 0)
 
-    def test_tracking_hit_resets_discovery_miss_streak(self) -> None:
-        """Tracker hit resets discovery_miss_count — confirmed mobs survive.
-
-        Discovery silhouette can miss a large kiting sprite (or a mob occluded
-        by the player) for many consecutive scans. Local tracking confirming
-        the mob on a fresh frame is the fresher signal: the miss streak must
-        not reach the removal threshold while tracking still follows it.
-        """
+    def test_tracking_hit_does_not_reset_heat_miss_streak(self) -> None:
+        """Local follow cannot keep a track that discovery heat does not confirm."""
         track_id = self._create(874, 578)
         self._tracking_lost(track_id, now_tick=self.now + 25)
         self.tracks.process_discovery_scan([], mob_name="horn", now_tick=self.now + 50)
@@ -625,55 +642,55 @@ class HuntTracksRulesTests(unittest.TestCase):
         )
         track = self.tracks.get_track_by_id(track_id)
         assert track is not None
-        # tracker hit resets the discovery-miss streak — stays alive
-        self.assertEqual(track.discovery_miss_count, 0)
+        self.assertEqual(track.discovery_miss_count, 1)
+        self.tracks.process_discovery_scan([], mob_name="horn", now_tick=self.now + 150)
+        self.tracks.process_discovery_scan([], mob_name="horn", now_tick=self.now + 200)
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
-    def test_kiting_mob_survives_discovery_misses_while_tracking_confirms(self) -> None:
-        """Anubis scenario: tracking keeps hitting while discovery misses.
-
-        A large kiting sprite that discovery's silhouette repeatedly fails to
-        extract must not be removed while local tracking still follows it on
-        fresh frames. Regression for tracks removed via ``path=miss-2`` one
-        second after ``found=True`` first ticks. The counter can sit at 1
-        (one discovery miss since the last tracking confirmation) but must
-        never climb to the removal threshold across interleaved hits.
-        """
-        from pybot.runtime.constants import DISCOVERY_MISS_REMOVE_COUNT
-
+    def test_kiting_mob_survives_when_heat_confirms(self) -> None:
+        """Silhouette can miss a large sprite; heat at the track keeps it."""
         track_id = self._create(874, 578)
         x = 874
         for tick in (100, 200, 300, 400, 500, 600):
-            # Tracking confirms the mob on a fresh frame (it is kiting).
             x += 25
             self.tracks.apply_tracking(
                 [_hit(track_id, x, 578)],
                 now_tick=self.now + tick,
             )
-            # Discovery misses it the same cycle (silhouette extraction fails).
             summary = self.tracks.process_discovery_scan(
-                [], mob_name="anubis", now_tick=self.now + tick + 1,
+                [],
+                mob_name="anubis",
+                now_tick=self.now + tick + 1,
+                heat_supported_track_ids={track_id},
             )
             self.assertEqual(summary.removed_count, 0)
             track = self.tracks.get_track_by_id(track_id)
             assert track is not None
-            self.assertLess(
-                track.discovery_miss_count, DISCOVERY_MISS_REMOVE_COUNT
-            )
+            self.assertEqual(track.discovery_miss_count, 0)
         self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
 
-    def test_kiting_mob_removed_after_tracking_also_loses_it(self) -> None:
-        """Once tracking loses the mob, discovery misses remove it normally."""
+    def test_kiting_mob_removed_when_heat_does_not_confirm(self) -> None:
+        """Tracking hits alone do not keep a track that heat never confirms."""
         track_id = self._create(874, 578)
-        # Tracking misses now — no more fresh-frame confirmation.
-        self.tracks.apply_tracking([_miss(track_id)], now_tick=self.now + 50)
-        track = self.tracks.get_track_by_id(track_id)
-        assert track is not None
-        self.assertEqual(track.lost_count, 1)
-        # Three discovery misses with no tracking hit → removed.
-        for offset in (100, 150, 200):
-            self.tracks.process_discovery_scan(
-                [], mob_name="anubis", now_tick=self.now + offset,
+        x = 874
+        for tick in (100, 200):
+            x += 25
+            self.tracks.apply_tracking(
+                [_hit(track_id, x, 578)],
+                now_tick=self.now + tick,
             )
+            self.tracks.process_discovery_scan(
+                [], mob_name="anubis", now_tick=self.now + tick + 1,
+            )
+            self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
+        x += 25
+        self.tracks.apply_tracking(
+            [_hit(track_id, x, 578)],
+            now_tick=self.now + 300,
+        )
+        self.tracks.process_discovery_scan(
+            [], mob_name="anubis", now_tick=self.now + 301,
+        )
         self.assertIsNone(self.tracks.get_track_by_id(track_id))
 
     def test_outside_roi_removed_gone_track_inside_roi_marked_absent(self) -> None:

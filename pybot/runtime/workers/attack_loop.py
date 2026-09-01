@@ -18,7 +18,6 @@ from pybot.runtime.constants import (
     HEAL_VERIFY_DELAY_MS,
     HP_RESTORE_COOLDOWN_S,
     LOG_REPEAT_INTERVAL_MS,
-    MAX_ATTACK_COORD_AGE_MS,
     WORKER_POLL_INTERVAL_S,
 )
 from pybot.runtime.combat_observer import CombatObserver
@@ -118,10 +117,7 @@ class AttackLoop:
             # fresh track is attacked in this same gameplay step instead of
             # waiting for another polling cycle (or risking a no-target teleport).
             for _ in range(2):
-                policy_tracks = self._attackable_policy_tracks(
-                    self._ctx.tracks.tracks_for_policy(tick),
-                    tick,
-                )
+                policy_tracks = self._ctx.tracks.tracks_for_policy(tick)
                 target_id = self._ctx.policy.select_target(policy_tracks, tick)
                 if target_id:
                     selected_epoch = next(
@@ -160,10 +156,7 @@ class AttackLoop:
             # owns its area/publication locks; do not hold them across attack or
             # teleport input.
             final_tick = monotonic_ms()
-            final_tracks = self._attackable_policy_tracks(
-                self._ctx.tracks.tracks_for_policy(final_tick),
-                final_tick,
-            )
+            final_tracks = self._ctx.tracks.tracks_for_policy(final_tick)
             final_target = self._ctx.policy.select_target(
                 final_tracks,
                 final_tick,
@@ -405,23 +398,6 @@ class AttackLoop:
             )
         )
 
-    def _attackable_policy_tracks(self, tracks, now_tick: int):
-        """Exclude held coordinates without deleting the live Track.
-
-        A local tracking miss should not make an old coordinate actionable, but
-        it also must not let one stale Track monopolize round-robin selection.
-        Discovery/tracking still own liveness and recovery; this is only the
-        attack-input freshness gate.
-        """
-        return [
-            track
-            for track in tracks
-            if not (
-                type(getattr(track, "last_found_tick", None)) is int
-                and now_tick - track.last_found_tick > MAX_ATTACK_COORD_AGE_MS
-            )
-        ]
-
     def _character_pos(self) -> tuple[int, int]:
         """Screen position used for the melee-range idle guard."""
         pos = self._ctx.character_screen_pos()
@@ -499,17 +475,6 @@ class AttackLoop:
         if snap is None:
             return
 
-        # A held coordinate is not a fresh attack coordinate. Production
-        # snapshots expose last_found_tick; lightweight compatibility fixtures
-        # may not, so they retain their existing behavior.
-        last_found_tick = getattr(snap, "last_found_tick", None)
-        if type(last_found_tick) is int and now_tick - last_found_tick > MAX_ATTACK_COORD_AGE_MS:
-            ctx.logger.behavior(
-                f"[ATTACK] stale coordinate dropped id={target_id} "
-                f"age_ms={now_tick - last_found_tick}"
-            )
-            return
-
         click_x, click_y = snap.x, snap.y
         snap_epoch = expected_epoch
         if snap_epoch is None:
@@ -569,16 +534,6 @@ class AttackLoop:
                 click_now = monotonic_ms()
                 fresh = ctx.tracks.snapshot_for_track(target_id, click_now)
                 if fresh is None:
-                    return False
-                fresh_last_found = getattr(fresh, "last_found_tick", None)
-                if (
-                    type(fresh_last_found) is int
-                    and click_now - fresh_last_found > MAX_ATTACK_COORD_AGE_MS
-                ):
-                    ctx.logger.behavior(
-                        f"[ATTACK] stale coordinate dropped id={target_id} "
-                        f"age_ms={click_now - fresh_last_found} before click"
-                    )
                     return False
                 return self._input.skill_click_at(
                     attack_scan,
