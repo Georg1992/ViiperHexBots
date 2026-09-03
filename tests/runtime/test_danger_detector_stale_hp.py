@@ -129,3 +129,50 @@ class DangerDetectorTests(unittest.TestCase):
         # The landing hit remains the active danger fact; it is not erased by
         # the post-teleport baseline reset.
         self.assertEqual(self.danger._last_damage_ratio, 20 / 90)
+
+    def test_max_hp_drop_with_current_hp_drop_is_not_damage(self) -> None:
+        """Current HP still at max after a drop means max HP moved, not a hit."""
+        self.vitals.publish_hp(4900, 4900)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(4700, 4700)
+        self.danger._poll_hp()
+
+        self.assertEqual(self.danger.damage_sequence, 0)
+        self.assertFalse(self.danger.has_recent_damage(1.0))
+        self.assertEqual(self.danger.danger_level(), DangerLevel.SAFE)
+        self.assertFalse(self.danger_wake.is_set())
+
+    def test_current_hp_drop_with_unchanged_max_is_still_damage(self) -> None:
+        self.vitals.publish_hp(4900, 4900)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(4700, 4900)
+        self.danger._poll_hp()
+
+        self.assertEqual(self.danger.damage_sequence, 1)
+        self.assertTrue(self.danger.has_recent_damage(1.0))
+        self.assertEqual(self.danger.danger_level(), DangerLevel.DANGER)
+        self.assertTrue(self.danger_wake.is_set())
+
+    def test_max_hp_drop_while_not_full_is_not_damage(self) -> None:
+        """Current HP moving with a lower max is still a buff end, not a hit."""
+        self.vitals.publish_hp(4800, 4900)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(4600, 4700)
+        self.danger._poll_hp()
+
+        self.assertEqual(self.danger.damage_sequence, 0)
+        self.assertFalse(self.danger.has_recent_damage(1.0))
+        self.assertEqual(self.danger.danger_level(), DangerLevel.SAFE)
+        self.assertFalse(self.danger_wake.is_set())
+
+    def test_real_hit_after_max_hp_drop_is_still_damage(self) -> None:
+        self.vitals.publish_hp(4900, 4900)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(4700, 4700)
+        self.danger._poll_hp()
+        self.vitals.publish_hp(4500, 4700)
+        self.danger._poll_hp()
+
+        self.assertEqual(self.danger.damage_sequence, 1)
+        self.assertTrue(self.danger.has_recent_damage(1.0))
+        self.assertEqual(self.danger.danger_level(), DangerLevel.DANGER)

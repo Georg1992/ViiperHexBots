@@ -59,6 +59,7 @@ class DangerDetector:
         self._wake_event = wake_event
         self._vitals = PlayerVitals() if vitals is None else vitals
         self._prev_hp: int | None = None
+        self._prev_hp_max: int | None = None
         self._damage_lock = threading.Lock()
         self._last_damage_mono: float | None = None
         self._last_damage_ratio: float | None = None
@@ -107,28 +108,41 @@ class DangerDetector:
     def _poll_hp(self) -> None:
         """Publish only a new HP-damage fact."""
         with self._damage_lock:
-            hp, _hp_max = self._vitals.hp_pair()
+            hp, hp_max = self._vitals.hp_pair()
             if hp is None:
                 return
             if self._prev_hp is None:
                 self._prev_hp = hp
+                self._prev_hp_max = hp_max
                 return
-            if hp >= self._prev_hp:
-                self._prev_hp = hp
+            previous_hp = self._prev_hp
+            previous_max = self._prev_hp_max
+            max_hp_decreased = (
+                hp_max is not None
+                and previous_max is not None
+                and hp_max < previous_max
+            )
+            still_at_max = hp_max is not None and hp == hp_max
+            self._prev_hp = hp
+            if hp_max is not None:
+                self._prev_hp_max = hp_max
+            if hp < previous_hp and (still_at_max or max_hp_decreased):
+                # Current HP moved because max HP moved (buff/skill ended).
+                # Still sitting at the (new) max is not incoming damage.
+                return
+            if hp >= previous_hp:
                 # A known sample back above the critical threshold is explicit
                 # recovery evidence. Unknown samples never reach this branch,
                 # so they cannot accidentally clear an urgent latch.
-                if not self._is_critical_hp(hp, _hp_max):
+                if not self._is_critical_hp(hp, hp_max):
                     self._critical_damage_seen = False
                 return
-            previous_hp = self._prev_hp
             now = time.monotonic()
-            self._prev_hp = hp
             self._last_damage_mono = now
             self._last_damage_ratio = (
                 (previous_hp - hp) / previous_hp if previous_hp > 0 else None
             )
-            self._critical_damage_seen = self._is_critical_hp(hp, _hp_max)
+            self._critical_damage_seen = self._is_critical_hp(hp, hp_max)
             self._damage_sequence += 1
 
         # The observer publishes facts and wakes the gameplay owner only. It
@@ -204,7 +218,9 @@ class DangerDetector:
             # that the current HP belongs to the landing transaction, even if
             # the vitals observation clock was coarse or was published by a
             # lightweight adapter without the same timestamp precision.
-            self._prev_hp = _hp if (fresh or damage_after_start) else None
+            keep_baseline = fresh or damage_after_start
+            self._prev_hp = _hp if keep_baseline else None
+            self._prev_hp_max = _max_hp if keep_baseline else None
             # Preserve a genuine landing hit. It belongs to the new area and
             # must remain urgent even after the ordinary recent-damage window.
             if damage_after_start:

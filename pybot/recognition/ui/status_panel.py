@@ -431,7 +431,9 @@ def read_status_panel_fixed_rois(
 
     # Fast fixed-ROI poll: maxima are static, so parse current values while
     # reusing the confirmed maxima. HP remains part of the fast poll because
-    # its fresh value feeds critical-danger detection.
+    # its fresh value feeds critical-danger detection. Max HP is re-read only
+    # when current HP changes, so a buff ending can publish current-at-max
+    # instead of current against a stale ceiling.
     hp_current = _parse_anchored(
         frame_bgr,
         origin,
@@ -472,18 +474,36 @@ def read_status_panel_fixed_rois(
         return None
     if not isinstance(weight_current, int):
         return None
+    if hp_current != previous.hp:
+        hp = _parse_anchored(
+            frame_bgr,
+            origin,
+            HP_SCAN_ZONE,
+            min_width=2,
+            stop_at_slash=False,
+            deadline=deadline,
+            telemetry=(
+                (lambda detail: telemetry(f"hp {detail}"))
+                if telemetry is not None else None
+            ),
+        )
+        if not isinstance(hp, tuple):
+            return None
+        hp_current, hp_max = hp
+    else:
+        if previous.hp_max <= 0 or hp_current > previous.hp_max:
+            return None
+        hp_max = previous.hp_max
     if (
-        previous.hp_max <= 0
-        or previous.sp_max <= 0
+        previous.sp_max <= 0
         or previous.weight_max is None
         or weight_current > previous.weight_max
-        or hp_current > previous.hp_max
         or sp_current > previous.sp_max
     ):
         return None
     return StatusPanelValues(
         hp=hp_current,
-        hp_max=previous.hp_max,
+        hp_max=hp_max,
         sp=sp_current,
         sp_max=previous.sp_max,
         weight=weight_current,
