@@ -8,6 +8,11 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
+
+HpChangeCallback = Callable[
+    [int | None, int | None, int | None, int | None], None
+]
 
 
 class PlayerVitals:
@@ -15,6 +20,7 @@ class PlayerVitals:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._on_hp_change: HpChangeCallback | None = None
         self._hp: int | None = None
         self._hp_max: int | None = None
         self._sp: int | None = None
@@ -83,6 +89,30 @@ class PlayerVitals:
         with self._lock:
             return self._epoch_is_current(epoch)
 
+    def set_on_hp_change(self, callback: HpChangeCallback | None) -> None:
+        """Log/observe HP only when the stored pair actually changes."""
+        self._on_hp_change = callback
+
+    def _apply_hp_locked(
+        self, hp: int | None, hp_max: int | None, now: int
+    ) -> tuple[int | None, int | None, int | None, int | None] | None:
+        if hp == self._hp and hp_max == self._hp_max:
+            return None
+        old_hp, old_max = self._hp, self._hp_max
+        self._hp = hp
+        self._hp_max = hp_max
+        self._hp_changed_ms = now
+        return old_hp, old_max, hp, hp_max
+
+    def _emit_hp_change(
+        self,
+        change: tuple[int | None, int | None, int | None, int | None] | None,
+    ) -> None:
+        callback = self._on_hp_change
+        if change is None or callback is None:
+            return
+        callback(*change)
+
     # ── HP ────────────────────────────────────────────────────────
 
     def publish_snapshot_if_current(
@@ -102,10 +132,7 @@ class PlayerVitals:
             now = int(time.monotonic() * 1000)
             self._hp_observed_ms = now
             self._sp_observed_ms = now
-            if hp != self._hp or hp_max != self._hp_max:
-                self._hp = hp
-                self._hp_max = hp_max
-                self._hp_changed_ms = now
+            hp_change = self._apply_hp_locked(hp, hp_max, now)
             if sp != self._sp or sp_max != self._sp_max:
                 self._sp = sp
                 self._sp_max = sp_max
@@ -113,7 +140,8 @@ class PlayerVitals:
             if weight != self._weight or weight_max != self._weight_max:
                 self._weight = weight
                 self._weight_max = weight_max
-            return True
+        self._emit_hp_change(hp_change)
+        return True
 
     # ── HP ────────────────────────────────────────────────────────
 
@@ -121,10 +149,8 @@ class PlayerVitals:
         with self._lock:
             now = int(time.monotonic() * 1000)
             self._hp_observed_ms = now
-            if hp != self._hp or hp_max != self._hp_max:
-                self._hp = hp
-                self._hp_max = hp_max
-                self._hp_changed_ms = now
+            hp_change = self._apply_hp_locked(hp, hp_max, now)
+        self._emit_hp_change(hp_change)
 
     def publish_hp_if_current(
         self,
@@ -137,11 +163,9 @@ class PlayerVitals:
                 return False
             now = int(time.monotonic() * 1000)
             self._hp_observed_ms = now
-            if hp != self._hp or hp_max != self._hp_max:
-                self._hp = hp
-                self._hp_max = hp_max
-                self._hp_changed_ms = now
-            return True
+            hp_change = self._apply_hp_locked(hp, hp_max, now)
+        self._emit_hp_change(hp_change)
+        return True
 
     def hp_pair(self) -> tuple[int | None, int | None]:
         """Atomic ``(hp, hp_max)`` for danger checks."""

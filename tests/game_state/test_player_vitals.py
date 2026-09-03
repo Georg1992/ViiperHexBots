@@ -107,6 +107,22 @@ class PlayerVitalsTests(unittest.TestCase):
         self.assertEqual(obs2, obs1)
         self.assertEqual(chg2, chg1)
 
+    def test_hp_change_callback_fires_only_when_value_changes(self) -> None:
+        vitals = PlayerVitals()
+        changes: list[tuple[int | None, int | None, int | None, int | None]] = []
+        vitals.set_on_hp_change(
+            lambda old_hp, old_max, new_hp, new_max: changes.append(
+                (old_hp, old_max, new_hp, new_max)
+            )
+        )
+        vitals.publish_hp(100, 200)
+        vitals.publish_hp(100, 200)
+        vitals.publish_hp(90, 200)
+        self.assertEqual(
+            changes,
+            [(None, None, 100, 200), (100, 200, 90, 200)],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

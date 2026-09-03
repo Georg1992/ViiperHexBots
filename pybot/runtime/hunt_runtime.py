@@ -333,6 +333,12 @@ def _build_conditional_workers(
     return actions
 
 
+def _format_hp_pair(hp: int | None, hp_max: int | None) -> str:
+    hp_text = "n/a" if hp is None else str(hp)
+    max_text = "n/a" if hp_max is None else str(hp_max)
+    return f"{hp_text}/{max_text}"
+
+
 def create_runtime_deps(
     config,
     session_id: str | None = None,
@@ -355,6 +361,12 @@ def create_runtime_deps(
         configure_opencv_runtime()
         detector, tracker = _build_detectors(config)
         player_vitals = PlayerVitals() if vitals is None else vitals
+        player_vitals.set_on_hp_change(
+            lambda old_hp, old_max, new_hp, new_max: logger.behavior(
+                f"[HP] {_format_hp_pair(old_hp, old_max)} -> "
+                f"{_format_hp_pair(new_hp, new_max)}"
+            )
+        )
         ctx = _build_context(
             config, logger, detector, tracker, overlay, player_vitals,
         )
