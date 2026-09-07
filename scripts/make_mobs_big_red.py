@@ -33,6 +33,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 from pybot.recognition.act_reader import ActFile, ActFrameRef, ActReader
@@ -41,6 +42,9 @@ from pybot.recognition.spr_reader import SprFile, SprReader
 
 SCALE_FACTOR = 1.5
 RED = (255, 0, 0)
+# Close interior transparency after scale so patchy sprites (swirl bands)
+# form one body. Diameter follows SCALE_FACTOR; 1.5x → 7px ellipse.
+HOLE_CLOSE_KSIZE = max(3, int(SCALE_FACTOR * 5) | 1)
 # Ragnarok monster sprites use a fixed action layout: 0-7 stand, 8-15 walk,
 # 16-23 attack, 24-31 hit, 32-39 die (death). Some mobs add living special
 # actions after 39 (e.g. idle poses 40-47), so the death range is fixed here
@@ -195,6 +199,25 @@ def _canonical_frame(act_file: ActFile) -> ActFrameRef:
             if frame.layers:
                 return frame
     raise RuntimeError("ACT has no renderable living frame")
+
+
+def close_internal_holes(bgra: np.ndarray) -> np.ndarray:
+    """Fill interior transparency without growing the outer silhouette."""
+    alpha = (bgra[:, :, 3] >= 128).astype(np.uint8)
+    if not np.any(alpha):
+        return bgra
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (HOLE_CLOSE_KSIZE, HOLE_CLOSE_KSIZE),
+    )
+    closed = cv2.morphologyEx(alpha, cv2.MORPH_CLOSE, kernel)
+    new_pixels = (closed > 0) & (alpha == 0)
+    if not np.any(new_pixels):
+        return bgra
+    fill = np.median(bgra[:, :, :3][alpha > 0], axis=0).astype(np.uint8)
+    out = bgra.copy()
+    out[new_pixels, :3] = fill
+    out[:, :, 3] = np.where(closed > 0, 255, 0).astype(np.uint8)
+    return out
 
 
 def _canonical_origin(frame: ActFrameRef) -> tuple[int, int]:
@@ -405,7 +428,9 @@ def generate_static_pair(
     spr_file = SprReader(spr_path).load()
     act_file = ActReader(act_path).load()
     canonical = _canonical_frame(act_file)
-    composite = render_act_frame(spr_file, _static_source_frame(canonical))
+    composite = close_internal_holes(
+        render_act_frame(spr_file, _static_source_frame(canonical)),
+    )
 
     out_spr.parent.mkdir(parents=True, exist_ok=True)
     out_spr.write_bytes(_encode_static_spr(spr_file, composite))

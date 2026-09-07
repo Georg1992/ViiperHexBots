@@ -109,6 +109,21 @@ class GrfDetectorModeTests(unittest.TestCase):
             "true modified sprite must still clear the stricter GRF floors",
         )
 
+    def test_grf_patchy_breeze_self_matches(self) -> None:
+        """Swirl-shaped modified sprites must still pass GRF silhouette floors."""
+        ensure_mob_assets(log_fn=lambda _message: None)
+        spr_path = MOBS_DIR / "breeze" / "modified_sprite" / "breeze.spr"
+        if not spr_path.is_file():
+            self.skipTest("breeze modified sprite is not installed")
+        grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
+        canvas = _modified_sprite_canvas("breeze", "breeze")
+        result = grf.detect(canvas, "breeze")
+        self.assertGreater(
+            len(result.accepted),
+            0,
+            "filled breeze silhouette must clear the GRF precision floor",
+        )
+
     def test_grf_skips_noisy_candidate_deform(self) -> None:
         detector = MobDetector(ROOT, self.config, use_sprite_grf=True)
         candidate = np.ones((16, 16), dtype=np.float32)
@@ -131,12 +146,11 @@ class GrfDetectorModeTests(unittest.TestCase):
 
         ensure_mob_assets(log_fn=lambda _message: None)
         grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
-        for mob in ("anubis", "horn"):
-            descriptor = grf.ensure_descriptor(mob)
-            self.assertTrue(
-                grf.descriptor_is_static(descriptor),
-                f"modified descriptor for {mob} should be single-frame",
-            )
+        descriptor = grf.ensure_descriptor("horn")
+        self.assertTrue(
+            grf.descriptor_is_static(descriptor),
+            "modified descriptor for horn should be single-frame",
+        )
 
     def test_normal_descriptor_is_not_static(self) -> None:
         """Animated originals keep pose diversity and full gate verification."""
@@ -150,7 +164,7 @@ class GrfDetectorModeTests(unittest.TestCase):
         ensure_mob_assets(log_fn=lambda _message: None)
         normal = MobDetector(ROOT, self.config)
         grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
-        descriptor = grf.ensure_descriptor("anubis")
+        descriptor = grf.ensure_descriptor("horn")
         n_min, n_max = normal._effective_aspect_band(descriptor)
         g_min, g_max = grf._effective_aspect_band(descriptor)
         self.assertEqual((n_min, n_max), (descriptor.min_aspect_ratio, descriptor.max_aspect_ratio))

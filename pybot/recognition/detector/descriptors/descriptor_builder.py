@@ -28,10 +28,9 @@ from pybot.recognition.detector.descriptors.palette_groups import (
 )
 
 
-# Version 51 normalizes aspect bands to the descriptor mean aspect. Runtime
-# geometry compares normalized blob aspects, so every generated descriptor must
-# use the same coordinate system.
-DESCRIPTOR_VERSION = 51
+# Version 52 rebuilds modified sprites with interior holes closed so patchy
+# single-body mobs (Breeze) clear the GRF silhouette precision floor.
+DESCRIPTOR_VERSION = 52
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in

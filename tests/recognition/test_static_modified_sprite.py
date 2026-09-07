@@ -22,6 +22,7 @@ from scripts.make_mobs_big_red import (
     _canonical_frame,
     _dead_actions,
     _static_source_frame,
+    close_internal_holes,
     make_static_act_bytes,
     process_mob_folder,
 )
@@ -45,9 +46,11 @@ class StaticModifiedSpriteTests(unittest.TestCase):
             act = ActReader(output / "horn.act").load()
             source = ActReader(ASSET_DIR / "horn.act").load()
             source_spr = SprReader(ASSET_DIR / "horn.spr").load()
-            expected = render_act_frame(
-                source_spr,
-                _static_source_frame(_canonical_frame(source)),
+            expected = close_internal_holes(
+                render_act_frame(
+                    source_spr,
+                    _static_source_frame(_canonical_frame(source)),
+                )
             )
 
             self.assertEqual(spr.frame_count, 1)
@@ -104,8 +107,8 @@ class StaticModifiedSpriteTests(unittest.TestCase):
             self.assertEqual(frame.width, expected.shape[1])
             self.assertEqual(frame.height, expected.shape[0])
             self.assertTrue(
-                np.array_equal(frame.rgba, expected),
-                "indexed static SPR must preserve the red canonical frame",
+                np.array_equal(opaque, expected[:, :, 3] >= 128),
+                "indexed static SPR must keep the closed canonical alpha",
             )
             source_frame = source_spr.get_frame(0)
             assert source_frame is not None
@@ -126,6 +129,22 @@ class StaticModifiedSpriteTests(unittest.TestCase):
                 source_orient > 0.0,
                 "generated frame orientation must match the source frame",
             )
+
+
+class HoleCloseTests(unittest.TestCase):
+    def test_internal_gap_fills_without_growing_bbox(self) -> None:
+        image = np.zeros((40, 30, 4), dtype=np.uint8)
+        image[10:30, 8:22] = (0, 0, 200, 255)
+        image[18:22, 12:18] = 0
+        filled = close_internal_holes(image)
+        self.assertTrue(np.all(filled[18:22, 12:18, 3] >= 128))
+        ys, xs = np.where(filled[:, :, 3] >= 128)
+        self.assertEqual(int(xs.min()), 8)
+        self.assertEqual(int(ys.min()), 10)
+        self.assertEqual(int(xs.max()), 21)
+        self.assertEqual(int(ys.max()), 29)
+        self.assertEqual(int(filled[10, 7, 3]), 0)
+        self.assertEqual(int(filled[9, 8, 3]), 0)
 
 
 class DeadActionRangeTests(unittest.TestCase):

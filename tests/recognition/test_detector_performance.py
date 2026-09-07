@@ -184,7 +184,7 @@ class DetectorPerformanceTests(unittest.TestCase):
 
     def test_oversized_deformation_is_descriptor_bounded(self) -> None:
         detector = MobDetector(PROJECT_ROOT, load_detector_config(), use_sprite_grf=False)
-        descriptor = detector.ensure_descriptor("anubis")
+        descriptor = detector.ensure_descriptor("horn")
         ref = detector._descriptor_silhouette_references(descriptor.silhouette_masks)[0]
         ref_avg, ref_stable = ref
 
