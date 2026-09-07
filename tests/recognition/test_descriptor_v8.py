@@ -9,7 +9,10 @@ import numpy as np
 
 from pybot.paths import PROJECT_ROOT
 from pybot.recognition.act_reader import ActReader
-from pybot.recognition.detector.descriptors.descriptor import SizeDescriptor
+from pybot.recognition.detector.descriptors.descriptor import (
+    SilhouetteMask,
+    SizeDescriptor,
+)
 from pybot.recognition.detector.descriptors.descriptor_builder import (
     DESCRIPTOR_VERSION,
     DescriptorBuilder,
@@ -92,6 +95,37 @@ class DescriptorV8Tests(unittest.TestCase):
         frame_avgs = {tuple(mask.avg_mask) for mask in frame_masks}
         for gate_mask in descriptor.silhouette_masks:
             self.assertIn(tuple(gate_mask.avg_mask), frame_avgs)
+
+
+def _mask_from_hard(hard: np.ndarray) -> SilhouetteMask:
+    avg = hard.astype(np.float32).reshape(-1).tolist()
+    return SilhouetteMask(
+        width=int(hard.shape[1]),
+        height=int(hard.shape[0]),
+        avg_mask=avg,
+        stable_mask=[value >= 0.2 for value in avg],
+    )
+
+
+class GateSilhouetteCoherenceTests(unittest.TestCase):
+    def test_swirl_with_one_cell_gaps_is_one_body(self) -> None:
+        hard = np.zeros((16, 16), dtype=np.uint8)
+        hard[2:5, 2:14] = 1
+        hard[6:9, 2:14] = 1
+        hard[10:13, 4:12] = 1
+        self.assertTrue(DescriptorBuilder._is_coherent_gate_silhouette(_mask_from_hard(hard)))
+
+    def test_distant_bodies_stay_incoherent(self) -> None:
+        hard = np.zeros((16, 16), dtype=np.uint8)
+        hard[1:5, 1:5] = 1
+        hard[11:15, 11:15] = 1
+        self.assertFalse(DescriptorBuilder._is_coherent_gate_silhouette(_mask_from_hard(hard)))
+
+    def test_stacked_bodies_with_wide_gap_stay_incoherent(self) -> None:
+        hard = np.zeros((16, 16), dtype=np.uint8)
+        hard[0:6, 5:11] = 1
+        hard[10:16, 5:11] = 1
+        self.assertFalse(DescriptorBuilder._is_coherent_gate_silhouette(_mask_from_hard(hard)))
 
 
 if __name__ == "__main__":

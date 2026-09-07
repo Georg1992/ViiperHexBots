@@ -47,6 +47,10 @@ GATE_SILHOUETTE_REF_COUNTS = (
     MIN_GATE_SILHOUETTE_MASKS + MIN_GATE_SILHOUETTE_MASKS // 2,
     STAND_WALK_ACTION_COUNT,
 )
+# Close 1-cell gaps in the 16x16 hard mask before counting bodies. Wispy
+# single-entity sprites (swirl bands) must not be treated as multi-body.
+# A 3x3 close does not merge bodies separated by 2+ empty cells.
+GATE_SILHOUETTE_CLOSE_KERNEL = 3
 
 MATCH_PALETTE_MAX_COLORS = 32
 MATCH_PALETTE_MAX_ACCENT_COLORS = 8
@@ -1181,11 +1185,20 @@ class DescriptorBuilder:
 
     @staticmethod
     def _is_coherent_gate_silhouette(mask: SilhouetteMask) -> bool:
-        """Reject silhouettes with a second hard body (1–2px speckles allowed)."""
+        """Reject silhouettes with a second hard body (1–2px speckles allowed).
+
+        Internal holes in one sprite are closed before the component count so
+        a swirl-shaped mob is still one body. The stored occupancy is unchanged.
+        """
         avg = np.asarray(mask.avg_mask, dtype=np.float32).reshape(
             mask.height, mask.width,
         )
         hard = (avg >= HARD_OCCUPANCY).astype(np.uint8)
+        kernel = np.ones(
+            (GATE_SILHOUETTE_CLOSE_KERNEL, GATE_SILHOUETTE_CLOSE_KERNEL),
+            dtype=np.uint8,
+        )
+        hard = cv2.morphologyEx(hard, cv2.MORPH_CLOSE, kernel)
         label_count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
             hard, connectivity=8,
         )
