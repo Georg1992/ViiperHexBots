@@ -108,6 +108,7 @@ class CoordTrackingWorker:
                 prediction_valid=track.lost_count < _LOCAL_TRACK_LOST_MISSES,
                 lost_count=track.lost_count,
                 anchor_required=True,
+                mob_name=track.mob_name,
             )
             for track in alive_tracks
             if track.discovery_scale > 0

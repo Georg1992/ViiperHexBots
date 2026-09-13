@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from pybot.paths import PROJECT_ROOT
+from pybot.mobs.catalog import hunt_mob_names
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
 from pybot.recognition.detector.tracking.local_tracker import (
     LocalTrackResult,
@@ -35,6 +36,7 @@ class RawDetection:
     candidate_scale: float
     living: bool
     bbox: tuple[int, int, int, int] = (0, 0, 0, 0)
+    mob_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -75,6 +77,8 @@ class StateTrackSnapshot:
     # Number of consecutive local misses at snapshot time. The local follower
     # uses this to extend a bounded motion prediction during recovery.
     lost_count: int = 0
+    # Sprite stem to follow. Empty snapshots use the session's hunt stem.
+    mob_name: str = ""
 
 
 
@@ -113,13 +117,17 @@ class DetectorSession:
         root = PROJECT_ROOT if project_root is None else project_root
         config = load_detector_config() if detector_config is None else config_or_copy(detector_config)
         self._mob_name = mob_name.lower()
+        self._hunt_names = hunt_mob_names(self._mob_name)
         self._detector = MobDetector(root, config, use_sprite_grf=use_sprite_grf)
         self._lock = threading.RLock()
         self._tracking_lock = threading.Lock()
         self._closed = False
 
     def ensure_descriptor(self):
-        return self._detector.ensure_descriptor(self._mob_name)
+        descriptor = None
+        for name in self._hunt_names:
+            descriptor = self._detector.ensure_descriptor(name)
+        return descriptor
 
     def detector_config(self) -> dict:
         return self._detector.config
@@ -140,47 +148,48 @@ class DetectorSession:
         start = time.perf_counter()
         with self._lock:
             locked_at = time.perf_counter()
-            result = self._detector.detect(frame, self._mob_name)
+            accepted: list[RawDetection] = []
+            heatmaps: list[np.ndarray] = []
+            raw_count = 0
+            timing: dict[str, float] = {}
+            for name in self._hunt_names:
+                result = self._detector.detect(frame, name)
+                raw_count += len(result.candidates)
+                heatmaps.append(result.sprite_heatmap)
+                timing.update(result.timing)
+                accepted.extend(
+                    RawDetection(
+                        x=c.center_x + roi.x,
+                        y=c.center_y + roi.y,
+                        confidence=c.final_score,
+                        candidate_scale=c.candidate_scale,
+                        living=c.accepted,
+                        bbox=(
+                            c.bbox[0] + roi.x,
+                            c.bbox[1] + roi.y,
+                            c.bbox[2],
+                            c.bbox[3],
+                        ),
+                        mob_name=name,
+                    )
+                    for c in result.accepted
+                )
         elapsed = time.perf_counter() - start
+        if len(self._hunt_names) > 1:
+            radius = int(self._detector.config["discoveryClusterRadiusPx"])
+            accepted = _merge_similar_sprite_detections(accepted, radius)
         heat_supported_track_ids = frozenset(
             int(entry[0])
             for entry in (heat_track_positions or [])
             if len(entry) >= 4
-            and (
-                self._heat_supports_position(
-                    result.sprite_heatmap,
-                    int(entry[1]) - roi.x,
-                    int(entry[2]) - roi.y,
-                    float(entry[3]),
-                )
-                or (
-                    len(entry) >= 6
-                    and self._heat_supports_position(
-                        result.sprite_heatmap,
-                        int(entry[4]) - roi.x,
-                        int(entry[5]) - roi.y,
-                        float(entry[3]),
-                    )
-                )
-            )
+            and self._heat_supports_entry(heatmaps, entry, roi)
         )
-        accepted = [
-            RawDetection(
-                x=c.center_x + roi.x,
-                y=c.center_y + roi.y,
-                confidence=c.final_score,
-                candidate_scale=c.candidate_scale,
-                living=c.accepted,
-                bbox=(c.bbox[0] + roi.x, c.bbox[1] + roi.y, c.bbox[2], c.bbox[3]),
-            )
-            for c in result.accepted
-        ]
         duration_ms = int(elapsed * 1000)
         lock_wait_ms = int((locked_at - start) * 1000)
         return DiscoveryScanResult(
             ok=True,
             fail_reason="",
-            raw_count=len(result.candidates),
+            raw_count=raw_count,
             accepted_count=len(accepted),
             detections=accepted,
             duration_ms=duration_ms,
@@ -188,7 +197,28 @@ class DetectorSession:
             heat_supported_track_ids=heat_supported_track_ids,
             lock_wait_ms=lock_wait_ms,
             detect_ms=max(0, duration_ms - lock_wait_ms),
-            timing=dict(result.timing),
+            timing=timing,
+        )
+
+    def _heat_supports_entry(
+        self,
+        heatmaps: list[np.ndarray],
+        entry: tuple[int, ...],
+        roi: HuntRoi,
+    ) -> bool:
+        """True when any hunt-member heatmap still supports this Track.
+
+        Isilla and Vanberk share a palette, so either heatmap may confirm
+        a blob that the other silhouette originally acquired.
+        """
+        scale = float(entry[3])
+        positions = [(int(entry[1]) - roi.x, int(entry[2]) - roi.y)]
+        if len(entry) >= 6:
+            positions.append((int(entry[4]) - roi.x, int(entry[5]) - roi.y))
+        return any(
+            self._heat_supports_position(heatmap, px, py, scale)
+            for heatmap in heatmaps
+            for px, py in positions
         )
 
     def _heat_supports_position(
@@ -268,7 +298,7 @@ class DetectorSession:
         try:
             result = self._detector.track_local(
                 frame,
-                self._mob_name,
+                self._follow_mob_name(snapshot),
                 track,
                 offset_x=roi.x,
                 offset_y=roi.y,
@@ -284,6 +314,16 @@ class DetectorSession:
                 miss_reason="tracking_exception",
             )
         return result, (time.perf_counter() - started) * 1000.0
+
+    def _follow_mob_name(self, snapshot: StateTrackSnapshot) -> str:
+        name = snapshot.mob_name.strip().lower()
+        if name:
+            return name
+        if len(self._hunt_names) != 1:
+            raise ValueError(
+                "Isilla + Vanberk tracks require mob_name on the snapshot"
+            )
+        return self._hunt_names[0]
 
     def track_locals_frame(
         self,
@@ -305,7 +345,7 @@ class DetectorSession:
             if self._closed:
                 return LocalTrackBatchResult(False, "session_closed", [], 0, 0, 0)
             with self._lock:
-                self._detector.ensure_descriptor(self._mob_name)
+                self.ensure_descriptor()
             positions = [(s.x - roi.x, s.y - roi.y) for s in track_snapshots]
             results: list[LocalTrackResult] = []
             durations: dict[int, float] = {}
@@ -330,6 +370,25 @@ class DetectorSession:
             thread_cpu_ms=thread_cpu_ms,
             track_durations_ms=durations,
         )
+
+
+def _merge_similar_sprite_detections(
+    detections: list[RawDetection],
+    radius_px: int,
+) -> list[RawDetection]:
+    """Keep the stronger hit when both similar sprites fire on one blob."""
+    if len(detections) <= 1:
+        return detections
+    radius_sq = radius_px * radius_px
+    kept: list[RawDetection] = []
+    for detection in sorted(detections, key=lambda item: item.confidence, reverse=True):
+        if any(
+            (detection.x - other.x) ** 2 + (detection.y - other.y) ** 2 <= radius_sq
+            for other in kept
+        ):
+            continue
+        kept.append(detection)
+    return kept
 
 
 def config_or_copy(config: dict) -> dict:

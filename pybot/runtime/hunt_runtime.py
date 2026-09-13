@@ -260,7 +260,7 @@ def _build_core_workers(
     )
     # HP observation remains independent, but it publishes only the urgent
     # signal. GameplayLoop is the sole owner that turns that signal into a
-    # teleport/input action.
+    # teleport/input action. HP *item* consumption runs on its own worker.
     workers = [
         ("danger", danger.run),
         ("coord", tracking.run),
@@ -277,7 +277,11 @@ def _build_conditional_workers(
     danger: DangerDetector | None = None,
     hunt_mode: HuntModeController | None = None,
 ) -> dict[str, object]:
-    """Build gameplay actions; they are advanced by ``GameplayLoop``."""
+    """Build optional workers and GameplayLoop actions.
+
+    Sit, storage, buffs, and timers are advanced by ``GameplayLoop``.
+    HP item restore is returned so the runtime can run it on its own thread.
+    """
     actions: dict[str, object] = {}
 
     if any(t.scan_code and t.button.strip() and t.interval_ms > 0 for t in ctx.config.skill_timers):
@@ -440,19 +444,25 @@ def create_runtime_deps(
             attack=attack,
             sit=actions.get("sit"),
             storage=actions.get("storage"),
-            hp_restore=actions.get("hp_restore"),
             buffs=actions.get("buffs"),
             timers=actions.get("timers"),
             teleport=tport,
             input_backend=input_backend,
         )
+        workers = list(core_workers)
+        hp_restore = actions.get("hp_restore")
+        if hp_restore is not None:
+            # Item heals are independent of hunting: a dedicated thread taps
+            # the HP key whenever HP is below 50%.
+            workers.append(("hp_restore", hp_restore.run))
+        workers.append(("gameplay", gameplay.run))
         return RuntimeDependencies(
             ctx=ctx,
             input_backend=input_backend,
             hunt_mode=hunt_mode,
             logger=logger,
             teleport_controller=tport,
-            workers=core_workers + [("gameplay", gameplay.run)],
+            workers=workers,
         )
     except BaseException:
         # The logger owns a live QueueListener as soon as it is constructed.

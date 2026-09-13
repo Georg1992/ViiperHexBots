@@ -180,13 +180,26 @@ class MobCatalogTests(unittest.TestCase):
         catalog = load_mob_catalog()
         names = [entry.descriptor_name.lower() for entry in catalog]
         self.assertEqual(names[: len(BUILTIN_MOB_ORDER)], list(BUILTIN_MOB_ORDER))
-        self.assertTrue(all(is_builtin_mob(name) for name in names[:4]))
+        self.assertTrue(all(is_builtin_mob(name) for name in names[: len(BUILTIN_MOB_ORDER)]))
+        self.assertTrue(is_builtin_mob("isilla"))
+        self.assertTrue(is_builtin_mob("vanberk"))
+        self.assertTrue(is_builtin_mob("isilla+vanberk"))
 
     def test_resolve_mob_name_uses_catalog(self) -> None:
         parser = configparser.ConfigParser()
         parser["MonsterSettings"] = {"SelectedMonster": "1"}
         name = resolve_mob_name(parser, None)
         self.assertTrue(name)
+
+    def test_live_catalog_ships_isilla_and_vanberk_as_one_builtin(self) -> None:
+        catalog = load_mob_catalog()
+        names = [entry.descriptor_name.lower() for entry in catalog]
+        self.assertIn("isilla+vanberk", names)
+        self.assertNotIn("isilla", names)
+        self.assertNotIn("vanberk", names)
+        entry = next(item for item in catalog if item.descriptor_name == "isilla+vanberk")
+        self.assertTrue(entry.is_builtin)
+        self.assertEqual(entry.display_name, "Isilla + Vanberk")
 
 
 if __name__ == "__main__":

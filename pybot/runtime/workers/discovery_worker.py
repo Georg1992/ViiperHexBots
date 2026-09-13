@@ -276,6 +276,7 @@ class DiscoveryWorker:
                 candidate_scale=item.candidate_scale,
                 living=True,
                 bbox=item.bbox,
+                mob_name=item.mob_name,
             )
             for item in filtered
         ]

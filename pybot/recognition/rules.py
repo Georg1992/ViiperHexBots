@@ -60,6 +60,8 @@ class DiscoveryDetection:
     living: bool = True
     # Heat-CC bbox in the same coordinate space as x/y (screen for runtime).
     bbox: tuple[int, int, int, int] = (0, 0, 0, 0)
+    # Sprite stem that accepted this blob. Empty on older single-mob callers.
+    mob_name: str = ""
 
 
 @dataclass
@@ -203,6 +205,7 @@ def cluster_living_detections(
                     candidate_scale=detection.candidate_scale,
                     living=True,
                     bbox=detection.bbox,
+                    mob_name=detection.mob_name,
                 )
             )
     return clusters

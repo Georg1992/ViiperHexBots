@@ -12,13 +12,34 @@ from pybot.recognition.detector.descriptors.descriptor_builder import DESCRIPTOR
 
 
 # These assets ship with the bot and cannot be removed through the UI.
-BUILTIN_MOB_ORDER = ("wild_rose", "desert_wolf", "horn", "noxious")
-BUILTIN_MOB_NAMES = frozenset(BUILTIN_MOB_ORDER)
+# Isilla and Vanberk share maps and nearly the same sprite, so they ship as
+# one hunt option. The member stems stay protected so neither can be deleted.
+ISILLA_VANBERK_MEMBERS = ("isilla", "vanberk")
+ISILLA_VANBERK_OPTION = "isilla+vanberk"
+ISILLA_VANBERK_DISPLAY = "Isilla + Vanberk"
+BUILTIN_MOB_ORDER = (
+    "wild_rose",
+    "desert_wolf",
+    "horn",
+    "noxious",
+    ISILLA_VANBERK_OPTION,
+)
+BUILTIN_MOB_NAMES = frozenset((*BUILTIN_MOB_ORDER, *ISILLA_VANBERK_MEMBERS))
 
 
 def is_builtin_mob(name: str) -> bool:
     """Return whether *name* identifies a protected bundled mob."""
     return name.strip().lower() in BUILTIN_MOB_NAMES
+
+
+def hunt_mob_names(option_name: str) -> tuple[str, ...]:
+    """Return the sprite descriptor stems hunted by a catalog option."""
+    key = option_name.strip().lower()
+    if not key:
+        raise ValueError("mob name cannot be empty")
+    if key == ISILLA_VANBERK_OPTION:
+        return ISILLA_VANBERK_MEMBERS
+    return (key,)
 
 
 @dataclass(frozen=True)
@@ -31,6 +52,30 @@ class MobEntry:
     def is_builtin(self) -> bool:
         """True when this entry is one of the mobs shipped with the bot."""
         return is_builtin_mob(self.descriptor_name)
+
+
+def collapse_isilla_vanberk(entries: list[MobEntry]) -> list[MobEntry]:
+    """Replace separate Isilla and Vanberk radios with one combined option."""
+    present = {entry.descriptor_name.lower() for entry in entries}
+    if not set(ISILLA_VANBERK_MEMBERS).issubset(present):
+        return entries
+    collapsed: list[MobEntry] = []
+    emitted = False
+    for entry in entries:
+        if entry.descriptor_name.lower() not in ISILLA_VANBERK_MEMBERS:
+            collapsed.append(entry)
+            continue
+        if emitted:
+            continue
+        collapsed.append(
+            MobEntry(
+                asset_name=ISILLA_VANBERK_OPTION,
+                display_name=ISILLA_VANBERK_DISPLAY,
+                descriptor_name=ISILLA_VANBERK_OPTION,
+            )
+        )
+        emitted = True
+    return collapsed
 
 
 def mob_display_name(asset_name: str) -> str:
@@ -60,12 +105,19 @@ def _scan_asset_pairs() -> list[tuple[str, str]]:
     pairs.sort(
         key=lambda pair: (
             0,
-            builtin_rank[pair[1].lower()],
+            builtin_rank[_builtin_rank_key(pair[1])],
         )
-        if pair[1].lower() in builtin_rank
+        if _builtin_rank_key(pair[1]) in builtin_rank
         else (1, pair[0].casefold(), pair[1].casefold())
     )
     return pairs
+
+
+def _builtin_rank_key(spr_stem: str) -> str:
+    key = spr_stem.lower()
+    if key in ISILLA_VANBERK_MEMBERS:
+        return ISILLA_VANBERK_OPTION
+    return key
 
 
 def descriptor_path(spr_stem: str) -> Path:
@@ -244,7 +296,7 @@ def load_mob_catalog(*, ensure_assets: bool = False) -> list[MobEntry]:
                 descriptor_name=spr_stem,
             )
         )
-    return entries
+    return collapse_isilla_vanberk(entries)
 
 
 def mob_folder_by_index(catalog: list[MobEntry], index: int) -> str:

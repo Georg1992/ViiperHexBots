@@ -17,13 +17,12 @@ class GameplayLoop:
     """Single owner for gameplay decisions and character input."""
 
     def __init__(self, ctx, *, attack, sit=None, storage=None,
-                 hp_restore=None, buffs=None, timers=None, teleport=None,
+                 buffs=None, timers=None, teleport=None,
                  input_backend=None) -> None:
         self._ctx = ctx
         self._attack = attack
         self._sit = sit
         self._storage = storage
-        self._hp_restore = hp_restore
         self._buffs = buffs
         self._timers = timers
         self._teleport = teleport
@@ -35,19 +34,6 @@ class GameplayLoop:
 
     def _register_deferred_actions(self) -> None:
         """Register periodic actions without creating more control threads."""
-        if self._hp_restore is not None:
-            self._scheduler.register(
-                "hp_restore",
-                interval_ms=1000,
-                priority=20,
-                # Let process_pending observe and report a blocked admission;
-                # suppressing it in ready() would hide the blocked state from
-                # the deterministic gameplay owner.
-                ready=lambda: bool(self._hp_restore.needs_restore()),
-                due_when=self._hp_restore.needs_restore,
-                execute=self._hp_restore.process_pending,
-                due_on_generation=False,
-            )
         if self._buffs is not None:
             for buff in self._ctx.config.custom_behavior.buffs:
                 if buff.scan_code > 0 and buff.button.strip() and buff.delay_ms > 0:
@@ -177,33 +163,8 @@ class GameplayLoop:
                 self._prepare_deferred_actions(now_ms)
                 self._seed_startup_successes()
 
-                if self._hp_restore is not None and self._hp_restore.needs_restore():
-                    self._scheduler.mark_pending("hp_restore")
-                # The scheduler observes monotonic deadlines and drains all
-                # safe actions in priority order. Failed actions remain pending;
-                # only successful callbacks restart their own deadline.
-                hp_action = None
-                hp_before = None
-                if self._hp_restore is not None:
-                    hp_action = self._scheduler.get("hp_restore")
-                    hp_before = hp_action.last_executed_ms
                 self._scheduler.run_pending(now_ms=monotonic_ms())
-                # A successful HP-item press gets this gameplay tick to itself;
-                # do not immediately send an offensive key on the same stale
-                # low-HP snapshot. The next tick rechecks the vitals.
-                if (
-                    hp_action is not None
-                    and hp_action.last_executed_ms is not None
-                    and hp_action.last_executed_ms != hp_before
-                ):
-                    continue
-                # Item healing is maintenance, not a combat gate. Critical
-                # danger remains a real gate and is handled independently.
-                # AttackLoop owns only the skill-heal recovery state above.
-                if self._scheduler.requires_retry(
-                    max_priority=40,
-                    ignore_keys={"hp_restore"},
-                ):
+                if self._scheduler.requires_retry(max_priority=40):
                     # A due buff/timer may be intentionally unsafe during a
                     # teleport settle. Keep its deadline pending and give the
                     # independent UI/danger workers time to run; do not spin

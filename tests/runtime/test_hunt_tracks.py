@@ -1428,6 +1428,27 @@ class HuntTracksRulesTests(unittest.TestCase):
         assert track is not None
         self.assertFalse(track.discovery_stationary)
 
+    def test_discovery_keeps_isilla_vanberk_sprite_name(self) -> None:
+        summary = self.tracks.process_discovery_scan(
+            [
+                DiscoveryDetection(
+                    x=400,
+                    y=400,
+                    confidence=0.8,
+                    candidate_scale=0.9,
+                    living=True,
+                    bbox=(380, 380, 40, 40),
+                    mob_name="vanberk",
+                )
+            ],
+            mob_name="isilla+vanberk",
+            now_tick=self.now,
+        )
+        self.assertEqual(summary.added_count, 1)
+        track = self.tracks.get_track_by_id(summary.created_ids[0])
+        assert track is not None
+        self.assertEqual(track.mob_name, "vanberk")
+
 
 if __name__ == "__main__":
     unittest.main()

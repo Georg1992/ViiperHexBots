@@ -6,8 +6,9 @@ import unittest
 from unittest.mock import MagicMock
 
 from pybot.runtime.danger_detector import DangerDetector
-from pybot.runtime.hunt_runtime import _build_core_workers
+from pybot.runtime.hunt_runtime import _build_conditional_workers, _build_core_workers
 from pybot.runtime.workers.attack_loop import AttackLoop
+from pybot.runtime.workers.hp_restore_worker import HpRestoreWorker
 
 
 class RuntimeCompositionTests(unittest.TestCase):
@@ -38,7 +39,23 @@ class RuntimeCompositionTests(unittest.TestCase):
         self.assertNotIn("storage", [name for name, _fn in workers])
         self.assertNotIn("timers", [name for name, _fn in workers])
         self.assertNotIn("buffs", [name for name, _fn in workers])
+        # HP item use is an independent worker thread, not a core observer
+        # and not a GameplayLoop action.
         self.assertNotIn("hp_restore", [name for name, _fn in workers])
+
+    def test_hp_restore_is_a_standalone_worker_when_hp_key_is_set(self) -> None:
+        ctx = MagicMock()
+        ctx.config.hp_scan_code = 59
+        ctx.config.hp_button = "f1"
+        ctx.config.skill_timers = ()
+        ctx.config.custom_behavior.buffs = ()
+        ctx.config.sit_on_low_sp = False
+        ctx.config.open_storage_steps = ()
+
+        actions = _build_conditional_workers(
+            ctx, MagicMock(), MagicMock(), MagicMock()
+        )
+        self.assertIsInstance(actions["hp_restore"], HpRestoreWorker)
 
 
 if __name__ == "__main__":

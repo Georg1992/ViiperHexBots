@@ -152,9 +152,14 @@ class DeferredActionSchedulerTests(unittest.TestCase):
         self.assertFalse(scheduler.get("hp").pending)
 
         condition["low"] = True
-        scheduler.mark_pending("hp")
         scheduler.run_pending(now_ms=1_000)
         self.assertEqual(calls, ["heal"])
+        first_at = scheduler.get("hp").last_executed_ms
+        self.assertIsNotNone(first_at)
+
+        scheduler.run_pending(now_ms=1_050)
+        self.assertEqual(calls, ["heal"])
+        self.assertEqual(scheduler.get("hp").last_executed_ms, first_at)
 
     def test_ignored_unsafe_action_does_not_require_retry(self) -> None:
         """Optional maintenance may remain pending without freezing gameplay."""

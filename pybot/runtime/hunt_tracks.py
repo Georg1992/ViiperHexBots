@@ -502,7 +502,7 @@ class HuntTracks:
             ):
                 continue
             track = self._create_track_locked(
-                mob_name,
+                detection.mob_name.strip().lower() or mob_name,
                 x,
                 y,
                 float(detection.confidence),

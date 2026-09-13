@@ -63,8 +63,10 @@ SIT_KEY_SETTLE_S = 0.35
 SIT_POST_TELEPORT_SETTLE_S = 1.2
 # Press HP Item Key when vision HP/max is below this.
 HP_RESTORE_RATIO = 0.5
-# Vision HP poll / min gap between HP Item Key presses.
-HP_RESTORE_POLL_S = 1.0
+# Idle poll while HP is already at/above HP_RESTORE_RATIO. Below that
+# threshold the item key is pressed again as soon as the previous tap
+# finishes (key_tap press duration only; no extra gap).
+HP_RESTORE_POLL_S = WORKER_POLL_INTERVAL_S
 # Minimum gap between successful custom skill-heal casts.
 HP_RESTORE_COOLDOWN_S = 1.8
 # No HP drop for this long before custom self-heal may run.

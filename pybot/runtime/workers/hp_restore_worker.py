@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pybot.game_state import PlayerVitals
 from pybot.runtime.constants import HP_RESTORE_POLL_S, HP_RESTORE_RATIO
+from pybot.runtime.event_utils import event_is_set
 from pybot.runtime.input.input_backend import InputBackend
 from pybot.runtime.workers.worker_contexts import HpRestoreWorkerContext
 
@@ -31,10 +32,13 @@ class HpRestoreWorker:
             f"threshold<{HP_RESTORE_RATIO:.0%}"
         )
         while not ctx.is_stopped():
-            self.process_pending()
-            # ``process_pending`` is deliberately non-blocking for the
-            # deterministic gameplay owner. The compatibility run loop still
-            # needs a bounded cadence so legacy callers cannot spin forever.
+            if event_is_set(ctx.pause_event):
+                ctx.wait_while_stopped_or_paused(HP_RESTORE_POLL_S)
+                continue
+            if self.needs_restore():
+                if not self.process_pending():
+                    ctx.stop_event.wait(HP_RESTORE_POLL_S)
+                continue
             ctx.stop_event.wait(HP_RESTORE_POLL_S)
 
     def needs_restore(self) -> bool:
@@ -43,7 +47,7 @@ class HpRestoreWorker:
         return ratio is not None and ratio < HP_RESTORE_RATIO
 
     def process_pending(self) -> bool:
-        """Evaluate one item-heal step; the gameplay loop owns scheduling."""
+        """Press the HP item once when current HP is below 50%."""
         ctx = self._ctx
         scan = int(ctx.config.hp_scan_code)
         ratio = self._hp_ratio()

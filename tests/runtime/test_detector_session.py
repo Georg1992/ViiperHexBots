@@ -141,6 +141,158 @@ class DetectorSessionTests(unittest.TestCase):
         self.assertGreater(batch.compute_ms, 0)
         self.assertLess(batch.lock_wait_ms, 50)
 
+    def test_isilla_vanberk_merges_overlapping_similar_sprites(self) -> None:
+        """Both descriptors fire on one blob; keep the stronger hit."""
+        session = DetectorSession("isilla+vanberk", project_root=ROOT)
+        heatmap = __import__("numpy").zeros((80, 80), dtype=float)
+        heatmap[50, 50] = 1.0
+
+        def fake_detect(_frame, mob_name, **_kwargs):
+            score = 0.91 if mob_name == "isilla" else 0.72
+            hit = type(
+                "Candidate",
+                (),
+                {
+                    "center_x": 50 if mob_name == "isilla" else 52,
+                    "center_y": 50,
+                    "final_score": score,
+                    "candidate_scale": 1.0,
+                    "accepted": True,
+                    "bbox": (40, 40, 20, 20),
+                },
+            )()
+            return type(
+                "FakeDetectionResult",
+                (),
+                {
+                    "sprite_heatmap": heatmap,
+                    "candidates": [hit],
+                    "accepted": [hit],
+                    "elapsed_s": 0.001,
+                    "timing": {},
+                },
+            )()
+
+        try:
+            with patch.object(session._detector, "detect", side_effect=fake_detect):
+                scan = session.discover_frame(
+                    heatmap,
+                    HuntRoi(x=0, y=0, w=80, h=80),
+                )
+            self.assertEqual(scan.accepted_count, 1)
+            self.assertEqual(scan.detections[0].mob_name, "isilla")
+            self.assertEqual(scan.raw_count, 2)
+        finally:
+            session.close()
+
+    def test_isilla_vanberk_keeps_separated_mobs(self) -> None:
+        session = DetectorSession("isilla+vanberk", project_root=ROOT)
+        heatmap = __import__("numpy").zeros((80, 80), dtype=float)
+
+        def fake_detect(_frame, mob_name, **_kwargs):
+            x = 10 if mob_name == "isilla" else 70
+            hit = type(
+                "Candidate",
+                (),
+                {
+                    "center_x": x,
+                    "center_y": 40,
+                    "final_score": 0.8,
+                    "candidate_scale": 1.0,
+                    "accepted": True,
+                    "bbox": (x - 10, 30, 20, 20),
+                },
+            )()
+            return type(
+                "FakeDetectionResult",
+                (),
+                {
+                    "sprite_heatmap": heatmap,
+                    "candidates": [hit],
+                    "accepted": [hit],
+                    "elapsed_s": 0.001,
+                    "timing": {},
+                },
+            )()
+
+        try:
+            with patch.object(session._detector, "detect", side_effect=fake_detect):
+                scan = session.discover_frame(
+                    heatmap,
+                    HuntRoi(x=0, y=0, w=80, h=80),
+                )
+            names = sorted(item.mob_name for item in scan.detections)
+            self.assertEqual(names, ["isilla", "vanberk"])
+        finally:
+            session.close()
+
+    def test_isilla_vanberk_heat_from_either_palette_supports_track(self) -> None:
+        """Shared palette: Vanberk heat keeps an Isilla-acquired Track alive."""
+        session = DetectorSession("isilla+vanberk", project_root=ROOT)
+        empty = __import__("numpy").zeros((80, 80), dtype=float)
+        vanberk_heat = empty.copy()
+        vanberk_heat[40, 20] = 1.0
+
+        def fake_detect(_frame, mob_name, **_kwargs):
+            heatmap = vanberk_heat if mob_name == "vanberk" else empty
+            return type(
+                "FakeDetectionResult",
+                (),
+                {
+                    "sprite_heatmap": heatmap,
+                    "candidates": [],
+                    "accepted": [],
+                    "elapsed_s": 0.001,
+                    "timing": {},
+                },
+            )()
+
+        try:
+            with patch.object(session._detector, "detect", side_effect=fake_detect):
+                scan = session.discover_frame(
+                    empty,
+                    HuntRoi(x=0, y=0, w=80, h=80),
+                    heat_track_positions=[(3, 20, 40, 1.0)],
+                )
+            self.assertEqual(scan.heat_supported_track_ids, frozenset({3}))
+        finally:
+            session.close()
+
+    def test_isilla_vanberk_tracking_uses_snapshot_sprite(self) -> None:
+        session = DetectorSession("isilla+vanberk", project_root=ROOT)
+        seen: list[str] = []
+
+        def fake_track(_frame, mob_name, track, **_kwargs):
+            seen.append(mob_name)
+            return LocalTrackResult(
+                track_id=int(track["trackId"]),
+                found=True,
+                x=int(track["x"]),
+                y=int(track["y"]),
+                confidence=1.0,
+                miss_reason="",
+            )
+
+        try:
+            with patch.object(session._detector, "ensure_descriptor"):
+                with patch.object(session._detector, "track_local", side_effect=fake_track):
+                    batch = session.track_locals_frame(
+                        self.roi_frame,
+                        self.roi,
+                        [
+                            StateTrackSnapshot(
+                                track_id=1, x=10, y=10, scale=1.0, mob_name="vanberk"
+                            ),
+                            StateTrackSnapshot(
+                                track_id=2, x=40, y=10, scale=1.0, mob_name="isilla"
+                            ),
+                        ],
+                    )
+            self.assertEqual(seen, ["vanberk", "isilla"])
+            self.assertEqual(batch.found_count, 2)
+        finally:
+            session.close()
+
 
 if __name__ == "__main__":
     unittest.main()

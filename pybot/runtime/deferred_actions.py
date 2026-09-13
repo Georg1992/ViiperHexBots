@@ -108,12 +108,20 @@ class DeferredActionScheduler:
         """Latch every elapsed deadline without moving it forward."""
         now_ms = int(now_ms)
         for action in self._actions.values():
-            if action.due_when is not None and not action.due_when():
-                # Condition-driven actions (HP restoration) are no longer
-                # pending when the condition has cleared; no timer expiry can
-                # manufacture work while the character is healthy.
-                action.expired = False
-                action.pending = False
+            if action.due_when is not None:
+                if not action.due_when():
+                    # Condition-driven actions (HP restoration) are no longer
+                    # pending when the condition has cleared; no timer expiry can
+                    # manufacture work while the character is healthy.
+                    action.expired = False
+                    action.pending = False
+                    continue
+                # First time the condition is true, press immediately. After a
+                # successful press, honor the interval so item use cannot occupy
+                # every gameplay tick.
+                if action.last_executed_ms is None or now_ms >= action.next_due_ms:
+                    action.expired = True
+                    action.pending = True
                 continue
             if now_ms >= action.next_due_ms and (
                 action.due_on_generation or action.last_executed_ms is not None
@@ -189,8 +197,7 @@ class DeferredActionScheduler:
         """Whether a due/unsafe action needs retry before lower-priority work.
 
         ``ignore_keys`` is for condition-driven maintenance that is useful when
-        admissible but must never freeze unrelated gameplay when temporarily
-        unsafe (for example an HP item outside its post-teleport window).
+        admissible but must never freeze unrelated gameplay (HP item use).
         """
         if not getattr(self, "_retry_required", False):
             return False

@@ -66,7 +66,7 @@ from pybot.config.schema import (
     SkillTimerSetting,
     normalize_hunt_mode,
 )
-from pybot.mobs.catalog import load_mob_catalog
+from pybot.mobs.catalog import hunt_mob_names, load_mob_catalog
 from pybot.runtime.input.scan_codes import keysym_to_key_name
 from pybot.recognition.detector.detector import configure_opencv_runtime
 
@@ -239,7 +239,7 @@ class MainWindow:
                 frame,
                 text="⚙",
                 width=3,
-                command=lambda name=mob.descriptor_name: self._open_mob_behavior_dialog(name),
+                command=lambda name=mob.descriptor_name, label=mob.display_name: self._open_mob_behavior_dialog(name, label),
             )
             settings_button.grid(row=index - 1, column=1, sticky="w", padx=(6, 0))
             self._mob_settings_buttons.append(settings_button)
@@ -264,7 +264,8 @@ class MainWindow:
         if select_stem and self.mob_catalog:
             key = select_stem.lower()
             for index, mob in enumerate(self.mob_catalog, start=1):
-                if mob.descriptor_name.lower() == key:
+                option = mob.descriptor_name.lower()
+                if option == key or key in hunt_mob_names(option):
                     self.mob_var.set(index)
                     break
         if self._settings_apply_enabled:
@@ -406,10 +407,13 @@ class MainWindow:
     def _delete_mob(self, asset_name: str, descriptor_name: str) -> None:
         if not self._can_import_mob():
             return
+        members = hunt_mob_names(descriptor_name)
+        label = "Isilla + Vanberk" if len(members) > 1 else asset_name
+        removed = " and ".join(name.capitalize() for name in members)
         if not messagebox.askyesno(
             "Delete mob",
-            f"Delete '{asset_name}' completely?\n\n"
-            "This removes its SPR/ACT assets, generated descriptors, "
+            f"Delete '{label}' completely?\n\n"
+            f"This removes {removed} SPR/ACT assets, generated descriptors, "
             "saved custom behavior, and sprite.grf entries.\n\n"
             "This cannot be undone.",
             icon="warning",
@@ -418,24 +422,25 @@ class MainWindow:
             return
 
         self._mob_delete_busy = True
-        self._mob_import_status.configure(text=f"Deleting {asset_name}…")
+        self._mob_import_status.configure(text=f"Deleting {label}…")
         self._lock_ui(self.lifecycle.state != BotState.OFF)
         self._show_mob_loading(
             title="Delete mob",
             heading="Deleting mob",
-            message=f"Deleting {asset_name}…",
+            message=f"Deleting {label}…",
         )
 
         def _worker() -> None:
             try:
-                delete_mob_assets(asset_name, descriptor_name)
+                for name in members:
+                    delete_mob_assets(name, name)
             except Exception as exc:
                 self._post_ui_callback(
-                    lambda exc=exc: self._mob_delete_failed(asset_name, exc)
+                    lambda exc=exc: self._mob_delete_failed(label, exc)
                 )
                 return
             self._post_ui_callback(
-                lambda: self._mob_delete_succeeded(asset_name, descriptor_name)
+                lambda: self._mob_delete_succeeded(label, descriptor_name, members)
             )
 
         threading.Thread(target=_worker, name="mob-delete", daemon=True).start()
@@ -452,10 +457,16 @@ class MainWindow:
             parent=self.root,
         )
 
-    def _mob_delete_succeeded(self, asset_name: str, descriptor_name: str) -> None:
+    def _mob_delete_succeeded(
+        self,
+        asset_name: str,
+        descriptor_name: str,
+        members: tuple[str, ...],
+    ) -> None:
         self._close_mob_loading()
         self._mob_delete_busy = False
-        self.config.mob_custom_settings.pop(descriptor_name.strip().lower(), None)
+        for key in (descriptor_name, *members):
+            self.config.mob_custom_settings.pop(key.strip().lower(), None)
         self._save_config_async()
         self._refresh_mob_radios()
         self._lock_ui(self.lifecycle.state != BotState.OFF)
@@ -910,18 +921,23 @@ class MainWindow:
         self._apply_ui_settings()
         return "break"
 
-    def _open_mob_behavior_dialog(self, mob_name: str) -> None:
+    def _open_mob_behavior_dialog(
+        self,
+        mob_name: str,
+        display_name: str | None = None,
+    ) -> None:
         key = mob_name.strip().lower()
         current = self.config.mob_custom_settings.get(key, MobCustomSettings())
+        title = display_name or mob_name
 
         def _apply(settings: MobCustomSettings) -> None:
             self.config.mob_custom_settings[key] = settings
             self._save_config_async()
-            self.log_pipe.log(f"[MOB] custom behavior saved: {mob_name}")
+            self.log_pipe.log(f"[MOB] custom behavior saved: {title}")
 
         MobBehaviorDialog(
             self.root,
-            mob_name,
+            title,
             current,
             on_apply=_apply,
         )

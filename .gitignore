@@ -13,6 +13,10 @@ assets/mobs/*
 !assets/mobs/Horn/**
 !assets/mobs/Noxious/
 !assets/mobs/Noxious/**
+!assets/mobs/isilla/
+!assets/mobs/isilla/**
+!assets/mobs/vanberk/
+!assets/mobs/vanberk/**
 logs/sessions/
 logs/debug_saves/
 logs/detect_debug/

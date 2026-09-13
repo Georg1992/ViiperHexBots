@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -99,6 +100,27 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self._worker().run()
         self.input.key_tap.assert_called_once_with(59, after_s=0.0)
 
+    def test_spams_hp_item_until_hp_reaches_fifty_percent(self) -> None:
+        self.ctx.mark_running()
+        self.vitals.publish_hp(20, 100)
+        presses = {"n": 0}
+
+        def tap(scan: int, *, after_s: float) -> bool:
+            self.assertEqual(scan, 59)
+            self.assertEqual(after_s, 0.0)
+            presses["n"] += 1
+            if presses["n"] >= 4:
+                self.vitals.publish_hp(50, 100)
+                self.ctx.stop_event.set()
+            return True
+
+        self.input.key_tap.side_effect = tap
+        started = time.monotonic()
+        self._worker().run()
+        elapsed = time.monotonic() - started
+        self.assertEqual(presses["n"], 4)
+        self.assertLess(elapsed, 0.5)
+
     def test_does_not_press_hp_item_key_at_or_above_fifty_percent(self) -> None:
         self.vitals.publish_hp(50, 100)
 
@@ -130,6 +152,19 @@ class HpRestoreWorkerTests(unittest.TestCase):
         self.input.key_tap.side_effect = stop_after_press
         self._worker().run()
         self.input.skill_click_at.assert_not_called()
+
+    def test_paused_hunt_does_not_consume_hp_item(self) -> None:
+        self.ctx.mark_paused()
+        self.vitals.publish_hp(40, 100)
+
+        def stop_soon(*_args, **_kwargs) -> bool:
+            self.ctx.stop_event.set()
+            return False
+
+        self.ctx.stop_event.wait = stop_soon  # type: ignore[method-assign]
+        self.ctx.wait_while_stopped_or_paused = stop_soon  # type: ignore[method-assign]
+        self._worker().run()
+        self.input.key_tap.assert_not_called()
 
 
 class DangerTeleportPriorityTests(unittest.TestCase):

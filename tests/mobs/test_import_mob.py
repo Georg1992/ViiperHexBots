@@ -186,6 +186,17 @@ class MobImportTests(unittest.TestCase):
                 with self.assertRaisesRegex(MobImportError, "built-in mob"):
                     delete_mob_assets("Horn", "horn")
 
+    def test_delete_mob_assets_rejects_builtin_isilla_vanberk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for name in ("isilla", "vanberk"):
+                _touch(tmp_path / "mobs" / name / "sprite" / f"{name}.spr")
+            with patch("pybot.mobs.import_mob.MOBS_DIR", tmp_path / "mobs"):
+                for name in ("isilla", "vanberk"):
+                    with self.subTest(name=name):
+                        with self.assertRaisesRegex(MobImportError, "built-in mob"):
+                            delete_mob_assets(name, name)
+
     def test_delete_mob_assets_rejects_missing_mob(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

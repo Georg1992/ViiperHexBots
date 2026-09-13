@@ -216,7 +216,8 @@ class SkillTimerWorkerContext(CanStop, CanLog, HasConfig, Protocol):
 class HpRestoreWorkerContext(CanStop, CanLog, HasConfig, Protocol):
     """Hunt runtime subset consumed by the HP item worker."""
 
-    def should_run_workers(self) -> bool: ...
+    @property
+    def pause_event(self) -> object: ...
     def wait_while_stopped_or_paused(self, timeout_s: float) -> bool: ...
 
 
