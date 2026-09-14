@@ -539,7 +539,7 @@ def render_descriptor_info(
         if descriptor_file is not None
         else "(in-memory)"
     )
-    header = _text_block([
+    header_lines = [
         f"{descriptor.mob_name}  v{descriptor.version}  {descriptor_label}",
         desc_path,
         f"size avg={descriptor.avg_width}x{descriptor.avg_height}",
@@ -549,18 +549,27 @@ def render_descriptor_info(
             f"accent={len(descriptor.accent_colors)}  "
             f"silMasks={len(descriptor.silhouette_masks)}  "
         ),
-        (
-            f"spriteDist={descriptor.max_sprite_palette_distance:.1f}  "
-            f"silDist={descriptor.max_silhouette_palette_distance:.1f}  "
-            f"runtimeSil={runtime_sil:.1f} (x{sil_scale:.2f})"
-        ),
-        (
-            f"sil gate: rec>={min_recall:.2f}  "
-            f"prec>={min_precision:.2f}  "
-            f"(build gateRefUniqueIoU={float(config['gateRefUniqueIoU']):.2f})"
-        ),
-        "SIL render = prod gate occupancy (hard+stable core, cyan=soft halo)",
-    ], width=720)
+    ]
+    if descriptor.silhouette_masks:
+        header_lines.extend([
+            (
+                f"spriteDist={descriptor.max_sprite_palette_distance:.1f}  "
+                f"silDist={descriptor.max_silhouette_palette_distance:.1f}  "
+                f"runtimeSil={runtime_sil:.1f} (x{sil_scale:.2f})"
+            ),
+            (
+                f"sil gate: rec>={min_recall:.2f}  "
+                f"prec>={min_precision:.2f}  "
+                f"(build gateRefUniqueIoU={float(config['gateRefUniqueIoU']):.2f})"
+            ),
+            "SIL render = prod gate occupancy (hard+stable core, cyan=soft halo)",
+        ])
+    else:
+        header_lines.extend([
+            f"spriteDist={descriptor.max_sprite_palette_distance:.1f}  marker square",
+            "GRF descriptor: palette + size only (no silhouette gate)",
+        ])
+    header = _text_block(header_lines, width=720)
 
     sections: list[tuple[str, np.ndarray]] = [
         ("MATCH PALETTE (weight bars)", _bgr_swatch_row(
@@ -594,12 +603,12 @@ def render_descriptor_info(
         ),
     ]
 
-    sil_row_imgs: list[np.ndarray] = []
-    for idx, mask in enumerate(descriptor.silhouette_masks):
-        sil_row_imgs.append(
+    if descriptor.silhouette_masks:
+        sil_row_imgs: list[np.ndarray] = [
             _labeled_silhouette_tile(mask, f"SIL {idx}", _SIL_SIZE)
-        )
-    sections.append(("SILHOUETTE REFS", np.hstack(sil_row_imgs)))
+            for idx, mask in enumerate(descriptor.silhouette_masks)
+        ]
+        sections.append(("SILHOUETTE REFS", np.hstack(sil_row_imgs)))
 
 
 
@@ -782,10 +791,10 @@ def write_pipeline_structure(path: Path) -> None:
 
 
 def render_modified_sprite_fixtures(config: dict) -> int:
-    """Render fixtures captured with the static modified SPR/ACT assets.
+    """Render fixtures captured with the GRF colored-square SPR/ACT assets.
 
     These captures must use the GRF detector session: it selects
-    ``modified_sprite_descriptor.json`` and the stricter GRF silhouette floors.
+    ``modified_sprite_descriptor.json`` and the marker-square gate.
     Keep this path separate from ``MOB_FIXTURE_SUITES`` because those suites
     exercise the normal animated descriptors.
     """
@@ -795,7 +804,6 @@ def render_modified_sprite_fixtures(config: dict) -> int:
 
     detector = MobDetector(PROJECT_ROOT, config, use_sprite_grf=True)
     descriptor = detector.ensure_descriptor("dokebi")
-    min_recall, min_precision = detector.silhouette_gate_thresholds()
     mob_dir = OUT_DIR / "dokebi"
     mob_dir.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(
@@ -804,9 +812,7 @@ def render_modified_sprite_fixtures(config: dict) -> int:
             descriptor,
             config,
             descriptor_file=detector.descriptor_path("dokebi"),
-            descriptor_label="MODIFIED SPRITE / GRF descriptor",
-            min_recall=min_recall,
-            min_precision=min_precision,
+            descriptor_label="GRF marker-square descriptor",
         ),
     )
     print(
@@ -824,21 +830,10 @@ def render_modified_sprite_fixtures(config: dict) -> int:
         pane_heat = heatmap_to_color(result.sprite_heatmap)
         annotate_heatmap_pane(pane_heat, result)
         pane_overlay = draw_detection_overlay(frame, result)
-        pane_sil = allocate_silhouette_panel(
-            result.descriptor,
-            result.silhouette_checks,
-            420,
-            frame.shape[0],
-            min_recall=min_recall,
-            min_precision=min_precision,
-        )
-        combined_height = max(
-            pane_heat.shape[0], pane_overlay.shape[0], pane_sil.shape[0],
-        )
+        combined_height = max(pane_heat.shape[0], pane_overlay.shape[0])
         combined = np.hstack([
             pad_to_height(pane_heat, combined_height),
             pad_to_height(pane_overlay, combined_height),
-            pad_to_height(pane_sil, combined_height),
         ])
         stem = image_path.stem
         output_path = mob_dir / f"{stem}_viz.png"
@@ -846,7 +841,7 @@ def render_modified_sprite_fixtures(config: dict) -> int:
         viz_count += 1
         print(
             f"  dokebi [GRF]    {stem:32s}  "
-            f"got={len(result.accepted)}  sil={len(result.silhouette_checks)}  "
+            f"got={len(result.accepted)}  blobs={len(result.silhouette_checks)}  "
             f"descriptor={detector.descriptor_path('dokebi').name}"
         )
     return viz_count
@@ -905,7 +900,7 @@ def main() -> None:
             f"({desc_file.relative_to(PROJECT_ROOT)} v{descriptor.version})"
         )
 
-        # Modified-sprite descriptor (big+red) for GRF-modified servers.
+        # Modified-sprite descriptor (colored square) for GRF-modified servers.
         mod_desc_path = desc_file.parent / "modified_sprite_descriptor.json"
         if mod_desc_path.is_file():
             try:
@@ -914,6 +909,7 @@ def main() -> None:
                     str(mob_dir / "modified_sprite_descriptor.png"),
                     render_descriptor_info(
                         mod_descriptor, config, descriptor_file=mod_desc_path,
+                        descriptor_label="GRF marker-square descriptor",
                     ),
                 )
                 print(

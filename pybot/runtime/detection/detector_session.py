@@ -16,7 +16,8 @@ from pathlib import Path
 import numpy as np
 
 from pybot.paths import PROJECT_ROOT
-from pybot.mobs.catalog import hunt_mob_names
+from pybot.mobs.catalog import hunt_color_key, hunt_mob_names
+from pybot.recognition.rules import sprite_bboxes_similar
 from pybot.recognition.detector.detector import MobDetector, load_detector_config
 from pybot.recognition.detector.tracking.local_tracker import (
     LocalTrackResult,
@@ -152,7 +153,7 @@ class DetectorSession:
             heatmaps: list[np.ndarray] = []
             raw_count = 0
             timing: dict[str, float] = {}
-            for name in self._hunt_names:
+            for name in self._discovery_detect_names():
                 result = self._detector.detect(frame, name)
                 raw_count += len(result.candidates)
                 heatmaps.append(result.sprite_heatmap)
@@ -208,8 +209,8 @@ class DetectorSession:
     ) -> bool:
         """True when any hunt-member heatmap still supports this Track.
 
-        Isilla and Vanberk share a palette, so either heatmap may confirm
-        a blob that the other silhouette originally acquired.
+        GRF pair hunts share one marker heatmap. Animated pair hunts keep
+        one heatmap per body, and either map may confirm the Track.
         """
         scale = float(entry[3])
         positions = [(int(entry[1]) - roi.x, int(entry[2]) - roi.y)]
@@ -315,13 +316,32 @@ class DetectorSession:
             )
         return result, (time.perf_counter() - started) * 1000.0
 
+    def _discovery_detect_names(self) -> tuple[str, ...]:
+        """Sprite stems to run through ``detect`` for this scan.
+
+        Animated hunts keep one pass per member so dissimilar bodies
+        (merman vs strouf) stay separate. GRF marker squares share a
+        color per pair, so one pass finds every square of that color.
+        """
+        if not self._detector.use_sprite_grf:
+            return self._hunt_names
+        names: list[str] = []
+        seen_keys: set[str] = set()
+        for name in self._hunt_names:
+            key = hunt_color_key(name)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            names.append(name)
+        return tuple(names)
+
     def _follow_mob_name(self, snapshot: StateTrackSnapshot) -> str:
         name = snapshot.mob_name.strip().lower()
         if name:
             return name
         if len(self._hunt_names) != 1:
             raise ValueError(
-                "Isilla + Vanberk tracks require mob_name on the snapshot"
+                f"{self._mob_name} tracks require mob_name on the snapshot"
             )
         return self._hunt_names[0]
 
@@ -376,7 +396,11 @@ def _merge_similar_sprite_detections(
     detections: list[RawDetection],
     radius_px: int,
 ) -> list[RawDetection]:
-    """Keep the stronger hit when both similar sprites fire on one blob."""
+    """Keep the stronger hit when both similar sprites fire on one blob.
+
+    Compact vs tall bodies on the same screen are different sprites; they
+    stay both, even when their centers fall inside the cluster radius.
+    """
     if len(detections) <= 1:
         return detections
     radius_sq = radius_px * radius_px
@@ -384,6 +408,7 @@ def _merge_similar_sprite_detections(
     for detection in sorted(detections, key=lambda item: item.confidence, reverse=True):
         if any(
             (detection.x - other.x) ** 2 + (detection.y - other.y) ** 2 <= radius_sq
+            and sprite_bboxes_similar(detection.bbox, other.bbox)
             for other in kept
         ):
             continue

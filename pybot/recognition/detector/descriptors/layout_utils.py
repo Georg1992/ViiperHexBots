@@ -13,6 +13,28 @@ from pybot.recognition.detector.scoring.heatmap_detector import (
 HARD_OCCUPANCY = 0.5
 
 
+def keep_primary_opaque_body(bgra: np.ndarray) -> np.ndarray:
+    """Keep the largest opaque component; drop detached staffs and specks.
+
+    Gate refs must match the body-only extract discovery actually finds.
+    A 1-cell waist stays one component and is unchanged.
+    """
+    if bgra.size == 0:
+        return bgra
+    alpha = (bgra[:, :, 3] >= 128).astype(np.uint8)
+    if not np.any(alpha):
+        return bgra
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        alpha, connectivity=8,
+    )
+    if count <= 2:
+        return bgra
+    keep_label = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
+    out = bgra.copy()
+    out[labels != keep_label, 3] = 0
+    return out
+
+
 def frame_silhouette(alpha: np.ndarray, width: int, height: int) -> np.ndarray:
     if alpha.size == 0:
         return np.zeros((height, width), dtype=np.float32)

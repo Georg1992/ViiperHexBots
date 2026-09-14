@@ -15,6 +15,14 @@ from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
 from pybot.mobs.catalog import ensure_mob_assets
+from pybot.mobs.marker_sprites import (
+    MARKER_SPRITE_SIZE,
+    encode_marker_spr,
+    modified_sprite_rgb,
+)
+from pybot.recognition.detector.descriptors.descriptor_builder import (
+    make_marker_square_descriptor,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REAL_HORN_DESCRIPTOR = (
@@ -63,13 +71,21 @@ class ModifiedAssetsRebuildTests(unittest.TestCase):
         )
         return builder
 
-    def test_missing_modified_assets_trigger_rebuild_despite_current_descriptor(self) -> None:
-        # Current-version modified-sprite descriptor exists, but the
-        # modified_sprite/ SPR+ACT pair was deleted.
-        shutil.copyfile(
-            REAL_HORN_DESCRIPTOR,
+    def _write_marker_descriptor(self) -> None:
+        rgb = modified_sprite_rgb("horn")
+        descriptor = make_marker_square_descriptor(
+            "horn",
+            (rgb[2], rgb[1], rgb[0]),
+            size=MARKER_SPRITE_SIZE,
+        )
+        descriptor.save(
             self.descriptors_dir / "horn" / "modified_sprite_descriptor.json",
         )
+
+    def test_missing_modified_assets_trigger_rebuild_despite_current_descriptor(self) -> None:
+        # Current marker descriptor exists, but the modified_sprite/ SPR+ACT
+        # pair was deleted.
+        self._write_marker_descriptor()
 
         with ExitStack() as stack:
             self._patch_ensure(stack)
@@ -91,7 +107,25 @@ class ModifiedAssetsRebuildTests(unittest.TestCase):
     def test_present_modified_assets_skip_rebuild(self) -> None:
         modified_dir = self.mobs_dir / "horn" / "modified_sprite"
         modified_dir.mkdir(parents=True)
-        (modified_dir / "horn.spr").write_bytes(b"static-spr")
+        (modified_dir / "horn.spr").write_bytes(
+            encode_marker_spr(modified_sprite_rgb("horn"))
+        )
+        (modified_dir / "horn.act").write_bytes(b"static-act")
+        self._write_marker_descriptor()
+
+        with ExitStack() as stack:
+            self._patch_ensure(stack)
+            builder = self._patched_builder(stack)
+            ensure_mob_assets(log_fn=lambda _msg: None)
+
+        builder.build_modified_sprite.assert_not_called()
+
+    def test_silhouette_style_modified_descriptor_triggers_rebuild(self) -> None:
+        modified_dir = self.mobs_dir / "horn" / "modified_sprite"
+        modified_dir.mkdir(parents=True)
+        (modified_dir / "horn.spr").write_bytes(
+            encode_marker_spr(modified_sprite_rgb("horn"))
+        )
         (modified_dir / "horn.act").write_bytes(b"static-act")
         shutil.copyfile(
             REAL_HORN_DESCRIPTOR,
@@ -103,7 +137,21 @@ class ModifiedAssetsRebuildTests(unittest.TestCase):
             builder = self._patched_builder(stack)
             ensure_mob_assets(log_fn=lambda _msg: None)
 
-        builder.build_modified_sprite.assert_not_called()
+        builder.build_modified_sprite.assert_called_once_with("horn", force=True)
+
+    def test_stale_modified_assets_trigger_rebuild(self) -> None:
+        modified_dir = self.mobs_dir / "horn" / "modified_sprite"
+        modified_dir.mkdir(parents=True)
+        (modified_dir / "horn.spr").write_bytes(b"not-a-square")
+        (modified_dir / "horn.act").write_bytes(b"static-act")
+        self._write_marker_descriptor()
+
+        with ExitStack() as stack:
+            self._patch_ensure(stack)
+            builder = self._patched_builder(stack)
+            ensure_mob_assets(log_fn=lambda _msg: None)
+
+        builder.build_modified_sprite.assert_called_once_with("horn", force=True)
 
 
 if __name__ == "__main__":

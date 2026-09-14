@@ -184,6 +184,9 @@ class MobCatalogTests(unittest.TestCase):
         self.assertTrue(is_builtin_mob("isilla"))
         self.assertTrue(is_builtin_mob("vanberk"))
         self.assertTrue(is_builtin_mob("isilla+vanberk"))
+        self.assertTrue(is_builtin_mob("merman"))
+        self.assertTrue(is_builtin_mob("strouf"))
+        self.assertTrue(is_builtin_mob("merman+strouf"))
 
     def test_resolve_mob_name_uses_catalog(self) -> None:
         parser = configparser.ConfigParser()
@@ -200,6 +203,16 @@ class MobCatalogTests(unittest.TestCase):
         entry = next(item for item in catalog if item.descriptor_name == "isilla+vanberk")
         self.assertTrue(entry.is_builtin)
         self.assertEqual(entry.display_name, "Isilla + Vanberk")
+
+    def test_live_catalog_ships_merman_and_strouf_as_one_builtin(self) -> None:
+        catalog = load_mob_catalog()
+        names = [entry.descriptor_name.lower() for entry in catalog]
+        self.assertIn("merman+strouf", names)
+        self.assertNotIn("merman", names)
+        self.assertNotIn("strouf", names)
+        entry = next(item for item in catalog if item.descriptor_name == "merman+strouf")
+        self.assertTrue(entry.is_builtin)
+        self.assertEqual(entry.display_name, "Merman + Strouf")
 
 
 if __name__ == "__main__":

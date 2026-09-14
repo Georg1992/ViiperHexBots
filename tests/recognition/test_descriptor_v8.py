@@ -31,6 +31,7 @@ class DescriptorV8Tests(unittest.TestCase):
     def test_builds_runtime_fields(self) -> None:
         descriptor = self.builder.build("horn", force=True)
         self.assertEqual(descriptor.version, DESCRIPTOR_VERSION)
+        self.assertTrue(descriptor.use_body_cluster_diversity)
         self.assertGreater(descriptor.avg_width, 0)
         self.assertGreater(descriptor.avg_height, 0)
         self.assertGreater(len(descriptor.match_palette_bgr), 0)
@@ -41,6 +42,24 @@ class DescriptorV8Tests(unittest.TestCase):
         self.assertGreaterEqual(len(descriptor.silhouette_masks), MIN_GATE_SILHOUETTE_MASKS)
         self.assertIn(len(descriptor.silhouette_masks), GATE_SILHOUETTE_REF_COUNTS)
         self.assertEqual(len(descriptor.silhouette_masks[0].avg_mask), 256)
+
+    def test_marker_square_descriptor_is_palette_and_size_only(self) -> None:
+        from pybot.mobs.marker_sprites import MARKER_SPRITE_SIZE, modified_sprite_rgb
+        from pybot.recognition.detector.descriptors.descriptor_builder import (
+            is_marker_square_descriptor,
+            make_marker_square_descriptor,
+        )
+
+        rgb = modified_sprite_rgb("horn")
+        descriptor = make_marker_square_descriptor(
+            "horn", (rgb[2], rgb[1], rgb[0]), size=MARKER_SPRITE_SIZE,
+        )
+        self.assertTrue(is_marker_square_descriptor(descriptor))
+        self.assertEqual(descriptor.avg_width, MARKER_SPRITE_SIZE)
+        self.assertEqual(len(descriptor.match_palette_bgr), 1)
+        self.assertEqual(len(descriptor.silhouette_masks), 0)
+        self.assertFalse(descriptor.use_body_cluster_diversity)
+        self.assertFalse(is_marker_square_descriptor(self.builder.build("horn")))
 
     def test_aspect_band_uses_descriptor_normalized_units(self) -> None:
         """Build-time aspect bounds match the runtime geometry coordinate system."""
@@ -126,6 +145,43 @@ class GateSilhouetteCoherenceTests(unittest.TestCase):
         hard[0:6, 5:11] = 1
         hard[10:16, 5:11] = 1
         self.assertFalse(DescriptorBuilder._is_coherent_gate_silhouette(_mask_from_hard(hard)))
+
+
+class PrimaryBodySilhouetteTests(unittest.TestCase):
+    def test_detached_staff_is_dropped_from_gate_mask(self) -> None:
+        from pybot.recognition.detector.descriptors.layout_utils import (
+            HARD_OCCUPANCY,
+            keep_primary_opaque_body,
+        )
+
+        frame = np.zeros((40, 50, 4), dtype=np.uint8)
+        frame[8:36, 18:46, 3] = 255
+        frame[10:30, 2:6, 3] = 255
+        kept = keep_primary_opaque_body(frame)
+        self.assertEqual(int((kept[10:30, 2:6, 3] >= 128).sum()), 0)
+        self.assertGreater(int((kept[8:36, 18:46, 3] >= 128).sum()), 0)
+
+        mask = DescriptorBuilder(PROJECT_ROOT)._build_silhouette_mask([frame])
+        avg = np.asarray(mask.avg_mask, dtype=np.float32).reshape(mask.height, mask.width)
+        hard = avg >= HARD_OCCUPANCY
+        occupied_cols = np.where(hard.sum(axis=0) > 0)[0]
+        self.assertGreater(len(occupied_cols), 4)
+        self.assertEqual(
+            int(occupied_cols[-1] - occupied_cols[0] + 1),
+            len(occupied_cols),
+        )
+
+    def test_one_cell_waist_stays_one_body(self) -> None:
+        from pybot.recognition.detector.descriptors.layout_utils import (
+            keep_primary_opaque_body,
+        )
+
+        frame = np.zeros((20, 12, 4), dtype=np.uint8)
+        frame[1:8, 2:10, 3] = 255
+        frame[8:9, 5:7, 3] = 255
+        frame[9:18, 2:10, 3] = 255
+        kept = keep_primary_opaque_body(frame)
+        self.assertTrue(np.array_equal(kept[:, :, 3], frame[:, :, 3]))
 
 
 if __name__ == "__main__":

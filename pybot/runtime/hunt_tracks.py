@@ -18,6 +18,7 @@ from pybot.recognition.rules import (
     clear_discovery_blob_observation,
     is_alive,
     movement_thresholds,
+    sprite_bboxes_similar,
 )
 
 from pybot.runtime.track_reconciler import DiscoveryReconcileResult, TrackReconciler
@@ -484,21 +485,24 @@ class HuntTracks:
         cluster_radius = int(config["discoveryClusterRadiusPx"])
         cluster_sq = cluster_radius * cluster_radius
         occupancy = [
-            (track.x, track.y, track.occupancy)
+            (track.x, track.y, track.occupancy, track.last_discovery_bbox)
             for track in self._tracks
             if is_alive(track)
         ]
         created_ids: list[int] = []
-        created_positions: list[tuple[int, int]] = []
+        created_positions: list[tuple[int, int, tuple[int, int, int, int]]] = []
         for detection in detections:
             if detection.candidate_scale <= 0:
                 continue
             x, y = int(detection.x), int(detection.y)
-            if self.blocks_new_track_at(x, y, existing=occupancy):
+            if self.blocks_new_track_at(
+                x, y, bbox=detection.bbox, existing=occupancy,
+            ):
                 continue
             if any(
                 (x - px) * (x - px) + (y - py) * (y - py) <= cluster_sq
-                for px, py in created_positions
+                and sprite_bboxes_similar(detection.bbox, bbox)
+                for px, py, bbox in created_positions
             ):
                 continue
             track = self._create_track_locked(
@@ -511,7 +515,7 @@ class HuntTracks:
                 discovery_bbox=detection.bbox,
             )
             created_ids.append(track.id)
-            created_positions.append((x, y))
+            created_positions.append((x, y, detection.bbox))
         return created_ids
 
     def _reacquire_from_discovery_locked(
@@ -837,12 +841,16 @@ class HuntTracks:
         x: int,
         y: int,
         *,
-        existing: list[tuple[int, int, int]] | None = None,
+        bbox: tuple[int, int, int, int] = (0, 0, 0, 0),
+        existing: list[tuple] | None = None,
     ) -> bool:
         """True when a unique occupancy-1 track already owns this center.
 
         A stacked track (occupancy > 1) does not block: the new center is a
         split, and ``create_track`` peels one occupant onto the new ID.
+
+        Distinct pair-member bodies (compact vs tall) do not block each other
+        even inside the same-object radius.
 
         *existing* is the occupancy snapshot from the start of an ingest so
         two distinct candidates in the same scan are not blocked by each
@@ -853,7 +861,7 @@ class HuntTracks:
         if existing is None:
             with self._lock:
                 entries = [
-                    (track.x, track.y, track.occupancy)
+                    (track.x, track.y, track.occupancy, track.last_discovery_bbox)
                     for track in self._tracks
                     if is_alive(track)
                 ]
@@ -861,9 +869,13 @@ class HuntTracks:
             entries = existing
         nearest_occ: int | None = None
         best_d = radius_sq + 1
-        for px, py, occupancy in entries:
+        for entry in entries:
+            px, py, occupancy = int(entry[0]), int(entry[1]), int(entry[2])
+            track_bbox = entry[3] if len(entry) > 3 else (0, 0, 0, 0)
             dist_sq = (x - px) * (x - px) + (y - py) * (y - py)
             if dist_sq > radius_sq:
+                continue
+            if not sprite_bboxes_similar(bbox, track_bbox):
                 continue
             if dist_sq < best_d:
                 nearest_occ = occupancy

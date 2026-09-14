@@ -1,18 +1,10 @@
-"""GRF (modified sprite.grf) mode: strict gate + static single-frame tracking.
+"""GRF (modified sprite.grf) mode: colored-square discovery + tracking.
 
-Modified sprites are one deterministic static frame with a distinctive red
-palette. GRF mode therefore:
-- references that single frame (the modified descriptor carries one unique
-  silhouette pose — ``descriptor_is_static``);
-- uses stricter silhouette recall and precision floors than animated sprites,
-  because every modified mob shares the same red palette and shape is the
-  only discriminator (alligator must not pass as frilldora);
-- skips noisy-candidate silhouette deform so a same-color impostor crop
-  cannot be warped toward the hunt reference;
-- widens the extract aspect band (``grfAspectBandScale``) so a clipped
-  palette CC (e.g. Anubis head shade outside the match radius) is not
-  rejected before the silhouette match;
-- keeps native-resolution silhouette verification during local tracking.
+Modified sprites are one deterministic colored square. Distinct hunts get
+distinct colors; paired map members share a color. GRF mode therefore:
+- stores a palette+size marker descriptor (not animated silhouette refs);
+- discovers with heatmap → blobs → square size/fill, not silhouette;
+- tracks with palette fill of a descriptor-sized window.
 """
 
 from __future__ import annotations
@@ -69,30 +61,29 @@ class GrfDetectorModeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.config = load_detector_config()
 
-    def test_silhouette_gate_thresholds_are_stricter_in_grf_mode(self) -> None:
-        normal = MobDetector(ROOT, self.config)
-        grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
-        normal_recall, normal_precision = normal.silhouette_gate_thresholds()
-        grf_recall, grf_precision = grf.silhouette_gate_thresholds()
-        self.assertEqual(
-            (normal_recall, normal_precision),
-            (
-                float(self.config["minSilhouetteRecall"]),
-                float(self.config["minSilhouettePrecision"]),
-            ),
+    def test_modified_descriptor_is_marker_square(self) -> None:
+        from pybot.mobs.marker_sprites import MARKER_SPRITE_SIZE, modified_sprite_rgb
+        from pybot.recognition.detector.descriptors.descriptor_builder import (
+            is_marker_square_descriptor,
         )
-        self.assertEqual(
-            (grf_recall, grf_precision),
-            (
-                float(self.config["grfMinSilhouetteRecall"]),
-                float(self.config["grfMinSilhouettePrecision"]),
-            ),
-        )
-        self.assertGreater(grf_recall, normal_recall)
-        self.assertGreater(grf_precision, normal_precision)
 
-    def test_grf_discovery_rejects_same_color_wrong_shape(self) -> None:
-        """A red desert wolf must not be accepted while hunting horn."""
+        ensure_mob_assets(log_fn=lambda _message: None)
+        grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
+        descriptor = grf.ensure_descriptor("horn")
+        self.assertTrue(is_marker_square_descriptor(descriptor))
+        self.assertEqual(descriptor.avg_width, MARKER_SPRITE_SIZE)
+        self.assertEqual(descriptor.avg_height, MARKER_SPRITE_SIZE)
+        self.assertEqual(len(descriptor.match_palette_bgr), 1)
+        self.assertFalse(descriptor.use_body_cluster_diversity)
+        self.assertEqual(len(descriptor.silhouette_masks), 0)
+        red, green, blue = modified_sprite_rgb("horn")
+        self.assertEqual(
+            tuple(descriptor.match_palette_bgr[0]),
+            (blue, green, red),
+        )
+
+    def test_grf_discovery_rejects_wrong_marker_color(self) -> None:
+        """A different-colored marker square must not be accepted as horn."""
         ensure_mob_assets(log_fn=lambda _message: None)
         grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
         canvas = _modified_sprite_canvas("DesertWolf", "desert_wolf")
@@ -100,17 +91,37 @@ class GrfDetectorModeTests(unittest.TestCase):
         self.assertEqual(
             len(impostor.accepted),
             0,
-            "same-color modified sprite of a different mob must fail the GRF gate",
+            "a different marker color must fail the GRF square gate",
         )
         self_match = grf.detect(canvas, "desert_wolf")
         self.assertGreater(
             len(self_match.accepted),
             0,
-            "true modified sprite must still clear the stricter GRF floors",
+            "true modified sprite must still clear the square size/fill gate",
+        )
+
+    def test_grf_paired_members_share_marker_and_accept_each_other(self) -> None:
+        """Isilla and Vanberk are the same orange square, so either hunt matches."""
+        ensure_mob_assets(log_fn=lambda _message: None)
+        from pybot.mobs.marker_sprites import modified_sprite_rgb
+
+        self.assertEqual(modified_sprite_rgb("isilla"), modified_sprite_rgb("vanberk"))
+        self.assertEqual(modified_sprite_rgb("merman"), modified_sprite_rgb("strouf"))
+        self.assertNotEqual(modified_sprite_rgb("isilla"), modified_sprite_rgb("merman"))
+        spr_path = MOBS_DIR / "isilla" / "modified_sprite" / "isilla.spr"
+        if not spr_path.is_file():
+            self.skipTest("isilla modified sprite is not installed")
+        grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
+        canvas = _modified_sprite_canvas("isilla", "isilla")
+        as_vanberk = grf.detect(canvas, "vanberk")
+        self.assertGreater(
+            len(as_vanberk.accepted),
+            0,
+            "shared-color pair member must match the other hunt descriptor",
         )
 
     def test_grf_patchy_breeze_self_matches(self) -> None:
-        """Swirl-shaped modified sprites must still pass GRF silhouette floors."""
+        """Imported marker squares must still pass GRF size/fill."""
         ensure_mob_assets(log_fn=lambda _message: None)
         spr_path = MOBS_DIR / "breeze" / "modified_sprite" / "breeze.spr"
         if not spr_path.is_file():
@@ -121,58 +132,104 @@ class GrfDetectorModeTests(unittest.TestCase):
         self.assertGreater(
             len(result.accepted),
             0,
-            "filled breeze silhouette must clear the GRF precision floor",
+            "filled breeze square must clear the GRF size/fill gate",
         )
 
-    def test_grf_skips_noisy_candidate_deform(self) -> None:
-        detector = MobDetector(ROOT, self.config, use_sprite_grf=True)
-        candidate = np.ones((16, 16), dtype=np.float32)
-        with patch.object(detector, "_deform_silhouette_occupancy") as deform:
-            result = detector._maybe_deform_noisy_candidate(
-                candidate,
-                [],
-                np.zeros((8, 8, 3), dtype=np.uint8),
-                None,
-                np.zeros((1, 3), dtype=np.float32),
-                10.0,
-                None,
-            )
-        deform.assert_not_called()
-        self.assertIs(result, candidate)
+    def test_grf_strouf_self_matches(self) -> None:
+        """Strouf marker square must clear size/fill on a live-sized ROI."""
+        from pybot.recognition.detector.descriptors.descriptor_builder import (
+            DescriptorBuilder,
+        )
 
-    def test_modified_descriptors_are_static_single_frame(self) -> None:
-        """The modified descriptor references the one static frame (all refs identical)."""
-        from pybot.mobs.catalog import ensure_mob_assets
+        spr_path = MOBS_DIR / "strouf" / "modified_sprite" / "strouf.spr"
+        if not spr_path.is_file():
+            self.skipTest("strouf modified sprite is not installed")
+        DescriptorBuilder(ROOT).build_modified_sprite("strouf", force=True)
+        grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
+        canvas = _modified_sprite_canvas("strouf", "strouf")
+        frame = np.full((1024, 1024, 3), (30, 60, 30), dtype=np.uint8)
+        y0 = (frame.shape[0] - canvas.shape[0]) // 2
+        x0 = (frame.shape[1] - canvas.shape[1]) // 2
+        frame[y0 : y0 + canvas.shape[0], x0 : x0 + canvas.shape[1]] = canvas
+        result = grf.detect(frame, "strouf")
+        self.assertGreater(
+            len(result.accepted),
+            0,
+            "strouf modified sprite must clear the GRF size/fill gate",
+        )
 
+    def test_grf_evil_druid_body_only_self_matches(self) -> None:
+        """Evil druid marker square must still pass size/fill."""
+        from pybot.recognition.detector.descriptors.descriptor_builder import (
+            DescriptorBuilder,
+        )
+
+        spr_path = MOBS_DIR / "evil_druid" / "modified_sprite" / "evil_druid.spr"
+        if not spr_path.is_file():
+            self.skipTest("evil_druid modified sprite is not installed")
+        builder = DescriptorBuilder(ROOT)
+        builder.build("evil_druid", force=True)
+        builder.build_modified_sprite("evil_druid", force=True)
+        grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
+        canvas = _modified_sprite_canvas("evil_druid", "evil_druid")
+        result = grf.detect(canvas, "evil_druid")
+        self.assertGreater(
+            len(result.accepted),
+            0,
+            "evil druid marker square must clear the GRF size/fill gate",
+        )
+
+    def test_grf_discovery_skips_silhouette_gate(self) -> None:
+        ensure_mob_assets(log_fn=lambda _message: None)
+        grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
+        canvas = _modified_sprite_canvas("Horn", "horn")
+        with patch.object(grf, "_evaluate_silhouette_gate") as silhouette:
+            result = grf.detect(canvas, "horn")
+        silhouette.assert_not_called()
+        self.assertGreater(len(result.accepted), 0)
+
+    def test_grf_score_at_skips_silhouette_gate(self) -> None:
         ensure_mob_assets(log_fn=lambda _message: None)
         grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
         descriptor = grf.ensure_descriptor("horn")
+        canvas = _modified_sprite_canvas("Horn", "horn")
+        cx = canvas.shape[1] // 2
+        cy = canvas.shape[0] // 2
+        with patch.object(grf, "_evaluate_silhouette_gate") as silhouette:
+            passed, _bbox, _fill = grf.score_at(canvas, descriptor, cx, cy)
+        silhouette.assert_not_called()
+        self.assertTrue(passed)
+
+    def test_grf_marker_square_gate_rejects_skinny_blob(self) -> None:
+        ensure_mob_assets(log_fn=lambda _message: None)
+        grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
+        descriptor = grf.ensure_descriptor("horn")
+        heatmap = np.ones((200, 200), dtype=np.float32)
+        width = int(descriptor.avg_width)
+        height = int(descriptor.avg_height)
+        self.assertFalse(
+            grf._passes_marker_square_gate((10, 10, 80, 20), descriptor, heatmap, 1.0),
+        )
         self.assertTrue(
-            grf.descriptor_is_static(descriptor),
-            "modified descriptor for horn should be single-frame",
+            grf._passes_marker_square_gate(
+                (10, 10, width, height), descriptor, heatmap, 1.0,
+            ),
         )
 
-    def test_normal_descriptor_is_not_static(self) -> None:
-        """Animated originals keep pose diversity and full gate verification."""
-        normal = MobDetector(ROOT, self.config)
-        horn = normal.ensure_descriptor("horn")
-        self.assertFalse(normal.descriptor_is_static(horn))
-
-    def test_grf_aspect_band_widened(self) -> None:
-        from pybot.mobs.catalog import ensure_mob_assets
-
+    def test_grf_heatmap_skips_edge_boost(self) -> None:
         ensure_mob_assets(log_fn=lambda _message: None)
-        normal = MobDetector(ROOT, self.config)
         grf = MobDetector(ROOT, self.config, use_sprite_grf=True)
-        descriptor = grf.ensure_descriptor("horn")
-        n_min, n_max = normal._effective_aspect_band(descriptor)
-        g_min, g_max = grf._effective_aspect_band(descriptor)
-        self.assertEqual((n_min, n_max), (descriptor.min_aspect_ratio, descriptor.max_aspect_ratio))
-        self.assertLess(g_min, n_min)
-        self.assertGreater(g_max, n_max)
+        canvas = _modified_sprite_canvas("Horn", "horn")
+        with patch.object(
+            grf.heatmap_detector,
+            "_finish_heatmap",
+            wraps=grf.heatmap_detector._finish_heatmap,
+        ) as finish:
+            grf.detect(canvas, "horn")
+        self.assertFalse(finish.call_args.kwargs["edge_boost"])
 
     def test_modified_tracking_still_verifies_with_native_gate(self) -> None:
-        """Static modified sprites cannot bypass the strict silhouette gate."""
+        """Static modified sprites still call score_at during local tracking."""
         detector = MobDetector(ROOT, load_detector_config(), use_sprite_grf=True)
         descriptor = detector.ensure_descriptor("horn")
         frame = np.zeros((400, 400, 3), dtype=np.uint8)

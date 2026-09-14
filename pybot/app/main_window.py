@@ -408,7 +408,11 @@ class MainWindow:
         if not self._can_import_mob():
             return
         members = hunt_mob_names(descriptor_name)
-        label = "Isilla + Vanberk" if len(members) > 1 else asset_name
+        label = (
+            " + ".join(name.capitalize() for name in members)
+            if len(members) > 1
+            else asset_name
+        )
         removed = " and ".join(name.capitalize() for name in members)
         if not messagebox.askyesno(
             "Delete mob",

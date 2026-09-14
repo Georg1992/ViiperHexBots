@@ -1,8 +1,8 @@
 """Sprite GRF archive — read, list, sync modified-sprite SPR+ACT files.
 
 The ``sprite.grf`` at the project root is a Ragnarok Online GRF archive used
-on servers that allow GRF modifications.  It bundles modified (big+red) SPR+ACT
-files so the game client loads the transformed sprites instead of the originals.
+on servers that allow GRF modifications.  It bundles modified (colored-square)
+SPR+ACT files so the game client loads the marker sprites instead of the originals.
 
 At startup ``sync_sprite_grf()`` ensures every mob with ``modified_sprite/``
 assets has its SPR+ACT pair in the archive.

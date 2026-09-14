@@ -1,8 +1,9 @@
 """Sprite heatmap + silhouette-gate mob detector.
 
-Pipeline: sprite heatmap → blobs → geometry pre-gate → color-structure
-pre-gate → silhouette gate → accept by heat score.
-No RegionScorer, no structural pixels, and no heavyweight global center search.
+Animated sprites: heatmap → blobs → geometry → color structure → silhouette.
+GRF marker squares: heatmap → blobs → square size/fill.
+Accept by heat score. No RegionScorer, no structural pixels, and no
+heavyweight global center search.
 """
 
 from __future__ import annotations
@@ -17,7 +18,10 @@ import cv2
 import numpy as np
 
 from pybot.recognition.detector.descriptors.descriptor import MobDescriptor
-from pybot.recognition.detector.descriptors.descriptor_builder import DESCRIPTOR_VERSION
+from pybot.recognition.detector.descriptors.descriptor_builder import (
+    DESCRIPTOR_VERSION,
+    is_marker_square_descriptor,
+)
 from pybot.recognition.detector.descriptors.layout_utils import (
     HARD_OCCUPANCY,
     best_silhouette_match,
@@ -40,9 +44,6 @@ REQUIRED_CONFIG_KEYS = {
     "gateRefUniqueIoU",
     "minSilhouetteRecall",
     "minSilhouettePrecision",
-    "grfMinSilhouetteRecall",
-    "grfMinSilhouettePrecision",
-    "grfAspectBandScale",
     "minRequiredPaletteGroups",
     "minSecondPaletteGroupShare",
     "minRequiredPaletteCoverage",
@@ -99,6 +100,13 @@ _EXTRACT_BODY_STRONG_FLOOR_FRAC = 0.75
 # source, so discovery always uses this fixed work-scale reduction. The scale
 # is selected from the rendering mode, never from the selected mob descriptor.
 _SPRITE_GRF_HEATMAP_DOWNSCALE = 4
+# Marker squares are opaque 64×64 fills. Heat 4× + blur inflates the CC
+# slightly; these bands keep a square while rejecting specks and terrain smear.
+_MARKER_AREA_MIN_RATIO = 0.35
+_MARKER_AREA_MAX_RATIO = 2.5
+_MARKER_ASPECT_MIN = 0.65
+_MARKER_ASPECT_MAX = 1.55
+_MARKER_MIN_HEAT_FILL = 0.50
 # Non-GRF discovery keeps the generic small-sprite safety floor. GRF mode is
 # intentionally exempt: its fixed rendering mode is the contract, regardless
 # of descriptor dimensions.
@@ -108,7 +116,8 @@ _DOWNSCALE_MIN_WORK_RESOLUTION_PX = 16.0
 # and the post-gate noisy_extract cleanup hook.
 _EXTRACT_BLOAT_AREA_RATIO = 2.0
 _CONTENT_NOISE_SOFT_HARD_RATIO = 2.0
-# Full 16x16 hard fill = palette smear in a desc-sized window, not a sprite body.
+# Full 16x16 hard fill = palette smear in a desc-sized window, not a sprite
+# body.
 _SOLID_FILL_HARD_FRACTION = 0.85
 
 # Silhouette crop / morph / deform sizing.
@@ -320,10 +329,6 @@ class MobDetector:
         self.local_track_max_search_radius_px = int(
             self.config["localTrackMaxSearchRadiusPx"]
         )
-        # GRF mode widens the descriptor aspect band: a static red sprite's
-        # palette CC is often clipped (head/feet shade outside the match radius),
-        # which shifts the extract aspect beyond the build-time tight band.
-        self.grf_aspect_band_scale = float(self.config["grfAspectBandScale"])
 
     def descriptor_path(self, mob_name: str) -> Path:
         stem = mob_name.lower()
@@ -353,6 +358,15 @@ class MobDetector:
                 f"descriptor for mob '{mob_name}' is version {descriptor.version}; "
                 f"rebuild descriptor version {DESCRIPTOR_VERSION} before detection"
             )
+        if self.use_sprite_grf:
+            if not is_marker_square_descriptor(descriptor):
+                raise RuntimeError(
+                    f"modified descriptor for mob '{mob_name}' is not a marker square; rebuild"
+                )
+        elif not descriptor.silhouette_masks:
+            raise RuntimeError(
+                f"descriptor for mob '{mob_name}' has no silhouette masks; rebuild"
+            )
         self._descriptor_cache[mob_name] = descriptor
         return descriptor
 
@@ -381,16 +395,23 @@ class MobDetector:
         self,
         frame_bgr: np.ndarray,
         mob_name: str,
+        *,
+        sprite_heatmap: np.ndarray | None = None,
     ) -> DetectionResult:
-        """Heatmap discovery with silhouette check.
+        """Heatmap discovery.
 
-        Order: heatmap → blobs → geometry → color structure → silhouette.
-        All blobs go through every gate — dedup against existing tracks is
-        handled by TrackReconciler after detection.
+        Animated sprites: heatmap → blobs → geometry → color structure →
+        silhouette. GRF marker squares: heatmap → blobs → square size/fill.
+        Dedup against existing tracks is handled by TrackReconciler after
+        detection.
 
         When ``use_sprite_grf`` is True, uses a deterministic 4× heatmap
         downscale for every mob; no descriptor-size or mob-specific fallback is
         applied.
+
+        ``sprite_heatmap`` reuses an already-built full-resolution map.
+        GRF pair hunts run one detect pass, so the session does not build
+        a second heatmap for the partner sprite.
         """
         start = time.perf_counter()
         cpu_start = time.process_time()
@@ -400,12 +421,6 @@ class MobDetector:
         # --- heatmap --------------------------------------------------
         heatmap_start = time.perf_counter()
         downscale = self._discovery_heatmap_downscale(frame_bgr)
-        # Static modified sprites use the cheap palette-only discovery path.
-        # Compute this before building the heatmap so the fast mode is also
-        # applied to the first post-teleport scan.
-        static_sprite_fast_path = self.use_sprite_grf and self.descriptor_is_static(
-            descriptor,
-        )
         if (
             not self.use_sprite_grf
             and downscale > 1
@@ -414,13 +429,14 @@ class MobDetector:
         ):
             downscale = 1
 
-        build_heatmap = self.heatmap_detector.build_sprite_heatmap
-        sprite_heatmap = build_heatmap(
-            frame_bgr,
-            descriptor,
-            downscale=downscale,
-            fast_static=static_sprite_fast_path,
-        )
+        if sprite_heatmap is None:
+            build_heatmap = self.heatmap_detector.build_sprite_heatmap
+            sprite_heatmap = build_heatmap(
+                frame_bgr,
+                descriptor,
+                downscale=downscale,
+                marker_square=self.use_sprite_grf,
+            )
         heatmap_end = time.perf_counter()
 
         # --- blobs ----------------------------------------------------
@@ -428,184 +444,31 @@ class MobDetector:
         blobs_end = time.perf_counter()
 
         heatmap_peak = float(sprite_heatmap.max()) if sprite_heatmap.size else 0.0
-        peak_rel = float(self.config["peakRelativeThreshold"])
-        small_rel_heat = _SMALL_HEAT_RELATIVE_PEAK_MULT * peak_rel
-        # The silhouette gate needs the unweighted palette mask, not the
-        # weighted discovery heatmap. Build that mask once per frame and slice
-        # it for every candidate. Recomputing the same palette-distance matrix
-        # inside every gate made a frame with several plausible blobs spend
-        # seconds in the gate, even though only one mob was ultimately accepted.
-        # This is especially visible when the sitting character changes the
-        # post-teleport frame and creates several Anubis-colored blobs.
-        # A full-frame palette map pays off only when several candidates will
-        # reuse it. Keep the one-candidate/common path local; this avoids adding
-        # a large frame-wide allocation to normal scans while bounding the
-        # repeated per-candidate work on a noisy post-transition frame. Static
-        # GRF mode deliberately keeps this None: each local silhouette window
-        # is much smaller than the 1024x1024 frame and uses the one exact sprite
-        # palette directly.
-        reuse_palette_heatmap = len(blobs) >= 2 and not static_sprite_fast_path
         palette_heatmap_started = time.perf_counter()
-        palette_heatmap_full = (
-            sprite_palette_heatmap(
-                frame_bgr,
-                descriptor.match_palette_bgr,
-                float(descriptor.max_sprite_palette_distance),
-            )
-            if reuse_palette_heatmap
-            else None
-        )
-        palette_heatmap_elapsed = time.perf_counter() - palette_heatmap_started
-
-        # --- gates → silhouette (known tracks skip pre-gates) ----------
-        candidates: list[DetectionCandidate] = []
-        silhouette_checks: list[SilhouetteCheck] = []
-        # Keep candidate-level timing so a pathological live frame can be
-        # diagnosed as blob explosion versus one malformed silhouette crop.
+        palette_heatmap_elapsed = 0.0
         gate_elapsed_s = 0.0
         max_gate_elapsed_s = 0.0
         max_gate_bbox: tuple[int, int, int, int] = (0, 0, 0, 0)
 
-        for candidate_id, (cx, cy, heat_score, comp_bbox) in enumerate(blobs):
-            bx, by, bw, bh = comp_bbox
-            bbox = (bx, by, bw, bh)
-            # All blobs must clear geometry + color structure pre-gates.
-            # Dedup against existing tracks is handled post-detection by
-            # TrackReconciler.match_and_absent().
-            if not self._passes_discovery_geometry_gate(comp_bbox, descriptor):
-                silhouette_checks.append(SilhouetteCheck(
-                    center_x=cx,
-                    center_y=cy,
-                    heat_score=heat_score,
-                    passed=False,
-                    similarity=0.0,
-                    candidate_id=candidate_id,
-                    discovery_bbox=comp_bbox,
-                ))
-                continue
-
-            # Tiny heat CCs: require relative heat vs frame peak (config-derived).
-            if self._is_small_heat_cc(comp_bbox, descriptor):
-                if heatmap_peak <= 0.0 or (float(heat_score) / heatmap_peak) < small_rel_heat:
-                    silhouette_checks.append(SilhouetteCheck(
-                        center_x=cx,
-                        center_y=cy,
-                        heat_score=heat_score,
-                        passed=False,
-                        similarity=0.0,
-                        candidate_id=candidate_id,
-                        discovery_bbox=comp_bbox,
-                    ))
-                    continue
-
-            if (
-                not static_sprite_fast_path
-                and not self._passes_color_structure_gate(
-                    frame_bgr, descriptor, comp_bbox,
+        if self.use_sprite_grf:
+            (
+                candidates,
+                silhouette_checks,
+                gate_elapsed_s,
+                max_gate_elapsed_s,
+                max_gate_bbox,
+            ) = self._collect_marker_square_candidates(
+                descriptor, blobs, sprite_heatmap, heatmap_peak,
+            )
+        else:
+            candidates, silhouette_checks, palette_heatmap_elapsed, gate_elapsed_s, max_gate_elapsed_s, max_gate_bbox = (
+                self._collect_silhouette_candidates(
+                    frame_bgr,
+                    descriptor,
+                    blobs,
+                    heatmap_peak,
                 )
-            ):
-                silhouette_checks.append(SilhouetteCheck(
-                    center_x=cx,
-                    center_y=cy,
-                    heat_score=heat_score,
-                    passed=False,
-                    similarity=0.0,
-                    candidate_id=candidate_id,
-                    discovery_bbox=comp_bbox,
-                ))
-                continue
-
-
-            gate_started = time.perf_counter()
-            (
-                passed,
-                similarity,
-                candidate,
-                matched_idx,
-                scores,
-                extract_bbox,
-                precision,
-                recall,
-                bridged_extract_area_ratio,
-            ) = self._evaluate_silhouette_gate(
-                frame_bgr,
-                descriptor,
-                bbox,
-                comp_bbox=comp_bbox,
-                palette_heatmap_full=palette_heatmap_full,
             )
-            gate_elapsed = time.perf_counter() - gate_started
-            gate_elapsed_s += gate_elapsed
-            if gate_elapsed > max_gate_elapsed_s:
-                max_gate_elapsed_s = gate_elapsed
-                max_gate_bbox = comp_bbox
-            # The generic extract body confirmation is useful for animated
-            # sprites and gray-world impostors. In static GRF mode the local
-            # palette-backed one-reference silhouette gate is the confirmation;
-            # repeating a second full palette-group analysis only adds latency.
-            if passed and not static_sprite_fast_path:
-                if not self._passes_extract_body_gate(
-                    frame_bgr, descriptor, extract_bbox,
-                ):
-                    passed = False
-            candidate_mask = (
-                candidate.reshape(-1).tolist() if candidate is not None else None
-            )
-            (
-                noisy_extract,
-                extract_bloated,
-                content_noisy,
-                extract_area_ratio,
-                soft_hard_ratio,
-            ) = self._noisy_extraction_signal(
-                extract_bbox,
-                descriptor,
-                candidate,
-                extract_area_ratio=bridged_extract_area_ratio,
-            )
-            # Drawn/accept box = heat CC bbox (a35ef47 tight blob box).
-            silhouette_checks.append(SilhouetteCheck(
-                center_x=cx,
-                center_y=cy,
-                heat_score=heat_score,
-                passed=passed,
-                similarity=similarity,
-                candidate_id=candidate_id,
-                discovery_bbox=comp_bbox,
-                precision=precision,
-                recall=recall,
-                candidate_mask=candidate_mask,
-                matched_mask_index=matched_idx,
-                mask_similarities=scores,
-                extract_bbox=extract_bbox,
-                noisy_extract=noisy_extract,
-                extract_bloated=extract_bloated,
-                content_noisy=content_noisy,
-                extract_area_ratio=extract_area_ratio,
-                soft_hard_ratio=soft_hard_ratio,
-            ))
-
-            if passed and extract_bbox is not None:
-                # Use silhouette extract bbox center (refined by palette CC)
-                # instead of the raw heatmap-blob center. The heatmap center
-                # can be off for asymmetrical mobs or clustered blobs;
-                # the extract bbox is the silhouette-matched palette region.
-                ex, ey, ew, eh = extract_bbox
-                refined_cx = ex + ew // 2
-                refined_cy = ey + eh // 2
-                candidates.append(DetectionCandidate(
-                    mob_name=descriptor.mob_name,
-                    center_x=refined_cx,
-                    center_y=refined_cy,
-                    bbox=bbox,
-                    final_score=heat_score,
-                    heatmap_score=heat_score,
-                    accepted=True,
-                    rejection_reason="",
-                    candidate_id=candidate_id,
-                ))
-
-
         gate_end = time.perf_counter()
         max_candidates = int(self.config["maxCandidates"])
         accepted = self._finalize_accepted(candidates)[:max_candidates]
@@ -676,6 +539,266 @@ class MobDetector:
             timing=timing,
             sprite_heatmap=sprite_heatmap,
             silhouette_checks=silhouette_checks,
+        )
+
+    def _collect_marker_square_candidates(
+        self,
+        descriptor: MobDescriptor,
+        blobs: list[tuple[int, int, float, tuple[int, int, int, int]]],
+        heatmap: np.ndarray,
+        heatmap_peak: float,
+    ) -> tuple[
+        list[DetectionCandidate],
+        list[SilhouetteCheck],
+        float,
+        float,
+        tuple[int, int, int, int],
+    ]:
+        """Accept heat blobs that look like the GRF colored square.
+
+        Blob pass/fail is recorded on ``SilhouetteCheck`` so discovery results
+        keep one candidate-check list for both rendering modes.
+        """
+        started = time.perf_counter()
+        candidates: list[DetectionCandidate] = []
+        checks: list[SilhouetteCheck] = []
+        max_gate_elapsed_s = 0.0
+        max_gate_bbox = (0, 0, 0, 0)
+        for candidate_id, (cx, cy, heat_score, comp_bbox) in enumerate(blobs):
+            gate_started = time.perf_counter()
+            passed = self._passes_marker_square_gate(
+                comp_bbox, descriptor, heatmap, heatmap_peak,
+            )
+            gate_elapsed = time.perf_counter() - gate_started
+            if gate_elapsed > max_gate_elapsed_s:
+                max_gate_elapsed_s = gate_elapsed
+                max_gate_bbox = comp_bbox
+            checks.append(SilhouetteCheck(
+                center_x=cx,
+                center_y=cy,
+                heat_score=heat_score,
+                passed=passed,
+                similarity=1.0 if passed else 0.0,
+                candidate_id=candidate_id,
+                discovery_bbox=comp_bbox,
+                extract_bbox=comp_bbox if passed else None,
+            ))
+            if not passed:
+                continue
+            bx, by, bw, bh = comp_bbox
+            candidates.append(DetectionCandidate(
+                mob_name=descriptor.mob_name,
+                center_x=bx + bw // 2,
+                center_y=by + bh // 2,
+                bbox=comp_bbox,
+                final_score=heat_score,
+                heatmap_score=heat_score,
+                accepted=True,
+                rejection_reason="",
+                candidate_id=candidate_id,
+            ))
+        return (
+            candidates,
+            checks,
+            time.perf_counter() - started,
+            max_gate_elapsed_s,
+            max_gate_bbox,
+        )
+
+    def _passes_marker_square_gate(
+        self,
+        comp_bbox: tuple[int, int, int, int],
+        descriptor: MobDescriptor,
+        heatmap: np.ndarray,
+        heatmap_peak: float,
+    ) -> bool:
+        """True when a heat CC is a filled square of the marker size."""
+        _x, _y, width, height = comp_bbox
+        if width < 1 or height < 1:
+            return False
+        desc_w = max(float(descriptor.avg_width), 1.0)
+        desc_h = max(float(descriptor.avg_height), 1.0)
+        area_ratio = (float(width) * float(height)) / (desc_w * desc_h)
+        if area_ratio < _MARKER_AREA_MIN_RATIO or area_ratio > _MARKER_AREA_MAX_RATIO:
+            return False
+        aspect = (float(width) / float(height)) / (desc_w / desc_h)
+        if aspect < _MARKER_ASPECT_MIN or aspect > _MARKER_ASPECT_MAX:
+            return False
+        fh, fw = heatmap.shape[:2]
+        x0 = max(0, int(_x))
+        y0 = max(0, int(_y))
+        x1 = min(fw, x0 + int(width))
+        y1 = min(fh, y0 + int(height))
+        local = heatmap[y0:y1, x0:x1]
+        if local.size == 0:
+            return False
+        threshold = max(
+            heatmap_peak * float(self.config["peakRelativeThreshold"]),
+            float(self.config["minCenterHeat"]),
+        )
+        fill = float((local >= threshold).mean())
+        return fill >= _MARKER_MIN_HEAT_FILL
+
+    def _collect_silhouette_candidates(
+        self,
+        frame_bgr: np.ndarray,
+        descriptor: MobDescriptor,
+        blobs: list[tuple[int, int, float, tuple[int, int, int, int]]],
+        heatmap_peak: float,
+    ) -> tuple[
+        list[DetectionCandidate],
+        list[SilhouetteCheck],
+        float,
+        float,
+        float,
+        tuple[int, int, int, int],
+    ]:
+        """Animated-sprite gates: geometry → color structure → silhouette."""
+        peak_rel = float(self.config["peakRelativeThreshold"])
+        small_rel_heat = _SMALL_HEAT_RELATIVE_PEAK_MULT * peak_rel
+        reuse_palette_heatmap = len(blobs) >= 2
+        palette_heatmap_started = time.perf_counter()
+        palette_heatmap_full = (
+            sprite_palette_heatmap(
+                frame_bgr,
+                descriptor.match_palette_bgr,
+                float(descriptor.max_sprite_palette_distance),
+            )
+            if reuse_palette_heatmap
+            else None
+        )
+        palette_heatmap_elapsed = time.perf_counter() - palette_heatmap_started
+        candidates: list[DetectionCandidate] = []
+        silhouette_checks: list[SilhouetteCheck] = []
+        gate_elapsed_s = 0.0
+        max_gate_elapsed_s = 0.0
+        max_gate_bbox: tuple[int, int, int, int] = (0, 0, 0, 0)
+
+        for candidate_id, (cx, cy, heat_score, comp_bbox) in enumerate(blobs):
+            bbox = comp_bbox
+            if not self._passes_discovery_geometry_gate(comp_bbox, descriptor):
+                silhouette_checks.append(SilhouetteCheck(
+                    center_x=cx,
+                    center_y=cy,
+                    heat_score=heat_score,
+                    passed=False,
+                    similarity=0.0,
+                    candidate_id=candidate_id,
+                    discovery_bbox=comp_bbox,
+                ))
+                continue
+
+            if self._is_small_heat_cc(comp_bbox, descriptor):
+                if heatmap_peak <= 0.0 or (float(heat_score) / heatmap_peak) < small_rel_heat:
+                    silhouette_checks.append(SilhouetteCheck(
+                        center_x=cx,
+                        center_y=cy,
+                        heat_score=heat_score,
+                        passed=False,
+                        similarity=0.0,
+                        candidate_id=candidate_id,
+                        discovery_bbox=comp_bbox,
+                    ))
+                    continue
+
+            if not self._passes_color_structure_gate(
+                frame_bgr, descriptor, comp_bbox,
+            ):
+                silhouette_checks.append(SilhouetteCheck(
+                    center_x=cx,
+                    center_y=cy,
+                    heat_score=heat_score,
+                    passed=False,
+                    similarity=0.0,
+                    candidate_id=candidate_id,
+                    discovery_bbox=comp_bbox,
+                ))
+                continue
+
+            gate_started = time.perf_counter()
+            (
+                passed,
+                similarity,
+                candidate,
+                matched_idx,
+                scores,
+                extract_bbox,
+                precision,
+                recall,
+                bridged_extract_area_ratio,
+            ) = self._evaluate_silhouette_gate(
+                frame_bgr,
+                descriptor,
+                bbox,
+                comp_bbox=comp_bbox,
+                palette_heatmap_full=palette_heatmap_full,
+            )
+            gate_elapsed = time.perf_counter() - gate_started
+            gate_elapsed_s += gate_elapsed
+            if gate_elapsed > max_gate_elapsed_s:
+                max_gate_elapsed_s = gate_elapsed
+                max_gate_bbox = comp_bbox
+            if passed and not self._passes_extract_body_gate(
+                frame_bgr, descriptor, extract_bbox,
+            ):
+                passed = False
+            candidate_mask = (
+                candidate.reshape(-1).tolist() if candidate is not None else None
+            )
+            (
+                noisy_extract,
+                extract_bloated,
+                content_noisy,
+                extract_area_ratio,
+                soft_hard_ratio,
+            ) = self._noisy_extraction_signal(
+                extract_bbox,
+                descriptor,
+                candidate,
+                extract_area_ratio=bridged_extract_area_ratio,
+            )
+            silhouette_checks.append(SilhouetteCheck(
+                center_x=cx,
+                center_y=cy,
+                heat_score=heat_score,
+                passed=passed,
+                similarity=similarity,
+                candidate_id=candidate_id,
+                discovery_bbox=comp_bbox,
+                precision=precision,
+                recall=recall,
+                candidate_mask=candidate_mask,
+                matched_mask_index=matched_idx,
+                mask_similarities=scores,
+                extract_bbox=extract_bbox,
+                noisy_extract=noisy_extract,
+                extract_bloated=extract_bloated,
+                content_noisy=content_noisy,
+                extract_area_ratio=extract_area_ratio,
+                soft_hard_ratio=soft_hard_ratio,
+            ))
+
+            if passed and extract_bbox is not None:
+                ex, ey, ew, eh = extract_bbox
+                candidates.append(DetectionCandidate(
+                    mob_name=descriptor.mob_name,
+                    center_x=ex + ew // 2,
+                    center_y=ey + eh // 2,
+                    bbox=bbox,
+                    final_score=heat_score,
+                    heatmap_score=heat_score,
+                    accepted=True,
+                    rejection_reason="",
+                    candidate_id=candidate_id,
+                ))
+
+        return (
+            candidates,
+            silhouette_checks,
+            palette_heatmap_elapsed,
+            gate_elapsed_s,
+            max_gate_elapsed_s,
+            max_gate_bbox,
         )
 
     # ------------------------------------------------------------------
@@ -884,24 +1007,6 @@ class MobDetector:
         descriptor._min_area_ratio = result
         return result
 
-    def _effective_aspect_band(self, descriptor: MobDescriptor) -> tuple[float, float]:
-        """Aspect band for the active mode (GRF widens the build-time band).
-
-        Modified sprites are static and palette-distinctive, but their palette CC
-        extract is frequently clipped (a head/feet shade outside the match radius
-        shortens one axis), which pushes the extract aspect past the build-time
-        tight band — Anubis' clipped extract measured 1.17 vs a 1.03 max. GRF mode
-        therefore scales the band outward; the red palette keeps wrong-size blobs
-        from passing anyway.
-        """
-        if self.use_sprite_grf:
-            scale = max(1.0, self.grf_aspect_band_scale)
-            return (
-                descriptor.min_aspect_ratio / scale,
-                descriptor.max_aspect_ratio * scale,
-            )
-        return descriptor.min_aspect_ratio, descriptor.max_aspect_ratio
-
     def _passes_size_aspect_vs_descriptor(
         self,
         width: int,
@@ -910,7 +1015,6 @@ class MobDetector:
         *,
         require_min_area: bool,
         enforce_max_area: bool = True,
-        grf_wide_aspect: bool = False,
     ) -> bool:
         """Descriptor-relative area + aspect band shared by heat and extract.
 
@@ -919,11 +1023,6 @@ class MobDetector:
         are measured from sprite tight-bboxes at build time (with margin) and
         floored by ``MIN_ASPECT_FLOOR`` so the band is expressed in the same
         normalized units the gate uses.
-
-        ``grf_wide_aspect`` opts the *extract* check into GRF mode's widened band
-        (``_effective_aspect_band``) — a clipped palette CC of a static red sprite
-        often measures past the build-time band. The heat geometry pre-gate keeps
-        the tight band so terrain mega-blobs still fail early.
         """
         if width < 1 or height < 1:
             return False
@@ -935,11 +1034,8 @@ class MobDetector:
         desc_aspect = desc_w / desc_h
         area_ratio = (float(width) * float(height)) / desc_area
         aspect_ratio = (float(width) / float(height)) / desc_aspect
-        if grf_wide_aspect and self.use_sprite_grf:
-            min_aspect, max_aspect = self._effective_aspect_band(descriptor)
-        else:
-            min_aspect = descriptor.min_aspect_ratio
-            max_aspect = descriptor.max_aspect_ratio
+        min_aspect = descriptor.min_aspect_ratio
+        max_aspect = descriptor.max_aspect_ratio
         if require_min_area and area_ratio < self._descriptor_min_area_ratio(descriptor):
             return False
         if enforce_max_area and area_ratio > _GEOMETRY_AREA_MAX_RATIO:
@@ -1010,10 +1106,8 @@ class MobDetector:
                 continue
             avg = np.array(mask.avg_mask, dtype=np.float32).reshape(mask.height, mask.width)
             stable = np.array(mask.stable_mask, dtype=bool).reshape(mask.height, mask.width)
-            # Static modified sprites carry the same canonical frame under every
-            # facing; dedup identical refs so the gate literally scores against
-            # the one frame (matching how the sprite renders) and skips the
-            # duplicated comparison. Rounding absorbs float noise across rebuilds.
+            # Identical facing refs collapse to one comparison. Rounding absorbs
+            # float noise across rebuilds.
             duplicate = False
             for prev_avg, prev_stable in seen:
                 if (
@@ -1031,54 +1125,11 @@ class MobDetector:
         return refs
 
     def silhouette_gate_thresholds(self) -> tuple[float, float]:
-        """Return silhouette floors for the active rendering mode.
-
-        Animated sprites keep the generic recall/precision floors. Modified
-        sprite.grf assets share one red palette, so shape is the only
-        discriminator — GRF mode uses stricter floors so a same-color
-        impostor (alligator while hunting frilldora) cannot pass.
-        """
-        if self.use_sprite_grf:
-            return (
-                float(self.config["grfMinSilhouetteRecall"]),
-                float(self.config["grfMinSilhouettePrecision"]),
-            )
+        """Return silhouette recall and precision floors for animated discovery."""
         return (
             float(self.config["minSilhouetteRecall"]),
             float(self.config["minSilhouettePrecision"]),
         )
-
-    def descriptor_is_static(self, descriptor: MobDescriptor) -> bool:
-        """True when every silhouette ref is the same frame (modified static sprite).
-
-        Modified sprites are generated as one canonical frame, so the descriptor
-        carries a single unique pose across all facings. A static descriptor has
-        a deterministic appearance: the animation-diversity gate adds nothing and
-        local tracking can follow it without the native-resolution verify.
-        """
-        cached = getattr(descriptor, "_static_descriptor", None)
-        if cached is not None:
-            return bool(cached)
-        masks = descriptor.silhouette_masks
-        if not masks:
-            descriptor._static_descriptor = False
-            return False
-        first = masks[0]
-        first_shape = (first.width, first.height)
-        first_avg = tuple(round(float(v), 3) for v in first.avg_mask)
-        first_stable = tuple(bool(v) for v in first.stable_mask)
-        for mask in masks[1:]:
-            if (
-                (mask.width, mask.height) != first_shape
-                or tuple(round(float(v), 3) for v in mask.avg_mask) != first_avg
-                or tuple(bool(v) for v in mask.stable_mask) != first_stable
-            ):
-                descriptor._static_descriptor = False
-                return False
-        descriptor._static_descriptor = True
-        return True
-
-
 
     def _evaluate_silhouette_gate(
         self,
@@ -1182,7 +1233,6 @@ class MobDetector:
             descriptor,
             require_min_area=True,
             enforce_max_area=False,
-            grf_wide_aspect=True,
         ):
             extract_bbox = (
                 search_x + comp_left,
@@ -1247,18 +1297,17 @@ class MobDetector:
         )
         hard_n = int((candidate >= HARD_OCCUPANCY).sum()) if candidate is not None else 0
         grid_n = int(gate_mask.width) * int(gate_mask.height)
+        # Content veto: solid palette fill of the gate grid (color smear in a
+        # desc-sized window).
         solid_fill = (
-            grid_n > 0 and (float(hard_n) / float(grid_n)) >= _SOLID_FILL_HARD_FRACTION
+            grid_n > 0
+            and (float(hard_n) / float(grid_n)) >= _SOLID_FILL_HARD_FRACTION
         )
         min_recall, min_precision = self.silhouette_gate_thresholds()
         dual_ok = (
             recall >= min_recall
             and precision >= min_precision
         )
-        # Content veto: solid palette fill of the gate grid (color smear in a
-        # desc-sized window). Bloated CCs may still shrink after pre-shrink
-        # aspect passes; soft/hard noise still uses deform for patchy mobs and
-        # remains on SilhouetteCheck via _noisy_extraction_signal.
         passed = bool(dual_ok and not solid_fill)
         return (
             passed,
@@ -1392,14 +1441,7 @@ class MobDetector:
         silhouette_distance: float,
         gate_mask,
     ) -> np.ndarray:
-        """If soft/hard is noisy but recall is already ok, deform best ref into heat.
-
-        GRF mode skips deform: the sprite is one deterministic frame, and
-        warping the hunt ref into a same-color impostor crop would raise
-        precision enough for a wrong mob to pass.
-        """
-        if self.use_sprite_grf:
-            return candidate
+        """If soft/hard is noisy but recall is already ok, deform best ref into heat."""
         soft_hard_ratio = _occupancy_soft_hard_ratio(candidate)
         if soft_hard_ratio < _CONTENT_NOISE_SOFT_HARD_RATIO:
             return candidate
@@ -1551,7 +1593,7 @@ class MobDetector:
         return mob_region, comp_mask, extract_bbox
 
     # ------------------------------------------------------------------
-    #  Per-point scoring  (kept for local_tracker — silhouette-based)
+    #  Per-point scoring  (kept for local_tracker)
     # ------------------------------------------------------------------
 
     def score_at(
@@ -1562,7 +1604,10 @@ class MobDetector:
         cy: int,
         scale: float = 1.0,
     ) -> tuple[bool, tuple[int, int, int, int] | None, float]:
-        """Score a point via the living silhouette gate (discovery / tracker).
+        """Score a point for local tracking.
+
+        Animated sprites use the living silhouette gate. GRF marker squares
+        use palette fill of a descriptor-sized window.
 
         Returns (accepted, bbox, similarity).
         """
@@ -1594,12 +1639,34 @@ class MobDetector:
             return False, None, 0.0
 
         bbox = (x, y, w, h)
+        if self.use_sprite_grf:
+            fill = self._marker_window_fill(frame_bgr, descriptor, bbox)
+            return fill >= _MARKER_MIN_HEAT_FILL, bbox, fill
         passed, sim, _cand, _idx, _scores, extract_bbox, _prec, _rec, _area = (
             self._evaluate_silhouette_gate(
                 frame_bgr, descriptor, bbox, comp_bbox=bbox, masks=masks,
             )
         )
         return passed, extract_bbox if extract_bbox is not None else bbox, float(sim)
+
+    def _marker_window_fill(
+        self,
+        frame_bgr: np.ndarray,
+        descriptor: MobDescriptor,
+        bbox: tuple[int, int, int, int],
+    ) -> float:
+        """Fraction of a descriptor-sized window matching the marker palette."""
+        x, y, width, height = bbox
+        crop = frame_bgr[y : y + height, x : x + width]
+        if crop.size == 0:
+            return 0.0
+        heat = sprite_palette_heatmap(
+            crop,
+            descriptor.match_palette_bgr,
+            float(descriptor.max_sprite_palette_distance),
+        )
+        threshold = float(self.config["minCenterHeat"])
+        return float((heat >= threshold).mean())
 
     # ------------------------------------------------------------------
     #  Tracking — delegates to local_tracker

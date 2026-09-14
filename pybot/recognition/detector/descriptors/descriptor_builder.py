@@ -21,6 +21,7 @@ from pybot.recognition.detector.descriptors.descriptor import (
 from pybot.recognition.detector.descriptors.layout_utils import (
     HARD_OCCUPANCY,
     frame_silhouette,
+    keep_primary_opaque_body,
 )
 from pybot.recognition.detector.descriptors.palette_groups import (
     cluster_match_palette_groups,
@@ -28,9 +29,9 @@ from pybot.recognition.detector.descriptors.palette_groups import (
 )
 
 
-# Version 52 rebuilds modified sprites with interior holes closed so patchy
-# single-body mobs (Breeze) clear the GRF silhouette precision floor.
-DESCRIPTOR_VERSION = 52
+# Version 54 turns off body-cluster diversity on elongated sprites so the
+# 0.6× coverage window does not suppress their own heat (Strouf).
+DESCRIPTOR_VERSION = 54
 # RO act layout: actions 0-7 stand/walk (4 facings), 8-15 attack/jump (4 facings).
 # Pairs: (0,1) (2,3) (4,5) (6,7) | (8,9) (10,11) (12,13) (14,15).
 # Actions 16+ (wide leap / special) are excluded by size auto-detect in
@@ -92,11 +93,82 @@ MIN_ASPECT_FLOOR = 0.45  # per-mob band clamps to at least this normalized ratio
 # (e.g. Noxious 42x33) get wider bands, large sprites stay tight.
 ASPECT_MARGIN_BASE = 0.50
 ASPECT_MARGIN_REF_SIZE = 78.0  # px — reference sprite dimension for margin formula
+# Diversity's coverage window is 0.6 × sprite size. Above this height/width
+# (or width/height) the window is mostly background and suppresses heat.
+DIVERSITY_MAX_ASPECT = 2.5
 
 # Palette coverage floor (color-structure gate).
 PALETTE_COVERAGE_FLOOR = 0.08
 PALETTE_COVERAGE_CAP = 0.28
 PALETTE_COVERAGE_MULTIPLIER = 0.25  # % of median sprite coverage
+
+
+def make_marker_square_descriptor(
+    mob_name: str,
+    fill_bgr: tuple[int, int, int],
+    *,
+    size: int,
+) -> MobDescriptor:
+    """Descriptor fields for a one-color GRF marker square (palette + size).
+
+    Silhouette and color-structure fields stay schema-compatible but unused:
+    GRF discovery matches fill color and square size only.
+    """
+    fill = (int(fill_bgr[0]), int(fill_bgr[1]), int(fill_bgr[2]))
+    fill_f = (float(fill[0]), float(fill[1]), float(fill[2]))
+    return MobDescriptor(
+        mob_name=mob_name.lower(),
+        version=DESCRIPTOR_VERSION,
+        size=SizeDescriptor(avg_width=float(size), avg_height=float(size)),
+        dominant_color=ColorCluster(
+            label="body_0",
+            bgr=fill_f,
+            fraction=1.0,
+            max_distance=DOMINANT_CLUSTER_MAX_DISTANCE,
+        ),
+        supporting_colors=[],
+        accent_colors=[
+            ColorCluster(
+                label="accent_0",
+                bgr=fill_f,
+                fraction=1.0,
+                max_distance=ACCENT_CLUSTER_MAX_DISTANCE,
+            )
+        ],
+        match_palette_bgr=[fill],
+        match_palette_weights=[1.0],
+        match_palette_required=[True],
+        match_palette_groups=[[0]],
+        match_palette_required_groups=[[0]],
+        match_palette_optional_groups=[],
+        max_sprite_palette_distance=float(DOMINANT_CLUSTER_MAX_DISTANCE),
+        max_silhouette_palette_distance=float(DOMINANT_CLUSTER_MAX_DISTANCE),
+        dominant_pixels_bgr=[list(fill)],
+        accent_pixels_bgr=[list(fill)],
+        silhouette_masks=[],
+        use_body_cluster_diversity=False,
+        min_aspect_ratio=1.0,
+        max_aspect_ratio=1.0,
+        min_body_cluster_strong=BODY_STRONG_ABSOLUTE_FLOOR,
+        min_required_palette_coverage=PALETTE_COVERAGE_FLOOR,
+    )
+
+
+def is_marker_square_descriptor(descriptor: MobDescriptor) -> bool:
+    """True when a modified descriptor is the current one-color square format."""
+    from pybot.mobs.marker_sprites import MARKER_SPRITE_SIZE, modified_sprite_rgb
+
+    if (
+        int(descriptor.avg_width) != MARKER_SPRITE_SIZE
+        or int(descriptor.avg_height) != MARKER_SPRITE_SIZE
+        or len(descriptor.match_palette_bgr) != 1
+        or descriptor.use_body_cluster_diversity
+        or descriptor.silhouette_masks
+    ):
+        return False
+    red, green, blue = modified_sprite_rgb(descriptor.mob_name)
+    expected = (blue, green, red)
+    return tuple(int(v) for v in descriptor.match_palette_bgr[0]) == expected
 
 
 def _bgr_value_saturation(bgr: tuple[int, int, int] | np.ndarray) -> tuple[float, float] | tuple[np.ndarray, np.ndarray]:
@@ -176,15 +248,16 @@ class DescriptorBuilder:
     def build_modified_sprite(
         self, mob_name: str, force: bool = False
     ) -> MobDescriptor | None:
-        """Build a modified (big+red) sprite descriptor for GRF-modified servers.
+        """Build a colored-square sprite descriptor for GRF-modified servers.
 
-        Runs ``make_mobs_big_red.py`` to transform the original ACT (1.5x scale,
-        recolored red, death actions transparent) and builds a separate
-        ``modified_sprite_descriptor.json`` from the result.
+        Writes a static marker SPR+ACT (one opaque square, death actions
+        transparent) and a palette+size ``modified_sprite_descriptor.json``.
+        Silhouette / color-structure fields used by animated discovery are
+        not generated.
 
         Returns None when the mob has no SPR/ACT assets (graceful skip).
         """
-        from scripts.make_mobs_big_red import process_mob_folder as make_big_red
+        from pybot.mobs.marker_sprites import process_mob_folder
 
         mob_name = mob_name.lower()
         asset_dir = self.asset_dir(mob_name)
@@ -194,30 +267,60 @@ class DescriptorBuilder:
         modified_dir = mob_folder / "modified_sprite"
         descriptor_path = self.output_dir(mob_name) / "modified_sprite_descriptor.json"
 
-        # Cache hit: descriptor already built and not forced.
         if descriptor_path.exists() and not force:
-            return MobDescriptor.load(descriptor_path)
+            existing = MobDescriptor.load(descriptor_path)
+            if is_marker_square_descriptor(existing):
+                return existing
 
-        # Check that the original assets exist (skip mobs without SPR/ACT).
         spr_path = asset_dir / f"{mob_name}.spr"
         act_path = asset_dir / f"{mob_name}.act"
         if not spr_path.is_file() or not act_path.is_file():
             return None
 
-        # Generate modified (big+red) ACT + copy SPR.
         modified_dir.mkdir(parents=True, exist_ok=True)
-        make_big_red(asset_dir, modified_dir, verbose=False)
-
-        # Build the descriptor from the modified assets, saving to the
-        # custom filename so it does not overwrite the normal descriptor.
-        return self._build_from_asset_dir(
-            mob_name,
-            modified_dir,
-            spr_stem=mob_name,
-            output_dir=self.output_dir(mob_name),
-            force=True,
-            descriptor_filename="modified_sprite_descriptor.json",
+        process_mob_folder(asset_dir, modified_dir, verbose=False)
+        return self._build_marker_square_descriptor(
+            mob_name, modified_dir, descriptor_path,
         )
+
+    def _build_marker_square_descriptor(
+        self,
+        mob_name: str,
+        modified_dir: Path,
+        descriptor_path: Path,
+    ) -> MobDescriptor:
+        """Load the generated square SPR and write a palette+size descriptor."""
+        from pybot.mobs.marker_sprites import MARKER_SPRITE_SIZE, modified_sprite_rgb
+
+        spr_path = modified_dir / f"{mob_name}.spr"
+        if not spr_path.is_file():
+            raise FileNotFoundError(f"missing marker SPR for '{mob_name}' in {modified_dir}")
+        spr_file = SprReader(spr_path).load()
+        frame = spr_file.get_frame(0)
+        if frame is None:
+            raise RuntimeError(f"marker SPR for {mob_name} has no frame 0")
+        if frame.width != MARKER_SPRITE_SIZE or frame.height != MARKER_SPRITE_SIZE:
+            raise RuntimeError(
+                f"marker SPR for {mob_name} must be {MARKER_SPRITE_SIZE}x{MARKER_SPRITE_SIZE}"
+            )
+        opaque = frame.rgba[:, :, 3] >= 128
+        if not bool(np.all(opaque)):
+            raise RuntimeError(f"marker SPR for {mob_name} must be fully opaque")
+        unique = np.unique(frame.rgba[:, :, :3].reshape(-1, 3), axis=0)
+        if len(unique) != 1:
+            raise RuntimeError(f"marker SPR for {mob_name} must be one fill color")
+        fill_bgr = (int(unique[0][0]), int(unique[0][1]), int(unique[0][2]))
+        red, green, blue = modified_sprite_rgb(mob_name)
+        expected_bgr = (blue, green, red)
+        if fill_bgr != expected_bgr:
+            raise RuntimeError(
+                f"marker SPR for {mob_name} fill {fill_bgr} != hunt color {expected_bgr}"
+            )
+        descriptor = make_marker_square_descriptor(
+            mob_name, fill_bgr, size=MARKER_SPRITE_SIZE,
+        )
+        descriptor.save(descriptor_path)
+        return descriptor
 
     def _build_from_asset_dir(
         self,
@@ -248,10 +351,29 @@ class DescriptorBuilder:
         if not all_facing_frames:
             raise RuntimeError(f"no stand/walk frames could be rendered for {mob_name}")
 
+        opaque_pixels = self._opaque_pixels(all_facing_frames)
+        unique_opaque = np.unique(opaque_pixels, axis=0)
+        uniform_fill = len(unique_opaque) == 1
+
         # Color clusters come from all facing directions so both front
         # and back views of the mob share the same body/accent palette.
-        profile = self._build_frame_profile(all_facing_frames)
-        profile["size"] = self._size_descriptor(all_facing_frames)
+        # One-color sprites use that fill for body, accent, and structural
+        # pixels. GRF marker squares do not use this path.
+        if uniform_fill:
+            profile = self._build_uniform_fill_profile(all_facing_frames, unique_opaque[0])
+            fill_bgr = [int(v) for v in unique_opaque[0]]
+            dominant_pixels_bgr = [fill_bgr]
+            accent_pixels_bgr = [fill_bgr]
+        else:
+            profile = self._build_frame_profile(all_facing_frames)
+            profile["size"] = self._size_descriptor(all_facing_frames)
+            dominant_pixels_bgr, accent_pixels_bgr = self._collect_structural_pixels(
+                spr_file,
+                act_file,
+                facing_pairs,
+            )
+            if not dominant_pixels_bgr or not accent_pixels_bgr:
+                raise RuntimeError(f"no structural pixels for {mob_name}")
 
         profile_body_colors = self._distinctive_clusters(profile["body_colors"])
         if not profile_body_colors:
@@ -283,13 +405,6 @@ class DescriptorBuilder:
                 match_palette_bgr,
             )
         )
-        dominant_pixels_bgr, accent_pixels_bgr = self._collect_structural_pixels(
-            spr_file,
-            act_file,
-            facing_pairs,
-        )
-        if not dominant_pixels_bgr or not accent_pixels_bgr:
-            raise RuntimeError(f"no structural pixels for {mob_name}")
         frame_silhouette_masks = self._build_frame_silhouette_masks(
             spr_file, act_file, facing_pairs,
         )
@@ -302,12 +417,21 @@ class DescriptorBuilder:
         # groups (Horn: all grays). It hurts when mass fans across 3+
         # groups (Creamy: brown body, blue wings, purple accents) — the
         # diversity AND gate never passes because body and groups don't
-        # co-occur in a 0.6x coverage window.
+        # co-occur in a 0.6x coverage window. It also hurts elongated
+        # sprites (Strouf): the window is mostly background and
+        # suppresses the mob's own heat.
         mass_body = [profile_dominant] + profile_supporting
         body_group_count = self._body_cluster_lab_groups(
             mass_body, match_palette_bgr, match_palette_groups,
         )
-        use_diversity = body_group_count <= 2
+        span_min = min(profile["size"].avg_width, profile["size"].avg_height)
+        span_max = max(profile["size"].avg_width, profile["size"].avg_height)
+        elongated = span_max / max(span_min, 1.0) > DIVERSITY_MAX_ASPECT
+        use_diversity = (
+            not uniform_fill
+            and body_group_count <= 2
+            and not elongated
+        )
 
         # Geometry aspect band from sprite frame tight bboxes.
         # Small sprites get GaussianBlur shape distortion at 2×
@@ -779,11 +903,51 @@ class DescriptorBuilder:
                 # Late death frames are often fully transparent — skip them.
                 if not np.any(bgra[:, :, 3] >= 128):
                     continue
-                cropped = self._tight_crop(bgra)
+                cropped = self._tight_crop(keep_primary_opaque_body(bgra))
                 if cropped.shape[0] <= 1 or cropped.shape[1] <= 1:
                     continue
                 frames.append(cropped)
         return frames
+
+    @staticmethod
+    def _opaque_pixels(frames: list[np.ndarray]) -> np.ndarray:
+        parts: list[np.ndarray] = []
+        for bgra in frames:
+            opaque = bgra[:, :, 3] >= 128
+            if np.any(opaque):
+                parts.append(bgra[:, :, :3][opaque])
+        if not parts:
+            raise ValueError("no frames with opaque pixels")
+        return np.concatenate(parts, axis=0)
+
+    def _build_uniform_fill_profile(
+        self,
+        frames: list[np.ndarray],
+        fill_bgr: np.ndarray,
+    ) -> dict:
+        """Profile for a one-color marker square (body and accent are the fill)."""
+        color = tuple(float(v) for v in fill_bgr)
+        body = [
+            ColorCluster(
+                label="body_0",
+                bgr=color,
+                fraction=1.0,
+                max_distance=BODY_CLUSTER_MAX_DISTANCE,
+            )
+        ]
+        accent = [
+            ColorCluster(
+                label="accent_0",
+                bgr=color,
+                fraction=1.0,
+                max_distance=ACCENT_CLUSTER_MAX_DISTANCE,
+            )
+        ]
+        return {
+            "size": self._size_descriptor(frames),
+            "body_colors": body,
+            "accent_colors": accent,
+        }
 
     def _build_frame_profile(
         self,
@@ -1345,10 +1509,17 @@ class DescriptorBuilder:
         return selected
 
     def _build_silhouette_mask(self, frames: list[np.ndarray]) -> SilhouetteMask:
-        masks = [
-            frame_silhouette(bgra[:, :, 3], SILHOUETTE_WIDTH, SILHOUETTE_HEIGHT)
-            for bgra in frames
-        ]
+        masks = []
+        for bgra in frames:
+            body = keep_primary_opaque_body(bgra)
+            if not np.any(body[:, :, 3] >= 128):
+                continue
+            cropped = self._tight_crop(body)
+            masks.append(
+                frame_silhouette(cropped[:, :, 3], SILHOUETTE_WIDTH, SILHOUETTE_HEIGHT)
+            )
+        if not masks:
+            raise RuntimeError("no opaque body occupancy for silhouette mask")
         avg_mask = np.mean(np.stack(masks, axis=0), axis=0).reshape(-1).tolist()
         stable_mask = [float(value) >= STABLE_SILHOUETTE_VALUE for value in avg_mask]
         return SilhouetteMask(

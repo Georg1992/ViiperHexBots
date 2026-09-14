@@ -18,6 +18,8 @@ from pybot.mobs.sprite_grf import (
     remove_mob_from_sprite_grf,
     sync_sprite_grf,
 )
+import numpy as np
+
 from pybot.recognition.spr_reader import SprReader
 
 
@@ -30,15 +32,25 @@ def _header_entry_count(path: Path) -> int:
 
 
 class SpriteGrfRemovalTests(unittest.TestCase):
-    def test_thara_modified_sprite_preserves_opaque_red_pixels(self) -> None:
+    def test_thara_modified_sprite_is_opaque_marker_square(self) -> None:
+        from pybot.mobs.marker_sprites import MARKER_SPRITE_SIZE, modified_sprite_rgb
+
         root = Path(__file__).resolve().parents[2]
         modified = root / "assets" / "mobs" / "thara_frog" / "modified_sprite"
-        frame = SprReader(modified / "thara_frog.spr").load().get_frame(0)
+        spr_path = modified / "thara_frog.spr"
+        if not spr_path.is_file():
+            self.skipTest("thara_frog modified sprite is not installed")
+        frame = SprReader(spr_path).load().get_frame(0)
         self.assertIsNotNone(frame)
         assert frame is not None
+        self.assertEqual(frame.width, MARKER_SPRITE_SIZE)
+        self.assertEqual(frame.height, MARKER_SPRITE_SIZE)
         opaque = frame.rgba[:, :, 3] >= 128
-        self.assertTrue(opaque.any())
-        self.assertGreater(int(frame.rgba[:, :, 2][opaque].min()), 0)
+        self.assertTrue(np.all(opaque))
+        red, green, blue = modified_sprite_rgb("thara_frog")
+        self.assertTrue(np.all(frame.rgba[:, :, 2][opaque] == red))
+        self.assertTrue(np.all(frame.rgba[:, :, 1][opaque] == green))
+        self.assertTrue(np.all(frame.rgba[:, :, 0][opaque] == blue))
 
     def test_thara_entries_match_generated_modified_assets(self) -> None:
         root = Path(__file__).resolve().parents[2]

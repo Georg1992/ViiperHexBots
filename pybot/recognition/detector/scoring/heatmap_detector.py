@@ -50,9 +50,10 @@ _OVERSIZED_SPLIT_NMS_RADIUS_FRAC = 0.55
 _OVERSIZED_SPLIT_MIN_SEPARATION_FRAC = 0.70
 # Ignore heat CCs smaller than this many pixels (noise speckles).
 _MIN_BLOB_COMPONENT_AREA = 6
-# Gaussian blur kernel ≈ this fraction of sprite size at work resolution.
+# Gaussian blur kernel ≈ this fraction of the narrow sprite axis at work
+# resolution. Using the long axis smears tall wispy sprites into the scene.
 _GAUSSIAN_BLUR_SIZE_FRAC = 0.8
-# Cap kernel at this fraction of work-res sprite size so small sprites
+# Cap kernel at this fraction of the narrow work-res axis so small sprites
 # (Creamy 48 px → 24 px at downscale 2) are not over-blurred. A 19 px
 # kernel on a 24 px field smears heat across the full frame.
 _GAUSSIAN_BLUR_MAX_WORK_SIZE_FRAC = 0.40
@@ -210,6 +211,10 @@ def sprite_palette_heatmap(
 def _palette_descriptor_weights(descriptor: MobDescriptor) -> np.ndarray:
     raw = np.asarray(descriptor.match_palette_weights, dtype=np.float32)
     return (np.float32(0.6) + np.float32(0.4) * np.sqrt(raw)).astype(np.float32)
+
+
+def _odd_ksize(span: float, frac: float) -> int:
+    return max(3, int(round(span * frac)) | 1)
 
 
 def _coverage_window(avg_width: float, avg_height: float, downscale: int) -> tuple[int, int]:
@@ -757,22 +762,22 @@ class HeatmapDetector:
         descriptor: MobDescriptor,
         downscale: int,
         frame_shape: tuple[int, int],
+        *,
+        edge_boost: bool = True,
     ) -> np.ndarray:
-        gray = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2GRAY)
-        edge_density = box_blurred_edge_density(gray)
-        sprite = sprite * (_EDGE_DENSITY_BASE + _EDGE_DENSITY_WEIGHT * edge_density)
+        if edge_boost:
+            gray = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2GRAY)
+            edge_density = box_blurred_edge_density(gray)
+            sprite = sprite * (_EDGE_DENSITY_BASE + _EDGE_DENSITY_WEIGHT * edge_density)
 
         work_w = descriptor.avg_width / max(downscale, 1)
         work_h = descriptor.avg_height / max(downscale, 1)
-        w = max(3, int(round(work_w * _GAUSSIAN_BLUR_SIZE_FRAC)) | 1)
-        h = max(3, int(round(work_h * _GAUSSIAN_BLUR_SIZE_FRAC)) | 1)
-        # Cap at 50 % of work-res sprite size so small sprites are not
-        # over-blurred into featureless smears.
-        cap_w = max(3, int(round(work_w * _GAUSSIAN_BLUR_MAX_WORK_SIZE_FRAC)) | 1)
-        cap_h = max(3, int(round(work_h * _GAUSSIAN_BLUR_MAX_WORK_SIZE_FRAC)) | 1)
-        w = min(w, cap_w)
-        h = min(h, cap_h)
-        final = cv2.GaussianBlur(sprite, (w, h), 0)
+        work_span = min(work_w, work_h)
+        k = min(
+            _odd_ksize(work_span, _GAUSSIAN_BLUR_SIZE_FRAC),
+            _odd_ksize(work_span, _GAUSSIAN_BLUR_MAX_WORK_SIZE_FRAC),
+        )
+        final = cv2.GaussianBlur(sprite, (k, k), 0)
 
         if downscale > 1:
             final = _nearest_upscale(final, downscale, frame_shape[0], frame_shape[1])
@@ -784,15 +789,15 @@ class HeatmapDetector:
         descriptor: MobDescriptor,
         downscale: int = 1,
         *,
-        fast_static: bool = False,
+        marker_square: bool = False,
     ) -> np.ndarray:
         """Build sprite palette heatmap with edge-density boost.
 
-        ``fast_static`` is used only for the modified, single-frame sprite
-        assets. Their palette is already distinctive and deterministic, so
-        rarity weighting and body-diversity maps add cost without adding an
-        identity signal. The downstream geometry and silhouette gates still
-        validate candidates.
+        ``marker_square`` is GRF colored-square discovery: the fill is already
+        distinctive, so rarity weighting, body-diversity maps, and the
+        edge-density ring boost are skipped. Animated discovery still
+        validates with geometry and silhouette; GRF uses size/fill on the
+        heat CC.
 
         Returns sprite_heatmap at full frame resolution.
         """
@@ -803,8 +808,8 @@ class HeatmapDetector:
 
         # --- 1. Sprite-palette-distance heatmap ---
         palette_started = time.perf_counter()
-        if fast_static:
-            # Static GRF mode does not need scene-relative rarity or the
+        if marker_square:
+            # GRF squares do not need scene-relative rarity or the
             # full-frame body/group diversity maps. Avoiding those extra
             # palette passes is important on the 1024x1024 hunt ROI.
             sprite = sprite_palette_heatmap(
@@ -845,7 +850,14 @@ class HeatmapDetector:
         # --- 3. GaussianBlur ---
         # --- 4. Upscale ---
         finish_started = time.perf_counter()
-        final = self._finish_heatmap(sprite, work_bgr, descriptor, downscale, frame_shape)
+        final = self._finish_heatmap(
+            sprite,
+            work_bgr,
+            descriptor,
+            downscale,
+            frame_shape,
+            edge_boost=not marker_square,
+        )
         finish_elapsed = time.perf_counter() - finish_started
         self.last_stage_times = {
             "workResize": work_elapsed,

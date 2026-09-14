@@ -172,7 +172,7 @@ def build_mob_descriptor(stem: str) -> MobDescriptor:
 
 
 def build_modified_sprite_descriptor(stem: str) -> MobDescriptor | None:
-    """Force-build the modified (big+red) sprite descriptor (best-effort)."""
+    """Force-build the colored-square modified-sprite descriptor."""
     key = stem.lower()
     builder = DescriptorBuilder(PROJECT_ROOT)
     return builder.build_modified_sprite(key, force=True)

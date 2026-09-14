@@ -65,7 +65,7 @@ class MobDescriptor:
     max_silhouette_palette_distance: float
     dominant_pixels_bgr: list[list[int]]
     accent_pixels_bgr: list[list[int]]
-    silhouette_masks: list[SilhouetteMask]
+    silhouette_masks: list[SilhouetteMask]  # empty for GRF marker squares
     use_body_cluster_diversity: bool
     min_aspect_ratio: float
     max_aspect_ratio: float
@@ -108,8 +108,6 @@ class MobDescriptor:
         silhouette_masks = [
             SilhouetteMask.from_dict(item) for item in data["silhouetteMasks"]
         ]
-        if not silhouette_masks:
-            raise ValueError("descriptor silhouetteMasks must be non-empty")
 
         if "accentColors" not in data:
             raise ValueError("descriptor missing accentColors")

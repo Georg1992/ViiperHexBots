@@ -17,6 +17,10 @@ assets/mobs/*
 !assets/mobs/isilla/**
 !assets/mobs/vanberk/
 !assets/mobs/vanberk/**
+!assets/mobs/merman/
+!assets/mobs/merman/**
+!assets/mobs/strouf/
+!assets/mobs/strouf/**
 logs/sessions/
 logs/debug_saves/
 logs/detect_debug/

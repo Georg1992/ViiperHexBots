@@ -1067,14 +1067,13 @@ def _find_local_peak(
     peak_y_local, peak_x_local = np.unravel_index(int(work.argmax()), work.shape)
     peak_x = int(round(peak_x_local * pyramid + x0 + (pyramid - 1) / 2))
     peak_y = int(round(peak_y_local * pyramid + y0 + (pyramid - 1) / 2))
-    # Every rendering mode uses the native silhouette gate for local
-    # acquisition. A palette heat peak alone is not sufficient evidence,
-    # including for static modified sprites.
+    # Every rendering mode verifies the winning peak with score_at.
+    # A palette heat peak alone is not sufficient evidence.
     accepted, bbox, sim = detector.score_at(
         frame_bgr, descriptor, peak_x, peak_y, scale,
     )
     if accepted and bbox is not None:
-        # Native gate returns the best current sprite extract. Carry its
+        # score_at returns the current sprite extract. Carry its
         # center forward instead of retaining the heatmap peak offset.
         bx, by, bw, bh = bbox
         return bx + bw // 2, by + bh // 2, peak_val, sim, bbox

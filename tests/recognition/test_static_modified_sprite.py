@@ -1,4 +1,4 @@
-"""Regression tests for static modified SPR/ACT generation."""
+"""Regression tests for static colored-square modified SPR/ACT generation."""
 
 from __future__ import annotations
 
@@ -8,6 +8,13 @@ from pathlib import Path
 
 import numpy as np
 
+from pybot.mobs.marker_sprites import (
+    MARKER_SPRITE_SIZE,
+    _dead_actions,
+    make_static_act_bytes,
+    modified_sprite_rgb,
+    process_mob_folder,
+)
 from pybot.recognition.act_reader import (
     ActAction,
     ActFile,
@@ -15,17 +22,7 @@ from pybot.recognition.act_reader import (
     ActReader,
     ActSpriteLayer,
 )
-from pybot.recognition.frame_renderer import render_act_frame
 from pybot.recognition.spr_reader import SprReader
-from scripts.make_mobs_big_red import (
-    SCALE_FACTOR,
-    _canonical_frame,
-    _dead_actions,
-    _static_source_frame,
-    close_internal_holes,
-    make_static_act_bytes,
-    process_mob_folder,
-)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -37,7 +34,7 @@ ASSET_DIR = PROJECT_ROOT / "assets" / "mobs" / "Horn" / "sprite"
     "Horn SPR/ACT assets not available",
 )
 class StaticModifiedSpriteTests(unittest.TestCase):
-    def test_modified_pair_has_one_static_frame_and_preserves_action_layout(self) -> None:
+    def test_modified_pair_is_one_colored_square(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "modified"
             self.assertEqual(process_mob_folder(ASSET_DIR, output), 1)
@@ -45,13 +42,7 @@ class StaticModifiedSpriteTests(unittest.TestCase):
             spr = SprReader(output / "horn.spr").load()
             act = ActReader(output / "horn.act").load()
             source = ActReader(ASSET_DIR / "horn.act").load()
-            source_spr = SprReader(ASSET_DIR / "horn.spr").load()
-            expected = close_internal_holes(
-                render_act_frame(
-                    source_spr,
-                    _static_source_frame(_canonical_frame(source)),
-                )
-            )
+            expected_rgb = modified_sprite_rgb("horn")
 
             self.assertEqual(spr.frame_count, 1)
             self.assertEqual(len(spr.indexed_frames), 1)
@@ -96,55 +87,17 @@ class StaticModifiedSpriteTests(unittest.TestCase):
                 {0},
             )
 
-            # The red/enlarged appearance is baked into the canonical SPR frame.
             frame = spr.get_frame(0)
             assert frame is not None
+            self.assertEqual(frame.width, MARKER_SPRITE_SIZE)
+            self.assertEqual(frame.height, MARKER_SPRITE_SIZE)
             opaque = frame.rgba[:, :, 3] >= 128
-            self.assertTrue(opaque.any())
-            self.assertTrue((frame.rgba[:, :, 2][opaque] > 0).any())
-            self.assertEqual(int(frame.rgba[:, :, 0][opaque].max()), 0)
-            self.assertEqual(int(frame.rgba[:, :, 1][opaque].max()), 0)
-            self.assertEqual(frame.width, expected.shape[1])
-            self.assertEqual(frame.height, expected.shape[0])
-            self.assertTrue(
-                np.array_equal(opaque, expected[:, :, 3] >= 128),
-                "indexed static SPR must keep the closed canonical alpha",
+            self.assertTrue(np.all(opaque))
+            expected_bgr = np.array(
+                [expected_rgb[2], expected_rgb[1], expected_rgb[0]],
+                dtype=np.uint8,
             )
-            source_frame = source_spr.get_frame(0)
-            assert source_frame is not None
-            self.assertGreaterEqual(frame.width, int(source_frame.width * SCALE_FACTOR))
-            # Orientation is preserved: the generated frame keeps the same
-            # top/bottom opacity ordering as the source frame (upright indexed
-            # frames render correctly in the client; flipped RGBA did not).
-            def _top_minus_bottom(image, h) -> float:
-                return float(
-                    image[: max(1, h // 4), :, 3].mean()
-                    - image[-max(1, h // 4) :, :, 3].mean()
-                )
-
-            generated_orient = _top_minus_bottom(frame.rgba, frame.height)
-            source_orient = _top_minus_bottom(source_frame.rgba, source_frame.height)
-            self.assertEqual(
-                generated_orient > 0.0,
-                source_orient > 0.0,
-                "generated frame orientation must match the source frame",
-            )
-
-
-class HoleCloseTests(unittest.TestCase):
-    def test_internal_gap_fills_without_growing_bbox(self) -> None:
-        image = np.zeros((40, 30, 4), dtype=np.uint8)
-        image[10:30, 8:22] = (0, 0, 200, 255)
-        image[18:22, 12:18] = 0
-        filled = close_internal_holes(image)
-        self.assertTrue(np.all(filled[18:22, 12:18, 3] >= 128))
-        ys, xs = np.where(filled[:, :, 3] >= 128)
-        self.assertEqual(int(xs.min()), 8)
-        self.assertEqual(int(ys.min()), 10)
-        self.assertEqual(int(xs.max()), 21)
-        self.assertEqual(int(ys.max()), 29)
-        self.assertEqual(int(filled[10, 7, 3]), 0)
-        self.assertEqual(int(filled[9, 8, 3]), 0)
+            self.assertTrue(np.all(frame.rgba[:, :, :3] == expected_bgr))
 
 
 class DeadActionRangeTests(unittest.TestCase):
@@ -152,7 +105,6 @@ class DeadActionRangeTests(unittest.TestCase):
         """Death is always actions 32-39 regardless of total action count."""
         self.assertEqual(_dead_actions(48), set(range(32, 40)))
         self.assertEqual(_dead_actions(40), set(range(32, 40)))
-        # A truncated layout exposes only the death actions it contains.
         self.assertEqual(_dead_actions(36), set(range(32, 36)))
         self.assertEqual(_dead_actions(31), set())
         self.assertEqual(_dead_actions(0), set())

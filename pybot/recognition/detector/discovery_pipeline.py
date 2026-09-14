@@ -100,6 +100,21 @@ def _finalize_accepted() -> Callable:
     return MobDetector._finalize_accepted
 
 
+def _collect_silhouette() -> Callable:
+    from pybot.recognition.detector.detector import MobDetector
+    return MobDetector._collect_silhouette_candidates
+
+
+def _collect_marker_square() -> Callable:
+    from pybot.recognition.detector.detector import MobDetector
+    return MobDetector._collect_marker_square_candidates
+
+
+def _marker_square_gate() -> Callable:
+    from pybot.recognition.detector.detector import MobDetector
+    return MobDetector._passes_marker_square_gate
+
+
 DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
     PipelineStage(
         title="Descriptor",
@@ -113,11 +128,9 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "ensure_descriptor",
                     "build_sprite_heatmap",
                     "top_centers",
-                    "_passes_discovery_geometry_gate",
-                    "_passes_color_structure_gate",
-                    "_evaluate_silhouette_gate",
-                    "_passes_extract_body_gate",
-                    "_noisy_extraction_signal",
+                    "use_sprite_grf",
+                    "_collect_marker_square_candidates",
+                    "_collect_silhouette_candidates",
                     "_finalize_accepted",
 
                 ),
@@ -130,7 +143,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             "downscale frame when large enough",
             "weighted_sprite_palette_heatmap",
             "body-cluster diversity (boost body+required groups; optional-group boost; press weak/mono)",
-            "edge-density boost",
+            "edge-density boost (skipped for GRF marker squares)",
             "GaussianBlur",
             "upscale",
         ),
@@ -142,12 +155,14 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                     "weighted_sprite_palette_heatmap",
                     "use_body_cluster_diversity",
                     "apply_body_cluster_diversity",
+                    "marker_square",
                     "_finish_heatmap",
                 ),
             ),
             SourceCheck(
                 _finish_heatmap,
                 (
+                    "edge_boost",
                     "edge_density",
                     "GaussianBlur",
                     "_nearest_upscale",
@@ -179,6 +194,42 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             ),
         ),
     ),
+    PipelineStage(
+        title="GRF marker square",
+        items=(
+            "sprite.grf hunts skip geometry, color-structure, and silhouette",
+            "heat CC area vs descriptor square",
+            "aspect near 1:1",
+            "heatmap fill of the CC bbox",
+        ),
+        sources=(
+            SourceCheck(
+                _detect,
+                (
+                    "use_sprite_grf",
+                    "_collect_marker_square_candidates",
+                ),
+            ),
+            SourceCheck(
+                _collect_marker_square,
+                (
+                    "_passes_marker_square_gate",
+                ),
+            ),
+            SourceCheck(
+                _marker_square_gate,
+                (
+                    "_MARKER_AREA_MIN_RATIO",
+                    "_MARKER_AREA_MAX_RATIO",
+                    "_MARKER_ASPECT_MIN",
+                    "_MARKER_ASPECT_MAX",
+                    "_MARKER_MIN_HEAT_FILL",
+                    "peakRelativeThreshold",
+                    "minCenterHeat",
+                ),
+            ),
+        ),
+    ),
     PipelineStage(        title="Geometry pre-gate",
         items=(
             "all peaks clear pre-gates (dedup is post-detection)",
@@ -198,7 +249,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                 ),
             ),
             SourceCheck(
-                _detect,
+                _collect_silhouette,
                 (
                     "_passes_discovery_geometry_gate",
                     "_is_small_heat_cc",
@@ -239,7 +290,7 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
                 ),
             ),
             SourceCheck(
-                _detect,
+                _collect_silhouette,
                 ("_passes_color_structure_gate",),
             ),
         ),
@@ -250,18 +301,26 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             "search around heat CC bbox (not sprite-inflated)",
             "palette binary_raw + dilate(1) -> CC overlapping heat",
             "horizontal MORPH_CLOSE bridge (silhouetteHorizontalBridgeCells)",
-            "pre-shrink extract: same min-area + aspect band as heat (fail-closed; GRF may widen aspect band via grfAspectBandScale)",
+            "pre-shrink extract: same min-area + aspect band as heat (fail-closed)",
             "if extract_area_ratio >= 2: shrink to descriptor window on body centroid",
-            "if soft/hard >= 2 and cand0 recall >= mode recall: deform best ref into heat within 2 silhouette cells (GRF skips deform)",
+            "if soft/hard >= 2 and cand0 recall >= mode recall: deform best ref into heat within 2 silhouette cells",
             "tight bridged crop resized to descriptor size",
             "candidate_silhouette vs descriptor masks",
-            "dual gate recall AND precision (GRF uses stricter floors than animated sprites)",
+            "dual gate recall AND precision",
             "reject solid-fill hard occupancy (>=95% of gate grid)",
             "new peaks: extract body_strong >= 0.5 * descriptor.min_body_cluster_strong",
             "noisy extract flags (bloated / soft-hard) on SilhouetteCheck",
             "pass / fail per blob",
         ),
         sources=(
+            SourceCheck(
+                _collect_silhouette,
+                (
+                    "_evaluate_silhouette_gate",
+                    "_passes_extract_body_gate",
+                    "_noisy_extraction_signal",
+                ),
+            ),
             SourceCheck(
                 _silhouette_gate,
                 (
@@ -310,7 +369,6 @@ DISCOVERY_PIPELINE: tuple[PipelineStage, ...] = (
             SourceCheck(
                 _maybe_deform,
                 (
-                    "use_sprite_grf",
                     "_occupancy_soft_hard_ratio",
                     "_CONTENT_NOISE_SOFT_HARD_RATIO",
                     "silhouette_gate_thresholds",

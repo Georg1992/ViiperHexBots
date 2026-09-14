@@ -44,6 +44,9 @@ from typing import Literal
 # (typically smaller) so nearby distinct mobs are not merged.
 HUNT_OBJECT_RADIUS = 90
 HUNT_DISCOVERY_CLUSTER_RADIUS = 48
+# Nearby detections merge only when both boxes look like the same sprite.
+# Distinct pair members (compact vs tall) stay separate even when they overlap.
+SPRITE_BBOX_SIMILAR_MAX_RATIO = 1.5
 
 TrackState = Literal["alive"]
 
@@ -178,6 +181,26 @@ def select_target_id(
     return alive_ids[next_index]
 
 
+def sprite_bboxes_similar(
+    first: tuple[int, int, int, int],
+    second: tuple[int, int, int, int],
+    *,
+    max_ratio: float = SPRITE_BBOX_SIMILAR_MAX_RATIO,
+) -> bool:
+    """True when two discovery boxes are the same kind of sprite.
+
+    Unknown or empty boxes keep the historical proximity merge. Measured boxes
+    must agree on both width and height or they are distinct bodies.
+    """
+    _x0, _y0, width_a, height_a = first
+    _x1, _y1, width_b, height_b = second
+    if width_a < 1 or height_a < 1 or width_b < 1 or height_b < 1:
+        return True
+    width_ratio = max(width_a, width_b) / min(width_a, width_b)
+    height_ratio = max(height_a, height_b) / min(height_a, height_b)
+    return width_ratio <= max_ratio and height_ratio <= max_ratio
+
+
 def cluster_living_detections(
     detections: list[DiscoveryDetection],
     cluster_radius: int = HUNT_DISCOVERY_CLUSTER_RADIUS,
@@ -193,7 +216,9 @@ def cluster_living_detections(
         for cluster in clusters:
             dx = detection.x - cluster.x
             dy = detection.y - cluster.y
-            if (dx * dx + dy * dy) <= cluster_radius_sq:
+            if (dx * dx + dy * dy) <= cluster_radius_sq and sprite_bboxes_similar(
+                detection.bbox, cluster.bbox
+            ):
                 merged = True
                 break
         if not merged:

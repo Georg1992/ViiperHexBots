@@ -13,6 +13,7 @@ from pybot.recognition.rules import (
     DiscoveryDetection,
     cluster_living_detections,
     detection_matches_existing,
+    sprite_bboxes_similar,
 )
 from pybot.recognition.detector.detector import load_detector_config
 
@@ -145,6 +146,9 @@ class TrackReconciler:
             edges: list[tuple[int, int]] = []
             for track_id in track_ids:
                 entry = track_by_id[track_id]
+                track_bbox = entry[6] if len(entry) > 6 else (0, 0, 0, 0)
+                if not sprite_bboxes_similar(detection.bbox, track_bbox):
+                    continue
                 px, py = int(entry[1]), int(entry[2])
                 dx = detection.x - px
                 dy = detection.y - py
@@ -303,6 +307,8 @@ class TrackReconciler:
                 continue
             track_bbox = entry[6] if len(entry) > 6 else (0, 0, 0, 0)
             det_bbox = detection.bbox
+            if not sprite_bboxes_similar(det_bbox, track_bbox):
+                continue
             if (
                 len(track_bbox) == 4
                 and track_bbox[2] > 0

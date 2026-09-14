@@ -74,7 +74,7 @@ ViiperHexBots/
     mobs/                   Source SPR/ACT per mob (input)
     generated_descriptors/  Runtime descriptors, rebuilt on launch (gitignored)
   clients/                  Per-server profiles (memory addresses)
-  scripts/                  Sprite asset helper (`make_mobs_big_red.py`)
+  scripts/                  Sprite asset helper (`make_marker_sprites.py` — colored-square GRF markers)
   tests/                    Pytest suite, fixtures, and debug tools
     fixtures/               Shared screenshots and recognition fixture suites
     tools/                  Test/debug utilities
