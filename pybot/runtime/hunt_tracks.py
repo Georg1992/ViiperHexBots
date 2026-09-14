@@ -757,20 +757,23 @@ class HuntTracks:
         - ``None`` — SP unread / unknown; idle and accessibility state
           are left untouched (must not fake a hit or an idle)
 
-        Two independent paths:
+        Every idle skill is counted. Two independent outcomes:
 
         **Dead** — mob was hittable (SP consumed at least once), discovery
-        heat blob is stationary (unchanged across scans), and the next 2
-        attacks were idle → track removed + death site.
+        heat blob is stationary (unchanged across scans), the character is
+        not in melee range, and the next 2 attacks were idle → track
+        removed + death site.
         ``confirm_idle_dead=False`` (sprite.grf) skips this removal; Discovery
-        heatmap miss owns disappearance.
+        heatmap miss owns disappearance. Consecutive idle still counts
+        toward unreachable.
 
         **Unreachable** — 5 consecutive idle attacks on any track → track
         removed + death site (same removal as dead). Catches never-hittable
-        mobs and accessible mobs that moved behind walls.
+        mobs and accessible mobs that attacks no longer land on.
 
-        The melee-range guard (150 px) prevents false positives when the
-        character is sitting on the mob and auto-attacks are hitting.
+        The melee-range guard (150 px) only blocks the faster idle-dead
+        confirmation: auto-attacks can hit without consuming SP. It must
+        not freeze the unreachable streak.
 
         Returns ``(action, idle_count)`` where *action* is one of
         ``"none"``, ``"dead"``, or ``"unreachable"``.
@@ -785,43 +788,31 @@ class HuntTracks:
                 return "none", track.idle_attack_count
 
             if was_idle:
-                # Melee auto-attacks often consume no SP; do not treat idle
-                # skill presses as death/unreachable while sitting on the mob.
                 dx = mob_x - char_x
                 dy = mob_y - char_y
-                if (dx * dx + dy * dy) <= (
+                in_melee = (dx * dx + dy * dy) <= (
                     MELEE_IDLE_GUARD_RADIUS_PX * MELEE_IDLE_GUARD_RADIUS_PX
+                )
+                track.idle_attack_count += 1
+                if (
+                    track.was_accessible
+                    and confirm_idle_dead
+                    and not track.moving
+                    and track.discovery_stationary
+                    and not in_melee
+                    and track.idle_attack_count >= IDLE_DEAD_ATTACK_COUNT
                 ):
-                    return "none", track.idle_attack_count
-
-                if track.was_accessible:
-                    # Path 1: hittable + discovery-stationary + not moving
-                    # + N idle attacks = dead.
-                    if track.moving or not track.discovery_stationary:
-                        track.idle_attack_count = 0
+                    tick = now_tick if now_tick is not None else monotonic_ms()
+                    if track.occupancy > 1:
+                        self._consume_occupant_locked(track, tick)
                         return "none", 0
-
-                    track.idle_attack_count += 1
-                    if track.idle_attack_count >= IDLE_DEAD_ATTACK_COUNT:
-                        if not confirm_idle_dead:
-                            return "none", track.idle_attack_count
-                        tick = now_tick if now_tick is not None else monotonic_ms()
-                        if track.occupancy > 1:
-                            self._consume_occupant_locked(track, tick)
-                            return "none", 0
-                        self._remove_dead_tracks_locked({track_id}, tick)
-                        return "dead", track.idle_attack_count
-
-                    return "none", track.idle_attack_count
-                else:
-                    # Path 2: never confirmed hit + N idle attacks = unreachable.
-                    track.idle_attack_count += 1
-                    if track.idle_attack_count >= IDLE_UNREACHABLE_ATTACK_COUNT:
-                        tick = now_tick if now_tick is not None else monotonic_ms()
-                        self._remove_dead_tracks_locked({track_id}, tick)
-                        return "unreachable", track.idle_attack_count
-
-                    return "none", track.idle_attack_count
+                    self._remove_dead_tracks_locked({track_id}, tick)
+                    return "dead", track.idle_attack_count
+                if track.idle_attack_count >= IDLE_UNREACHABLE_ATTACK_COUNT:
+                    tick = now_tick if now_tick is not None else monotonic_ms()
+                    self._remove_dead_tracks_locked({track_id}, tick)
+                    return "unreachable", track.idle_attack_count
+                return "none", track.idle_attack_count
 
             # SP consumed → real attack → mob is hittable
             track.was_accessible = True

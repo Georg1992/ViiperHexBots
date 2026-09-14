@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock
@@ -542,6 +543,20 @@ class TrackingDiscoveryWakeTests(unittest.TestCase):
 
         self.assertFalse(attack.process_pending())
         self.assertFalse(ctx.attack_wake.is_set())
+
+    def test_skill_delay_wait_ignores_attack_wake(self) -> None:
+        """A new track must not truncate the post-skill SP sample window."""
+        ctx = MagicMock()
+        ctx.stop_event = threading.Event()
+        ctx.danger_wake = threading.Event()
+        ctx.attack_wake = threading.Event()
+        ctx.attack_wake.set()
+        attack = AttackLoop(ctx, MagicMock(), MagicMock())
+        started = time.monotonic()
+        attack._wait_for_gameplay_delay(0.08, interrupt_on_attack_wake=False)
+        elapsed = time.monotonic() - started
+        self.assertGreaterEqual(elapsed, 0.06)
+        self.assertTrue(ctx.attack_wake.is_set())
 
     def test_attack_targets_every_alive_track(self) -> None:
         """Attack always offers existing tracks to policy, including held coords."""

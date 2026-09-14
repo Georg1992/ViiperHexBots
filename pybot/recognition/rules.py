@@ -31,7 +31,9 @@ Ownership:
 - **Attack** supplies skill clicks and idle SP samples (``was_idle``).
   Confirmed idle-dead / unreachable decisions live in
   ``HuntTracks.evaluate_idle_attack`` (death uses discovery blob stationary,
-  not tracking displacement). Attack must not write track positions.
+  not tracking displacement). Every idle skill is counted; unreachable
+  removes a track after consecutive attacks that did not land. Attack must
+  not write track positions.
 """
 
 from __future__ import annotations

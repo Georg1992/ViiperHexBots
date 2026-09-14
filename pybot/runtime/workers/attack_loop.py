@@ -405,8 +405,17 @@ class AttackLoop:
             return self._char_x, self._char_y
         return int(pos[0]), int(pos[1])
 
-    def _wait_for_gameplay_delay(self, timeout_s: float) -> None:
-        """Wait without hiding danger or fresh-track producer wakes."""
+    def _wait_for_gameplay_delay(
+        self,
+        timeout_s: float,
+        *,
+        interrupt_on_attack_wake: bool = True,
+    ) -> None:
+        """Wait without hiding danger or fresh-track producer wakes.
+
+        Skill-delay waits keep ``interrupt_on_attack_wake=False`` so a new
+        discovery cannot truncate the SP sample that idle/unreachable needs.
+        """
         danger_wake = getattr(self._ctx, "danger_wake", None)
         attack_wake = getattr(self._ctx, "attack_wake", None)
         deadline = time.monotonic() + max(0.0, timeout_s)
@@ -414,7 +423,7 @@ class AttackLoop:
             if event_is_set(danger_wake) is True:
                 danger_wake.clear()
                 return
-            if event_is_set(attack_wake) is True:
+            if interrupt_on_attack_wake and event_is_set(attack_wake) is True:
                 attack_wake.clear()
                 return
             remaining = deadline - time.monotonic()
@@ -576,15 +585,17 @@ class AttackLoop:
         # In production this is sliced when a real critical notification is
         # pending, returning control to GameplayLoop so escape wins the next
         # deterministic step instead of waiting out the full skill delay.
-        self._wait_for_gameplay_delay(ctx.config.skill_delay_ms / 1000.0)
+        # Fresh-track wakes must not cut this wait short: idle/unreachable
+        # classification needs the post-skill SP sample.
+        self._wait_for_gameplay_delay(
+            ctx.config.skill_delay_ms / 1000.0,
+            interrupt_on_attack_wake=False,
+        )
 
-        # Sit/heal/pause may have claimed the gate during the skill delay.
-        if not ctx.should_run_combat():
-            return
         # Discovery may remove a target while its skill delay is in flight.
         # Do not apply idle/death bookkeeping, attack counters, or target
         # rotation to that stale track after it has disappeared.
-        post_snap = ctx.tracks.snapshot_for_track(target_id, now_tick)
+        post_snap = ctx.tracks.snapshot_for_track(target_id, monotonic_ms())
         if post_snap is None or (
             snap_epoch is not None
             and getattr(post_snap, "area_epoch", None) != snap_epoch
@@ -621,21 +632,25 @@ class AttackLoop:
             )
         was_idle = observation.was_idle
 
-        accessible = snap.was_accessible
-        blob_stationary = snap.discovery_stationary
-        moving = snap.moving
-        idle_before = snap.idle_attack_count
+        accessible = post_snap.was_accessible
+        blob_stationary = post_snap.discovery_stationary
+        moving = post_snap.moving
+        idle_before = post_snap.idle_attack_count
 
+        # Idle/unreachable bookkeeping is not combat input. Sit/heal/pause
+        # may have claimed the gate during the skill delay; still classify
+        # the attack that already went out so a never-landing skill can
+        # mark the track unreachable and remove it.
         # sprite.grf: no death animations → idle-dead is meaningless, but
         # unreachable is about pathfinding and still matters.
         action, idle_count = ctx.tracks.evaluate_idle_attack(
             target_id,
             was_idle=was_idle,
-            mob_x=click_x,
-            mob_y=click_y,
+            mob_x=post_snap.x,
+            mob_y=post_snap.y,
             char_x=idle_char_x,
             char_y=idle_char_y,
-            now_tick=now_tick,
+            now_tick=sample_now,
             confirm_idle_dead=not ctx.config.use_sprite_grf,
         )
         if not ctx.config.use_sprite_grf and action == "dead":
@@ -668,6 +683,9 @@ class AttackLoop:
                 f"[IDLE] path=first-hit id={target_id} "
                 f"pre_sp={pre_sp} post_sp={post_sp} — SP spent, now accessible"
             )
+
+        if not ctx.should_run_combat():
+            return
 
         ctx.tracks.apply_attack_event(target_id)
         ctx.policy.note_attack_target(target_id)

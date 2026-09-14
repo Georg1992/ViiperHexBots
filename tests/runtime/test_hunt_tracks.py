@@ -330,6 +330,40 @@ class HuntTracksRulesTests(unittest.TestCase):
             self.assertEqual(action, "none")
         self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
 
+    def test_sprite_grf_accessible_idle_becomes_unreachable(self) -> None:
+        """sprite.grf still removes a track when consecutive attacks stop landing."""
+        track_id = self._create(500, 500)
+        self.tracks.evaluate_idle_attack(
+            track_id, was_idle=False, mob_x=500, mob_y=500, char_x=0, char_y=0,
+        )
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.discovery_stationary = True
+        for _ in range(4):
+            action, _count = self.tracks.evaluate_idle_attack(
+                track_id,
+                was_idle=True,
+                mob_x=500,
+                mob_y=500,
+                char_x=0,
+                char_y=0,
+                confirm_idle_dead=False,
+            )
+            self.assertEqual(action, "none")
+            self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
+        action, count = self.tracks.evaluate_idle_attack(
+            track_id,
+            was_idle=True,
+            mob_x=500,
+            mob_y=500,
+            char_x=0,
+            char_y=0,
+            confirm_idle_dead=False,
+        )
+        self.assertEqual(action, "unreachable")
+        self.assertEqual(count, 5)
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
+
     def test_unreachable_idle_removes_whole_stack(self) -> None:
         track_id = self._create(500, 500)
         track = self.tracks.get_track_by_id(track_id)
@@ -1192,22 +1226,40 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertFalse(track.was_accessible)
         self.assertEqual(track.idle_attack_count, 1)
 
-    def test_melee_range_idle_does_not_increment_streak(self) -> None:
+    def test_melee_range_idle_still_counts_unreachable(self) -> None:
         track_id = self._create(100, 100)
-        for _ in range(3):
-            self.tracks.evaluate_idle_attack(
-                track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+        for i in range(4):
+            action, count = self.tracks.evaluate_idle_attack(
+                track_id, was_idle=True, mob_x=100, mob_y=100, char_x=100, char_y=100,
             )
+            self.assertEqual(action, "none")
+            self.assertEqual(count, i + 1)
+        action, count = self.tracks.evaluate_idle_attack(
+            track_id, was_idle=True, mob_x=100, mob_y=100, char_x=100, char_y=100,
+        )
+        self.assertEqual(action, "unreachable")
+        self.assertEqual(count, 5)
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
+
+    def test_melee_range_does_not_confirm_idle_dead(self) -> None:
+        track_id = self._create(100, 100)
+        self.tracks.evaluate_idle_attack(
+            track_id, was_idle=False, mob_x=100, mob_y=100, char_x=100, char_y=100,
+        )
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.discovery_stationary = True
         action, count = self.tracks.evaluate_idle_attack(
             track_id, was_idle=True, mob_x=100, mob_y=100, char_x=100, char_y=100,
         )
         self.assertEqual(action, "none")
-        # Melee-range idle attacks are ignored to avoid false death/unreachable
-        # detection while the character is sitting on the mob.
-        self.assertEqual(count, 3)
-        track = self.tracks.get_track_by_id(track_id)
-        assert track is not None
-        self.assertEqual(track.idle_attack_count, 3)
+        self.assertEqual(count, 1)
+        action, count = self.tracks.evaluate_idle_attack(
+            track_id, was_idle=True, mob_x=100, mob_y=100, char_x=100, char_y=100,
+        )
+        self.assertEqual(action, "none")
+        self.assertEqual(count, 2)
+        self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
 
     def test_accessible_stationary_dies_at_two_idle(self) -> None:
         track_id = self._create(500, 500)
@@ -1362,7 +1414,7 @@ class HuntTracksRulesTests(unittest.TestCase):
         self.assertEqual(len(alive), 1)
         self.assertEqual((alive[0].x, alive[0].y), (500, 500))
 
-    def test_accessible_without_blob_stationary_resets_idle_streak(self) -> None:
+    def test_accessible_without_blob_stationary_does_not_mark_dead(self) -> None:
         track_id = self._create(500, 500)
         self.tracks.evaluate_idle_attack(
             track_id, was_idle=False, mob_x=500, mob_y=500, char_x=0, char_y=0,
@@ -1374,16 +1426,37 @@ class HuntTracksRulesTests(unittest.TestCase):
             track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
         )
         self.assertEqual(action, "none")
-        self.assertEqual(count, 0)
+        self.assertEqual(count, 1)
         action, count = self.tracks.evaluate_idle_attack(
             track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
             now_tick=self.now + 50,
         )
         # Without a stationary discovery blob, idle attacks are inconclusive
-        # and must not mark a live target dead.
+        # for death, but they still count toward unreachable.
         self.assertEqual(action, "none")
-        self.assertEqual(count, 0)
+        self.assertEqual(count, 2)
         self.assertIsNotNone(self.tracks.get_track_by_id(track_id))
+
+    def test_accessible_idle_without_stationary_blob_becomes_unreachable(self) -> None:
+        track_id = self._create(500, 500)
+        self.tracks.evaluate_idle_attack(
+            track_id, was_idle=False, mob_x=500, mob_y=500, char_x=0, char_y=0,
+        )
+        track = self.tracks.get_track_by_id(track_id)
+        assert track is not None
+        track.discovery_stationary = False
+        for _ in range(4):
+            action, _count = self.tracks.evaluate_idle_attack(
+                track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+            )
+            self.assertEqual(action, "none")
+        action, count = self.tracks.evaluate_idle_attack(
+            track_id, was_idle=True, mob_x=500, mob_y=500, char_x=0, char_y=0,
+            now_tick=self.now + 50,
+        )
+        self.assertEqual(action, "unreachable")
+        self.assertEqual(count, 5)
+        self.assertIsNone(self.tracks.get_track_by_id(track_id))
     def test_discovery_blob_stability_sets_stationary(self) -> None:
         track_id = self._create(500, 500)
         bbox = (480, 480, 40, 40)

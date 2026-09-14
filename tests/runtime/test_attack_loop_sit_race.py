@@ -75,12 +75,10 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         loop._attack_one(1, 1)
 
         # Kiting happens before the gameplay delay; this unit test exercises
-        # target preparation/input ordering only. The delay is interruptible
-        # and is not reached when the lightweight mock context reports the
-        # combat gate closed after input.
+        # target preparation/input ordering only.
         self.assertEqual(
-            events,
-            ["debuff", "marked", "attack", "kite", "delay"],
+            events[:4],
+            ["debuff", "marked", "attack", "kite"],
         )
         ctx.tracks.mark_debuff_applied.assert_called_once_with(1)
 
@@ -703,6 +701,54 @@ class AttackLoopSitRaceTests(unittest.TestCase):
         ctx.tracks.apply_attack_event.assert_not_called()
         ctx.policy.note_attack_target.assert_not_called()
         self.assertTrue(any("stale target dropped" in str(call) for call in ctx.logger.behavior.call_args_list))
+
+    def test_idle_attack_checked_when_combat_blocked_after_skill_delay(self) -> None:
+        """An issued skill is still classified so never-landing attacks remove the track."""
+        ctx = _attack_ctx()
+        ctx.config = SimpleNamespace(
+            skill_scan_code=16,
+            skill_button="e",
+            skill_delay_ms=1,
+            use_sprite_grf=True,
+            custom_behavior=SimpleNamespace(heal_scan_code=16, heal_button="heal"),
+        )
+        ctx.should_run_combat.return_value = True
+        ctx.stop_event = MagicMock()
+
+        def _close_combat(_timeout):
+            ctx.should_run_combat.return_value = False
+
+        ctx.stop_event.wait.side_effect = _close_combat
+        ctx.character_screen_pos.return_value = (0, 0)
+        snapshot = SimpleNamespace(
+            x=10, y=20, debuff_applied=False, was_accessible=False,
+            discovery_stationary=False, moving=False,
+            idle_attack_count=4, attack_count=4, area_epoch=0,
+        )
+        ctx.tracks.snapshot_for_track.return_value = snapshot
+        ctx.tracks.positions_snapshot.return_value = [(10, 20)]
+        ctx.tracks.evaluate_idle_attack.return_value = ("unreachable", 5)
+        ctx.logger = MagicMock()
+        ctx.overlay = MagicMock()
+        ctx.policy = MagicMock()
+        input_backend = MagicMock()
+        input_backend.skill_click_at.return_value = True
+        mob_behavior = MagicMock()
+        mob_behavior.prepare_target.return_value = True
+        vitals = PlayerVitals()
+        vitals.publish_sp(100, 200)
+        loop = AttackLoop(
+            ctx, MagicMock(), input_backend, mob_behavior=mob_behavior, vitals=vitals,
+        )
+
+        loop._attack_one(1, 1)
+
+        ctx.tracks.evaluate_idle_attack.assert_called_once()
+        ctx.tracks.apply_attack_event.assert_not_called()
+        ctx.policy.note_attack_target.assert_not_called()
+        self.assertTrue(
+            any("idle-unreachable" in str(call) for call in ctx.logger.behavior.call_args_list)
+        )
 
     def test_attack_kites_before_sit_blocks_combat_during_skill_delay(self) -> None:
         ctx = _attack_ctx()
